@@ -89,11 +89,10 @@ jobs:
           "INSTALLED_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
           "INSTALL_DIR=$($exe.DirectoryName)" >> $env:GITHUB_ENV
 
-      - name: Crash diagnostics (measurement only — does not gate)
-        continue-on-error: true
+      - name: Crash recovery against the INSTALLED app (kill main / tree, merchant relaunch, ledger)
         run: |
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
-          node e2e/crash-diagnostics.mjs
+          node e2e/crash-recovery.mjs
 
       - name: E2E smoke test against the INSTALLED app
         run: |

@@ -108,7 +108,10 @@ if (!gotSingleInstanceLock) {
     session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
 
     db = openDatabase(join(app.getPath("userData"), "alzabt-pos-ledger.sqlite"));
-    if (diagEnabled) diag("ledger-open", { integrity: db.pragma("quick_check", { simple: true }) });
+    if (diagEnabled) {
+      const sales = db.prepare("SELECT count(*) AS n FROM sales").get() as { n: bigint };
+      diag("ledger-open", { integrity: db.pragma("quick_check", { simple: true }), sales: Number(sales.n) });
+    }
     const service = new PosService({
       repository: new SaleRepository(db),
       pinStates: new PinStateRepository(db),
