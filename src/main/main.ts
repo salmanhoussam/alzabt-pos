@@ -6,6 +6,7 @@
  * windows, every permission request denied, and every IPC call checked to come from our own
  * window's top frame.
  */
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, ipcMain, session } from "electron";
@@ -18,6 +19,7 @@ import { type Db, openDatabase } from "../persistence/db";
 import { PinStateRepository } from "../persistence/pinStateRepository";
 import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
+import { AUTO_START_MARKER_FILE, applyAutoStart } from "./autoStart";
 import { CHANNEL_NAMES, createIpcHandlers } from "./ipcHandlers";
 
 const RENDERER_INDEX = join(__dirname, "..", "..", "renderer", "index.html");
@@ -100,6 +102,19 @@ if (!app.requestSingleInstanceLock()) {
     });
     registerIpc(service);
     mainWindow = createWindow();
+
+    // Best-effort, after the till is already up: a failure here is logged, never fatal.
+    const autoStart = applyAutoStart({
+      app: { setLoginItemSettings: (settings) => app.setLoginItemSettings(settings) },
+      store: { exists: existsSync, write: (path, contents) => writeFileSync(path, contents, "utf8") },
+      markerPath: join(app.getPath("userData"), AUTO_START_MARKER_FILE),
+      executablePath: process.execPath,
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      env: process.env,
+      now: () => new Date(),
+    });
+    console.info("[pos] auto-start:", JSON.stringify(autoStart));
   });
 
   app.on("window-all-closed", () => app.quit());

@@ -18,6 +18,17 @@ function runChild(mode: string, dbPath: string) {
   return result;
 }
 
+/** The child died abruptly at its kill point — not from an ordinary exception, not normally. */
+function expectHardKill(r: ReturnType<typeof runChild>): void {
+  expect(r.stderr, r.stderr).toContain("KILL-POINT-REACHED");
+  expect(r.stderr).not.toMatch(/Error|unreachable/);
+  if (process.platform === "win32") {
+    expect(r.status).not.toBe(0); // TerminateProcess: an exit code, no signal
+  } else {
+    expect(r.signal).toBe("SIGKILL");
+  }
+}
+
 function integrity(dbPath: string): string {
   const db = openDatabase(dbPath);
   const v = db.pragma("integrity_check", { simple: true }) as string;
@@ -34,7 +45,7 @@ afterEach(() => t.cleanup());
 describe("abrupt process death (SIGKILL)", () => {
   it("killed mid-transaction: the reopened ledger holds no sale and no orphan lines", () => {
     const r = runChild("kill-mid-transaction", t.dbPath);
-    expect(r.signal, r.stderr).toBe("SIGKILL");
+    expectHardKill(r);
     expect(integrity(t.dbPath)).toBe("ok");
     const db = openDatabase(t.dbPath);
     expect(countRows(db)).toEqual({ sales: 0, lines: 0, voids: 0 });
@@ -54,7 +65,7 @@ describe("abrupt process death (SIGKILL)", () => {
 
   it("NEGATIVE CONTROL: killed at the same point without a transaction, a partial sale survives", () => {
     const r = runChild("kill-no-transaction", t.dbPath);
-    expect(r.signal, r.stderr).toBe("SIGKILL");
+    expectHardKill(r);
     const db = openDatabase(t.dbPath);
     expect(countRows(db)).toEqual({ sales: 1, lines: 2, voids: 0 });
     db.close();
@@ -62,7 +73,7 @@ describe("abrupt process death (SIGKILL)", () => {
 
   it("killed right after COMMIT without closing: the completed sale survives restart intact", () => {
     const r = runChild("commit-then-kill", t.dbPath);
-    expect(r.signal, r.stderr).toBe("SIGKILL");
+    expectHardKill(r);
     expect(integrity(t.dbPath)).toBe("ok");
     const h = makeHarness(t.dbPath);
     expect(countRows(h.db)).toEqual({ sales: 1, lines: 3, voids: 0 });
