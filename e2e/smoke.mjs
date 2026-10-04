@@ -8,10 +8,11 @@
 // Uses a throw-away profile directory — it never touches a real ledger. Screenshots land in
 // e2e-output/ (git-ignored).
 import { _electron as electron } from "playwright-core";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -166,28 +167,71 @@ await page.getByRole("button", { name: "Today's Sales" }).click();
 await page.waitForSelector(".stats");
 assert((await stat(page, "Completed sales")) === "2" && (await stat(page, "Net sales")) === "14.80 USD", "after restart: 2 sales, net 14.80 persisted");
 
-// A third sale, then KILL the Electron process (no clean shutdown).
+// A third sale, then HARD-KILL the Electron main process (no clean shutdown) — the main process
+// only: its helper processes are left alone, exactly as an application crash would leave them.
 await page.getByRole("button", { name: "Sell" }).click();
 await product(page, "Water 500ml").click();
 await page.getByRole("button", { name: "Complete sale" }).click();
 await page.getByRole("button", { name: "Other" }).click();
 await page.waitForSelector("text=Receipt #3");
-const pid = app.process().pid;
-process.kill(pid, "SIGKILL");
-log("SIGKILLed electron main process", pid);
-await new Promise((r) => setTimeout(r, 1500));
 
-// ── Run 3: after a hard kill ─────────────────────────────────────────────────────────────────────
+// The REAL Electron main PID, asked of the main process itself. NOT app.process().pid: on Windows
+// Playwright starts Electron through `cmd.exe /c` (shell: true), so app.process() is that wrapper —
+// killing it leaves the whole POS running (the false "orphan" finding of Gate 2, runs #1 and #2).
+const mainPid = await app.evaluate(() => process.pid);
+const launcherPid = app.process().pid;
+log(`main pid ${mainPid}, launcher pid ${launcherPid}${mainPid === launcherPid ? " (same process)" : " (wrapper)"}`);
+const isAlive = (p) => {
+  try {
+    process.kill(p, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const image = basename(ELECTRON);
+const appPids = () =>
+  process.platform === "win32"
+    ? execFileSync("tasklist", ["/FI", `IMAGENAME eq ${image}`, "/FO", "CSV", "/NH"], { encoding: "utf8" })
+        .split(/\r?\n/)
+        .filter((l) => l.toLowerCase().includes(image.toLowerCase()))
+        .map((l) => Number(l.split('","')[1]))
+    : [mainPid];
+const beforeKill = appPids();
+log(`app processes before the kill: ${beforeKill.length}`);
+process.kill(mainPid, "SIGKILL"); // TerminateProcess on Windows
+log("hard-killed the Electron main process only", mainPid);
+
+// No cleanup: every process of the killed instance must go away BY ITSELF.
+const killedAt = Date.now();
+while (beforeKill.some(isAlive) && Date.now() - killedAt < 10000) await new Promise((r) => setTimeout(r, 100));
+const leftovers = beforeKill.filter(isAlive);
+assert(leftovers.length === 0, `all ${beforeKill.length} process(es) of the killed instance exited on their own (${Date.now() - killedAt} ms) — no cleanup`);
+
+// ── Run 3: relaunch straight after the hard kill — no reboot, no manual cleanup ────────────────
 ({ app, page } = await launch());
 await login(page, "Cashier One", "1111");
 await page.getByRole("button", { name: "Today's Sales" }).click();
 await page.waitForSelector(".stats");
-assert((await stat(page, "Completed sales")) === "3", "after SIGKILL: sale #3 survived");
+assert((await stat(page, "Completed sales")) === "3", "after the hard kill: sale #3 (committed just before it) survived");
 assert((await stat(page, "Net sales")) === "15.55 USD", "net 14.80 + 0.75 = 15.55");
 await page.screenshot({ path: SHOTS + "08-today-after-kill.png" });
+
+// The recovered till takes a new sale.
+await page.getByRole("button", { name: "Sell" }).click();
+await product(page, "Zaatar Manousheh").click();
+await product(page, "Zaatar Manousheh").click();
+await page.getByRole("button", { name: "Complete sale" }).click();
+await page.getByRole("button", { name: "Cash" }).click();
+await page.waitForSelector("text=Receipt #4");
+await page.getByRole("button", { name: "New sale" }).click();
+await page.getByRole("button", { name: "Today's Sales" }).click();
+await page.waitForSelector(".stats");
+assert((await stat(page, "Completed sales")) === "4", "new sale #4 completed after recovery");
+assert((await stat(page, "Net sales")) === "18.55 USD", "net 15.55 + 2×1.50 = 18.55");
 await page.getByRole("button", { name: "History" }).click();
 await page.waitForSelector(".history-table");
 const rows = await page.locator(".history-table tbody tr").count();
-assert(rows === 3, "history lists 3 sales");
+assert(rows === 4, "history lists 4 sales");
 await app.close();
 log("ALL E2E CHECKS PASSED");

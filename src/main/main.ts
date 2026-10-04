@@ -6,6 +6,7 @@
  * windows, every permission request denied, and every IPC call checked to come from our own
  * window's top frame.
  */
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, ipcMain, session } from "electron";
@@ -15,8 +16,11 @@ import { FIXTURE_CASHIERS } from "../fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../fixtures/catalog";
 import { FIXTURE_TERMINAL } from "../fixtures/terminal";
 import { type Db, openDatabase } from "../persistence/db";
+import { PinStateRepository } from "../persistence/pinStateRepository";
 import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
+import { AUTO_START_MARKER_FILE, applyAutoStart } from "./autoStart";
+import { diag, diagEnabled } from "./diagnostics";
 import { CHANNEL_NAMES, createIpcHandlers } from "./ipcHandlers";
 
 const RENDERER_INDEX = join(__dirname, "..", "..", "renderer", "index.html");
@@ -48,7 +52,10 @@ function createWindow(): BrowserWindow {
   win.webContents.on("will-navigate", (event, url) => {
     if (url !== RENDERER_URL) event.preventDefault();
   });
-  win.once("ready-to-show", () => win.show());
+  win.once("ready-to-show", () => {
+    win.show();
+    diag("window-ready");
+  });
   void win.loadFile(RENDERER_INDEX);
   return win;
 }
@@ -75,8 +82,18 @@ function registerIpc(service: PosService): void {
 const userDataOverride = process.env.ALZABT_POS_USER_DATA;
 if (userDataOverride) app.setPath("userData", userDataOverride);
 
-if (!app.requestSingleInstanceLock()) {
-  // One terminal, one process, one writer.
+diag("main-start", { argv: process.argv, execPath: process.execPath, userData: app.getPath("userData") });
+process.on("uncaughtExceptionMonitor", (err) => diag("uncaught-exception", { message: String(err) }));
+process.on("exit", (code) => diag("exit", { code }));
+app.on("child-process-gone", (_e, details) => diag("child-process-gone", { ...details }));
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+diag("single-instance-lock", { acquired: gotSingleInstanceLock });
+
+if (!gotSingleInstanceLock) {
+  // One terminal, one process, one writer. Logged, because on Windows leftover helper processes
+  // from a crashed instance can hold the lock and this exit would otherwise be silent.
+  console.error("[pos] single-instance lock not acquired — another Alzabt POS process holds it; exiting");
   app.quit();
 } else {
   app.on("second-instance", () => {
@@ -87,17 +104,36 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    diag("ready");
     session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
 
     db = openDatabase(join(app.getPath("userData"), "alzabt-pos-ledger.sqlite"));
+    if (diagEnabled) {
+      const sales = db.prepare("SELECT count(*) AS n FROM sales").get() as { n: bigint };
+      diag("ledger-open", { integrity: db.pragma("quick_check", { simple: true }), sales: Number(sales.n) });
+    }
     const service = new PosService({
       repository: new SaleRepository(db),
+      pinStates: new PinStateRepository(db),
       catalog: loadCatalog(FIXTURE_CATALOG),
       cashiers: FIXTURE_CASHIERS,
       terminal: FIXTURE_TERMINAL,
     });
     registerIpc(service);
     mainWindow = createWindow();
+
+    // Best-effort, after the till is already up: a failure here is logged, never fatal.
+    const autoStart = applyAutoStart({
+      app: { setLoginItemSettings: (settings) => app.setLoginItemSettings(settings) },
+      store: { exists: existsSync, write: (path, contents) => writeFileSync(path, contents, "utf8") },
+      markerPath: join(app.getPath("userData"), AUTO_START_MARKER_FILE),
+      executablePath: process.execPath,
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      env: process.env,
+      now: () => new Date(),
+    });
+    console.info("[pos] auto-start:", JSON.stringify(autoStart));
   });
 
   app.on("window-all-closed", () => app.quit());

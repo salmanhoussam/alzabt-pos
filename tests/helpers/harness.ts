@@ -7,6 +7,7 @@ import { FIXTURE_CASHIERS } from "../../src/fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../../src/fixtures/catalog";
 import { FIXTURE_TERMINAL, type TerminalConfig } from "../../src/fixtures/terminal";
 import { type Db, openDatabase } from "../../src/persistence/db";
+import { PinStateRepository } from "../../src/persistence/pinStateRepository";
 import { SaleRepository } from "../../src/persistence/saleRepository";
 
 export interface TempDir {
@@ -48,17 +49,23 @@ export function makeHarness(
   } = {},
 ): Harness {
   const db = openDatabase(dbPath);
-  const repository = opts.repository ? opts.repository(db) : new SaleRepository(db);
-  const clock = opts.clock ?? new TestClock();
-  const service = new PosService({
-    repository,
-    catalog: opts.catalog ?? loadCatalog(opts.catalogSource ?? FIXTURE_CATALOG),
-    cashiers: FIXTURE_CASHIERS,
-    terminal: opts.terminal ?? FIXTURE_TERMINAL,
-    now: clock.now,
-  });
-  if (opts.login !== false) service.login("cashier-01", "1111");
-  return { db, repository, service, clock };
+  try {
+    const repository = opts.repository ? opts.repository(db) : new SaleRepository(db);
+    const clock = opts.clock ?? new TestClock();
+    const service = new PosService({
+      repository,
+      pinStates: new PinStateRepository(db),
+      catalog: opts.catalog ?? loadCatalog(opts.catalogSource ?? FIXTURE_CATALOG),
+      cashiers: FIXTURE_CASHIERS,
+      terminal: opts.terminal ?? FIXTURE_TERMINAL,
+      now: clock.now,
+    });
+    if (opts.login !== false) service.login("cashier-01", "1111");
+    return { db, repository, service, clock };
+  } catch (err) {
+    db.close(); // never leave a handle open on a failed setup (Windows cannot delete open files)
+    throw err;
+  }
 }
 
 let keyCounter = 0;

@@ -1,0 +1,142 @@
+# Windows delivery check for Alzabt POS.
+#
+# Builds the NSIS installer from committed source on a GitHub-hosted Windows runner, then proves on
+# real Windows that it installs silently, the INSTALLED app passes the Electron E2E smoke test
+# (sale, void, restart, hard kill), auto-start registers, and the uninstaller cleans up.
+# The installer is uploaded as a workflow artifact only if every step passed.
+#
+# No secrets, no signing, no release, no deployment.
+name: windows-delivery
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-delivery-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm # caches the npm download cache only — never node_modules or build output
+
+      - name: Runner facts
+        run: |
+          Write-Host "OS:      $((Get-CimInstance Win32_OperatingSystem).Caption) $([Environment]::OSVersion.Version)"
+          Write-Host "Node:    $(node --version)   npm: $(npm --version)"
+          Write-Host "Session: $([Environment]::UserInteractive) interactive, user $env:USERNAME"
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Native SQLite loads on Windows
+        run: |
+          node -e "const D=require('better-sqlite3'); const d=new D(':memory:'); console.log(JSON.stringify({platform:process.platform, arch:process.arch, node:process.versions.node, sqlite:d.prepare('select sqlite_version() v').get().v}))"
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Automated tests
+        run: npx vitest run --reporter=verbose
+
+      - name: Build (main + renderer)
+        run: npm run build
+
+      - name: Package NSIS installer
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Inspect installer
+        id: installer
+        run: |
+          $installer = Get-ChildItem release -Filter "*Setup*.exe" | Select-Object -First 1
+          if (-not $installer) { throw "No installer produced" }
+          $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash
+          Write-Host "Installer: $($installer.Name)  $($installer.Length) bytes  SHA256 $hash"
+          $sig = Get-AuthenticodeSignature $installer.FullName
+          Write-Host "Authenticode: $($sig.Status) (unsigned is expected in this gate)"
+          "path=$($installer.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Silent install (per-user, no admin)
+        run: |
+          $p = Start-Process -FilePath "${{ steps.installer.outputs.path }}" -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installer exit code $($p.ExitCode)" }
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter "Alzabt POS.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "Installed executable not found under $env:LOCALAPPDATA\Programs" }
+          Write-Host "Installed: $($exe.FullName)"
+          $entry = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object DisplayName -like "Alzabt POS*"
+          if (-not $entry) { throw "No Add/Remove Programs entry" }
+          Write-Host "Add/Remove Programs: $($entry.DisplayName) $($entry.DisplayVersion)"
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          $run = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name AlzabtPOS -ErrorAction SilentlyContinue
+          if ($run) { throw "Auto-start entry existed before the app ever ran" }
+          "INSTALLED_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+          "INSTALL_DIR=$($exe.DirectoryName)" >> $env:GITHUB_ENV
+
+      - name: Crash recovery against the INSTALLED app (kill main / tree, merchant relaunch, ledger)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/crash-recovery.mjs
+
+      - name: E2E smoke test against the INSTALLED app
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/smoke.mjs
+
+      - name: Auto-start registered by the installed app
+        run: |
+          $run = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name AlzabtPOS -ErrorAction SilentlyContinue
+          if (-not $run) { throw "Auto-start entry AlzabtPOS not found in HKCU Run" }
+          Write-Host "HKCU Run AlzabtPOS = $($run.AlzabtPOS)"
+          if ($run.AlzabtPOS -notlike "*$env:INSTALLED_EXE*") { throw "Auto-start entry does not point at the installed executable" }
+          $all = (Get-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run").Property | Where-Object { $_ -like "*lzabt*" }
+          Write-Host "Run entries mentioning Alzabt: $($all -join ', ')"
+          if (@($all).Count -ne 1) { throw "Expected exactly one auto-start entry, found $(@($all).Count)" }
+
+      - name: Silent uninstall cleans up
+        run: |
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          $uninstaller = Get-ChildItem $env:INSTALL_DIR -Filter "Uninstall*.exe" | Select-Object -First 1
+          if (-not $uninstaller) { throw "Uninstaller not found" }
+          Start-Process -FilePath $uninstaller.FullName -ArgumentList "/S" -Wait
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Test-Path $env:INSTALLED_EXE) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+          if (Test-Path $env:INSTALLED_EXE) { throw "Executable still present after uninstall" }
+          $run = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name AlzabtPOS -ErrorAction SilentlyContinue
+          if ($run) { throw "Auto-start entry left behind after uninstall" }
+          $entry = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object DisplayName -like "Alzabt POS*"
+          if ($entry) { throw "Add/Remove Programs entry left behind" }
+          Write-Host "Uninstalled: executable, auto-start entry and Add/Remove Programs entry removed"
+
+      - name: Upload E2E screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alzabt-pos-windows-e2e-screenshots
+          path: e2e-output/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload installer (only after every check passed)
+        uses: actions/upload-artifact@v4
+        with:
+          name: alzabt-pos-windows-installer
+          path: release/*Setup*.exe
+          if-no-files-found: error
+          retention-days: 14

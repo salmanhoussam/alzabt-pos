@@ -32,8 +32,13 @@ export function openDatabase(filename: string, migrations: ReadonlyArray<Migrati
   }
 }
 
+/**
+ * Line endings are normalised before hashing: a Windows checkout with CRLF must produce the same
+ * checksum as the LF build that created the database, or an update would refuse to open a real
+ * ledger. (LF-only databases are unaffected — their checksum is unchanged.)
+ */
 function checksum(sql: string): string {
-  return createHash("sha256").update(sql, "utf8").digest("hex");
+  return createHash("sha256").update(sql.replace(/\r\n/g, "\n"), "utf8").digest("hex");
 }
 
 export function migrate(db: Db, migrations: ReadonlyArray<Migration> = MIGRATIONS): void {

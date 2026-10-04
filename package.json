@@ -3,7 +3,7 @@
   "productName": "Alzabt POS",
   "version": "0.1.0",
   "private": true,
-  "description": "Alzabt POS — local, offline-first Windows point of sale (Gate 1: local ledger proof of concept).",
+  "description": "Alzabt POS — local, offline-first Windows point of sale.",
   "author": "Alzabt",
   "main": "dist/main/main/main.js",
   "scripts": {
@@ -56,7 +56,8 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh"
     },
     "publish": null
   }

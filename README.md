@@ -3,8 +3,10 @@
 An installable Windows point of sale for a merchant who has a PC and no existing POS software.
 Offline-first: completed sales live in a local SQLite ledger on the PC.
 
-**Status: Gate 1 — local pilot.** One PC, one terminal, no network of any kind. Cloud sync, device
-enrolment and Lia come in later gates and are deliberately absent here.
+**Status: Gate 2 — Windows delivery + local hardening.** One PC, one terminal, no network of any
+kind. Gate 1 built the local ledger; Gate 2 adds the Windows installer pipeline, auto-start with
+Windows and cashier PIN lockout. Cloud sync, device enrolment and Lia come in later gates and are
+deliberately absent.
 
 ## What Gate 1 proves
 
@@ -16,13 +18,19 @@ kills, can be voided with a separate void record, and is reflected in Today's Sa
 
 ```bash
 npm install
-npm test            # 55 kernel + IPC tests (no Electron needed)
+npm test            # kernel, persistence, IPC, lockout and auto-start tests (no Electron needed)
 npm start           # build, then launch the Electron app
 npm run e2e         # build, then drive the real app end-to-end (Linux without display: xvfb-run -a npm run e2e)
 npm run dist:win    # Windows installer (NSIS) — run on Windows
 ```
 
 Test cashiers (fixture only): **Cashier One / PIN 1111**, **Cashier Two / PIN 2222**.
+
+**Windows installer:** built by `.github/workflows/windows-delivery.yml` on every push to `main` or
+`claude/**`. The workflow installs it silently, runs the E2E smoke test against the installed app,
+checks auto-start, uninstalls, and only then uploads `alzabt-pos-windows-installer` as a workflow
+artifact (14 days). The installer is **unsigned** in this gate — Windows SmartScreen will show
+"Windows protected your PC" (More info → Run anyway) until a code-signing certificate exists.
 
 The ledger file is `alzabt-pos-ledger.sqlite` in the per-user app-data folder
 (`%APPDATA%\Alzabt POS` on Windows). `ALZABT_POS_USER_DATA` overrides the folder (tests/support).
@@ -63,6 +71,16 @@ replay returns the original sale and never writes a second one.
 **Business day.** Defined once, in `src/domain/businessDay.ts` (calendar date in the terminal's
 IANA zone), and stored on each sale and void at write time.
 
+**PIN lockout.** Per cashier: 5 consecutive wrong PINs lock that cashier for 5 minutes; the lock
+is checked before the PIN (a correct PIN cannot bypass it), attempts during a lock do not extend
+it, it expires on its own, and it survives restarts (SQLite). Policy: `src/domain/pinLockout.ts`.
+
+**Auto-start.** Packaged Windows builds register one per-user login item (`AlzabtPOS`, HKCU Run)
+via Electron's `app.setLoginItemSettings`, once per installation — if the merchant turns it off in
+Windows Settings it stays off. Development runs never register. Opt out with
+`ALZABT_POS_DISABLE_AUTOSTART=1`. The uninstaller removes the entry but never the sales ledger.
+See `src/main/autoStart.ts`, `build/installer.nsh`.
+
 **Electron boundary.** `contextIsolation`, no `nodeIntegration`, `sandbox`, a CSP with no network,
 no navigation or new windows, all permissions denied, IPC accepted only from our own window. The
 renderer gets nine business methods and nothing else — no SQL, no files, no generic invoke. The
@@ -72,4 +90,5 @@ refuses a displayed total that no longer matches the catalog.
 ## Out of scope for this gate
 
 Cloud API, sync, device enrolment, Lia, networking, inventory, customers, discounts, tax, refunds,
-split payments, shifts, printing, cash drawer, multi-terminal, auto-update, code signing.
+split payments, shifts, printing, cash drawer, multi-terminal, auto-update, code signing, tray /
+background mode.

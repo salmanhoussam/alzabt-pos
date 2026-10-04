@@ -1,0 +1,5 @@
+# Source is LF everywhere (Windows checkouts included). Migration checksums are also
+# line-ending-normalised in src/persistence/db.ts, so this is belt and braces.
+* text=auto eol=lf
+*.png binary
+*.ico binary

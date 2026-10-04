@@ -7,5 +7,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["tests", "src/domain", "src/application", "src/persistence", "src/fixtures", "src/shared", "src/main/ipcHandlers.ts", "vitest.config.mts"]
+  "include": ["tests", "src/domain", "src/application", "src/persistence", "src/fixtures", "src/shared", "src/main/ipcHandlers.ts", "src/main/autoStart.ts", "vitest.config.mts"]
 }

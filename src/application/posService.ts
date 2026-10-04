@@ -20,13 +20,23 @@ import {
   assertPaymentMethod,
   normalizeVoidReason,
 } from "../domain/sale";
+import {
+  CLEAR_PIN_STATE,
+  PIN_LOCKOUT_POLICY,
+  afterFailure,
+  attemptsRemaining,
+  checkLock,
+  minutesRemaining,
+} from "../domain/pinLockout";
 import type { CashierFixture } from "../fixtures/cashiers";
 import type { TerminalConfig } from "../fixtures/terminal";
+import type { PinStateRepository } from "../persistence/pinStateRepository";
 import type { SaleRepository } from "../persistence/saleRepository";
-import { type Cashier, verifyCashierPin } from "./cashierAuth";
+import { type Cashier, pinMatches } from "./cashierAuth";
 
 export interface PosServiceDeps {
   readonly repository: SaleRepository;
+  readonly pinStates: PinStateRepository;
   readonly catalog: Catalog;
   readonly cashiers: ReadonlyArray<CashierFixture>;
   readonly terminal: TerminalConfig;
@@ -55,6 +65,11 @@ export interface SaleWithVoid {
 
 export const MAX_HISTORY = 200;
 
+type LoginOutcome =
+  | { readonly kind: "ok" }
+  | { readonly kind: "wrong"; readonly left: number }
+  | { readonly kind: "locked"; readonly remainingMs: number };
+
 export class PosService {
   private readonly repository: SaleRepository;
   private readonly now: () => Date;
@@ -79,8 +94,42 @@ export class PosService {
     return this.deps.cashiers.map((c) => ({ id: c.id, name: c.name }));
   }
 
+  /**
+   * PIN login with per-cashier lockout (policy: src/domain/pinLockout.ts). The lock is checked
+   * BEFORE the PIN, so a correct PIN cannot bypass it. An unknown cashier id gets the generic
+   * error and creates no state.
+   */
   login(cashierId: string, pin: string): Cashier {
-    this.cashier = verifyCashierPin(this.deps.cashiers, cashierId, pin);
+    const fixture = this.deps.cashiers.find((c) => c.id === cashierId);
+    if (!fixture) throw new DomainError("INVALID_CREDENTIALS", "Cashier or PIN is incorrect");
+    const now = this.now();
+    const lockMinutes = PIN_LOCKOUT_POLICY.lockDurationMs / 60000;
+
+    const outcome = this.deps.pinStates.update<LoginOutcome>(fixture.id, now, (state) => {
+      const lock = checkLock(state, now);
+      if (lock.locked) return { next: state, result: { kind: "locked", remainingMs: lock.remainingMs } };
+      if (pinMatches(fixture, pin)) return { next: CLEAR_PIN_STATE, result: { kind: "ok" } };
+      const next = afterFailure(state, now);
+      const nowLocked = checkLock(next, now);
+      return nowLocked.locked
+        ? { next, result: { kind: "locked", remainingMs: nowLocked.remainingMs } }
+        : { next, result: { kind: "wrong", left: attemptsRemaining(next) } };
+    });
+
+    if (outcome.kind === "locked") {
+      const minutes = minutesRemaining(outcome.remainingMs);
+      throw new DomainError(
+        "CASHIER_LOCKED",
+        `Too many incorrect PIN attempts. ${fixture.name} is locked — try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+      );
+    }
+    if (outcome.kind === "wrong") {
+      throw new DomainError(
+        "INVALID_CREDENTIALS",
+        `Cashier or PIN is incorrect. ${outcome.left} attempt${outcome.left === 1 ? "" : "s"} left before a ${lockMinutes}-minute lock.`,
+      );
+    }
+    this.cashier = { id: fixture.id, name: fixture.name };
     return this.cashier;
   }
 

@@ -8,6 +8,7 @@
  *   kill-no-transaction    NEGATIVE CONTROL: same point, but the steps run without a transaction
  *   commit-then-kill       complete a sale normally, then die immediately without closing the DB
  */
+import { writeSync } from "node:fs";
 import type { Db } from "../../src/persistence/db";
 import { type NewSaleHeader, type NewSaleLine, SaleRepository } from "../../src/persistence/saleRepository";
 import { makeHarness } from "./harness";
@@ -15,7 +16,12 @@ import { makeHarness } from "./harness";
 const [mode, dbPath] = process.argv.slice(2);
 if (!mode || !dbPath) throw new Error("usage: crashChild <mode> <dbPath>");
 
+export const KILL_POINT_MARKER = "KILL-POINT-REACHED";
+
 const die = (): never => {
+  // Synchronous write, so the parent can prove the kill happened at the intended point — on
+  // Windows a killed process reports an exit code, not a signal.
+  writeSync(2, `${KILL_POINT_MARKER}\n`);
   process.kill(process.pid, "SIGKILL");
   throw new Error("unreachable");
 };
