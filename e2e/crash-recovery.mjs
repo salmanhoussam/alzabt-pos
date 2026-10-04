@@ -195,6 +195,12 @@ async function closeGracefully(pid) {
   if (!(await waitFor(() => !alive(pid), 15000))) taskkill(["/F", "/T", "/PID", String(pid)]);
 }
 
+process.on("exit", () => {
+  try {
+    writeFileSync(join(OUT, "crash-recovery.json"), JSON.stringify(results, null, 2));
+  } catch {}
+});
+
 // ── A / B / C: started like a merchant ─────────────────────────────────────────────────────────
 for (const [name, action] of [
   ["A-graceful", "graceful"],
@@ -235,12 +241,13 @@ for (const [name, action] of [
   await page.getByRole("button", { name: "Cash" }).click();
   await page.waitForSelector("text=Receipt #1");
   const mainPid = await app.evaluate(() => process.pid);
+  const launcherPid = app.process().pid; // read BEFORE the kill: the handle is disposed afterwards
   const before = listProcesses();
   const tAction = Date.now();
   const actionOutput = taskkill(["/F", "/PID", String(mainPid)]); // the main process only
   const goneAfterMs = await survivalTimes(before.map((p) => p.pid), tAction, 10000);
   const relaunch = await merchantRelaunch(env, diagFile);
-  const r = { name: "D-ledger-kill-real-main", action: "kill-main", actionOutput, mainPid, launcherPid: app.process().pid, before, goneAfterMs, relaunch };
+  const r = { name: "D-ledger-kill-real-main", action: "kill-main", actionOutput, mainPid, launcherPid, before, goneAfterMs, relaunch };
   report(r);
   expectRecovered(r);
   check(r.relaunch.ledger?.sales === 1, `D: the sale committed before the crash is in the reopened ledger (sales=${r.relaunch.ledger?.sales})`);
@@ -269,7 +276,7 @@ for (const [name, action] of [
   check(launcherPid !== mainPid, `N: on Windows Playwright's app.process() (${launcherPid}, ${launcher?.Name}) is not the Electron main (${mainPid})`);
   check(r.mainStillAlive, "N: killing only the wrapper leaves the POS running (not a crash)");
   check(r.relaunch.lockAcquired === false && r.relaunch.windowMs === null, "N: the detector reports NOT recovered — relaunch is refused by the lock while the POS still runs");
-  await app.close().catch(() => {});
+  await Promise.race([app.close().catch(() => {}), sleep(10000)]);
   killAll();
 }
 
