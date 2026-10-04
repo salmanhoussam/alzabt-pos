@@ -79,7 +79,9 @@ const userDataOverride = process.env.ALZABT_POS_USER_DATA;
 if (userDataOverride) app.setPath("userData", userDataOverride);
 
 if (!app.requestSingleInstanceLock()) {
-  // One terminal, one process, one writer.
+  // One terminal, one process, one writer. Logged, because on Windows leftover helper processes
+  // from a crashed instance can hold the lock and this exit would otherwise be silent.
+  console.error("[pos] single-instance lock not acquired — another Alzabt POS process holds it; exiting");
   app.quit();
 } else {
   app.on("second-instance", () => {

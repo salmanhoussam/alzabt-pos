@@ -8,10 +8,11 @@
 // Uses a throw-away profile directory — it never touches a real ledger. Screenshots land in
 // e2e-output/ (git-ignored).
 import { _electron as electron } from "playwright-core";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -176,6 +177,33 @@ const pid = app.process().pid;
 process.kill(pid, "SIGKILL");
 log("SIGKILLed electron main process", pid);
 await new Promise((r) => setTimeout(r, 1500));
+
+// Windows: killing only the main process can leave Electron/Chromium helper processes alive, and
+// they can hold the single-instance lock. MEASURE that rather than hide it: count survivors, give
+// them up to 30 s to exit on their own, and only then end them so the durability check can run.
+if (process.platform === "win32") {
+  const image = basename(ELECTRON);
+  const survivors = () =>
+    execFileSync("tasklist", ["/FI", `IMAGENAME eq ${image}`, "/FO", "CSV", "/NH"], { encoding: "utf8" })
+      .split(/\r?\n/)
+      .filter((l) => l.toLowerCase().includes(image.toLowerCase())).length;
+  let n = survivors();
+  log(`FINDING windows: ${n} '${image}' helper process(es) alive 1.5 s after killing the main process`);
+  const started = Date.now();
+  while (n > 0 && Date.now() - started < 30000) {
+    await new Promise((r) => setTimeout(r, 1000));
+    n = survivors();
+  }
+  if (n === 0) {
+    log(`FINDING windows: helpers exited on their own within ${Math.round((Date.now() - started) / 1000) + 1.5} s`);
+  } else {
+    log(`FINDING windows: ${n} helper process(es) still alive after 31.5 s — ending them with taskkill`);
+    try {
+      execFileSync("taskkill", ["/F", "/IM", image], { encoding: "utf8" });
+    } catch {}
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+}
 
 // ── Run 3: after a hard kill ─────────────────────────────────────────────────────────────────────
 ({ app, page } = await launch());
