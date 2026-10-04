@@ -87,4 +87,18 @@ CREATE TRIGGER voids_immutable_delete BEFORE DELETE ON voids
 BEGIN SELECT RAISE(ABORT, 'ledger: voids cannot be deleted'); END;
 `,
   },
+  {
+    version: 2,
+    name: "cashier_pin_lockout",
+    // Mutable operational state, NOT ledger: rows are updated and deleted freely. One row per
+    // cashier that has failed at least once; see src/domain/pinLockout.ts for the policy.
+    sql: `
+CREATE TABLE cashier_pin_state (
+  cashier_id      TEXT    PRIMARY KEY,
+  failed_attempts INTEGER NOT NULL CHECK (failed_attempts >= 0),
+  locked_until    TEXT,
+  updated_at      TEXT    NOT NULL
+) STRICT;
+`,
+  },
 ];

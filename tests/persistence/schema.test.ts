@@ -10,26 +10,54 @@ beforeEach(() => {
 afterEach(() => t.cleanup());
 
 describe("migrations", () => {
-  it("creates the schema at version 1 with WAL and FULL sync, and is idempotent on reopen", () => {
+  it("creates the schema at the latest version with WAL and FULL sync, and is idempotent on reopen", () => {
     const db = openDatabase(t.dbPath);
-    expect(schemaVersion(db)).toBe(1);
+    expect(schemaVersion(db)).toBe(MIGRATIONS.length);
     expect(db.pragma("journal_mode", { simple: true })).toBe("wal");
     expect(db.pragma("synchronous", { simple: true })).toBe(2n); // FULL
     expect(db.pragma("foreign_keys", { simple: true })).toBe(1n);
     db.close();
     const again = openDatabase(t.dbPath);
-    expect(schemaVersion(again)).toBe(1);
+    expect(schemaVersion(again)).toBe(MIGRATIONS.length);
     again.close();
   });
 
   it("refuses to open a database whose applied migration was edited", () => {
     openDatabase(t.dbPath).close();
-    const tampered = [{ ...MIGRATIONS[0]!, sql: MIGRATIONS[0]!.sql + "\n-- edited" }];
+    const tampered = [{ ...MIGRATIONS[0]!, sql: MIGRATIONS[0]!.sql + "\n-- edited" }, ...MIGRATIONS.slice(1)];
     expect(() => openDatabase(t.dbPath, tampered)).toThrow(/does not match/);
   });
 
+  it("a Gate 1 (version 1) ledger upgrades to the current schema with its sales intact", () => {
+    const gate1 = openDatabase(t.dbPath, MIGRATIONS.slice(0, 1));
+    expect(schemaVersion(gate1)).toBe(1);
+    gate1.close();
+    const { db, service } = makeHarness(t.dbPath); // opens with all migrations
+    service.createSale({
+      idempotencyKey: newKey(),
+      lines: [{ productId: "prod-0001", quantity: 1 }],
+      paymentMethod: "cash",
+      expectedTotalMinor: 250n,
+    });
+    expect(schemaVersion(db)).toBe(MIGRATIONS.length);
+    expect(countRows(db).sales).toBe(1);
+    db.close();
+  });
+
+  it("CRLF line endings in a migration's source do not change its checksum (Windows checkout)", () => {
+    openDatabase(t.dbPath).close();
+    const crlf = MIGRATIONS.map((m) => ({ ...m, sql: m.sql.replace(/\n/g, "\r\n") }));
+    expect(crlf[0]!.sql).not.toBe(MIGRATIONS[0]!.sql); // the control: the text really differs
+    const db = openDatabase(t.dbPath, crlf);
+    expect(schemaVersion(db)).toBe(MIGRATIONS.length);
+    db.close();
+  });
+
   it("refuses to open a database newer than this build", () => {
-    const future = [...MIGRATIONS, { version: 2, name: "future", sql: "CREATE TABLE future_t (x INTEGER) STRICT;" }];
+    const future = [
+      ...MIGRATIONS,
+      { version: MIGRATIONS.length + 1, name: "future", sql: "CREATE TABLE future_t (x INTEGER) STRICT;" },
+    ];
     openDatabase(t.dbPath, future).close();
     expect(() => openDatabase(t.dbPath)).toThrow(/newer than this build/);
   });

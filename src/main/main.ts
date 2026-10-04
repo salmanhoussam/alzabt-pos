@@ -15,6 +15,7 @@ import { FIXTURE_CASHIERS } from "../fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../fixtures/catalog";
 import { FIXTURE_TERMINAL } from "../fixtures/terminal";
 import { type Db, openDatabase } from "../persistence/db";
+import { PinStateRepository } from "../persistence/pinStateRepository";
 import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
 import { CHANNEL_NAMES, createIpcHandlers } from "./ipcHandlers";
@@ -92,6 +93,7 @@ if (!app.requestSingleInstanceLock()) {
     db = openDatabase(join(app.getPath("userData"), "alzabt-pos-ledger.sqlite"));
     const service = new PosService({
       repository: new SaleRepository(db),
+      pinStates: new PinStateRepository(db),
       catalog: loadCatalog(FIXTURE_CATALOG),
       cashiers: FIXTURE_CASHIERS,
       terminal: FIXTURE_TERMINAL,
