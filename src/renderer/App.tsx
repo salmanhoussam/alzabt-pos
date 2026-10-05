@@ -1,19 +1,24 @@
 import { useEffect, useState } from "react";
 import type { CashierDto, ImportCatalogResponse } from "../shared/ipcContract";
+import { BuildLine } from "./BuildLine";
 import { call, errorText, pos } from "./api";
 import { HistoryScreen } from "./screens/HistoryScreen";
 import { LoginScreen } from "./screens/LoginScreen";
 import { SellScreen } from "./screens/SellScreen";
 import { TodayScreen } from "./screens/TodayScreen";
+import { ToolsScreen } from "./screens/ToolsScreen";
 
-type Tab = "sell" | "today" | "history";
+type Tab = "sell" | "today" | "history" | "tools";
+
+type ExportNotice = { status: "exported"; what: "catalog" | "backup"; fileName: string; productCount?: number };
+type ErrorNotice = { status: "error"; title: string; message: string };
 
 export function App() {
   const [cashier, setCashier] = useState<CashierDto | null | undefined>(undefined);
   const [tab, setTab] = useState<Tab>("sell");
   // Bumped after a catalog import so the Sell screen reloads the catalog from the main process.
   const [catalogVersion, setCatalogVersion] = useState(0);
-  const [importResult, setImportResult] = useState<ImportCatalogResponse | { status: "error"; message: string } | null>(null);
+  const [importResult, setImportResult] = useState<ImportCatalogResponse | ExportNotice | ErrorNotice | null>(null);
 
   useEffect(() => {
     call(pos().currentCashier())
@@ -22,7 +27,15 @@ export function App() {
   }, []);
 
   if (cashier === undefined) return <div className="center muted">Loading…</div>;
-  if (cashier === null) return <LoginScreen onLogin={setCashier} />;
+  if (cashier === null)
+    return (
+      <div className="app">
+        <main className="content">
+          <LoginScreen onLogin={setCashier} />
+        </main>
+        <BuildLine />
+      </div>
+    );
 
   const logout = async () => {
     await call(pos().logout());
@@ -40,7 +53,27 @@ export function App() {
         setTab("sell");
       }
     } catch (e) {
-      setImportResult({ status: "error", message: errorText(e) });
+      setImportResult({ status: "error", title: "Catalog NOT imported", message: errorText(e) });
+    }
+  };
+
+  const exportCatalog = async () => {
+    try {
+      const result = await call(pos().exportCatalog());
+      if (result.status === "cancelled") return;
+      setImportResult({ status: "exported", what: "catalog", fileName: result.fileName, productCount: result.productCount });
+    } catch (e) {
+      setImportResult({ status: "error", title: "Catalog NOT exported", message: errorText(e) });
+    }
+  };
+
+  const exportBackup = async () => {
+    try {
+      const result = await call(pos().exportBackup());
+      if (result.status === "cancelled") return;
+      setImportResult({ status: "exported", what: "backup", fileName: result.fileName });
+    } catch (e) {
+      setImportResult({ status: "error", title: "Backup NOT exported", message: errorText(e) });
     }
   };
 
@@ -58,10 +91,10 @@ export function App() {
           <button className={tab === "history" ? "tab active" : "tab"} onClick={() => setTab("history")}>
             History
           </button>
+          <button className={tab === "tools" ? "tab active" : "tab"} onClick={() => setTab("tools")}>
+            Tools
+          </button>
         </nav>
-        <button className="btn ghost" onClick={importCatalog}>
-          Import catalog
-        </button>
         <span className="muted">{cashier.name}</span>
         <button className="btn ghost" onClick={logout}>
           Log out
@@ -71,7 +104,11 @@ export function App() {
         {tab === "sell" && <SellScreen key={catalogVersion} />}
         {tab === "today" && <TodayScreen />}
         {tab === "history" && <HistoryScreen />}
+        {tab === "tools" && (
+          <ToolsScreen onImportCatalog={importCatalog} onExportCatalog={exportCatalog} onExportBackup={exportBackup} />
+        )}
       </main>
+      <BuildLine />
       {importResult && (
         <div className="overlay">
           <div className="card dialog import-report">
@@ -105,8 +142,25 @@ export function App() {
             )}
             {importResult.status === "error" && (
               <>
-                <h2>Catalog NOT imported</h2>
+                <h2>{importResult.title}</h2>
                 <p className="error">{importResult.message}</p>
+              </>
+            )}
+            {importResult.status === "exported" && importResult.what === "catalog" && (
+              <>
+                <h2>Catalog exported</h2>
+                <p>
+                  {importResult.productCount} products saved to <strong dir="auto">{importResult.fileName}</strong>. Edit
+                  prices in Excel, save as “CSV UTF-8”, then use Import catalog.
+                </p>
+              </>
+            )}
+            {importResult.status === "exported" && importResult.what === "backup" && (
+              <>
+                <h2>Backup exported</h2>
+                <p>
+                  A verified copy of the sales database was saved to <strong dir="auto">{importResult.fileName}</strong>.
+                </p>
               </>
             )}
             <button className="btn primary wide" onClick={() => setImportResult(null)}>

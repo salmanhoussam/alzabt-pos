@@ -8,7 +8,7 @@
 // stubbed inside the main process (the test cannot click an OS dialog); everything after the file
 // is picked is the production path.
 import { _electron as electron } from "playwright-core";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -56,20 +56,34 @@ const pickFile = (app, path) =>
   app.evaluate(({ dialog }, p) => {
     dialog.showOpenDialogSync = () => [p];
   }, path);
+const saveTo = (app, path) =>
+  app.evaluate(({ dialog }, p) => {
+    dialog.showSaveDialogSync = () => p;
+  }, path);
+const tools = (page) => page.getByRole("button", { name: "Tools", exact: true }).click();
+const EXPECTED = JSON.parse(readFileSync(join(APP, "dist", "build-info.json"), "utf8"));
+const Database = createRequire(import.meta.url)("better-sqlite3");
 const product = (page, name) => page.locator("button.product", { hasText: name });
 
 // ── Run 1: import ───────────────────────────────────────────────────────────────────────────────
 let { app, page } = await launch();
 assert(await product(page, "Espresso").isVisible(), "fresh profile starts on the demo fixture");
 
+const buildLine = (await page.getByTestId("build-line").innerText()).trim();
+log("build line:", buildLine);
+assert(buildLine === `Alzabt POS ${EXPECTED.version} · Build ${EXPECTED.build}`, "version and build are visible in the app");
+
 await pickFile(app, BAD);
+await tools(page);
 await page.getByRole("button", { name: "Import catalog" }).click();
 await page.waitForSelector("text=Catalog NOT imported");
 assert(await page.locator(".import-report").getByText("Line 2").isVisible(), "a malformed price is rejected with its line number");
 await page.getByRole("button", { name: "OK" }).click();
+await page.getByRole("button", { name: "Sell", exact: true }).click();
 assert(await product(page, "Espresso").isVisible(), "rejected import changed nothing");
 
 await pickFile(app, GOOD);
+await tools(page);
 await page.getByRole("button", { name: "Import catalog" }).click();
 await page.waitForSelector("text=Catalog imported");
 const report = await page.locator(".import-report").innerText();
@@ -117,5 +131,45 @@ await page.getByRole("button", { name: "Today's Sales" }).click();
 await page.waitForSelector(".stats");
 const stats = await page.locator(".stats").innerText();
 assert(stats.includes("14.00 USD"), "today's sales show 14.00 USD after restart");
+
+// ── Export catalog → re-import: nothing changes ────────────────────────────────────────────────
+const EXPORT = join(home, "exported-catalog.csv");
+await saveTo(app, EXPORT);
+await tools(page);
+await page.getByRole("button", { name: "Export catalog" }).click();
+await page.waitForSelector("text=Catalog exported");
+await page.getByRole("button", { name: "OK" }).click();
+const exported = readFileSync(EXPORT, "utf8");
+assert(exported.startsWith("\uFEFF") && exported.includes("بيبسي 330 مل") && exported.includes("4,شيبس,,0.01,USD,piece,1"), "exported CSV has a BOM and the Arabic names exactly");
+await pickFile(app, EXPORT);
+await page.getByRole("button", { name: "Import catalog" }).click();
+await page.waitForSelector("text=Catalog imported");
+const reimport = await page.locator(".import-report").innerText();
+assert(/0 new, 0 updated, 4 unchanged/.test(reimport), "re-importing the exported file changes nothing");
+await page.getByRole("button", { name: "OK" }).click();
+
+// ── Export backup: a verified, consistent copy of the live ledger ──────────────────────────────
+const BACKUP = join(home, "exported-backup.sqlite");
+await saveTo(app, BACKUP);
+await tools(page);
+await page.getByRole("button", { name: "Export backup" }).click();
+await page.waitForSelector("text=Backup exported");
+await page.getByRole("button", { name: "OK" }).click();
 await app.close();
+
+const copy = new Database(BACKUP, { readonly: true });
+const copySales = copy.prepare("SELECT count(*) AS n FROM sales").get().n;
+const copyIntegrity = copy.pragma("integrity_check", { simple: true });
+copy.close();
+assert(copySales === 1 && copyIntegrity === "ok", "exported backup opens, passes integrity_check and holds the sale");
+
+const profile = env.ALZABT_POS_USER_DATA;
+const backups = readdirSync(join(profile, "backups"));
+log("backups:", JSON.stringify(backups));
+assert(backups.some((f) => /^daily-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f)), "a daily backup was made automatically");
+assert(!backups.some((f) => f.startsWith("pre-migration-")), "no pre-migration backup on a fresh ledger");
+const logText = readFileSync(join(profile, "logs", "alzabt-pos.log"), "utf8");
+assert(logText.includes('"event":"app-start"') && logText.includes(`"build":"${EXPECTED.build}"`), "the field log records start-up with the build");
+assert(existsSync(join(profile, "ledger.json")), "the ledger marker was recorded");
+assert(!/"pin":"\d/.test(logText), "no PIN in the log");
 log("ALL CATALOG IMPORT E2E CHECKS PASSED");
