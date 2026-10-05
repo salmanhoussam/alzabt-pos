@@ -97,7 +97,8 @@ export function priceCart(catalog: Catalog, cart: ReadonlyArray<CartLine>): Pric
     lines.push({
       lineNo: index + 1,
       productId: product.id,
-      sku: product.sku,
+      // sale_lines.sku is NOT NULL (Gate 1 schema, immutable): a product without a SKU snapshots "".
+      sku: product.sku ?? "",
       productName: product.name,
       quantity: line.quantity,
       unitPrice: product.price,

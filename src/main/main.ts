@@ -6,22 +6,24 @@
  * windows, every permission request denied, and every IPC call checked to come from our own
  * window's top frame.
  */
-import { existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { BrowserWindow, app, ipcMain, session } from "electron";
-import { PosService } from "../application/posService";
+import { BrowserWindow, app, dialog, ipcMain, session } from "electron";
+import { PosService, startupCatalog } from "../application/posService";
+import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
 import { loadCatalog } from "../domain/catalog";
 import { FIXTURE_CASHIERS } from "../fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../fixtures/catalog";
 import { FIXTURE_TERMINAL } from "../fixtures/terminal";
+import { CatalogRepository } from "../persistence/catalogRepository";
 import { type Db, openDatabase } from "../persistence/db";
 import { PinStateRepository } from "../persistence/pinStateRepository";
 import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
 import { AUTO_START_MARKER_FILE, applyAutoStart } from "./autoStart";
 import { diag, diagEnabled } from "./diagnostics";
-import { CHANNEL_NAMES, createIpcHandlers } from "./ipcHandlers";
+import { CHANNEL_NAMES, type PickedFile, createIpcHandlers } from "./ipcHandlers";
 
 const RENDERER_INDEX = join(__dirname, "..", "..", "renderer", "index.html");
 const RENDERER_URL = pathToFileURL(RENDERER_INDEX).toString();
@@ -60,8 +62,23 @@ function createWindow(): BrowserWindow {
   return win;
 }
 
+/** Native file dialog, run in the main process: the renderer never sees or chooses a path. */
+function pickCatalogFile(): PickedFile | null {
+  if (!mainWindow) return null;
+  // Looked up on `dialog` at call time (not destructured) so the E2E test can stub it.
+  const picked = dialog.showOpenDialogSync(mainWindow, {
+    title: "Import catalog (CSV, UTF-8)",
+    properties: ["openFile"],
+    filters: [{ name: "CSV", extensions: ["csv"] }],
+  });
+  const path = picked?.[0];
+  if (!path) return null;
+  if (statSync(path).size > MAX_IMPORT_BYTES) return { name: basename(path), bytes: new Uint8Array(MAX_IMPORT_BYTES + 1) };
+  return { name: basename(path), bytes: readFileSync(path) };
+}
+
 function registerIpc(service: PosService): void {
-  const handlers = createIpcHandlers(service);
+  const handlers = createIpcHandlers(service, { pickCatalogFile });
   for (const name of CHANNEL_NAMES) {
     ipcMain.handle(CHANNELS[name], (event, payload: unknown) => {
       const fromOurWindow =
@@ -112,10 +129,15 @@ if (!gotSingleInstanceLock) {
       const sales = db.prepare("SELECT count(*) AS n FROM sales").get() as { n: bigint };
       diag("ledger-open", { integrity: db.pragma("quick_check", { simple: true }), sales: Number(sales.n) });
     }
+    const catalogStore = new CatalogRepository(db);
+    const start = startupCatalog(catalogStore, loadCatalog(FIXTURE_CATALOG), FIXTURE_TERMINAL.currency);
+    console.info(`[pos] catalog: ${start.origin}, ${start.catalog.products.length} products`);
+    diag("catalog", { origin: start.origin, products: start.catalog.products.length });
     const service = new PosService({
       repository: new SaleRepository(db),
       pinStates: new PinStateRepository(db),
-      catalog: loadCatalog(FIXTURE_CATALOG),
+      catalog: start.catalog,
+      catalogStore,
       cashiers: FIXTURE_CASHIERS,
       terminal: FIXTURE_TERMINAL,
     });

@@ -24,6 +24,7 @@ export function SellScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [completed, setCompleted] = useState<SaleDto | null>(null);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     call(pos().getCatalog())
@@ -36,6 +37,14 @@ export function SellScreen() {
     () => (catalog && cart.length ? priceCart(catalog, cart) : null),
     [catalog, cart],
   );
+
+  // Plain substring search on the displayed name (and SKU). No Arabic normalisation in this pilot.
+  const visible = useMemo(() => {
+    if (!catalog) return [];
+    const q = query.trim().toLowerCase();
+    if (!q) return catalog.products;
+    return catalog.products.filter((p) => p.name.toLowerCase().includes(q) || (p.sku ?? "").toLowerCase().includes(q));
+  }, [catalog, query]);
 
   const edit = (next: CartLine[]) => {
     setCart(next);
@@ -72,14 +81,31 @@ export function SellScreen() {
 
   return (
     <div className="sell">
-      <section className="products">
-        {catalog.products.map((p) => (
-          <button key={p.id} className="product" onClick={() => edit(addProduct(cart, p.id))}>
-            <span className="product-name">{p.name}</span>
-            <span className="product-sku muted">{p.sku}</span>
-            <span className="product-price">{formatDecimal(p.price)}</span>
-          </button>
-        ))}
+      <section className="products-pane">
+        <input
+          className="search"
+          type="search"
+          dir="auto"
+          placeholder={`Search ${catalog.products.length} products…`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <div className="products">
+          {visible.map((p) => (
+            <button key={p.id} className="product" onClick={() => edit(addProduct(cart, p.id))}>
+              <span className="product-name" dir="auto">
+                {p.name}
+              </span>
+              {p.sku && <span className="product-sku muted">{p.sku}</span>}
+              <span className="product-price">
+                {formatDecimal(p.price)}
+                {p.baseUnit !== "piece" && <span className="muted"> / {p.baseUnit}</span>}
+                {p.priceNeedsReview && <span className="badge" title="Placeholder price — set the real price">price?</span>}
+              </span>
+            </button>
+          ))}
+          {visible.length === 0 && <p className="muted">No product matches “{query}”.</p>}
+        </div>
       </section>
 
       <aside className="cart">
@@ -90,7 +116,7 @@ export function SellScreen() {
             {priced.lines.map((l) => (
               <li key={l.productId} className="line">
                 <div className="line-main">
-                  <span>{l.productName}</span>
+                  <span dir="auto">{l.productName}</span>
                   <span className="muted">
                     {formatDecimal(l.unitPrice)} × {l.quantity}
                   </span>

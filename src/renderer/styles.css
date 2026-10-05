@@ -49,10 +49,14 @@ h1, h2 { margin: 0 0 12px; }
 .pin { font-size: 32px; letter-spacing: 8px; min-height: 48px; margin: 8px 0; }
 .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 
-.sell { display: grid; grid-template-columns: 1fr 420px; gap: 16px; height: 100%; }
-.products { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; align-content: start; }
+.sell { display: grid; grid-template-columns: 1fr 420px; gap: 16px; height: 100%; min-height: 0; }
+.products-pane { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.search { min-height: 48px; padding: 0 14px; font-size: 18px; border: 1px solid var(--border); border-radius: var(--radius); }
+.products { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; align-content: start; overflow: auto; flex: 1; min-height: 0; }
+.badge { margin-inline-start: 8px; padding: 1px 6px; border-radius: 6px; background: #fff3cd; color: #8a5a00; font-size: 12px; font-weight: 700; }
+.import-report ul { max-height: 240px; overflow: auto; }
 .product {
-  display: flex; flex-direction: column; gap: 4px; min-height: 110px; padding: 14px; text-align: left;
+  display: flex; flex-direction: column; gap: 4px; min-height: 110px; padding: 14px; text-align: start;
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; font-size: 16px;
 }
 .product:active { background: var(--bg); }

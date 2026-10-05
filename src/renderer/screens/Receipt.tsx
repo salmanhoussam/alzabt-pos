@@ -15,7 +15,7 @@ export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => 
             {sale.lines.map((l) => (
               <tr key={l.lineNo}>
                 <td>
-                  {l.productName} <span className="muted">({l.sku})</span>
+                  <span dir="auto">{l.productName}</span> {l.sku && <span className="muted">({l.sku})</span>}
                 </td>
                 <td className="num">
                   {l.quantity} × {fmt(l.unitPrice)}

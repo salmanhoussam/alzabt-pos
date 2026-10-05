@@ -20,6 +20,17 @@ import { CHANNELS, type ChannelName, type IpcResult } from "../shared/ipcContrac
 
 type Handler = (payload: unknown) => IpcResult<unknown>;
 
+/** A file the cashier picked in the main process's native dialog; null when they cancelled. */
+export interface PickedFile {
+  readonly name: string;
+  readonly bytes: Uint8Array;
+}
+
+export interface IpcHandlerOptions {
+  /** Shows the native "open file" dialog. Absent (tests, headless) means import is unavailable. */
+  readonly pickCatalogFile?: () => PickedFile | null;
+}
+
 function invalid(message: string): never {
   throw new DomainError("INVALID_INPUT", message);
 }
@@ -56,7 +67,7 @@ function wrap(fn: (payload: unknown) => unknown): Handler {
   };
 }
 
-export function createIpcHandlers(service: PosService): Record<ChannelName, Handler> {
+export function createIpcHandlers(service: PosService, options: IpcHandlerOptions = {}): Record<ChannelName, Handler> {
   return {
     listCashiers: wrap((p) => {
       noPayload(p);
@@ -110,6 +121,15 @@ export function createIpcHandlers(service: PosService): Record<ChannelName, Hand
         invalid("'limit' must be an integer between 1 and 200");
       }
       return service.getSaleHistory(o.limit).map((h) => ({ sale: toSaleDto(h.sale), void: h.void ? toVoidDto(h.void) : null }));
+    }),
+    importCatalog: wrap((p) => {
+      noPayload(p);
+      // Logged-in check BEFORE any dialog opens; the service checks again.
+      if (!service.currentCashier()) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
+      if (!options.pickCatalogFile) throw new DomainError("NOT_AVAILABLE", "Catalog import is not available here");
+      const file = options.pickCatalogFile();
+      if (!file) return { status: "cancelled" };
+      return service.importCatalogCsv(file.name, file.bytes);
     }),
   };
 }

@@ -83,9 +83,28 @@ See `src/main/autoStart.ts`, `build/installer.nsh`.
 
 **Electron boundary.** `contextIsolation`, no `nodeIntegration`, `sandbox`, a CSP with no network,
 no navigation or new windows, all permissions denied, IPC accepted only from our own window. The
-renderer gets nine business methods and nothing else — no SQL, no files, no generic invoke. The
+renderer gets ten business methods and nothing else — no SQL, no files, no generic invoke. The
 renderer never supplies a price, cashier, time or receipt number; the main process decides them and
 refuses a displayed total that no longer matches the catalog.
+
+## Field pilot: local catalog import
+
+A terminal can replace the bundled demo catalog with the merchant's own products: **Import
+catalog** (top bar) opens a native file dialog in the main process — the renderer never names a
+path — and imports a strict UTF-8 CSV (`src/domain/catalogImport.ts` documents the format) into the
+`catalog_products` table (migration 3).
+
+- **All or nothing.** One rejected row refuses the whole file; the reasons are shown per line.
+- **Exact money.** Prices are parsed to integer minor units; `$5`, `5,00`, `1.001` are rejected.
+- **Idempotent.** Identity is the merchant's own `source_id`; re-importing the same file changes
+  nothing, a changed file updates rows, and rows no longer listed are hidden, never deleted.
+- **Names.** `name_ar` is required and stored as written; `name_en` is optional and never invented;
+  display falls back to `name_ar`.
+- **Placeholder prices** (`price_needs_review=1`) stay sellable and are marked `price?` on the till.
+- **History is untouched.** Sale lines keep their own name/price snapshot; no sale references the
+  catalog table. A fresh install (no local products) starts on the demo fixture.
+
+Merchant files never enter this repository (`*.csv` is git-ignored); tests use synthetic data.
 
 ## Out of scope for this gate
 

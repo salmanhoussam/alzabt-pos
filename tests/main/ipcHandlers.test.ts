@@ -39,6 +39,7 @@ describe("IPC surface", () => {
         "getCatalog",
         "getSaleHistory",
         "getTodaySales",
+        "importCatalog",
         "listCashiers",
         "login",
         "logout",

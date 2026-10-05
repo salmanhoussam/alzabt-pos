@@ -6,6 +6,7 @@ import { type Catalog, type CatalogSource, loadCatalog } from "../../src/domain/
 import { FIXTURE_CASHIERS } from "../../src/fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../../src/fixtures/catalog";
 import { FIXTURE_TERMINAL, type TerminalConfig } from "../../src/fixtures/terminal";
+import { CatalogRepository } from "../../src/persistence/catalogRepository";
 import { type Db, openDatabase } from "../../src/persistence/db";
 import { PinStateRepository } from "../../src/persistence/pinStateRepository";
 import { SaleRepository } from "../../src/persistence/saleRepository";
@@ -56,6 +57,7 @@ export function makeHarness(
       repository,
       pinStates: new PinStateRepository(db),
       catalog: opts.catalog ?? loadCatalog(opts.catalogSource ?? FIXTURE_CATALOG),
+      catalogStore: new CatalogRepository(db),
       cashiers: FIXTURE_CASHIERS,
       terminal: opts.terminal ?? FIXTURE_TERMINAL,
       now: clock.now,
