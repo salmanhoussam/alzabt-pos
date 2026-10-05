@@ -67,7 +67,8 @@ const product = (page, name) => page.locator("button.product", { hasText: name }
 
 // ── Run 1: import ───────────────────────────────────────────────────────────────────────────────
 let { app, page } = await launch();
-assert(await product(page, "Espresso").isVisible(), "fresh profile starts on the demo fixture");
+await product(page, "Espresso").waitFor({ state: "visible", timeout: 10000 });
+assert(true, "fresh profile starts on the demo fixture");
 
 const buildLine = (await page.getByTestId("build-line").innerText()).trim();
 log("build line:", buildLine);
@@ -80,7 +81,8 @@ await page.waitForSelector("text=Catalog NOT imported");
 assert(await page.locator(".import-report").getByText("Line 2").isVisible(), "a malformed price is rejected with its line number");
 await page.getByRole("button", { name: "OK" }).click();
 await page.getByRole("button", { name: "Sell", exact: true }).click();
-assert(await product(page, "Espresso").isVisible(), "rejected import changed nothing");
+await product(page, "Espresso").waitFor({ state: "visible", timeout: 10000 });
+assert((await page.locator("button.product").count()) === 8, "rejected import changed nothing (8 demo products)");
 
 await pickFile(app, GOOD);
 await tools(page);
