@@ -20,6 +20,9 @@ const CH = {
   getTodaySales: "pos:getTodaySales",
   getSaleHistory: "pos:getSaleHistory",
   importCatalog: "pos:importCatalog",
+  exportCatalog: "pos:exportCatalog",
+  exportBackup: "pos:exportBackup",
+  getAppInfo: "pos:getAppInfo",
 } as const satisfies typeof CHANNELS;
 
 const api: PosApi = {
@@ -33,6 +36,9 @@ const api: PosApi = {
   getTodaySales: () => ipcRenderer.invoke(CH.getTodaySales),
   getSaleHistory: (req) => ipcRenderer.invoke(CH.getSaleHistory, { limit: req.limit }),
   importCatalog: () => ipcRenderer.invoke(CH.importCatalog),
+  exportCatalog: () => ipcRenderer.invoke(CH.exportCatalog),
+  exportBackup: () => ipcRenderer.invoke(CH.exportBackup),
+  getAppInfo: () => ipcRenderer.invoke(CH.getAppInfo),
 };
 
 contextBridge.exposeInMainWorld("pos", Object.freeze(api));

@@ -10,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { businessDateOf } from "../domain/businessDay";
 import { type CartLine, priceCart } from "../domain/cart";
 import { type Catalog, loadCatalog } from "../domain/catalog";
-import { decodeUtf8Strict, validateImport, type ImportRejection } from "../domain/catalogImport";
+import { decodeUtf8Strict, toImportCsv, validateImport, type ImportRejection } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
 import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
@@ -213,6 +213,21 @@ export class PosService {
     };
   }
 
+  /**
+   * The imported catalog in the import format, for editing (e.g. prices in Excel) and importing again
+   * through importCatalogCsv. Only the imported source is exported — never the demo fixture.
+   */
+  exportCatalogCsv(): { readonly csv: string; readonly productCount: number } {
+    this.requireCashier();
+    const store = this.deps.catalogStore;
+    if (!store) throw new DomainError("NOT_AVAILABLE", "Catalog export is not available on this terminal");
+    const rows = store.listForExport(CSV_SOURCE);
+    if (rows.length === 0) {
+      throw new DomainError("NOT_AVAILABLE", "There is no imported catalog to export yet");
+    }
+    return { csv: toImportCsv(rows), productCount: rows.length };
+  }
+
   // ── Sales ───────────────────────────────────────────────────────────────────────────────────────
 
   createSale(input: CreateSaleInput): CreateSaleResult {
@@ -282,6 +297,14 @@ export class PosService {
     const sale = this.repository.getSale(saleId);
     if (!sale) throw new DomainError("LEDGER_INTEGRITY", "Committed sale could not be read back");
     return { sale, duplicate: false };
+  }
+
+  /**
+   * Read-only: the sale already committed under this idempotency key, if any. Used to tell the
+   * cashier the truth after an unexpected error ("recorded" vs "not recorded"), never to write.
+   */
+  saleForIdempotencyKey(key: string): SaleRecord | null {
+    return this.repository.findByIdempotencyKey(key)?.sale ?? null;
   }
 
   getSale(saleId: string): SaleWithVoid {

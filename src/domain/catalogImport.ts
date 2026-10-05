@@ -22,13 +22,15 @@
  * different product — the re-import would then show it as "updated". Past sales are unaffected
  * either way: every sale line snapshots its own name and price.
  */
-import { BASE_UNITS } from "./catalog";
+import { BASE_UNITS, MAX_PRODUCT_ID_LENGTH } from "./catalog";
 import { DomainError } from "./errors";
 import { parseDecimal } from "./money";
 
 export const IMPORT_HEADER = ["source_id", "name_ar", "name_en", "price", "currency", "base_unit", "price_needs_review"];
 export const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 export const MAX_IMPORT_ROWS = 5000;
+/** Longest merchant row id. Product ids are "<source>:<source_id>", which must fit MAX_PRODUCT_ID_LENGTH. */
+export const MAX_SOURCE_ID_LENGTH = 64;
 const MAX_NAME = 200;
 
 export interface ImportRow {
@@ -145,7 +147,9 @@ export function validateImport(text: string, terminalCurrency: string): Validate
     }
     const [sourceId, nameAr, nameEn, price, currency, baseUnit, review] = cells as [string, ...string[]];
 
-    if (!/^[A-Za-z0-9._-]{1,64}$/.test(sourceId)) return reject(`invalid source_id '${sourceId}'`);
+    if (!/^[A-Za-z0-9._-]+$/.test(sourceId) || sourceId.length > MAX_SOURCE_ID_LENGTH) {
+      return reject(`invalid source_id '${sourceId}'`);
+    }
     const earlier = seen.get(sourceId);
     if (earlier !== undefined) return reject(`source_id '${sourceId}' already used on line ${earlier}`);
     seen.set(sourceId, line);
@@ -182,4 +186,39 @@ export function validateImport(text: string, terminalCurrency: string): Validate
   });
   if (rows.length === 0 && rejected.length === 0) throw new DomainError("IMPORT_REJECTED", "The file has no products");
   return { rows, rejected };
+}
+
+// ── Export ──────────────────────────────────────────────────────────────────────────────────────
+
+/** One catalog row as written back to the import format. Prices travel as exact decimal text. */
+export interface ExportRow {
+  readonly sourceId: string;
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+  readonly price: string;
+  readonly currency: string;
+  readonly baseUnit: string;
+  readonly priceNeedsReview: boolean;
+}
+
+function csvField(value: string): string {
+  return /[",\r\n]|^\s|\s$/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/**
+ * Writes rows in EXACTLY the import format (same header, same columns), so an exported file can be
+ * edited in Excel and imported again: unchanged rows come back "unchanged", edited prices "updated".
+ * UTF-8 BOM (Excel then reads Arabic correctly) and CRLF line endings. Never rounds: `price` is
+ * already exact decimal text produced from integer minor units.
+ */
+export function toImportCsv(rows: ReadonlyArray<ExportRow>): string {
+  const lines = [IMPORT_HEADER.join(",")];
+  for (const r of rows) {
+    lines.push(
+      [r.sourceId, r.nameAr, r.nameEn ?? "", r.price, r.currency, r.baseUnit, r.priceNeedsReview ? "1" : "0"]
+        .map(csvField)
+        .join(","),
+    );
+  }
+  return "\uFEFF" + lines.join("\r\n") + "\r\n";
 }

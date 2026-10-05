@@ -36,6 +36,9 @@ describe("IPC surface", () => {
       [
         "createSale",
         "currentCashier",
+        "exportBackup",
+        "exportCatalog",
+        "getAppInfo",
         "getCatalog",
         "getSaleHistory",
         "getTodaySales",
@@ -121,14 +124,84 @@ describe("IPC surface", () => {
     db.close();
   });
 
-  it("an unexpected internal failure is reported generically, not leaked", () => {
+  it("an unexpected failure on a non-sale channel is generic and says nothing about sales", () => {
     const { db, ipc } = setup();
     ipc.login({ cashierId: "cashier-01", pin: "1111" });
     db.close(); // force a non-domain error inside the service
     const r = ipc.getTodaySales(undefined);
     expect(r).toEqual({
       ok: false,
-      error: { code: "INTERNAL", message: "Unexpected error — the sale was not recorded" },
+      error: { code: "INTERNAL", message: "Unexpected error. Please try again; if it keeps happening, contact support." },
     });
+    if (r.ok) throw new Error("unreachable");
+    expect(r.error.message).not.toMatch(/sale/i);
+  });
+
+  it("createSale after an unexpected failure says NOT recorded only when the ledger has no such sale", () => {
+    const { db, repository, ipc } = setup();
+    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    // A failure BEFORE the commit: nothing is written.
+    const commit = repository.commitSale.bind(repository);
+    repository.commitSale = () => {
+      throw new Error("disk exploded");
+    };
+    const failed = ipc.createSale(goodSale());
+    expect(failed).toMatchObject({ ok: false, error: { code: "SALE_NOT_RECORDED" } });
+    expect(countRows(db).sales).toBe(0);
+
+    // A failure AFTER the commit (the sale is in the ledger): the answer must say so.
+    const sale = goodSale();
+    repository.commitSale = commit;
+    const getSale = repository.getSale.bind(repository);
+    let calls = 0;
+    repository.getSale = (id: string) => {
+      calls += 1;
+      if (calls === 1) throw new Error("read-back exploded");
+      return getSale(id);
+    };
+    const r = ipc.createSale(sale);
+    expect(r).toMatchObject({ ok: false, error: { code: "SALE_RECORDED" } });
+    if (r.ok) throw new Error("unreachable");
+    expect(r.error.message).toMatch(/WAS recorded \(receipt #1\)/);
+    expect(countRows(db).sales).toBe(1);
+
+    // Retrying the same attempt is safe: it returns the recorded sale, no second sale.
+    repository.getSale = getSale;
+    const retry = ipc.createSale(sale);
+    expect(retry).toMatchObject({ ok: true, data: { duplicate: true, sale: { receiptNumber: 1 } } });
+    expect(countRows(db).sales).toBe(1);
+    db.close();
+  });
+
+  it("createSale reports 'unknown' when even the ledger lookup fails", () => {
+    const { db, ipc } = setup();
+    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    db.close();
+    expect(ipc.createSale(goodSale())).toMatchObject({ ok: false, error: { code: "SALE_STATUS_UNKNOWN" } });
+  });
+
+  it("a product id at the import limit (77 chars) can be sold — import and sale share one limit", () => {
+    const { db, service, ipc } = setup();
+    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    const sourceId = "x".repeat(64);
+    const bytes = new TextEncoder().encode(
+      `source_id,name_ar,name_en,price,currency,base_unit,price_needs_review\n${sourceId},مياه,,0.50,USD,piece,0\n`,
+    );
+    const imported = service.importCatalogCsv("c.csv", bytes);
+    expect(imported.status).toBe("imported");
+    const productId = `merchant-csv:${sourceId}`;
+    expect(productId.length).toBe(77);
+    const r = ipc.createSale({
+      idempotencyKey: newKey(),
+      lines: [{ productId, quantity: 2 }],
+      paymentMethod: "cash",
+      expectedTotalMinor: "100",
+    });
+    expect(r).toMatchObject({ ok: true, data: { sale: { lines: [{ productName: "مياه", quantity: 2 }] } } });
+    // Longer than the shared limit is still refused as input.
+    expect(
+      ipc.createSale({ idempotencyKey: newKey(), lines: [{ productId: "y".repeat(129), quantity: 1 }], paymentMethod: "cash", expectedTotalMinor: "1" }),
+    ).toMatchObject({ ok: false, error: { code: "INVALID_INPUT" } });
+    db.close();
   });
 });

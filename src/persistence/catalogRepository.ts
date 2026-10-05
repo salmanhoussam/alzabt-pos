@@ -6,7 +6,7 @@
  */
 import { formatDecimal, money } from "../domain/money";
 import { type CatalogSource, displayName } from "../domain/catalog";
-import type { ImportRow } from "../domain/catalogImport";
+import type { ExportRow, ImportRow } from "../domain/catalogImport";
 import type { Db } from "./db";
 
 /** The only import source in the field pilot: a merchant CSV in the strict import format. */
@@ -71,6 +71,39 @@ export class CatalogRepository {
         priceNeedsReview: r.price_needs_review === 1n,
       })),
     };
+  }
+
+  /**
+   * The active rows of one import source, in import order, as exact export rows (prices formatted
+   * from integer minor units — no floating point anywhere). Inactive rows are not exported; a
+   * re-import of the exported file therefore leaves them inactive.
+   */
+  listForExport(source: string): ExportRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT source_key, name_ar, name_en, selling_price_minor, currency, base_unit, price_needs_review
+           FROM catalog_products
+          WHERE source = ? AND is_active = 1
+          ORDER BY CAST(source_key AS INTEGER), source_key`,
+      )
+      .all(source) as Array<{
+      source_key: string;
+      name_ar: string;
+      name_en: string | null;
+      selling_price_minor: bigint;
+      currency: string;
+      base_unit: string;
+      price_needs_review: bigint;
+    }>;
+    return rows.map((r) => ({
+      sourceId: r.source_key,
+      nameAr: r.name_ar,
+      nameEn: r.name_en,
+      price: formatDecimal(money(r.selling_price_minor, r.currency)),
+      currency: r.currency,
+      baseUnit: r.base_unit,
+      priceNeedsReview: r.price_needs_review === 1n,
+    }));
   }
 
   /** Applies a fully validated import in ONE transaction: all rows land, or none do. */

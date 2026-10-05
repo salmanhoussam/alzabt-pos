@@ -28,6 +28,13 @@ export interface CatalogSource {
   }>;
 }
 
+/**
+ * Longest product id anywhere in the terminal (catalog, IPC, sale snapshot). One constant so the
+ * import path and the sale path cannot disagree again (a 77-char imported id once failed the sale
+ * path's 64-char limit). Imported ids are "merchant-csv:" + a source_id of at most 64 chars.
+ */
+export const MAX_PRODUCT_ID_LENGTH = 128;
+
 /** Units a product may be sold in today. Fractional units (kg, m) need fractional quantities first. */
 export const BASE_UNITS: ReadonlyArray<string> = Object.freeze(["piece", "box"]);
 
@@ -56,6 +63,9 @@ export function loadCatalog(source: CatalogSource): Catalog {
   for (const raw of source.products) {
     if (!raw.id || raw.sku === "" || !raw.name.trim()) {
       throw new DomainError("INVALID_CATALOG", `Product is missing id or name, or has an empty sku: ${JSON.stringify(raw)}`);
+    }
+    if (raw.id.length > MAX_PRODUCT_ID_LENGTH) {
+      throw new DomainError("INVALID_CATALOG", `Product id longer than ${MAX_PRODUCT_ID_LENGTH} characters`);
     }
     if (byId.has(raw.id)) throw new DomainError("INVALID_CATALOG", `Duplicate product id '${raw.id}'`);
     if (raw.sku !== null && skus.has(raw.sku)) throw new DomainError("INVALID_CATALOG", `Duplicate SKU '${raw.sku}'`);
