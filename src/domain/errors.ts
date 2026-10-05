@@ -24,7 +24,9 @@ export type DomainErrorCode =
   | "VOID_NOT_ALLOWED"
   | "INVALID_REASON"
   | "INVALID_INPUT"
-  | "LEDGER_INTEGRITY";
+  | "LEDGER_INTEGRITY"
+  | "IMPORT_REJECTED"
+  | "NOT_AVAILABLE";
 
 export class DomainError extends Error {
   constructor(

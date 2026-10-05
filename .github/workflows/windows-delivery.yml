@@ -2,8 +2,12 @@
 #
 # Builds the NSIS installer from committed source on a GitHub-hosted Windows runner, then proves on
 # real Windows that it installs silently, the INSTALLED app passes the Electron E2E smoke test
-# (sale, void, restart, hard kill), auto-start registers, and the uninstaller cleans up.
-# The installer is uploaded as a workflow artifact only if every step passed.
+# (sale, void, restart, hard kill), a local catalog import with Arabic names works end to end
+# (including export, re-import and backup), a ledger it cannot open is refused with a visible error
+# and left untouched, auto-start registers, the uninstaller cleans up — and that installing this
+# build OVER the previous releases (Gate 2.1 and the field-pilot build) keeps every sale, void and
+# catalog row in the real per-user profile (%APPDATA%\Alzabt POS).
+# The installer (named with version + build SHA) is uploaded only if every step passed.
 #
 # No secrets, no signing, no release, no deployment.
 name: windows-delivery
@@ -25,17 +29,25 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the upgrade test builds the previous releases from their exact commits
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm # caches the npm download cache only — never node_modules or build output
+
+      - name: Build identity (embedded in the app and the installer name)
+        run: |
+          $sha = (git rev-parse --short=7 HEAD).Trim()
+          "ALZABT_BUILD_SHA=$sha" >> $env:GITHUB_ENV
+          Write-Host "Building $(node -p "require('./package.json').version") from $(git rev-parse HEAD) (short $sha)"
 
       - name: Runner facts
         run: |
@@ -60,7 +72,9 @@ jobs:
         run: npm run build
 
       - name: Package NSIS installer
-        run: npx electron-builder --win nsis --x64 --publish never
+        run: |
+          Get-Content dist/build-info.json
+          npx electron-builder --win nsis --x64 --publish never "-c.nsis.artifactName=Alzabt-POS-Setup-`${version}-$($env:ALZABT_BUILD_SHA).`${ext}"
 
       - name: Inspect installer
         id: installer
@@ -71,6 +85,7 @@ jobs:
           Write-Host "Installer: $($installer.Name)  $($installer.Length) bytes  SHA256 $hash"
           $sig = Get-AuthenticodeSignature $installer.FullName
           Write-Host "Authenticode: $($sig.Status) (unsigned is expected in this gate)"
+          if ($installer.Name -notlike "*-$($env:ALZABT_BUILD_SHA).exe") { throw "Installer name does not carry the build SHA" }
           "path=$($installer.FullName)" >> $env:GITHUB_OUTPUT
 
       - name: Silent install (per-user, no admin)
@@ -99,6 +114,16 @@ jobs:
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
           node e2e/smoke.mjs
 
+      - name: Local catalog import (synthetic Arabic CSV) against the INSTALLED app
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/catalog-import.mjs
+
+      - name: Startup failure is visible and leaves the ledger untouched (INSTALLED app)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/startup-failure.mjs
+
       - name: Auto-start registered by the installed app
         run: |
           $run = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name AlzabtPOS -ErrorAction SilentlyContinue
@@ -123,6 +148,79 @@ jobs:
           $entry = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object DisplayName -like "Alzabt POS*"
           if ($entry) { throw "Add/Remove Programs entry left behind" }
           Write-Host "Uninstalled: executable, auto-start entry and Add/Remove Programs entry removed"
+
+      # ── Upgrade preservation, on the REAL per-user profile ──────────────────────────────────────
+      # Builds the two previous releases from their exact commits: 7c7edcc (Gate 2.1 — the build
+      # hash-verified at the shop, schema v2) and 24bdc22 (field-pilot catalog, schema v3).
+      - name: Build previous releases for the upgrade test
+        run: |
+          foreach ($ref in @("7c7edcc3ac5c5df3c3f7fea14f27b532196413d4", "24bdc22560e6f72e8cadc361c8a23151dc6a9681")) {
+            $dir = "..\old-$($ref.Substring(0,7))"
+            git worktree add --detach $dir $ref
+            Push-Location $dir
+            npm ci --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw "npm ci failed for $ref" }
+            npm run build
+            if ($LASTEXITCODE -ne 0) { throw "build failed for $ref" }
+            npx electron-builder --win nsis --x64 --publish never
+            if ($LASTEXITCODE -ne 0) { throw "packaging failed for $ref" }
+            $exe = Get-ChildItem release -Filter "*Setup*.exe" | Select-Object -First 1
+            Write-Host "Previous release $ref : $($exe.Name) $($exe.Length) bytes SHA256 $((Get-FileHash $exe.FullName).Hash)"
+            Pop-Location
+          }
+
+      - name: "Upgrade A: Gate 2.1 (schema v2) -> this build, real %APPDATA% profile"
+        run: |
+          $posProfile = Join-Path $env:APPDATA "Alzabt POS"
+          Write-Host "Real profile: $posProfile"
+          if (Test-Path (Join-Path $posProfile "alzabt-pos-ledger.sqlite")) { throw "Real profile already has a ledger before the upgrade test" }
+          $old = Get-ChildItem ..\old-7c7edcc\release -Filter "*Setup*.exe" | Select-Object -First 1
+          $p = Start-Process -FilePath $old.FullName -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "old installer exit $($p.ExitCode)" }
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/upgrade.mjs seed-v2
+          if ($LASTEXITCODE -ne 0) { throw "seed-v2 failed" }
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          $p = Start-Process -FilePath "${{ steps.installer.outputs.path }}" -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "new installer (over old) exit $($p.ExitCode)" }
+          node e2e/upgrade.mjs verify-from-v2
+          if ($LASTEXITCODE -ne 0) { throw "verify-from-v2 failed" }
+          $run = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name AlzabtPOS -ErrorAction SilentlyContinue
+          if (-not $run -or $run.AlzabtPOS -notlike "*$env:INSTALLED_EXE*") { throw "Auto-start entry lost or wrong after the upgrade" }
+          Write-Host "Auto-start kept across the upgrade: $($run.AlzabtPOS)"
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          $u = Get-ChildItem $env:INSTALL_DIR -Filter "Uninstall*.exe" | Select-Object -First 1
+          Start-Process -FilePath $u.FullName -ArgumentList "/S" -Wait
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Test-Path $env:INSTALLED_EXE) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+          if (-not (Test-Path (Join-Path $posProfile "alzabt-pos-ledger.sqlite"))) { throw "Uninstall removed the ledger" }
+          Write-Host "Uninstall kept the ledger and backups:"
+          Get-ChildItem $posProfile -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+          # Test cleanup AFTER measurement, so scenario B starts from an empty real profile.
+          Remove-Item $posProfile -Recurse -Force
+
+      - name: "Upgrade B: field-pilot (schema v3, imported catalog) -> this build, real %APPDATA% profile"
+        run: |
+          $posProfile = Join-Path $env:APPDATA "Alzabt POS"
+          $old = Get-ChildItem ..\old-24bdc22\release -Filter "*Setup*.exe" | Select-Object -First 1
+          $p = Start-Process -FilePath $old.FullName -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "old installer exit $($p.ExitCode)" }
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/upgrade.mjs seed-v3
+          if ($LASTEXITCODE -ne 0) { throw "seed-v3 failed" }
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          $p = Start-Process -FilePath "${{ steps.installer.outputs.path }}" -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "new installer (over old) exit $($p.ExitCode)" }
+          node e2e/upgrade.mjs verify-from-v3
+          if ($LASTEXITCODE -ne 0) { throw "verify-from-v3 failed" }
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          $u = Get-ChildItem $env:INSTALL_DIR -Filter "Uninstall*.exe" | Select-Object -First 1
+          Start-Process -FilePath $u.FullName -ArgumentList "/S" -Wait
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Test-Path $env:INSTALLED_EXE) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+          if (Test-Path $env:INSTALLED_EXE) { throw "Executable still present after uninstall" }
+          if (-not (Test-Path (Join-Path $posProfile "alzabt-pos-ledger.sqlite"))) { throw "Uninstall removed the ledger" }
+          Write-Host "Final uninstall: app removed, ledger kept in $posProfile"
 
       - name: Upload E2E screenshots
         if: always()

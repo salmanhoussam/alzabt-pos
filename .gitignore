@@ -14,3 +14,6 @@ coverage/
 .DS_Store
 Thumbs.db
 e2e-output/
+# Field data: merchant catalogs, invoices and exports never enter this public repo.
+*.csv
+field-data/

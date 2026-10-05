@@ -4,20 +4,46 @@ import { type Money, parseDecimal } from "./money";
 /** A sellable product as the terminal knows it. Prices are exact Money, never numbers. */
 export interface Product {
   readonly id: string;
-  readonly sku: string;
+  /** Optional: a merchant catalog may have no SKUs. Unique when present. */
+  readonly sku: string | null;
+  /** The name shown and snapshotted on the sale line (see displayName for local catalogs). */
   readonly name: string;
   readonly price: Money;
+  /** The unit one quantity of this product is sold in ("piece", "box"). Quantities stay whole. */
+  readonly baseUnit: string;
+  /** True when the price is a placeholder the merchant still has to set. Still sellable. */
+  readonly priceNeedsReview: boolean;
 }
 
-/** The shape a catalog is written in (fixture today, a cloud snapshot later): prices as text. */
+/** The shape a catalog is written in (fixture or local catalog table): prices as text. */
 export interface CatalogSource {
   readonly currency: string;
   readonly products: ReadonlyArray<{
     readonly id: string;
-    readonly sku: string;
+    readonly sku: string | null;
     readonly name: string;
     readonly price: string;
+    readonly baseUnit?: string;
+    readonly priceNeedsReview?: boolean;
   }>;
+}
+
+/**
+ * Longest product id anywhere in the terminal (catalog, IPC, sale snapshot). One constant so the
+ * import path and the sale path cannot disagree again (a 77-char imported id once failed the sale
+ * path's 64-char limit). Imported ids are "merchant-csv:" + a source_id of at most 64 chars.
+ */
+export const MAX_PRODUCT_ID_LENGTH = 128;
+
+/** Units a product may be sold in today. Fractional units (kg, m) need fractional quantities first. */
+export const BASE_UNITS: ReadonlyArray<string> = Object.freeze(["piece", "box"]);
+
+/**
+ * Approved catalog naming rule: name_ar is required, name_en is optional, and an English display
+ * falls back to name_ar. No translation is ever invented.
+ */
+export function displayName(nameAr: string, nameEn: string | null): string {
+  return nameEn ?? nameAr;
 }
 
 export interface Catalog {
@@ -28,26 +54,35 @@ export interface Catalog {
 
 /**
  * Validates and freezes a catalog. Every product is priced in the catalog's single currency;
- * ids and SKUs must be unique and non-empty. A catalog that fails here is never used.
+ * ids must be unique and non-empty, SKUs unique when present. A catalog that fails here is never used.
  */
 export function loadCatalog(source: CatalogSource): Catalog {
   const byId = new Map<string, Product>();
   const skus = new Set<string>();
   const products: Product[] = [];
   for (const raw of source.products) {
-    if (!raw.id || !raw.sku || !raw.name.trim()) {
-      throw new DomainError("INVALID_CATALOG", `Product is missing id, sku or name: ${JSON.stringify(raw)}`);
+    if (!raw.id || raw.sku === "" || !raw.name.trim()) {
+      throw new DomainError("INVALID_CATALOG", `Product is missing id or name, or has an empty sku: ${JSON.stringify(raw)}`);
+    }
+    if (raw.id.length > MAX_PRODUCT_ID_LENGTH) {
+      throw new DomainError("INVALID_CATALOG", `Product id longer than ${MAX_PRODUCT_ID_LENGTH} characters`);
     }
     if (byId.has(raw.id)) throw new DomainError("INVALID_CATALOG", `Duplicate product id '${raw.id}'`);
-    if (skus.has(raw.sku)) throw new DomainError("INVALID_CATALOG", `Duplicate SKU '${raw.sku}'`);
+    if (raw.sku !== null && skus.has(raw.sku)) throw new DomainError("INVALID_CATALOG", `Duplicate SKU '${raw.sku}'`);
+    const baseUnit = raw.baseUnit ?? "piece";
+    if (!BASE_UNITS.includes(baseUnit)) {
+      throw new DomainError("INVALID_CATALOG", `Product '${raw.id}' has unsupported unit '${baseUnit}'`);
+    }
     const product: Product = Object.freeze({
       id: raw.id,
       sku: raw.sku,
       name: raw.name.trim(),
       price: parseDecimal(raw.price, source.currency),
+      baseUnit,
+      priceNeedsReview: raw.priceNeedsReview ?? false,
     });
     byId.set(product.id, product);
-    skus.add(product.sku);
+    if (product.sku !== null) skus.add(product.sku);
     products.push(product);
   }
   return Object.freeze({ currency: source.currency, products: Object.freeze(products), byId });

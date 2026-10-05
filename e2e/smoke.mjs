@@ -80,7 +80,7 @@ const surface = await page.evaluate(() => ({
 }));
 log("renderer surface:", JSON.stringify(surface));
 assert(surface.require === "undefined" && surface.process === "undefined" && surface.ipcRenderer === "undefined", "renderer has no require/process/ipcRenderer");
-assert(JSON.stringify(surface.posKeys) === JSON.stringify(["createSale","currentCashier","getCatalog","getSaleHistory","getTodaySales","listCashiers","login","logout","voidSale"]), "window.pos exposes only the 9 business methods");
+assert(JSON.stringify(surface.posKeys) === JSON.stringify(["createSale","currentCashier","exportBackup","exportCatalog","getAppInfo","getCatalog","getSaleHistory","getTodaySales","importCatalog","listCashiers","login","logout","voidSale"]), "window.pos exposes only the 13 business methods");
 await page.screenshot({ path: SHOTS + "01-login.png" });
 
 // Wrong PIN first.

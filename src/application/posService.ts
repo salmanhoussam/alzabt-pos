@@ -9,7 +9,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { businessDateOf } from "../domain/businessDay";
 import { type CartLine, priceCart } from "../domain/cart";
-import type { Catalog } from "../domain/catalog";
+import { type Catalog, loadCatalog } from "../domain/catalog";
+import { decodeUtf8Strict, toImportCsv, validateImport, type ImportRejection } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
 import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
@@ -30,6 +31,7 @@ import {
 } from "../domain/pinLockout";
 import type { CashierFixture } from "../fixtures/cashiers";
 import type { TerminalConfig } from "../fixtures/terminal";
+import { CSV_SOURCE, type CatalogRepository, type ImportCounts } from "../persistence/catalogRepository";
 import type { PinStateRepository } from "../persistence/pinStateRepository";
 import type { SaleRepository } from "../persistence/saleRepository";
 import { type Cashier, pinMatches } from "./cashierAuth";
@@ -38,6 +40,8 @@ export interface PosServiceDeps {
   readonly repository: SaleRepository;
   readonly pinStates: PinStateRepository;
   readonly catalog: Catalog;
+  /** The local catalog table. Without it (tests, older callers) catalog import is unavailable. */
+  readonly catalogStore?: CatalogRepository;
   readonly cashiers: ReadonlyArray<CashierFixture>;
   readonly terminal: TerminalConfig;
   readonly now?: () => Date;
@@ -65,6 +69,23 @@ export interface SaleWithVoid {
 
 export const MAX_HISTORY = 200;
 
+export type CatalogImportResult =
+  | ({ readonly status: "imported"; readonly rowCount: number; readonly placeholderPrices: number } & ImportCounts)
+  | { readonly status: "rejected"; readonly rejected: ReadonlyArray<ImportRejection> };
+
+/**
+ * Which catalog the till starts with: the local catalog when it has active products, otherwise the
+ * bundled demo fixture (a fresh install, and every automated test, starts on the fixture).
+ */
+export function startupCatalog(
+  store: CatalogRepository,
+  fixture: Catalog,
+  currency: string,
+): { readonly catalog: Catalog; readonly origin: "local" | "fixture" } {
+  const local = store.loadActiveSource(currency);
+  return local ? { catalog: loadCatalog(local), origin: "local" } : { catalog: fixture, origin: "fixture" };
+}
+
 type LoginOutcome =
   | { readonly kind: "ok" }
   | { readonly kind: "wrong"; readonly left: number }
@@ -75,14 +96,11 @@ export class PosService {
   private readonly now: () => Date;
   private readonly newId: () => string;
   private cashier: Cashier | null = null;
+  private catalog: Catalog;
 
   constructor(private readonly deps: PosServiceDeps) {
-    if (deps.catalog.currency !== deps.terminal.currency) {
-      throw new DomainError(
-        "MIXED_CURRENCY",
-        `Catalog currency ${deps.catalog.currency} differs from terminal currency ${deps.terminal.currency}`,
-      );
-    }
+    this.assertTerminalCurrency(deps.catalog);
+    this.catalog = deps.catalog;
     this.repository = deps.repository;
     this.now = deps.now ?? (() => new Date());
     this.newId = deps.newId ?? randomUUID;
@@ -149,7 +167,65 @@ export class PosService {
   // ── Catalog ─────────────────────────────────────────────────────────────────────────────────────
 
   getCatalog(): Catalog {
-    return this.deps.catalog;
+    return this.catalog;
+  }
+
+  private assertTerminalCurrency(catalog: Catalog): void {
+    if (catalog.currency !== this.deps.terminal.currency) {
+      throw new DomainError(
+        "MIXED_CURRENCY",
+        `Catalog currency ${catalog.currency} differs from terminal currency ${this.deps.terminal.currency}`,
+      );
+    }
+  }
+
+  /**
+   * Imports a merchant catalog file (strict format: src/domain/catalogImport.ts) into the local
+   * catalog and makes it the live catalog. All or nothing: any rejected row refuses the whole file
+   * and nothing is written. A cart priced against the old catalog is re-checked at checkout by the
+   * existing TOTAL_MISMATCH / PRODUCT_NOT_FOUND guards, so a mid-sale import cannot mis-charge.
+   */
+  importCatalogCsv(fileName: string, bytes: Uint8Array): CatalogImportResult {
+    const cashier = this.requireCashier();
+    const store = this.deps.catalogStore;
+    if (!store) throw new DomainError("NOT_AVAILABLE", "Catalog import is not available on this terminal");
+    const currency = this.deps.terminal.currency;
+    const { rows, rejected } = validateImport(decodeUtf8Strict(bytes), currency);
+    if (rejected.length > 0) return { status: "rejected", rejected };
+
+    const counts = store.applyImport(CSV_SOURCE, rows, {
+      importId: this.newId(),
+      fileName: fileName.slice(0, 200),
+      fileSha256: createHash("sha256").update(bytes).digest("hex"),
+      cashierId: cashier.id,
+      now: this.now(),
+    });
+    const source = store.loadActiveSource(currency);
+    if (!source) throw new DomainError("LEDGER_INTEGRITY", "Imported catalog could not be read back");
+    const next = loadCatalog(source);
+    this.assertTerminalCurrency(next);
+    this.catalog = next;
+    return {
+      status: "imported",
+      rowCount: rows.length,
+      placeholderPrices: rows.filter((r) => r.priceNeedsReview).length,
+      ...counts,
+    };
+  }
+
+  /**
+   * The imported catalog in the import format, for editing (e.g. prices in Excel) and importing again
+   * through importCatalogCsv. Only the imported source is exported — never the demo fixture.
+   */
+  exportCatalogCsv(): { readonly csv: string; readonly productCount: number } {
+    this.requireCashier();
+    const store = this.deps.catalogStore;
+    if (!store) throw new DomainError("NOT_AVAILABLE", "Catalog export is not available on this terminal");
+    const rows = store.listForExport(CSV_SOURCE);
+    if (rows.length === 0) {
+      throw new DomainError("NOT_AVAILABLE", "There is no imported catalog to export yet");
+    }
+    return { csv: toImportCsv(rows), productCount: rows.length };
   }
 
   // ── Sales ───────────────────────────────────────────────────────────────────────────────────────
@@ -181,7 +257,7 @@ export class PosService {
       return { sale: existing.sale, duplicate: true };
     }
 
-    const priced = priceCart(this.deps.catalog, input.lines);
+    const priced = priceCart(this.catalog, input.lines);
     if (priced.total.minor !== input.expectedTotalMinor) {
       throw new DomainError(
         "TOTAL_MISMATCH",
@@ -221,6 +297,14 @@ export class PosService {
     const sale = this.repository.getSale(saleId);
     if (!sale) throw new DomainError("LEDGER_INTEGRITY", "Committed sale could not be read back");
     return { sale, duplicate: false };
+  }
+
+  /**
+   * Read-only: the sale already committed under this idempotency key, if any. Used to tell the
+   * cashier the truth after an unexpected error ("recorded" vs "not recorded"), never to write.
+   */
+  saleForIdempotencyKey(key: string): SaleRecord | null {
+    return this.repository.findByIdempotencyKey(key)?.sale ?? null;
   }
 
   getSale(saleId: string): SaleWithVoid {

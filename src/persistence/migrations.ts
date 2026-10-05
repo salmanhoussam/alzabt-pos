@@ -101,4 +101,47 @@ CREATE TABLE cashier_pin_state (
 ) STRICT;
 `,
   },
+  {
+    version: 3,
+    name: "local_catalog",
+    // The terminal's own product list, imported from a local file (field pilot). Mutable master
+    // data, NOT ledger: rows are updated in place and deactivated, never deleted, and no sale
+    // references them — sale_lines keep their own name/price snapshot, so nothing here can alter
+    // a past sale. Money is INTEGER minor units, as everywhere. base_unit is validated in code
+    // (src/domain/catalog.ts BASE_UNITS) so a new unit needs no table rebuild.
+    sql: `
+CREATE TABLE catalog_products (
+  id                  TEXT    PRIMARY KEY,
+  source              TEXT    NOT NULL CHECK (length(source) > 0),
+  source_key          TEXT    NOT NULL CHECK (length(source_key) > 0),
+  sku                 TEXT    CHECK (sku IS NULL OR length(sku) > 0),
+  name_ar             TEXT    NOT NULL CHECK (length(trim(name_ar)) > 0),
+  name_en             TEXT    CHECK (name_en IS NULL OR length(trim(name_en)) > 0),
+  selling_price_minor INTEGER NOT NULL CHECK (selling_price_minor > 0),
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  base_unit           TEXT    NOT NULL CHECK (length(base_unit) > 0),
+  price_needs_review  INTEGER NOT NULL CHECK (price_needs_review IN (0, 1)),
+  is_active           INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+  created_at          TEXT    NOT NULL,
+  updated_at          TEXT    NOT NULL,
+  UNIQUE (source, source_key)
+) STRICT;
+
+CREATE UNIQUE INDEX catalog_products_sku ON catalog_products (sku) WHERE sku IS NOT NULL;
+
+CREATE TABLE catalog_imports (
+  id           TEXT    PRIMARY KEY,
+  source       TEXT    NOT NULL,
+  file_name    TEXT    NOT NULL,
+  file_sha256  TEXT    NOT NULL CHECK (length(file_sha256) = 64),
+  row_count    INTEGER NOT NULL CHECK (row_count >= 0),
+  inserted     INTEGER NOT NULL CHECK (inserted >= 0),
+  updated      INTEGER NOT NULL CHECK (updated >= 0),
+  unchanged    INTEGER NOT NULL CHECK (unchanged >= 0),
+  deactivated  INTEGER NOT NULL CHECK (deactivated >= 0),
+  cashier_id   TEXT    NOT NULL,
+  imported_at  TEXT    NOT NULL
+) STRICT;
+`,
+  },
 ];

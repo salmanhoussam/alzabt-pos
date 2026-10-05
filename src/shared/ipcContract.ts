@@ -16,6 +16,10 @@ export const CHANNELS = {
   voidSale: "pos:voidSale",
   getTodaySales: "pos:getTodaySales",
   getSaleHistory: "pos:getSaleHistory",
+  importCatalog: "pos:importCatalog",
+  exportCatalog: "pos:exportCatalog",
+  exportBackup: "pos:exportBackup",
+  getAppInfo: "pos:getAppInfo",
 } as const;
 
 export type ChannelName = keyof typeof CHANNELS;
@@ -32,9 +36,11 @@ export interface CashierDto {
 
 export interface ProductDto {
   readonly id: string;
-  readonly sku: string;
+  readonly sku: string | null;
   readonly name: string;
   readonly price: MoneyDto;
+  readonly baseUnit: string;
+  readonly priceNeedsReview: boolean;
 }
 
 export interface CatalogDto {
@@ -117,6 +123,34 @@ export interface HistoryRequest {
   readonly limit: number;
 }
 
+/**
+ * importCatalog takes NO payload: the main process asks the cashier to pick the file in a native
+ * dialog and reads it itself. The renderer can never name a path or hand over file contents.
+ */
+export type ImportCatalogResponse =
+  | { readonly status: "cancelled" }
+  | {
+      readonly status: "imported";
+      readonly rowCount: number;
+      readonly inserted: number;
+      readonly updated: number;
+      readonly unchanged: number;
+      readonly deactivated: number;
+      readonly placeholderPrices: number;
+    }
+  | { readonly status: "rejected"; readonly rejected: ReadonlyArray<{ readonly line: number; readonly reason: string }> };
+
+/** exportCatalog / exportBackup take NO payload: the main process shows the save dialog and writes. */
+export type ExportResponse =
+  | { readonly status: "cancelled" }
+  | { readonly status: "saved"; readonly fileName: string; readonly productCount?: number };
+
+/** Installation identity, shown in the UI for field support. */
+export interface AppInfoDto {
+  readonly version: string;
+  readonly build: string;
+}
+
 export interface IpcError {
   readonly code: string;
   readonly message: string;
@@ -135,4 +169,8 @@ export interface PosApi {
   voidSale(req: VoidSaleRequest): Promise<IpcResult<VoidDto>>;
   getTodaySales(): Promise<IpcResult<TodaySalesDto>>;
   getSaleHistory(req: HistoryRequest): Promise<IpcResult<SaleWithVoidDto[]>>;
+  importCatalog(): Promise<IpcResult<ImportCatalogResponse>>;
+  exportCatalog(): Promise<IpcResult<ExportResponse>>;
+  exportBackup(): Promise<IpcResult<ExportResponse>>;
+  getAppInfo(): Promise<IpcResult<AppInfoDto>>;
 }

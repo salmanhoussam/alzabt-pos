@@ -4,9 +4,16 @@
  *
  * Every payload is validated for EXACT shape: wrong types, missing keys and unexpected extra keys
  * are all rejected before the service is called. Business errors become { ok:false, code, message };
- * any other error becomes a generic INTERNAL error so internals never leak to the renderer.
+ * any other error is logged and becomes a fixed message so internals never leak to the renderer.
+ *
+ * Unexpected-error messages tell the TRUTH for the channel that failed. createSale used to answer
+ * "the sale was not recorded" for every channel and every failure — false when the error happened
+ * after the commit, or when a concurrent attempt with the same idempotency key had committed it.
+ * createSale now checks the ledger by the request's idempotency key and says "recorded",
+ * "not recorded" or "unknown"; other channels never claim anything about sales.
  */
 import type { PosService } from "../application/posService";
+import { MAX_PRODUCT_ID_LENGTH } from "../domain/catalog";
 import { DomainError } from "../domain/errors";
 import { assertPaymentMethod } from "../domain/sale";
 import {
@@ -16,9 +23,36 @@ import {
   toTodaySalesDto,
   toVoidDto,
 } from "../shared/dto";
-import { CHANNELS, type ChannelName, type IpcResult } from "../shared/ipcContract";
+import { type AppInfoDto, CHANNELS, type ChannelName, type IpcError, type IpcResult } from "../shared/ipcContract";
+import { type Logger, nullLogger } from "./logger";
 
 type Handler = (payload: unknown) => IpcResult<unknown>;
+
+/** A file the cashier picked in the main process's native dialog; null when they cancelled. */
+export interface PickedFile {
+  readonly name: string;
+  readonly bytes: Uint8Array;
+}
+
+/** Result of a main-process save dialog + write; null when the cashier cancelled. */
+export interface SavedFile {
+  readonly fileName: string;
+}
+
+export interface IpcHandlerOptions {
+  /** Shows the native "open file" dialog. Absent (tests, headless) means import is unavailable. */
+  readonly pickCatalogFile?: () => PickedFile | null;
+  /** Native "save as" dialog + atomic write of the exported catalog. Absent means unavailable. */
+  readonly saveCatalogExport?: (suggestedName: string, contents: string) => SavedFile | null;
+  /** Native "save as" dialog + verified consistent snapshot of the ledger. Absent means unavailable. */
+  readonly exportBackup?: () => SavedFile | null;
+  /** Version/build identity of this installation. */
+  readonly appInfo?: () => AppInfoDto;
+  /** Called after a NEW sale is committed (the daily-backup trigger). Must not throw. */
+  readonly afterSale?: () => void;
+  readonly logger?: Logger;
+  readonly now?: () => Date;
+}
 
 function invalid(message: string): never {
   throw new DomainError("INVALID_INPUT", message);
@@ -44,48 +78,82 @@ function noPayload(payload: unknown): void {
   if (payload !== undefined && payload !== null) invalid("This operation takes no payload");
 }
 
-function wrap(fn: (payload: unknown) => unknown): Handler {
-  return (payload) => {
-    try {
-      return { ok: true, data: fn(payload) };
-    } catch (err) {
-      if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
-      console.error("[pos] internal error", err);
-      return { ok: false, error: { code: "INTERNAL", message: "Unexpected error — the sale was not recorded" } };
-    }
-  };
+const GENERIC_INTERNAL: IpcError = {
+  code: "INTERNAL",
+  message: "Unexpected error. Please try again; if it keeps happening, contact support.",
+};
+
+/** What the cashier is told after an unexpected error in createSale, decided by reading the ledger. */
+export function saleFailureTruth(service: PosService, payload: unknown): IpcError {
+  const key =
+    payload && typeof payload === "object" && typeof (payload as { idempotencyKey?: unknown }).idempotencyKey === "string"
+      ? (payload as { idempotencyKey: string }).idempotencyKey
+      : null;
+  if (key === null) return { code: "SALE_NOT_RECORDED", message: "Unexpected error — the sale was not recorded." };
+  try {
+    const sale = service.saleForIdempotencyKey(key);
+    return sale
+      ? {
+          code: "SALE_RECORDED",
+          message: `The sale WAS recorded (receipt #${sale.receiptNumber}) but an unexpected error followed. Check History — do not ring it up again.`,
+        }
+      : { code: "SALE_NOT_RECORDED", message: "Unexpected error — the sale was not recorded. You can try again." };
+  } catch {
+    return {
+      code: "SALE_STATUS_UNKNOWN",
+      message: "Unexpected error — it is not known whether the sale was recorded. Check History before trying again.",
+    };
+  }
 }
 
-export function createIpcHandlers(service: PosService): Record<ChannelName, Handler> {
+export function createIpcHandlers(service: PosService, options: IpcHandlerOptions = {}): Record<ChannelName, Handler> {
+  const log = options.logger ?? nullLogger;
+  const now = options.now ?? (() => new Date());
+
+  function wrap(channel: ChannelName, fn: (payload: unknown) => unknown, onInternal?: (payload: unknown) => IpcError): Handler {
+    return (payload) => {
+      try {
+        return { ok: true, data: fn(payload) };
+      } catch (err) {
+        if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
+        log.error("ipc-internal-error", { channel, error: err });
+        console.error("[pos] internal error", channel, err);
+        return { ok: false, error: onInternal ? onInternal(payload) : GENERIC_INTERNAL };
+      }
+    };
+  }
+
+  const stamp = () => now().toISOString().slice(0, 10).replace(/-/g, "");
+
   return {
-    listCashiers: wrap((p) => {
+    listCashiers: wrap("listCashiers", (p) => {
       noPayload(p);
       return service.listCashiers();
     }),
-    login: wrap((p) => {
+    login: wrap("login", (p) => {
       const o = exactObject(p, ["cashierId", "pin"]);
       return service.login(str(o.cashierId, "cashierId", 64), str(o.pin, "pin", 16));
     }),
-    logout: wrap((p) => {
+    logout: wrap("logout", (p) => {
       noPayload(p);
       service.logout();
       return null;
     }),
-    currentCashier: wrap((p) => {
+    currentCashier: wrap("currentCashier", (p) => {
       noPayload(p);
       return service.currentCashier();
     }),
-    getCatalog: wrap((p) => {
+    getCatalog: wrap("getCatalog", (p) => {
       noPayload(p);
       return toCatalogDto(service.getCatalog());
     }),
-    createSale: wrap((p) => {
+    createSale: wrap("createSale", (p) => {
       const o = exactObject(p, ["idempotencyKey", "lines", "paymentMethod", "expectedTotalMinor"]);
       if (!Array.isArray(o.lines) || o.lines.length === 0 || o.lines.length > 200) invalid("'lines' must be a non-empty array");
       const lines = o.lines.map((raw) => {
         const l = exactObject(raw, ["productId", "quantity"]);
         if (typeof l.quantity !== "number" || !Number.isSafeInteger(l.quantity)) invalid("'quantity' must be an integer");
-        return { productId: str(l.productId, "productId", 64), quantity: l.quantity };
+        return { productId: str(l.productId, "productId", MAX_PRODUCT_ID_LENGTH), quantity: l.quantity };
       });
       assertPaymentMethod(o.paymentMethod);
       const result = service.createSale({
@@ -94,22 +162,62 @@ export function createIpcHandlers(service: PosService): Record<ChannelName, Hand
         paymentMethod: o.paymentMethod,
         expectedTotalMinor: parseMinor(o.expectedTotalMinor),
       });
+      if (!result.duplicate) {
+        try {
+          options.afterSale?.();
+        } catch (err) {
+          log.warn("after-sale-hook-failed", { error: err });
+        }
+      }
       return { sale: toSaleDto(result.sale), duplicate: result.duplicate };
-    }),
-    voidSale: wrap((p) => {
+    }, (p) => saleFailureTruth(service, p)),
+    voidSale: wrap("voidSale", (p) => {
       const o = exactObject(p, ["saleId", "reason"]);
       return toVoidDto(service.voidSale(str(o.saleId, "saleId", 64), str(o.reason, "reason", 400)));
     }),
-    getTodaySales: wrap((p) => {
+    getTodaySales: wrap("getTodaySales", (p) => {
       noPayload(p);
       return toTodaySalesDto(service.getTodaySales());
     }),
-    getSaleHistory: wrap((p) => {
+    getSaleHistory: wrap("getSaleHistory", (p) => {
       const o = exactObject(p, ["limit"]);
       if (typeof o.limit !== "number" || !Number.isSafeInteger(o.limit) || o.limit < 1 || o.limit > 200) {
         invalid("'limit' must be an integer between 1 and 200");
       }
       return service.getSaleHistory(o.limit).map((h) => ({ sale: toSaleDto(h.sale), void: h.void ? toVoidDto(h.void) : null }));
+    }),
+    importCatalog: wrap("importCatalog", (p) => {
+      noPayload(p);
+      // Logged-in check BEFORE any dialog opens; the service checks again.
+      if (!service.currentCashier()) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
+      if (!options.pickCatalogFile) throw new DomainError("NOT_AVAILABLE", "Catalog import is not available here");
+      const file = options.pickCatalogFile();
+      if (!file) return { status: "cancelled" };
+      const result = service.importCatalogCsv(file.name, file.bytes);
+      log.info("catalog-import", result.status === "imported" ? { ...result } : { status: result.status, rejected: result.rejected.length });
+      return result;
+    }),
+    exportCatalog: wrap("exportCatalog", (p) => {
+      noPayload(p);
+      if (!service.currentCashier()) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
+      if (!options.saveCatalogExport) throw new DomainError("NOT_AVAILABLE", "Catalog export is not available here");
+      const { csv, productCount } = service.exportCatalogCsv();
+      const saved = options.saveCatalogExport(`alzabt-pos-catalog-${stamp()}.csv`, csv);
+      if (!saved) return { status: "cancelled" };
+      log.info("catalog-export", { products: productCount });
+      return { status: "saved", fileName: saved.fileName, productCount };
+    }),
+    exportBackup: wrap("exportBackup", (p) => {
+      noPayload(p);
+      if (!service.currentCashier()) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
+      if (!options.exportBackup) throw new DomainError("NOT_AVAILABLE", "Backup export is not available here");
+      const saved = options.exportBackup();
+      if (!saved) return { status: "cancelled" };
+      return { status: "saved", fileName: saved.fileName };
+    }),
+    getAppInfo: wrap("getAppInfo", (p) => {
+      noPayload(p);
+      return options.appInfo?.() ?? { version: "unknown", build: "unknown" };
     }),
   };
 }

@@ -23,7 +23,14 @@ export function fromMoneyDto(dto: MoneyDto): Money {
 }
 
 export function toProductDto(p: Product): ProductDto {
-  return { id: p.id, sku: p.sku, name: p.name, price: toMoneyDto(p.price) };
+  return {
+    id: p.id,
+    sku: p.sku,
+    name: p.name,
+    price: toMoneyDto(p.price),
+    baseUnit: p.baseUnit,
+    priceNeedsReview: p.priceNeedsReview,
+  };
 }
 
 export function toCatalogDto(c: Catalog): CatalogDto {
@@ -32,7 +39,14 @@ export function toCatalogDto(c: Catalog): CatalogDto {
 
 /** Rebuilds a usable Catalog in the renderer (for display totals only — main always reprices). */
 export function fromCatalogDto(dto: CatalogDto): Catalog {
-  const products: Product[] = dto.products.map((p) => ({ id: p.id, sku: p.sku, name: p.name, price: fromMoneyDto(p.price) }));
+  const products: Product[] = dto.products.map((p) => ({
+    id: p.id,
+    sku: p.sku,
+    name: p.name,
+    price: fromMoneyDto(p.price),
+    baseUnit: p.baseUnit,
+    priceNeedsReview: p.priceNeedsReview,
+  }));
   return { currency: dto.currency, products, byId: new Map(products.map((p) => [p.id, p])) };
 }
 
