@@ -305,6 +305,16 @@ function failStartup(err: unknown): void {
   }
   db = null;
   const message = startupFailureMessage(code, buildLabel(BUILD_INFO));
-  dialog.showErrorBox(message.title, message.body);
+  // showMessageBoxSync rather than showErrorBox: on Windows showErrorBox captions the window just
+  // "Error" (measured on Windows CI); here the caption is ours, so support can recognise it.
+  dialog.showMessageBoxSync({
+    type: "error",
+    title: message.title,
+    message: message.title,
+    detail: message.body,
+    buttons: ["Close"],
+    defaultId: 0,
+    noLink: true,
+  });
   app.exit(1);
 }
