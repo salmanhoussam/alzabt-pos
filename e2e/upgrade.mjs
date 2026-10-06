@@ -61,7 +61,10 @@ async function launch() {
 }
 
 const product = (page, name) => page.locator("button.product", { hasText: name });
-const tab = (page, name) => page.getByRole("button", { name, exact: true }).click();
+// 🔴 Tabs by data-testid, not by visible text: the default terminal language is Arabic, so an E2E
+// that clicks "Sell" or "History" would pass only while the UI happens to be English.
+const TAB_IDS = { "Sell": "sell", "Today's Sales": "today", History: "history", Tools: "tools", Products: "products" };
+const tab = (page, name) => page.locator(`[data-testid="tab-${TAB_IDS[name]}"]`).click();
 const stub = (app, kind, path) =>
   app.evaluate(
     ({ dialog }, [k, p]) => {

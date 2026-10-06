@@ -31,6 +31,11 @@ const goodSale = () => ({
 });
 
 describe("IPC surface", () => {
+  // The surface grew from THIRTEEN channels to NINETEEN when offline product management landed:
+  // listProducts, createProduct, updateProduct, setProductActive, getSettings, setTerminalLanguage.
+  // The old value is named here on purpose — this assertion is the record of what the renderer may
+  // ask for, so every addition has to be written down, and the shape rule below still holds: each
+  // channel is one named business operation, and there is still no SQL, query, file or generic one.
   it("exposes only the fixed business channels — no SQL, query, file or generic invoke", () => {
     expect(CHANNEL_NAMES.sort()).toEqual(
       [
@@ -41,15 +46,26 @@ describe("IPC surface", () => {
         "getAppInfo",
         "getCatalog",
         "getSaleHistory",
+        "getSettings",
         "getTodaySales",
         "importCatalog",
         "listCashiers",
+        "listProducts",
         "login",
         "logout",
+        "createProduct",
+        "setProductActive",
+        "setTerminalLanguage",
+        "updateProduct",
         "voidSale",
       ].sort(),
     );
+    expect(CHANNEL_NAMES).toHaveLength(19);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
+    // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.
+    for (const ch of Object.values(CHANNELS)) {
+      expect(ch).not.toMatch(/sql|query|exec|file|path|invoke|raw/i);
+    }
   });
 
   it("full flow through the handlers: login → sale → today → void → today", () => {
