@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **PROPOSAL — nothing here is implemented.** Revised 2026-10-06 with Salman's approved decisions; awaiting implementation approval. |
+| Status | **Revision 3, 2026-10-07.** Product Management is implemented and accepted in principle; everything else here is still a proposal. |
 | Written | 2026-10-06, by أبو حسين |
 | Evidence basis | `alzabt-pos` `main` = `65137e4`, version `0.1.1`, clean clone; local handoff materials of 2026-10-05; one real store invoice read as a structural reference |
 | Scope | The local Windows POS only. No cloud, no sync, no Lia. |
@@ -495,18 +495,37 @@ Option B works **because `sale_lines` is a leaf**. Rebuilding `sales` — which 
 them off from inside its transaction. So: **`sales` must never need a rebuild**, or the migration
 runner itself has to change first. Worth knowing before a later migration discovers it.
 
-### Proposed new migrations
+### Proposed new migrations — 🔴 UNNUMBERED, on Salman's instruction
 
-| Migration | Contents | Depends on |
+`DECISION — SALMAN 2026-10-07`: **a migration number is assigned only when the implementation ORDER
+is approved.** Two changes compete for the next number — the `sale_lines` quantity rebuild and the
+durable audit table — so neither is called "migration 4" anywhere any more.
+
+| Change | Contents | Contract |
 |---|---|---|
-| **4** | Rebuild `sale_lines` to `quantity_milli` (Option B) | Q-2 (the scaling factor), Q-3 (A or B) |
-| **5** | `catalog_products.unit_needs_review` + more `BASE_UNITS` | §6 |
-| **6** | `stock_movements`, append-only, with its reason vocabulary | 4, 5 |
-| **7** | `customers`, a customer reference on a sale, `payments` append-only | §8 |
-| **8** | Cashier records and the two-role permission model | §12 |
-| **9** | Settings: terminal language, receipt language, store identity for printed documents | §11, §9 |
+| Quantity rebuild | Rebuild `sale_lines` to `quantity_milli`, one long-term table | `docs/plans/exact-quantity-contract.md` |
+| Durable audit | `audit_events`, append-only, in the SAME transaction as the mutation it records | `docs/plans/durable-local-audit-proposal.md` |
+| Units flag | `catalog_products.unit_needs_review` | §6 |
+| Inventory | `stock_movements`, append-only, with its reason vocabulary | §7 |
+| Customer & payments | `customers`, a customer reference on a sale, `payments` append-only | §8 |
+| Cashiers | Real cashier records and the two-role permission model | §12 |
+| Settings | Terminal language, receipt language, store identity for printed documents | §9, §11 |
 
-Nothing above is written until Salman approves.
+Nothing above is written until Salman approves both the contract and the order.
+
+### The line-total check, superseded
+
+Revision 2 proposed a **tolerance** — `abs(line_total_minor * 1000 - quantity_milli *
+unit_price_minor) <= 500`. Revision 3 replaces it with an **exact equality**:
+
+```sql
+CHECK (line_total_minor = (quantity_milli * unit_price_minor + 500) / 1000)
+```
+
+Measured: SQLite's `/` is integer division on integers, and this form admits **exactly one** total in
+every case — the exact tie included, where the tolerance admitted two and left rounding to the
+application. The schema now pins the rounding rule, so the app and the database cannot disagree.
+Evidence: `docs/evidence/quantity-exact-check-experiment.py`.
 
 ## 16. Migration strategy
 
@@ -610,30 +629,29 @@ first:
 
 ## 20. Proposed PR sequence
 
-`DECISION — SALMAN 2026-10-06`: the sequence below is his, evaluated against the current code. I
-agree with it, and the evaluation is in the right-hand column — including the two places where the
-code makes a step cheaper or heavier than it looks.
+`DECISION — SALMAN 2026-10-07`. This **replaces** revision 2's sequence. Barcode and categories move
+**down**: they are useful, but they do not block correct offline selling or invoicing, and exact
+quantity does.
 
-| # | PR | Evaluated against `65137e4` |
+| # | PR | State |
 |---|---|---|
-| 0 | **Real-PC stability evidence + observability** | ✅ Right first. The evidence collection (§14) is read-only and costs no code. The observability additions **log events that are currently unlogged and change no runtime behaviour** — no GPU change, no recovery action, no display-wake decision. Those wait for an A–E classification. |
-| 1 | **i18n / RTL foundation** | ✅ And cheaper here than anywhere later: the `DomainError` codes already exist, so localisation is a catalogue; and logical CSS direction costs nothing now versus rewriting six screens later. Every PR after this one is bilingual on its first commit. **Verify** whether a bundled Arabic font is actually needed on the shop PC before bundling one. |
-| 2 | **Exact quantity + units contract / migration** | ✅ Correctly before product CRUD: migration 4 changes the shape every later PR writes against. Blocked on **Q-2** (scaling factor) and **Q-3** (Option A or B). §15 recommends B, with the evidence. |
-| 3 | **Local product CRUD** | 🟢 **Cheaper than it looks.** `catalog_products` already carries every column a product editor needs; this is IPC plus one bilingual screen, **no migration** — except the small `unit_needs_review` flag from §6, which can ride along. |
-| 4 | **Inventory movement ledger + stock projection** | ✅ Needs units settled (PR 2). Note §6's rule: a product with an unverified unit gets **no authoritative** stock arithmetic, so the projection must carry that state rather than hide it. |
-| 5 | **Customer + payments + balance due** | ✅ Unblocks the shop's actual document. §8 is settled, so this is now a build, not a decision. |
-| 6 | **A4 PDF invoice + 4×6 QR label** | ✅ Reasonable to pair: one printing path, one font, two page sizes. Needs PR 5 for paid/balance and PR 1 for Arabic. The QR encodes a **local** sale identity only. |
-| 7 | **Real cashier management / permissions** | ⚠️ **The one place I would still argue.** Until this lands, two published PINs can void sales and replace the catalog — and PRs 3, 4 and 5 each *add* a dangerous action to that list. Moving it earlier is defensible; keeping it here is defensible only if the shop's till stays physically supervised. Salman's call, Q-14. |
-| 8 | **Physical scanner / printer verification** | ✅ Last before release, and only against hardware measured in PR 0's visit. The scanner probe already exists and has never been run. |
-| 9 | **Field release** | ✅ Gated on §21. |
+| **A** | **Finish Product Management verification** — Windows CI, full SQLite suite, visual evidence | 🟡 **in progress** — branch `feat/offline-product-management`, accepted in principle, awaiting CI evidence |
+| **B** | **Node 22 repository contract** — `engines` + `.nvmrc`, nothing else | 🟡 prepared, branch `chore/node22-runtime-contract` |
+| **C** | **Exact / fractional quantity** contract + migration | 🟡 contract written: `docs/plans/exact-quantity-contract.md`. **Not implemented.** |
+| **D** | **Durable local audit** | 🟡 proposal written: `docs/plans/durable-local-audit-proposal.md`. **Not implemented.** Required before a field release. |
+| **E** | Local inventory movement ledger + derived stock | ⚪ §7 |
+| **F** | Customer + payments + balance due | ⚪ §8 |
+| **G** | A4 PDF invoice | ⚪ §9 |
+| **H** | 4×6 QR label | ⚪ §10 |
+| **I** | Barcode + category improvements | ⚪ moved down deliberately — neither blocks selling or invoicing |
+| **J** | Cashier / permission hardening | ⚪ §12 — and 🔴 still the real blocker before money, since two published PINs can void and import |
+| **K** | Physical scanner / printer integration | ⚪ only against hardware measured at the shop |
+| **L** | Field release | ⚪ gated on §21, and on D |
 | — | Cloud | `DEFERRED TO CLOUD` — §23 |
 
-### What changed from this document's previous version
-
-The earlier draft put Arabic at PR 8 and argued the Store core first. Salman's foundation-early
-split is better than either option I offered: it removes the "translate twice" cost I was trying to
-avoid **without** delaying the Store core, because the foundation is small and every later screen
-pays its own way. The earlier recommendation is withdrawn.
+The i18n/RTL foundation that revision 2 placed at PR 1 **shipped inside A**, because the Products
+screen had to be bilingual on its first commit and a bilingual screen needs the foundation. The
+standing rule it created stands: every new screen is bilingual on its first commit.
 
 ## 21. V1 acceptance criteria
 
@@ -701,7 +719,10 @@ All ten are `DOCUMENTED PREVIOUS DECISION`. The architecture study behind them i
 | **Q-6** | Is the total written out in **Arabic words** required for V1? The reference document prints it twice. | §9 |
 | **Q-8** | "NO unrestricted void": does a cashier get **no** void at all, or a void that an Owner/Admin authorises at the till with an override? The second is what a shop usually needs and is more work. | Migration 8 |
 | **Q-12** | Has the 430-item catalog been imported at the shop yet? | §19 |
-| **Q-14** | **New.** PRs 3, 4 and 5 each add a dangerous action while the published fixture PINs are still live. Do permissions stay at PR 7, or move ahead of PR 3? | The sequence |
+| **Q-14** | PRs E, F and G each add a dangerous action while the published fixture PINs are still live. Do permissions stay at **J**, or move ahead of **E**? | The sequence |
+| **Q-Q1…Q-Q6** | The six quantity decisions — field name and scale, the exact CHECK, a zero-total line, `MAX_QUANTITY`, refusing a fractional entry on a whole-only unit, and the migration order | `docs/plans/exact-quantity-contract.md` §14 |
+| **Q-A1** | Approve the audit DDL as written, including **one transaction with the mutation** — which means a price change that cannot be recorded **does not happen** | `docs/plans/durable-local-audit-proposal.md` §12 |
+| **Q-A2** | **Migration order:** quantity rebuild first, or audit first? §9 of the audit proposal argues audit first (purely additive, no rollback risk); the counter-argument is that quantity is what the invoice needs | Both contracts |
 
 ---
 
@@ -734,3 +755,20 @@ All ten are `DOCUMENTED PREVIOUS DECISION`. The architecture study behind them i
    so a malformed ledger aborts the migration instead of being copied forward. §15
 
 Both were found by strengthening a test rather than by re-reading the code.
+
+### Revision 3 — 2026-10-07, after Salman's review of the Product PR
+
+| Area | Change |
+|---|---|
+| §15 | Migration numbers **unassigned** until the order is approved; no document says "migration 4" any more. |
+| §15 | The line-total check became an **exact equality** instead of a tolerance — measured to admit exactly one total, the tie included. |
+| §20 | Replaced with the approved **A–L** roadmap. Barcode and categories moved down to **I**; exact quantity is **C**. |
+| §24 | Nine new decisions: six on quantity, two on audit, plus the permission-position question. |
+| — | Two contracts written and **not implemented**: `exact-quantity-contract.md`, `durable-local-audit-proposal.md`. |
+
+### A third claim from an earlier revision, withdrawn
+
+**"`abs(…) <= 500` is the best the schema can do for a fractional line total."** Withdrawn. An exact
+integer equality using SQLite's integer division pins round-half-up uniquely, including on an exact
+tie. The tolerance was not wrong; it was weaker than necessary, and it left the rounding rule in the
+application where the schema could hold it.
