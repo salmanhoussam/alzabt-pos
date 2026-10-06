@@ -185,11 +185,12 @@ Structural requirements, read off the reference document.
 |---|---|
 | Store branding block: logo, Arabic and English trading name, trade line, contact line | **MUST V1** |
 | Bilingual field labels throughout, Arabic beside English | **MUST V1** |
-| Invoice number, date, document type | **MUST V1** |
+| Invoice number — **`receipt_number`, and only that** | **MUST V1** · `DECISION — SALMAN 2026-10-07`: one merchant-facing number. **No second sequence is invented.** The sale UUID stays internal technical identity and may later be encoded in the QR. This answers Q-5. |
+| Date, document type | **MUST V1** |
 | Customer block: name, address, phone, notes — each printable when blank | **MUST V1** |
 | Line table: no., description, quantity, **unit**, unit price, line total | **MUST V1** |
 | Totals block: subtotal, paid, **balance due emphasised** | **MUST V1** |
-| The total written out in **Arabic words** | **SHOULD V1** — it appears twice on the reference. `OPEN QUESTION`: required for V1? |
+| The total written out in **Arabic words** | **SHOULD / LATER** · `DECISION — SALMAN 2026-10-07`: not a MUST. The numeric exact total is authoritative, and the first correct invoice PDF is **not** delayed for it. This answers Q-6. |
 | Footer thank-you line, bilingual | **SHOULD V1** |
 | Generated from sale data automatically, never typed | **MUST V1** |
 | Produced as a PDF file the merchant can save and reprint | **MUST V1** |
@@ -627,31 +628,28 @@ first:
 7. Run the scanner probe, if a scanner exists.
 8. Record everything in the field checklist that already exists, and fill in the empty survey CSVs.
 
-## 20. Proposed PR sequence
+## 20. PR sequence — locked
 
-`DECISION — SALMAN 2026-10-07`. This **replaces** revision 2's sequence. Barcode and categories move
-**down**: they are useful, but they do not block correct offline selling or invoicing, and exact
-quantity does.
+`DECISION — SALMAN 2026-10-07`. This replaces revision 3's A–L. **The one structural change:
+cashier/permission hardening moved AHEAD of inventory and the customer/payment features**, because
+the published fixture PINs cannot still be able to perform administrative Store actions when money
+features reach a field release.
 
 | # | PR | State |
 |---|---|---|
-| **A** | **Finish Product Management verification** — Windows CI, full SQLite suite, visual evidence | 🟡 **in progress** — branch `feat/offline-product-management`, accepted in principle, awaiting CI evidence |
-| **B** | **Node 22 repository contract** — `engines` + `.nvmrc`, nothing else | 🟡 prepared, branch `chore/node22-runtime-contract` |
-| **C** | **Exact / fractional quantity** contract + migration | 🟡 contract written: `docs/plans/exact-quantity-contract.md`. **Not implemented.** |
-| **D** | **Durable local audit** | 🟡 proposal written: `docs/plans/durable-local-audit-proposal.md`. **Not implemented.** Required before a field release. |
-| **E** | Local inventory movement ledger + derived stock | ⚪ §7 |
-| **F** | Customer + payments + balance due | ⚪ §8 |
-| **G** | A4 PDF invoice | ⚪ §9 |
-| **H** | 4×6 QR label | ⚪ §10 |
-| **I** | Barcode + category improvements | ⚪ moved down deliberately — neither blocks selling or invoicing |
-| **J** | Cashier / permission hardening | ⚪ §12 — and 🔴 still the real blocker before money, since two published PINs can void and import |
-| **K** | Physical scanner / printer integration | ⚪ only against hardware measured at the shop |
-| **L** | Field release | ⚪ gated on §21, and on D |
-| — | Cloud | `DEFERRED TO CLOUD` — §23 |
-
-The i18n/RTL foundation that revision 2 placed at PR 1 **shipped inside A**, because the Products
-screen had to be bilingual on its first commit and a bilingual screen needs the foundation. The
-standing rule it created stands: every new screen is bilingual on its first commit.
+| **1** | Product Management **Draft PR** + Windows CI evidence | 🟡 **blocked on a push credential** — see the session, Addendum 4 |
+| **2** | Node 22 runtime contract | 🟡 prepared, 4 lines, branch `chore/node22-runtime-contract` |
+| **3** | **Migration 4** — exact / fractional quantity | ✅ contract approved · ⚪ not implemented, waits on PR 1's evidence |
+| **4** | **Migration 5** — durable local audit | ✅ principle approved · ⚪ not implemented, **a separate PR from 3** |
+| **5** | **Local cashier / role hardening** | ⚪ **moved up.** Owner/Admin vs Cashier; a cashier may *request* a void, an Owner/Admin PIN override authorises it on the till |
+| **6** | Inventory movement ledger + stock projection | ⚪ |
+| **7** | Customer + payments + balance due | ⚪ |
+| **8** | A4 PDF invoice | ⚪ |
+| **9** | 4×6 QR label | ⚪ |
+| **10** | Barcode / categories / search enhancements | ⚪ |
+| **11** | Physical scanner / printer verification | ⚪ |
+| **12** | Field release | ⚪ |
+| — | Cloud | `DEFERRED TO CLOUD` |
 
 ## 21. V1 acceptance criteria
 

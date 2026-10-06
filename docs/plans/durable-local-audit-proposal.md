@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Status | **PROPOSAL — NOT IMPLEMENTED, NOT NUMBERED.** |
-| Migration number | **deliberately unassigned.** Two schema changes are competing for the next number (the `sale_lines` quantity rebuild and this table); a number is assigned only when Salman approves the implementation ORDER. This document never says "migration 4". |
+| Status | ✅ **PRINCIPLE APPROVED, 2026-10-07. NOT implemented**, and explicitly **not in the same PR as quantity** — it is the PR after it. |
+| Migration number | **5** — `DECISION — SALMAN 2026-10-07`: order locked, 4 = quantity, 5 = this. The file name stays unnumbered because the proposal, not the number, is what is retained. |
 | Written | 2026-10-07 · reframed on Salman's review the same day |
 | Blocks | Field release. Approved as required before one. |
 | Does not block | The offline product-management PR, which ships with the hook already wired. |
@@ -215,11 +215,15 @@ Consequences, each stated rather than discovered later:
 
 And separately, because it decides this table's number:
 
-```
-Migration order:  [ ] quantity rebuild first, audit second
-                  [ ] audit first, quantity rebuild second
-```
+✅ **Answered 2026-10-07: quantity first (migration 4), audit second (migration 5).**
 
-§9 argues for **audit first**: it is purely additive, it has no rollback risk, and every day the
-quantity work takes is a day administrative changes are recorded in a file that can be lost. The
-counter-argument is also real — the quantity rebuild is what the shop's invoice actually needs.
+My §9 argued for audit first — purely additive, no rollback risk, and it closes the loss window
+sooner. Salman's order stands, and the argument against mine is the stronger one: the loss window is
+microseconds wide and the rotating log catches everything outside it, while the quantity rebuild is
+what the shop's actual invoice needs. **The principle below is what was approved, not the schedule.**
+
+### What was approved, verbatim
+
+> A business mutation and its durable audit event must commit in the SAME SQLite transaction.
+> If the audit insert fails, the price change fails. No silent unaudited administrative mutation.
+> The rotating application log remains observability only. It is not the durable audit ledger.

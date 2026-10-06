@@ -2,8 +2,8 @@
 
 | Field | Value |
 |---|---|
-| Status | **CONTRACT FOR APPROVAL — not implemented.** |
-| Migration number | **deliberately unassigned** until the order is approved (see the audit proposal's §12) |
+| Status | ✅ **APPROVED by Salman, 2026-10-07. NOT implemented** — implementation waits on the Product PR's CI evidence. |
+| Migration number | **4** — `DECISION — SALMAN 2026-10-07`, order locked: 4 = quantity, 5 = durable audit. |
 | Written | 2026-10-07 |
 | Direction | Scaled integers. **No float, anywhere, at any layer.** |
 | Shape | **ONE long-term `sale_lines` table**, rebuilt once — Salman's preference, and §12 is the measured case for it |
@@ -48,6 +48,7 @@ Two classes, one list, decided by the product's `base_unit`:
 
 ```
 WHOLE-ONLY   piece · box · pack · other    quantity_milli % 1000 == 0   and ≥ 1000
+             `other` stays whole-only until a future explicit unit contract says otherwise
 FRACTIONAL   kg · meter                    quantity_milli ≥ 1           (0.001 is the smallest sale)
 ```
 
@@ -236,9 +237,62 @@ Beyond §11's E2E:
 
 | # | Question |
 |---|---|
-| **Q-Q1** | **Approve `quantity_milli`, scale 1000**, with §2's stated boundary? |
-| **Q-Q2** | Approve the **exact** round-half-up CHECK (§4) rather than a tolerance? |
-| **Q-Q3** | A line whose total rounds to **zero** — refuse it in the service, or allow it? |
-| **Q-Q4** | `MAX_QUANTITY` stays **9999 base units**? (⇒ 9,999,000 milli) |
-| **Q-Q5** | Whole-only units refuse a fractional entry (recommended) rather than rounding it? |
-| **Q-Q6** | **Migration order** — this rebuild first, or the audit table first? |
+All six are now **answered**. `DECISION — SALMAN 2026-10-07`:
+
+| # | Question | Decision |
+|---|---|---|
+| Q-Q1 | Field name and scale | ✅ `quantity_milli`, scale **1000**, with §2's boundary |
+| Q-Q2 | Exact CHECK or a tolerance | ✅ the **exact** integer rule — "the authoritative V1 round-half-up boundary for positive sale amounts" |
+| Q-Q3 | A line whose total rounds to zero | ✅ **REJECTED.** See §15 |
+| Q-Q4 | `MAX_QUANTITY` | ✅ stays **9999** base units ⇒ `quantity_milli ≤ 9,999,000` |
+| Q-Q5 | Whole-only units and a fractional entry | ✅ **reject, never round** |
+| Q-Q6 | Migration order | ✅ **4 = quantity, 5 = audit** |
+
+### 15. A line whose total rounds to zero is refused
+
+`DECISION — SALMAN 2026-10-07`, and it closes the consequence §4 named:
+
+> A completed sale line whose rounded `line_total_minor` is 0 **must be rejected**. Do not silently
+> create zero-value sale lines. Free or promotional items, if ever needed, are an explicit business
+> feature of their own.
+
+So the arithmetic stays right and the *sale* refuses the result:
+
+```
+code     ZERO_VALUE_LINE            a new DomainErrorCode
+where    priceCart(), beside the existing quantity and currency guards — the ONE place a line
+         is priced, so the renderer's running total and the recorded amount refuse identically
+message  names the product, the quantity and the unit price, because "invalid line" tells a
+         cashier nothing about which line or why
+```
+
+🔴 **Not a database CHECK**, deliberately: migration 1 already stores historical lines, and a
+`line_total_minor > 0` constraint added in migration 4 would have to be satisfied by every copied
+row. Every existing row satisfies it today — a past line could not have cost nothing — but a
+constraint whose truth depends on data nobody has inspected is a migration that fails at the
+merchant's, not in CI. The service refuses it on the way in; the schema does not re-litigate history.
+
+### 16. The eight rounding tests Salman asked for
+
+| # | Case | Expected |
+|---|---|---|
+| 1 | Whole quantity — 3 pieces × $4.00 | 1200, and the old invariant collapses to equality |
+| 2 | Fractional quantity — 34 kg × $2.60 | 8840 |
+| 3 | **Below half** — 0.333 kg × $3.17 (105,561) | 106 accepted, 105 refused |
+| 4 | **Exact half** — 0.500 kg × $2.01 (100,500) | **101 only** — 100 refused |
+| 5 | **Above half** — one minor unit over | the correct total only |
+| 6 | Old integer-sale compatibility | every historical line fingerprints identically |
+| 7 | Very large valid quantity — 9999 units at a real price | accepted; 9999.001 refused |
+| 8 | **Overflow margin** | the check's multiplication peaks at ~10¹⁵ against int64's 9.22×10¹⁸ — **9,224×** |
+
+### 17. The thirteen acceptance tests, as given
+
+`A` v3 → v4 upgrade · `B` every historical sale preserved · `C` `quantity_milli = N × 1000` for every
+line · `D` totals value-for-value equivalent · `E` receipt numbering continues · `F` void behaviour
+unchanged · `G` backup-before-migration still runs and verifies · `H` a failed migration rolls back
+completely · `I` `foreign_key_check` clean · `J` `integrity_check` = ok · `K` append-only triggers
+still refuse mutation and deletion · `L` **installed-app upgrade E2E on Windows** · `M` a restart
+after the migration preserves all data.
+
+🔴 **`L` is a gate, not a line item:** migration 4 is not complete without installed-app upgrade
+evidence. The same rule that is currently holding the Product PR.
