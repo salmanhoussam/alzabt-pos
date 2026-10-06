@@ -23,6 +23,12 @@ const CH = {
   exportCatalog: "pos:exportCatalog",
   exportBackup: "pos:exportBackup",
   getAppInfo: "pos:getAppInfo",
+  listProducts: "pos:listProducts",
+  createProduct: "pos:createProduct",
+  updateProduct: "pos:updateProduct",
+  setProductActive: "pos:setProductActive",
+  getSettings: "pos:getSettings",
+  setTerminalLanguage: "pos:setTerminalLanguage",
 } as const satisfies typeof CHANNELS;
 
 const api: PosApi = {
@@ -39,6 +45,12 @@ const api: PosApi = {
   exportCatalog: () => ipcRenderer.invoke(CH.exportCatalog),
   exportBackup: () => ipcRenderer.invoke(CH.exportBackup),
   getAppInfo: () => ipcRenderer.invoke(CH.getAppInfo),
+  listProducts: () => ipcRenderer.invoke(CH.listProducts),
+  createProduct: (req) => ipcRenderer.invoke(CH.createProduct, { draft: req.draft }),
+  updateProduct: (req) => ipcRenderer.invoke(CH.updateProduct, { id: req.id, draft: req.draft, isActive: req.isActive }),
+  setProductActive: (req) => ipcRenderer.invoke(CH.setProductActive, { id: req.id, isActive: req.isActive }),
+  getSettings: () => ipcRenderer.invoke(CH.getSettings),
+  setTerminalLanguage: (req) => ipcRenderer.invoke(CH.setTerminalLanguage, { language: req.language }),
 };
 
 contextBridge.exposeInMainWorld("pos", Object.freeze(api));

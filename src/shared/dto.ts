@@ -4,7 +4,9 @@ import { DomainError } from "../domain/errors";
 import { type Money, money } from "../domain/money";
 import type { TodaySalesReport } from "../domain/report";
 import type { SaleRecord, VoidRecord } from "../domain/sale";
-import type { CatalogDto, MoneyDto, ProductDto, SaleDto, TodaySalesDto, VoidDto } from "./ipcContract";
+import type { AdminProductRow } from "../persistence/catalogRepository";
+import { formatDecimal } from "../domain/money";
+import type { AdminProductDto, CatalogDto, MoneyDto, ProductDto, SaleDto, TodaySalesDto, VoidDto } from "./ipcContract";
 
 export function toMoneyDto(m: Money): MoneyDto {
   return { minor: m.minor.toString(), currency: m.currency };
@@ -87,5 +89,28 @@ export function toTodaySalesDto(r: TodaySalesReport): TodaySalesDto {
     grossSales: toMoneyDto(r.grossSales),
     voidTotal: toMoneyDto(r.voidTotal),
     netSales: toMoneyDto(r.netSales),
+  };
+}
+
+/**
+ * A catalog row as the administration screen needs it. `bigint` columns become decimal strings and
+ * SQLite's 0/1 integers become booleans here, once, so no renderer code ever sees a `bigint` or
+ * has to remember that `is_active` is a number.
+ */
+export function toAdminProductDto(row: AdminProductRow): AdminProductDto {
+  const price = money(row.selling_price_minor, row.currency);
+  return {
+    id: row.id,
+    source: row.source,
+    sourceKey: row.source_key,
+    sku: row.sku,
+    nameAr: row.name_ar,
+    nameEn: row.name_en,
+    price: toMoneyDto(price),
+    priceDecimal: formatDecimal(price),
+    baseUnit: row.base_unit,
+    priceNeedsReview: row.price_needs_review === 1n,
+    isActive: row.is_active === 1n,
+    updatedAt: row.updated_at,
   };
 }

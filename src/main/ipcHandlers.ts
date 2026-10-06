@@ -16,8 +16,12 @@ import type { PosService } from "../application/posService";
 import { MAX_PRODUCT_ID_LENGTH } from "../domain/catalog";
 import { DomainError } from "../domain/errors";
 import { assertPaymentMethod } from "../domain/sale";
+import { isLanguage } from "../shared/i18n";
+import type { TerminalSettings } from "../shared/i18n";
+import { MAX_PRODUCT_NAME, MAX_SKU, type ProductDraft } from "../domain/productDraft";
 import {
   parseMinor,
+  toAdminProductDto,
   toCatalogDto,
   toSaleDto,
   toTodaySalesDto,
@@ -52,6 +56,11 @@ export interface IpcHandlerOptions {
   readonly afterSale?: () => void;
   readonly logger?: Logger;
   readonly now?: () => Date;
+  /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
+  readonly settings?: {
+    get(): TerminalSettings;
+    setTerminalLanguage(lang: "ar" | "en"): TerminalSettings;
+  };
 }
 
 function invalid(message: string): never {
@@ -72,6 +81,35 @@ function exactObject(payload: unknown, keys: readonly string[]): Record<string, 
 function str(value: unknown, field: string, max = 200): string {
   if (typeof value !== "string" || value.length === 0 || value.length > max) invalid(`'${field}' must be a string`);
   return value;
+}
+
+/** An optional text field: null, undefined and "" all mean "not given". */
+function optionalStr(value: unknown, field: string, max: number): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") invalid(`'${field}' must be text`);
+  if (value.length > max) invalid(`'${field}' must be at most ${max} characters`);
+  return value;
+}
+
+function bool(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") invalid(`'${field}' must be true or false`);
+  return value;
+}
+
+/**
+ * The product form's exact shape. Validation of MEANING (a required Arabic name, an exact price, a
+ * known unit) belongs to the domain — `validateProductDraft` — not here; this only refuses a
+ * payload that is not the right shape, so a malformed IPC call never reaches the service.
+ */
+function productDraft(value: unknown): ProductDraft {
+  const d = exactObject(value, ["nameAr", "nameEn", "sku", "price", "baseUnit"]);
+  return {
+    nameAr: str(d.nameAr, "nameAr", MAX_PRODUCT_NAME),
+    nameEn: optionalStr(d.nameEn, "nameEn", MAX_PRODUCT_NAME),
+    sku: optionalStr(d.sku, "sku", MAX_SKU),
+    price: str(d.price, "price", 32),
+    baseUnit: str(d.baseUnit, "baseUnit", 32),
+  };
 }
 
 function noPayload(payload: unknown): void {
@@ -218,6 +256,46 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     getAppInfo: wrap("getAppInfo", (p) => {
       noPayload(p);
       return options.appInfo?.() ?? { version: "unknown", build: "unknown" };
+    }),
+
+    // ── Product administration ──────────────────────────────────────────────────────────────────
+    listProducts: wrap("listProducts", (p) => {
+      noPayload(p);
+      return service.listProducts().map(toAdminProductDto);
+    }),
+    createProduct: wrap("createProduct", (p) => {
+      const o = exactObject(p, ["draft"]);
+      const row = toAdminProductDto(service.createProduct(productDraft(o.draft)));
+      log.info("product-created", { id: row.id, source: row.source, unit: row.baseUnit });
+      return row;
+    }),
+    updateProduct: wrap("updateProduct", (p) => {
+      const o = exactObject(p, ["id", "draft", "isActive"]);
+      const row = toAdminProductDto(
+        service.updateProduct(str(o.id, "id", MAX_PRODUCT_ID_LENGTH), productDraft(o.draft), bool(o.isActive, "isActive")),
+      );
+      log.info("product-updated", { id: row.id, source: row.source });
+      return row;
+    }),
+    setProductActive: wrap("setProductActive", (p) => {
+      const o = exactObject(p, ["id", "isActive"]);
+      const row = toAdminProductDto(
+        service.setProductActive(str(o.id, "id", MAX_PRODUCT_ID_LENGTH), bool(o.isActive, "isActive")),
+      );
+      log.info("product-active-changed", { id: row.id, isActive: row.isActive });
+      return row;
+    }),
+
+    // ── Operator settings ───────────────────────────────────────────────────────────────────────
+    getSettings: wrap("getSettings", (p) => {
+      noPayload(p);
+      return options.settings?.get() ?? { terminalLanguage: "ar", receiptLanguage: "ar" };
+    }),
+    setTerminalLanguage: wrap("setTerminalLanguage", (p) => {
+      const o = exactObject(p, ["language"]);
+      if (!isLanguage(o.language)) invalid("'language' must be 'ar' or 'en'");
+      if (!options.settings) throw new DomainError("NOT_AVAILABLE", "Settings are not available here");
+      return options.settings.setTerminalLanguage(o.language);
     }),
   };
 }

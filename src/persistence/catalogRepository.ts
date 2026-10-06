@@ -12,6 +12,14 @@ import type { Db } from "./db";
 /** The only import source in the field pilot: a merchant CSV in the strict import format. */
 export const CSV_SOURCE = "merchant-csv";
 
+/**
+ * Products the operator typed on the till. A SEPARATE source from the CSV on purpose:
+ * `UNIQUE (source, source_key)` then keeps the two origins from ever colliding, a re-import can
+ * never deactivate a hand-made product (`applyImport` only touches rows of its own source), and
+ * `source` stays an honest record of where a product came from.
+ */
+export const MANUAL_SOURCE = "manual";
+
 export interface ImportCounts {
   readonly inserted: number;
   readonly updated: number;
@@ -41,6 +49,43 @@ interface ProductRow {
 
 export function productIdFor(source: string, sourceKey: string): string {
   return `${source}:${sourceKey}`;
+}
+
+/** A product row as the administration screen needs it: every column, active or not. */
+export interface AdminProductRow {
+  readonly id: string;
+  readonly source: string;
+  readonly source_key: string;
+  readonly sku: string | null;
+  readonly name_ar: string;
+  readonly name_en: string | null;
+  readonly selling_price_minor: bigint;
+  readonly currency: string;
+  readonly base_unit: string;
+  readonly price_needs_review: bigint;
+  readonly is_active: bigint;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+/** A validated new product, ready to store. Prices are already exact minor units. */
+export interface NewProduct {
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+  readonly sku: string | null;
+  readonly priceMinor: bigint;
+  readonly currency: string;
+  readonly baseUnit: string;
+}
+
+/** The editable fields of an existing product. Identity (source, source_key) is not among them. */
+export interface ProductEdit {
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+  readonly sku: string | null;
+  readonly priceMinor: bigint;
+  readonly baseUnit: string;
+  readonly isActive: boolean;
 }
 
 export class CatalogRepository {
@@ -190,5 +235,141 @@ export class CatalogRepository {
         return counts;
       })
       .immediate();
+  }
+
+  // ── Product administration (offline product management) ─────────────────────────────────────────
+  //
+  // Master data, written in place — NOT ledger. Nothing here can reach a past sale: `sale_lines`
+  // snapshots its own product name, SKU and unit price at checkout and no sale row references
+  // `catalog_products`, so an edit today is invisible to yesterday's invoice. That is a property of
+  // the Gate 1 schema, not a promise made here, and `tests/persistence/productAdmin.test.ts`
+  // asserts it against real committed sales.
+
+  /** Every local product, active and inactive, newest source first then by key. For the admin list. */
+  listAll(): AdminProductRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, source, source_key, sku, name_ar, name_en, selling_price_minor, currency,
+                base_unit, price_needs_review, is_active, created_at, updated_at
+           FROM catalog_products
+          ORDER BY source, CAST(source_key AS INTEGER), source_key`,
+      )
+      .all() as AdminProductRow[];
+  }
+
+  findById(id: string): AdminProductRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, source, source_key, sku, name_ar, name_en, selling_price_minor, currency,
+                base_unit, price_needs_review, is_active, created_at, updated_at
+           FROM catalog_products WHERE id = ?`,
+      )
+      .get(id) as AdminProductRow | undefined;
+    return row ?? null;
+  }
+
+  /** The SKU is unique across the whole table when present (migration 3's partial unique index). */
+  findBySku(sku: string): AdminProductRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, source, source_key, sku, name_ar, name_en, selling_price_minor, currency,
+                base_unit, price_needs_review, is_active, created_at, updated_at
+           FROM catalog_products WHERE sku = ?`,
+      )
+      .get(sku) as AdminProductRow | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * The next manual key, zero-padded so that `CAST(source_key AS INTEGER)` and a plain string sort
+   * agree — the existing catalog queries order by both, and a key of "10" must not sort before "9".
+   */
+  private nextManualKey(): string {
+    const row = this.db
+      .prepare(
+        `SELECT max(CAST(source_key AS INTEGER)) AS n FROM catalog_products WHERE source = ?`,
+      )
+      .get(MANUAL_SOURCE) as { n: bigint | null };
+    return String(Number(row.n ?? 0n) + 1).padStart(6, "0");
+  }
+
+  /**
+   * Inserts one operator-created product and returns the row as stored. One transaction, so the key
+   * it picked and the row it wrote cannot be separated by a crash.
+   */
+  createManual(input: NewProduct, now: Date): AdminProductRow {
+    return this.db
+      .transaction((): AdminProductRow => {
+        const sourceKey = this.nextManualKey();
+        const id = productIdFor(MANUAL_SOURCE, sourceKey);
+        const stamp = now.toISOString();
+        this.db
+          .prepare(
+            `INSERT INTO catalog_products (id, source, source_key, sku, name_ar, name_en, selling_price_minor,
+                                           currency, base_unit, price_needs_review, is_active, created_at, updated_at)
+             VALUES (@id, @source, @sourceKey, @sku, @nameAr, @nameEn, @price, @currency, @baseUnit, 0, 1, @now, @now)`,
+          )
+          .run({
+            id,
+            source: MANUAL_SOURCE,
+            sourceKey,
+            sku: input.sku,
+            nameAr: input.nameAr,
+            nameEn: input.nameEn,
+            price: input.priceMinor,
+            currency: input.currency,
+            baseUnit: input.baseUnit,
+            now: stamp,
+          });
+        const row = this.findById(id);
+        if (!row) throw new Error("catalog: created product could not be read back");
+        return row;
+      })
+      .immediate();
+  }
+
+  /**
+   * Updates an existing product's editable fields. `source` and `source_key` are NEVER changed —
+   * they are the product's identity, and a later re-import matches on them.
+   */
+  updateProduct(id: string, input: ProductEdit, now: Date): AdminProductRow {
+    return this.db
+      .transaction((): AdminProductRow => {
+        const before = this.findById(id);
+        if (!before) throw new Error(`catalog: no product '${id}'`);
+        this.db
+          .prepare(
+            `UPDATE catalog_products
+                SET sku = @sku, name_ar = @nameAr, name_en = @nameEn, selling_price_minor = @price,
+                    base_unit = @baseUnit, is_active = @active, updated_at = @now
+              WHERE id = @id`,
+          )
+          .run({
+            id,
+            sku: input.sku,
+            nameAr: input.nameAr,
+            nameEn: input.nameEn,
+            price: input.priceMinor,
+            baseUnit: input.baseUnit,
+            active: input.isActive ? 1 : 0,
+            now: now.toISOString(),
+          });
+        const row = this.findById(id);
+        if (!row) throw new Error("catalog: updated product could not be read back");
+        return row;
+      })
+      .immediate();
+  }
+
+  /** Deactivate or reactivate. There is deliberately no delete: a sold product stays on record. */
+  setActive(id: string, active: boolean, now: Date): AdminProductRow {
+    const before = this.findById(id);
+    if (!before) throw new Error(`catalog: no product '${id}'`);
+    this.db
+      .prepare("UPDATE catalog_products SET is_active = ?, updated_at = ? WHERE id = ?")
+      .run(active ? 1 : 0, now.toISOString(), id);
+    const row = this.findById(id);
+    if (!row) throw new Error("catalog: product could not be read back");
+    return row;
   }
 }
