@@ -41,11 +41,15 @@ const wrench = {
 // stated: if anyone adds a migration or a column, they fail by name and the reviewer sees it.
 
 describe("schema is unchanged by this feature", () => {
-  it("still has exactly three migrations", () => {
+  it("has exactly four migrations, and offline product management still contributed none of them", () => {
+    // Was three until migration 4 (exact_sale_quantity) landed. Product administration itself still
+    // adds no migration — that is what this file proves, and 1-3 below are byte-identical to the
+    // ones it shipped against.
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
       [1, "initial_ledger"],
       [2, "cashier_pin_lockout"],
       [3, "local_catalog"],
+      [4, "exact_sale_quantity"],
     ]);
   });
 
@@ -74,12 +78,20 @@ describe("schema is unchanged by this feature", () => {
     }
   });
 
-  it("the sales ledger is untouched by product administration", () => {
+  it("the sales ledger carries the migration-4 quantity, and nothing product administration added", () => {
     const lineColumns = (db.prepare("PRAGMA table_info(sale_lines)").all() as Array<{ name: string }>).map(
       (c) => c.name,
     );
-    expect(lineColumns).toContain("quantity");
-    expect(lineColumns).not.toContain("quantity_milli");
+    // This assertion is REVERSED from the one offline product management shipped, which read
+    // `toContain("quantity")` / `not.toContain("quantity_milli")`. Migration 4 rebuilt the table:
+    // the whole-unit column is gone and the exact one replaced it.
+    expect(lineColumns).toContain("quantity_milli");
+    expect(lineColumns).not.toContain("quantity");
+    expect(lineColumns).toContain("sale_unit");
+    // Still nothing a product-administration feature would have needed.
+    for (const absent of ["category_id", "barcode", "discount_minor", "tax_minor"]) {
+      expect(lineColumns, `${absent} must still be absent`).not.toContain(absent);
+    }
   });
 });
 

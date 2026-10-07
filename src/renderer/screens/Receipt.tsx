@@ -1,5 +1,6 @@
 import type { SaleDto } from "../../shared/ipcContract";
 import { fmt } from "../api";
+import { formatQuantity } from "../../domain/quantity";
 
 /** On-screen receipt summary (no printing in this gate). */
 export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => void }) {
@@ -18,7 +19,8 @@ export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => 
                   <span dir="auto">{l.productName}</span> {l.sku && <span className="muted">({l.sku})</span>}
                 </td>
                 <td className="num">
-                  {l.quantity} × {fmt(l.unitPrice)}
+                  {formatQuantity(l.quantityMilli)}
+                  {l.saleUnit ? ` ${l.saleUnit}` : ""} × {fmt(l.unitPrice)}
                 </td>
                 <td className="num">{fmt(l.lineTotal)}</td>
               </tr>

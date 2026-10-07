@@ -15,6 +15,7 @@
 import type { PosService } from "../application/posService";
 import { MAX_PRODUCT_ID_LENGTH } from "../domain/catalog";
 import { DomainError } from "../domain/errors";
+import { MAX_QUANTITY_MILLI } from "../domain/quantity";
 import { assertPaymentMethod } from "../domain/sale";
 import { isLanguage } from "../shared/i18n";
 import type { TerminalSettings } from "../shared/i18n";
@@ -189,9 +190,21 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       const o = exactObject(p, ["idempotencyKey", "lines", "paymentMethod", "expectedTotalMinor"]);
       if (!Array.isArray(o.lines) || o.lines.length === 0 || o.lines.length > 200) invalid("'lines' must be a non-empty array");
       const lines = o.lines.map((raw) => {
-        const l = exactObject(raw, ["productId", "quantity"]);
-        if (typeof l.quantity !== "number" || !Number.isSafeInteger(l.quantity)) invalid("'quantity' must be an integer");
-        return { productId: str(l.productId, "productId", MAX_PRODUCT_ID_LENGTH), quantity: l.quantity };
+        const l = exactObject(raw, ["productId", "quantityMilli"]);
+        // Thousandths of a sale unit, as an integer. The unit's own rule (whole-only vs fractional)
+        // needs the catalog and is applied in the domain, not here.
+        if (
+          typeof l.quantityMilli !== "number" ||
+          !Number.isSafeInteger(l.quantityMilli) ||
+          l.quantityMilli < 1 ||
+          l.quantityMilli > MAX_QUANTITY_MILLI
+        ) {
+          invalid(`'quantityMilli' must be an integer between 1 and ${MAX_QUANTITY_MILLI}`);
+        }
+        return {
+          productId: str(l.productId, "productId", MAX_PRODUCT_ID_LENGTH),
+          quantityMilli: l.quantityMilli as number,
+        };
       });
       assertPaymentMethod(o.paymentMethod);
       const result = service.createSale({

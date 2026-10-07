@@ -29,7 +29,11 @@ export type DomainErrorCode =
   | "NOT_AVAILABLE"
   | "PRODUCT_NOT_FOUND"
   | "DUPLICATE_SKU"
-  | "UNSUPPORTED_UNIT";
+  | "UNSUPPORTED_UNIT"
+  // migration 4 — exact quantities
+  | "FRACTION_NOT_ALLOWED"
+  | "ZERO_VALUE_LINE"
+  | "PRICE_OUT_OF_RANGE";
 
 export class DomainError extends Error {
   constructor(

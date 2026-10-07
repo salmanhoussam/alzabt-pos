@@ -144,4 +144,81 @@ CREATE TABLE catalog_imports (
 ) STRICT;
 `,
   },
+  {
+    version: 4,
+    name: "exact_sale_quantity",
+    // ── Single-table rebuild of sale_lines ──────────────────────────────────────────────────────
+    // `quantity INTEGER` (whole sale units) becomes `quantity_milli INTEGER` (thousandths), and the
+    // line gains `sale_unit`: the unit this line was ACTUALLY SOLD IN, snapshotted exactly like
+    // product_name and unit_price_minor. It is NOT product.base_unit — the product can be edited and
+    // will one day carry several sell units; see docs/plans/exact-quantity-contract.md §18.
+    //
+    // Why a rebuild and not ALTER TABLE: the old CHECK is `line_total_minor = quantity *
+    // unit_price_minor`, and SQLite cannot drop or replace a CHECK. The rebuild is safe here, and
+    // every word of that was measured rather than assumed:
+    //   - sale_lines is a LEAF table: nothing anywhere REFERENCES it, so dropping it with foreign
+    //     keys ON is sound. (`PRAGMA foreign_keys=OFF` is silently IGNORED inside a transaction,
+    //     which the migration runner always is, so this migration must never depend on it.)
+    //   - DROP TABLE does NOT fire the BEFORE DELETE trigger, so the append-only rule does not
+    //     block its own replacement.
+    //   - the runner wraps each migration in db.transaction(...).immediate(), so a crash part-way
+    //     leaves the v3 table, its rows and its triggers exactly as they were.
+    //
+    // Historical rows: quantity N becomes N*1000, and `sale_unit` stays NULL, meaning UNKNOWN. The
+    // unit of a past sale is NOT recoverable — the product may have been edited, and a fixture
+    // product is not in catalog_products at all — so nothing here consults today's catalog to
+    // invent one. Every other column is copied byte for byte; no total is ever recomputed.
+    sql: `
+CREATE TABLE sale_lines_v4 (
+  id                TEXT    PRIMARY KEY,
+  sale_id           TEXT    NOT NULL REFERENCES sales (id),
+  line_no           INTEGER NOT NULL CHECK (line_no > 0),
+  product_id        TEXT    NOT NULL,
+  sku               TEXT    NOT NULL,
+  product_name      TEXT    NOT NULL,
+  -- NULL means UNKNOWN, and only a row written before this migration may be unknown; the
+  -- sale_lines_require_unit trigger below refuses a new one.
+  sale_unit         TEXT             CHECK (sale_unit IS NULL OR length(trim(sale_unit)) > 0),
+  quantity_milli    INTEGER NOT NULL CHECK (quantity_milli > 0 AND quantity_milli <= 9999000),
+  -- 922429446630 = floor((2^63 - 1 - 500) / 9999000). Above it, quantity_milli * unit_price_minor
+  -- overflows signed 64-bit INTEGER and SQLite SILENTLY yields a REAL, which would make the CHECK
+  -- below evaluate in floating point. The bound keeps the multiplication itself integral.
+  unit_price_minor  INTEGER NOT NULL CHECK (unit_price_minor >= 0 AND unit_price_minor <= 922429446630),
+  -- Exact round-half-up. Integer division on INTEGER operands admits exactly one value, ties
+  -- included; there is no tolerance and no second arithmetic anywhere in the app.
+  line_total_minor  INTEGER NOT NULL
+      CHECK (line_total_minor = (quantity_milli * unit_price_minor + 500) / 1000),
+  -- Fractions belong to the units named here and to nothing else, so a unit added to BASE_UNITS
+  -- later is whole-only until a migration says otherwise: it fails CLOSED.
+  CHECK (sale_unit IS NULL OR sale_unit IN ('kg', 'meter') OR quantity_milli % 1000 = 0),
+  UNIQUE (sale_id, line_no)
+) STRICT;
+
+INSERT INTO sale_lines_v4 (id, sale_id, line_no, product_id, sku, product_name,
+                           sale_unit, quantity_milli, unit_price_minor, line_total_minor)
+SELECT id, sale_id, line_no, product_id, sku, product_name,
+       NULL, quantity * 1000, unit_price_minor, line_total_minor
+  FROM sale_lines;
+
+DROP TABLE sale_lines;
+ALTER TABLE sale_lines_v4 RENAME TO sale_lines;
+
+CREATE INDEX sale_lines_sale_id ON sale_lines (sale_id);
+
+CREATE TRIGGER sale_lines_immutable_update BEFORE UPDATE ON sale_lines
+BEGIN SELECT RAISE(ABORT, 'ledger: sale lines are immutable'); END;
+CREATE TRIGGER sale_lines_immutable_delete BEFORE DELETE ON sale_lines
+BEGIN SELECT RAISE(ABORT, 'ledger: sale lines cannot be deleted'); END;
+CREATE TRIGGER sale_lines_closed_sale BEFORE INSERT ON sale_lines
+WHEN (SELECT count(*) FROM sale_lines WHERE sale_id = NEW.sale_id)
+     >= (SELECT line_count FROM sales WHERE id = NEW.sale_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: sale already holds all of its lines'); END;
+
+-- Created AFTER the copy on purpose: the migrated rows keep their honest NULL, and from here on a
+-- line without its unit is impossible. A NOT NULL column could not express both.
+CREATE TRIGGER sale_lines_require_unit BEFORE INSERT ON sale_lines
+WHEN NEW.sale_unit IS NULL
+BEGIN SELECT RAISE(ABORT, 'ledger: a sale line must record the unit it was sold in'); END;
+`,
+  },
 ];

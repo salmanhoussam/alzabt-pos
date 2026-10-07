@@ -100,6 +100,8 @@ async function voidCardSale(page) {
   await page.waitForSelector("tr.voided");
 }
 
+const totalText = async (page) => (await page.locator(".total strong").innerText()).trim();
+
 async function stats(page) {
   await tab(page, "Today's Sales");
   await page.waitForSelector(".stats");
@@ -114,6 +116,17 @@ async function historyRows(page) {
   return { rows: await page.locator(".history-table tbody tr").count(), voided: await page.locator("tr.voided").count() };
 }
 
+/** sale_lines is `quantity` before migration 4 and `quantity_milli` after it. */
+function lineColumns(db) {
+  return db.prepare("PRAGMA table_info(sale_lines)").all().map((c) => c.name);
+}
+function lineQtyColumn(db) {
+  return lineColumns(db).includes("quantity_milli") ? "l.quantity_milli" : "l.quantity";
+}
+function lineHasSaleUnit(db) {
+  return lineColumns(db).includes("sale_unit");
+}
+
 function ledgerFacts() {
   const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
   try {
@@ -125,8 +138,29 @@ function ledgerFacts() {
       voids: n("SELECT count(*) AS n FROM voids"),
       receipts: db.prepare("SELECT receipt_number AS r FROM sales ORDER BY receipt_number").all().map((r) => Number(r.r)),
       catalog: tables.includes("catalog_products") ? n("SELECT count(*) AS n FROM catalog_products WHERE is_active = 1") : null,
+      // Migration 4: the exact quantity, and how many lines honestly admit they do not know the
+      // unit they were sold in (every line written before the migration).
+      quantities: db
+        .prepare(
+          `SELECT ${lineQtyColumn(db)} AS q FROM sale_lines l JOIN sales s ON s.id = l.sale_id
+            ORDER BY s.receipt_number, l.line_no`,
+        )
+        .all()
+        .map((r) => Number(r.q)),
+      unknownUnits: lineHasSaleUnit(db) ? n("SELECT count(*) AS n FROM sale_lines WHERE sale_unit IS NULL") : null,
       integrity: db.pragma("integrity_check", { simple: true }),
     };
+  } finally {
+    db.close();
+  }
+}
+
+/** A catalog product's stored base_unit, read from the ledger (the app must be closed). */
+function productUnit(sku) {
+  const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
+  try {
+    const row = db.prepare("SELECT base_unit AS u FROM catalog_products WHERE sku = ?").get(sku);
+    return row ? row.u : null;
   } finally {
     db.close();
   }
@@ -188,12 +222,16 @@ if (PHASE === "seed-v2") {
 
   const f = ledgerFacts();
   log("ledger after upgrade + new sale:", JSON.stringify(f));
-  assert(f.schema === 3 && f.integrity === "ok", "migrated to schema v3, integrity ok");
+  // Was `f.schema === 3`; migration 4 makes a v2 ledger land on v4 in one upgrade.
+  assert(f.schema === 4 && f.integrity === "ok", "migrated to schema v4, integrity ok");
+  // Two Espressos at 2.50 and one at 2.50, all WHOLE pieces, so every quantity scaled by 1000.
+  assert(f.quantities.every((q) => q % 1000 === 0), `every migrated quantity is a whole number of units: ${JSON.stringify(f.quantities)}`);
+  assert(f.unknownUnits === 2, `the 2 pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
   assert(JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1, "receipts 1,2 kept and 3 continues the sequence");
   const backups = backupFiles();
   log("backups:", JSON.stringify(backups));
-  const pre = backups.find((b) => /^pre-migration-v2-to-v3-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, "a pre-migration backup was taken before v2→v3");
+  const pre = backups.find((b) => /^pre-migration-v2-to-v4-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, "a pre-migration backup was taken before v2→v4");
   const copy = new Database(join(DEFAULT_PROFILE, "backups", pre), { readonly: true });
   const preSchema = Number(copy.prepare("SELECT max(version) AS n FROM schema_migrations").get().n);
   const preSales = Number(copy.prepare("SELECT count(*) AS n FROM sales").get().n);
@@ -261,7 +299,18 @@ if (PHASE === "seed-v2") {
   await tab(page, "Sell");
   await sell(page, ["بسكويت"], "Cash", 3);
   await app.close();
-  assert(!backupFiles().some((b) => b.startsWith("pre-migration-")), "no migration was needed (v3→v3), so no pre-migration backup");
+  // 🔴 INVERTED by migration 4. This used to assert that NO pre-migration backup existed, because
+  // v3→v3 migrated nothing. v3→v4 is a real migration, so the backup is now mandatory — and it must
+  // hold the OLD schema, which is the only thing that makes the migration recoverable.
+  const pre3 = backupFiles().find((b) => /^pre-migration-v3-to-v4-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre3, `a pre-migration backup was taken before v3→v4 (got ${JSON.stringify(backupFiles())})`);
+  const copy3 = new Database(join(DEFAULT_PROFILE, "backups", pre3), { readonly: true });
+  const preCols = copy3.prepare("PRAGMA table_info(sale_lines)").all().map((c) => c.name);
+  const preSchema3 = Number(copy3.prepare("SELECT max(version) AS n FROM schema_migrations").get().n);
+  const preSales3 = Number(copy3.prepare("SELECT count(*) AS n FROM sales").get().n);
+  copy3.close();
+  assert(preSchema3 === 3 && preSales3 === 2, "the backup holds the OLD v3 ledger (2 sales)");
+  assert(preCols.includes("quantity") && !preCols.includes("quantity_milli"), "the backup is recoverable at the PRE-migration-4 schema");
 
   ({ app, page } = await launch());
   const h2 = await historyRows(page);
@@ -282,9 +331,103 @@ if (PHASE === "seed-v2") {
   await app.close();
   const f = ledgerFacts();
   log("final ledger:", JSON.stringify(f));
-  assert(f.schema === 3 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", "final ledger intact");
+  // Was `f.schema === 3`.
+  assert(f.schema === 4 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", "final ledger intact at v4");
+  assert(f.unknownUnits === 3, `the 3 pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
+} else if (PHASE === "seed-main") {
+  // Scenario C — the PRODUCT MANAGEMENT build (main, schema v3, manual products, Arabic default).
+  assert(!existsSync(LEDGER), "scenario starts with no ledger in the real profile");
+  const { app, page } = await launch();
+  const cat = writeCatalog();
+  await stub(app, "open", cat.file);
+  await tab(page, "Tools");
+  await page.getByRole("button", { name: "Import catalog" }).click();
+  await page.waitForSelector("text=Catalog imported");
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+
+  // A product typed by hand on that build — the thing this scenario exists to preserve.
+  await tab(page, "Products");
+  await page.locator('[data-testid="add-product"]').click();
+  await page.waitForSelector('[data-testid="field-nameAr"]');
+  await page.locator('[data-testid="field-nameAr"]').fill("حبل قنب");
+  const formInputs = page.locator(".product-form input");
+  await formInputs.nth(1).fill("Hemp Rope");
+  await formInputs.nth(2).fill("SYN-ROPE");
+  await page.locator('[data-testid="field-price"]').fill("4.00");
+  await page.locator('[data-testid="field-unit"]').selectOption("kg");
+  await page.locator('[data-testid="save-product"]').click();
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="product-row"]').length >= 1);
+
+  await tab(page, "Sell");
+  await page.waitForSelector("button.product");
+  await sell(page, ["SYN-ROPE"], "Cash", 1); // the manual product, sold in WHOLE kg on the old build
+  await sell(page, ["مياه"], "Card", 2);
+  await voidCardSale(page);
+  await page.screenshot({ path: SHOTS + "upgrade-c1-old-main.png" });
+  await app.close();
+
+  const f = ledgerFacts();
+  log("ledger after seeding with the PRODUCT MANAGEMENT build:", JSON.stringify(f));
+  assert(f.schema === 3, `the product-management build wrote schema v3 (got ${f.schema})`);
+  assert(f.sales === 2 && f.voids === 1, "2 sales and 1 void");
+  assert(f.unknownUnits === null, "that build's sale_lines has no sale_unit column at all");
+} else if (PHASE === "verify-from-main") {
+  let { app, page } = await launch();
+  await assertBuildLine(page);
+
+  // The manual product survived, with its unit and its price.
+  await tab(page, "Products");
+  await page.waitForSelector('[data-testid="product-row"]');
+  const rows = await page.locator('[data-testid="product-row"]').allInnerTexts();
+  const rope = rows.find((r) => r.includes("حبل قنب"));
+  assert(rope, `the manually added product survived the upgrade (rows: ${rows.length})`);
+  assert(rope.includes("SYN-ROPE") && rope.includes("4.00"), `its SKU and price survived: ${rope.replace(/\s+/g, " ")}`);
+  // The unit LABEL is translated ("kg" renders as كيلو on an Arabic terminal), so the unit itself is
+  // asserted from the ledger below, with the app closed.
+
+  const h = await historyRows(page);
+  assert(h.rows === 2 && h.voided === 1, "history after upgrade: both sales, the void preserved");
+  await app.close(); // the ledger is read with the app CLOSED, as every other phase here does
+
+  const f = ledgerFacts();
+  log("ledger after the upgrade:", JSON.stringify(f));
+  assert(f.schema === 4 && f.integrity === "ok", `migrated to schema v4, integrity ok (got ${f.schema})`);
+  assert(f.quantities.every((q) => q % 1000 === 0), `migrated quantities are whole: ${JSON.stringify(f.quantities)}`);
+  assert(f.unknownUnits === 2, `both pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
+  assert(productUnit("SYN-ROPE") === "kg", `the product's unit survived as kg (got ${productUnit("SYN-ROPE")})`);
+  const pre = backupFiles().find((b) => /^pre-migration-v3-to-v4-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, `a pre-migration backup exists (got ${JSON.stringify(backupFiles())})`);
+
+  // 🔴 And the point of the whole migration: a FRACTIONAL sale of that same product now works.
+  ({ app, page } = await launch());
+  await tab(page, "Sell");
+  await page.waitForSelector("button.product");
+  await product(page, "SYN-ROPE").click();
+  const qty = page.locator('[data-testid^="qty-"]').first();
+  await qty.fill("2.5");
+  await qty.press("Enter");
+  await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("10.00"));
+  assert((await totalText(page)).startsWith("10.00"), `2.5 kg at 4.00 totals 10.00 (got ${await totalText(page)})`);
+  await page.getByRole("button", { name: "Complete sale" }).click();
+  await page.getByRole("button", { name: "Cash" }).click();
+  await page.waitForSelector("text=Receipt #3");
+  await page.screenshot({ path: SHOTS + "upgrade-c2-fractional.png" });
+  await page.getByRole("button", { name: "New sale" }).click();
+  await app.close();
+
+  // It survives a restart, exactly as 2500 thousandths, with its unit recorded.
+  ({ app, page } = await launch());
+  const h2 = await historyRows(page);
+  assert(h2.rows === 3 && h2.voided === 1, "after restart: the fractional sale joined the history");
+  await app.close();
+  const f2 = ledgerFacts();
+  log("final ledger:", JSON.stringify(f2));
+  assert(JSON.stringify(f2.quantities) === "[1000,1000,2500]", `the fractional quantity is stored exactly: ${JSON.stringify(f2.quantities)}`);
+  assert(f2.unknownUnits === 2, "the new line records its unit; only the two legacy lines are unknown");
+  assert(JSON.stringify(f2.receipts) === "[1,2,3]" && f2.integrity === "ok", "receipt sequence continued and the ledger is sound");
 } else {
-  console.error("usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3");
+  console.error("usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main");
   process.exit(2);
 }
 log(`UPGRADE PHASE ${PHASE} PASSED — profile ${DEFAULT_PROFILE}`);

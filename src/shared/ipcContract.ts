@@ -60,7 +60,10 @@ export interface SaleLineDto {
   readonly productId: string;
   readonly sku: string;
   readonly productName: string;
-  readonly quantity: number;
+  /** The unit sold; null only on a line written before migration 4. */
+  readonly saleUnit: string | null;
+  /** Thousandths of one sale unit. Formatted for display by domain/quantity.ts. */
+  readonly quantityMilli: number;
   readonly unitPrice: MoneyDto;
   readonly lineTotal: MoneyDto;
 }
@@ -111,7 +114,7 @@ export interface LoginRequest {
 
 export interface CreateSaleRequest {
   readonly idempotencyKey: string;
-  readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantity: number }>;
+  readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
   readonly paymentMethod: PaymentMethod;
   readonly expectedTotalMinor: string;
 }

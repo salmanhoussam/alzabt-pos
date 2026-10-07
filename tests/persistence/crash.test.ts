@@ -55,7 +55,7 @@ describe("abrupt process death (SIGKILL)", () => {
     const h = makeHarness(t.dbPath);
     const { sale } = h.service.createSale({
       idempotencyKey: newKey(),
-      lines: [{ productId: "prod-0004", quantity: 4 }],
+      lines: [{ productId: "prod-0004", quantityMilli: 4000 }],
       paymentMethod: "cash",
       expectedTotalMinor: 300n,
     });

@@ -50,9 +50,9 @@ class NoTransactionRepository extends FailOnLineRepository {
 }
 
 const THREE_LINES = [
-  { productId: "prod-0001", quantity: 2 },
-  { productId: "prod-0005", quantity: 1 },
-  { productId: "prod-0007", quantity: 3 },
+  { productId: "prod-0001", quantityMilli: 2000 },
+  { productId: "prod-0005", quantityMilli: 1000 },
+  { productId: "prod-0007", quantityMilli: 3000 },
 ];
 const THREE_LINES_TOTAL = 500n + 225n + 1230n; // 19.55
 

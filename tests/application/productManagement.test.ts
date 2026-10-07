@@ -58,7 +58,7 @@ describe("createProduct", () => {
     expect(service.getCatalog().byId.get(row.id)?.name).toBe("Red Wrench");
     const sale = service.createSale({
       idempotencyKey: newKey(),
-      lines: [{ productId: row.id, quantity: 2 }],
+      lines: [{ productId: row.id, quantityMilli: 2000 }],
       paymentMethod: "cash",
       expectedTotalMinor: 800n,
     });
@@ -119,7 +119,7 @@ describe("updateProduct", () => {
     const row = service.createProduct(draft);
     const sold = service.createSale({
       idempotencyKey: newKey(),
-      lines: [{ productId: row.id, quantity: 3 }],
+      lines: [{ productId: row.id, quantityMilli: 3000 }],
       paymentMethod: "cash",
       expectedTotalMinor: 1200n,
     });
@@ -177,7 +177,7 @@ describe("deactivation", () => {
     expect(() =>
       service.createSale({
         idempotencyKey: newKey(),
-        lines: [{ productId: row.id, quantity: 1 }],
+        lines: [{ productId: row.id, quantityMilli: 1000 }],
         paymentMethod: "cash",
         expectedTotalMinor: 400n,
       }),
@@ -188,7 +188,7 @@ describe("deactivation", () => {
     const row = service.createProduct(draft);
     const sold = service.createSale({
       idempotencyKey: newKey(),
-      lines: [{ productId: row.id, quantity: 1 }],
+      lines: [{ productId: row.id, quantityMilli: 1000 }],
       paymentMethod: "cash",
       expectedTotalMinor: 400n,
     });

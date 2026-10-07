@@ -22,7 +22,13 @@ export interface SaleLineRecord {
   /** Snapshots taken at sale time — a later catalog change never alters them. */
   readonly sku: string;
   readonly productName: string;
-  readonly quantity: number;
+  /**
+   * The unit this line was SOLD in, snapshotted. NULL only on a line written before migration 4,
+   * where the historical unit is genuinely unknown and is never guessed from today's catalog.
+   */
+  readonly saleUnit: string | null;
+  /** Thousandths of one sale unit (domain/quantity.ts). */
+  readonly quantityMilli: number;
   readonly unitPrice: Money;
   readonly lineTotal: Money;
 }

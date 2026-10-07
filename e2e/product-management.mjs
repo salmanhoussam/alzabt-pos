@@ -90,8 +90,10 @@ assert((await rows(page).first().innerText()).includes("مفتاح أحمر"), "
 // A unit whose real quantities are fractional must say so rather than round in silence.
 await page.locator('[data-testid="add-product"]').click();
 await fill(page, { nameAr: "سلك نحاس", nameEn: "", sku: "E2E-002", price: "2.50", unit: "kg" });
-await page.waitForSelector('[data-testid="whole-units-note"]');
-assert(true, "choosing kg shows the whole-units-only note");
+await page.waitForSelector('[data-testid="fractional-note"]');
+// Migration 4 inverted this note: kg USED to say "whole units only" and now says fractions are
+// allowed. The testid changed with the meaning rather than keeping a name that lies.
+assert(true, "choosing kg shows the fractional-quantity note");
 await page.locator('[data-testid="save-product"]').click();
 await page.getByRole("button", { name: /^(حسناً|OK)$/ }).click();
 await page.waitForFunction(() => document.querySelectorAll('[data-testid="product-row"]').length === 2);
@@ -127,6 +129,36 @@ await page.waitForSelector("text=Sale completed");
 const receipt = await page.locator(".receipt").innerText();
 assert(receipt.includes("4.00"), "the sale was rung at 4.00");
 await page.getByRole("button", { name: /^(حسناً|OK|Close|New sale)$/ }).first().click().catch(() => {});
+
+// ── 4b · A FRACTIONAL sale of the kg product, on a fresh install ────────────────────────────────
+// سلك نحاس is priced 2.50 per kg, so 2.5 kg is exactly 6.25 — no rounding involved.
+await page.waitForSelector(".products-pane");
+await page.locator("button.product", { hasText: "E2E-002" }).click();
+const qtyBox = page.locator('[data-testid^="qty-"]').first();
+await qtyBox.fill("2.5");
+await qtyBox.press("Enter");
+await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("6.25"));
+assert(true, "2.5 kg at 2.50 totals 6.25 — a fraction priced exactly");
+await page.getByRole("button", { name: "Complete sale" }).click();
+await page.getByRole("button", { name: "Cash" }).click();
+await page.waitForSelector("text=Sale completed");
+const fractionalReceipt = await page.locator(".receipt").innerText();
+assert(fractionalReceipt.includes("2.5 kg"), `the receipt states the quantity AND its unit (${fractionalReceipt.replace(/\s+/g, " ").slice(0, 120)})`);
+assert(fractionalReceipt.includes("6.25"), "the receipt total is 6.25");
+await page.screenshot({ path: SHOTS + "P7-fractional-sale.png" });
+await page.getByRole("button", { name: /^(حسناً|OK|Close|New sale)$/ }).first().click().catch(() => {});
+
+// A fraction of a WHOLE-ONLY product is refused rather than rounded.
+await page.waitForSelector(".products-pane");
+await page.locator("button.product", { hasText: "E2E-001" }).click();
+const wholeBox = page.locator('[data-testid^="qty-"]').first();
+await wholeBox.fill("1.5");
+await wholeBox.press("Enter");
+await page.waitForSelector("text=/whole units|وحدات كاملة/");
+assert(true, "a fraction typed against a piece product is refused, not rounded");
+await page.locator('[data-testid="tab-today"]').click();
+await tab(page, "sell");
+await page.waitForSelector(".products-pane");
 
 await tab(page, "products");
 await page.waitForSelector('[data-testid="product-row"]');

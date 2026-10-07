@@ -15,6 +15,7 @@ import {
 } from "../../src/persistence/backup";
 import { openDatabase, schemaVersion } from "../../src/persistence/db";
 import { MIGRATIONS } from "../../src/persistence/migrations";
+import { insertLegacySale } from "../helpers/legacyLedger";
 import { PosService } from "../../src/application/posService";
 import { loadCatalog } from "../../src/domain/catalog";
 import { FIXTURE_CASHIERS } from "../../src/fixtures/cashiers";
@@ -35,7 +36,7 @@ function sell(h: ReturnType<typeof makeHarness>, n: number): void {
     h.service.createSale({
       idempotencyKey: newKey(),
       paymentMethod: "cash",
-      lines: [{ productId: "prod-0003", quantity: 1 }],
+      lines: [{ productId: "prod-0003", quantityMilli: 1000 }],
       expectedTotalMinor: 199n,
     });
   }
@@ -89,22 +90,21 @@ describe("snapshotDatabase (export backup)", () => {
 });
 
 /** A ledger exactly as 0.1.0 left it: schema v2 (no local catalog table), with `n` real sales. */
+/**
+ * A v2 ledger holding real sales, written in the OLD row shape with raw SQL.
+ *
+ * It used to drive PosService against the v2 schema, which worked only while today's columns and
+ * the old ones coincided. Since migration 4 they do not — the repository writes quantity_milli and
+ * sale_unit, which a v2 table has never heard of — and writing through today's code was never
+ * really exercising an old ledger anyway. insertLegacySale writes what an old build wrote.
+ */
 function v2LedgerWithSales(path: string, n: number): void {
   const db = openDatabase(path, MIGRATIONS.slice(0, 2));
-  const service = new PosService({
-    repository: new SaleRepository(db),
-    pinStates: new PinStateRepository(db),
-    catalog: loadCatalog(FIXTURE_CATALOG),
-    cashiers: FIXTURE_CASHIERS,
-    terminal: FIXTURE_TERMINAL,
-  });
-  service.login("cashier-01", "1111");
   for (let i = 0; i < n; i++) {
-    service.createSale({
-      idempotencyKey: newKey(),
-      paymentMethod: "cash",
-      lines: [{ productId: "prod-0001", quantity: 1 }],
-      expectedTotalMinor: 250n,
+    insertLegacySale(db, {
+      id: `legacy-${i + 1}`,
+      receiptNumber: i + 1,
+      lines: [{ productId: "prod-0001", sku: "SYN-ESP", productName: "Espresso", quantity: 1, unitPriceMinor: 250 }],
     });
   }
   db.close();
