@@ -1,3 +1,4 @@
+import { DomainError } from "../domain/errors";
 import type { IpcResult, PosApi } from "../shared/ipcContract";
 import { formatDecimal } from "../domain/money";
 import { fromMoneyDto } from "../shared/dto";
@@ -38,6 +39,17 @@ export function newIdempotencyKey(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * The text an operator reads when something is refused.
+ *
+ * An ApiError carries the main process's own message. A DomainError is one the RENDERER raised
+ * itself — `parseQuantity` is the first of these, and it must explain why a typed quantity was
+ * refused rather than hide behind "Unexpected error", because the whole point of refusing a
+ * fraction on a whole-only unit is that the operator is told instead of being handed a rounded
+ * number. Anything else really is unexpected and is never shown verbatim.
+ */
 export function errorText(err: unknown): string {
-  return err instanceof ApiError ? err.message : "Unexpected error";
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof DomainError) return err.message;
+  return "Unexpected error";
 }

@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import { type CartLine, type PricedCart, addProduct, decrement, priceCart, removeProduct } from "../../domain/cart";
 import type { Catalog } from "../../domain/catalog";
 import { formatDecimal } from "../../domain/money";
+import { formatQuantity, parseQuantity } from "../../domain/quantity";
 import { PAYMENT_METHODS, type PaymentMethod } from "../../domain/sale";
 import { fromCatalogDto } from "../../shared/dto";
 import type { SaleDto } from "../../shared/ipcContract";
 import { call, errorText, newIdempotencyKey, pos } from "../api";
+import { LineMath } from "../components/LineMath";
 import { Receipt } from "./Receipt";
 
 const METHOD_LABEL: Record<PaymentMethod, string> = {
@@ -25,6 +27,11 @@ export function SellScreen() {
   const [error, setError] = useState<string | null>(null);
   const [completed, setCompleted] = useState<SaleDto | null>(null);
   const [query, setQuery] = useState("");
+  /**
+   * What the operator is typing into a line's quantity box, per product. Held as TEXT until it is
+   * committed, so a half-typed "2." is never a quantity; parseQuantity decides at that one moment.
+   */
+  const [qtyDraft, setQtyDraft] = useState<Record<string, string>>({});
 
   useEffect(() => {
     call(pos().getCatalog())
@@ -46,6 +53,27 @@ export function SellScreen() {
     return catalog.products.filter((p) => p.name.toLowerCase().includes(q) || (p.sku ?? "").toLowerCase().includes(q));
   }, [catalog, query]);
 
+  /**
+   * Commits a typed quantity. Invalid text is REFUSED with the domain's own message and the box
+   * returns to the quantity that is actually in the cart — a fraction on a whole-only unit is never
+   * quietly rounded, and nothing is stored until it parses.
+   */
+  const commitQuantity = (productId: string, saleUnit: string) => {
+    const text = qtyDraft[productId];
+    setQtyDraft((d) => {
+      const { [productId]: _dropped, ...rest } = d;
+      return rest;
+    });
+    if (text === undefined) return;
+    try {
+      const quantityMilli = parseQuantity(text, saleUnit);
+      setError(null);
+      edit(cart.map((l) => (l.productId === productId ? { productId, quantityMilli } : l)));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
   const edit = (next: CartLine[]) => {
     setCart(next);
     setAttemptKey(newIdempotencyKey());
@@ -60,7 +88,7 @@ export function SellScreen() {
       const result = await call(
         pos().createSale({
           idempotencyKey: attemptKey,
-          lines: cart.map((l) => ({ productId: l.productId, quantity: l.quantity })),
+          lines: cart.map((l) => ({ productId: l.productId, quantityMilli: l.quantityMilli })),
           paymentMethod: method,
           expectedTotalMinor: priced.total.minor.toString(),
         }),
@@ -118,14 +146,26 @@ export function SellScreen() {
                 <div className="line-main">
                   <span dir="auto">{l.productName}</span>
                   <span className="muted">
-                    {formatDecimal(l.unitPrice)} × {l.quantity}
+                    <LineMath quantityMilli={l.quantityMilli} saleUnit={l.saleUnit} unitPrice={l.unitPrice} />
                   </span>
                 </div>
                 <div className="qty">
                   <button className="btn key" aria-label="Decrease" onClick={() => edit(decrement(cart, l.productId))}>
                     −
                   </button>
-                  <span className="qty-n">{l.quantity}</span>
+                  <input
+                    className="qty-n qty-input"
+                    type="text"
+                    inputMode="decimal"
+                    aria-label={`Quantity in ${l.saleUnit}`}
+                    data-testid={`qty-${l.productId}`}
+                    value={qtyDraft[l.productId] ?? formatQuantity(l.quantityMilli)}
+                    onChange={(e) => setQtyDraft((d) => ({ ...d, [l.productId]: e.target.value }))}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitQuantity(l.productId, l.saleUnit);
+                    }}
+                    onBlur={() => commitQuantity(l.productId, l.saleUnit)}
+                  />
                   <button className="btn key" aria-label="Increase" onClick={() => edit(addProduct(cart, l.productId))}>
                     +
                   </button>

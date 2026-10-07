@@ -35,7 +35,8 @@ export interface NewSaleLine {
   readonly productId: string;
   readonly sku: string;
   readonly productName: string;
-  readonly quantity: number;
+  readonly saleUnit: string;
+  readonly quantityMilli: number;
   readonly unitPriceMinor: bigint;
   readonly lineTotalMinor: bigint;
 }
@@ -64,7 +65,8 @@ interface LineRow {
   product_id: string;
   sku: string;
   product_name: string;
-  quantity: bigint;
+  sale_unit: string | null;
+  quantity_milli: bigint;
   unit_price_minor: bigint;
   line_total_minor: bigint;
 }
@@ -139,10 +141,10 @@ export class SaleRepository {
   protected insertSaleLine(saleId: string, line: NewSaleLine): void {
     this.db
       .prepare(
-        `INSERT INTO sale_lines (id, sale_id, line_no, product_id, sku, product_name, quantity,
-                                 unit_price_minor, line_total_minor)
-         VALUES (@id, @saleId, @lineNo, @productId, @sku, @productName, @quantity,
-                 @unitPriceMinor, @lineTotalMinor)`,
+        `INSERT INTO sale_lines (id, sale_id, line_no, product_id, sku, product_name, sale_unit,
+                                 quantity_milli, unit_price_minor, line_total_minor)
+         VALUES (@id, @saleId, @lineNo, @productId, @sku, @productName, @saleUnit,
+                 @quantityMilli, @unitPriceMinor, @lineTotalMinor)`,
       )
       .run({ ...line, saleId });
   }
@@ -227,7 +229,8 @@ export class SaleRepository {
         productId: l.product_id,
         sku: l.sku,
         productName: l.product_name,
-        quantity: toSafeNumber(l.quantity, "quantity"),
+        saleUnit: l.sale_unit,
+        quantityMilli: toSafeNumber(l.quantity_milli, "quantity"),
         unitPrice: money(l.unit_price_minor, row.currency),
         lineTotal: money(l.line_total_minor, row.currency),
       }),

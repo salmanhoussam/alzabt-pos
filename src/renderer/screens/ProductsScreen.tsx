@@ -12,7 +12,7 @@
  * experiences is the same one the tests assert.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { BASE_UNITS, FRACTIONAL_IN_REALITY } from "../../domain/catalog";
+import { BASE_UNITS, FRACTIONAL_SALE_UNITS } from "../../domain/catalog";
 import { matchesSearch } from "../../domain/arabic";
 import type { AdminProductDto, ProductDraftRequest } from "../../shared/ipcContract";
 import { call, errorText, pos } from "../api";
@@ -119,9 +119,9 @@ export function ProductsScreen() {
                 </td>
                 <td>
                   {unit(p.baseUnit)}
-                  {FRACTIONAL_IN_REALITY.includes(p.baseUnit) && (
-                    <span className="badge faint" title={t("products.wholeUnitsOnly")}>
-                      1,2,3…
+                  {FRACTIONAL_SALE_UNITS.includes(p.baseUnit) && (
+                    <span className="badge faint" title={t("products.fractionsAllowed")}>
+                      0.001
                     </span>
                   )}
                 </td>
@@ -291,9 +291,9 @@ function ProductForm(props: {
           </select>
         </label>
 
-        {FRACTIONAL_IN_REALITY.includes(draft.baseUnit) && (
-          <p className="muted small" data-testid="whole-units-note">
-            {t("products.wholeUnitsOnly")}
+        {FRACTIONAL_SALE_UNITS.includes(draft.baseUnit) && (
+          <p className="muted small" data-testid="fractional-note">
+            {t("products.fractionsAllowed")}
           </p>
         )}
 

@@ -296,3 +296,165 @@ after the migration preserves all data.
 
 🔴 **`L` is a gate, not a line item:** migration 4 is not complete without installed-app upgrade
 evidence. The same rule that is currently holding the Product PR.
+
+---
+
+# Revision 2 — the sale line records the unit it was SOLD in
+
+Salman, 2026-10-07, in response to the question "should `sale_lines` carry `base_unit`?" The answer
+was **no, not that field** — and the correction is a real one, not a rename.
+
+## 18. `base_unit` and `sale_unit` are two different facts
+
+```
+product.base_unit        the product's canonical unit — and, later, the unit INVENTORY counts in
+sale_lines.sale_unit     the unit THIS line was actually sold in, and the unit the invoice shows
+```
+
+They are equal today, and they will stop being equal the moment piece/box pricing arrives:
+
+```
+Product: screws · base_unit = piece
+
+sold as  piece →  price per piece
+sold as  box   →  100 pieces, price per box
+
+A customer buying 2 boxes must leave behind, permanently:
+    quantity 2 · sale_unit box · unit_price = the price of ONE box · line_total = 2 × that
+```
+
+**The unit may never be inferred from the catalog row at read time.** The product can be edited, its
+default unit can change, and a sell option can be withdrawn — so an invoice reprinted next year
+would state something that was never true. The unit is a snapshot, exactly like `product_name` and
+`unit_price_minor` already are.
+
+## 19. The legacy rule — no invented history
+
+Rows written before migration 4 carry **no** recoverable unit. The catalog's `base_unit` today is
+not evidence of what was sold then: the product may have been edited, and a fixture product is not
+in `catalog_products` at all.
+
+```
+every migrated row        sale_unit = NULL        and NULL means UNKNOWN, not "piece"
+```
+
+Display shows such a line's quantity with **no unit**, never a guessed one. Nothing in this
+migration reconstructs a historical unit, and nothing may.
+
+## 20. New rows must carry the unit — enforced by the database
+
+A column cannot be `NOT NULL` and also hold the legacy NULLs, so the rule is a trigger, created
+**after** the historical rows are copied:
+
+```sql
+CREATE TRIGGER sale_lines_require_unit BEFORE INSERT ON sale_lines
+WHEN NEW.sale_unit IS NULL
+BEGIN SELECT RAISE(ABORT, 'ledger: a sale line must record the unit it was sold in'); END;
+```
+
+Legacy NULLs survive; a new NULL is impossible. Same principle as every other ledger rule here: the
+database refuses it, rather than the code remembering to.
+
+## 21. The fractional rule keys off `sale_unit`, and fails closed
+
+```sql
+CHECK (sale_unit IS NULL                   -- a legacy row is exempt
+       OR sale_unit IN ('kg','meter')      -- the units that may carry a fraction
+       OR quantity_milli % 1000 = 0)       -- everything else is whole-only
+```
+
+The list in SQL is the **fractional** one, deliberately. Migration 3 kept `base_unit` validated in
+code so a new unit needs no table rebuild; this CHECK keeps that spirit by failing closed — a unit
+added to `BASE_UNITS` tomorrow is treated as whole-only by the database until a migration says
+otherwise. The opposite spelling (listing the whole-only units) would silently permit fractions for
+any unit nobody remembered to add.
+
+## 22. Future multi-unit pricing — the model this migration must not block
+
+Not built here. Recorded so the sale line is already shaped for it:
+
+```
+Product
+  id · base_unit                      the identity, and the unit inventory will count in
+
+ProductSellUnit  (future table)
+  product_id · sale_unit · conversion_to_base · selling_price_minor
+  · optional barcode · active · is_default
+
+  screws:  piece → conversion 1   · price per piece
+           box   → conversion 100 · price per box      (a box may carry its own barcode)
+```
+
+Purchase cost stays separate from selling price, always.
+
+**Does migration 4 block it? No** — `sale_unit`, `unit_price_minor` (the price of ONE sale unit) and
+`quantity_milli` (a count of sale units) are all snapshotted, so a historical pack sale would be
+fully readable.
+
+**What about inventory, which counts in base units?** Deriving the base-unit movement of a pack sale
+needs the conversion factor **as it was at sale time**. This migration does **not** add that column,
+and the reason is specific rather than convenient: in V1 `sale_unit` is always the product's
+`base_unit`, so the conversion is exactly 1 for every row this migration can produce — an invariant
+the code enforces and a test asserts, not a guess read back from mutable data. When sell units
+arrive they need their own table and their own migration anyway, and that migration can add
+`sale_unit_conversion_milli` and backfill `1000` for every pre-existing row with certainty.
+
+If Salman prefers the column now rather than that reasoning later, it is one nullable INTEGER and
+this plan changes by one line — his call, stated here so it is a decision and not an omission.
+
+## 23. 🔴 Overflow — a measured hazard the approved contract does not cover
+
+**SQLite converts a 64-bit integer multiplication that overflows into a REAL, silently.** Measured,
+not assumed:
+
+```
+9999000 * 100000000000        = 999900000000000000     typeof=integer
+9999000 * 1000000000000       = 9999000000000000000    typeof=real      🔴
+9999000 * 922429446630 + 500  = 9223372036853371000    typeof=integer   ← the exact cliff
+9999000 * 922429446631 + 500  = 9223372036863370000    typeof=real
+```
+
+So with `quantity_milli` at its maximum, any `unit_price_minor` above **922,429,446,630** makes the
+line-total CHECK evaluate in floating point — which is precisely what "never use Float" exists to
+prevent, and it would happen without any error.
+
+`money.ts` allows `MAX_MINOR = 10^15`, which is **1,084×** past that cliff, and `sale_lines` carries
+no upper bound on `unit_price_minor` today.
+
+**Proposed:** `CHECK (unit_price_minor <= 100000000000)` — 10^11, one billion USD per unit, whose
+worst-case product is 9.999e17 against a ceiling of 9.223e18, a 9.2× margin. Plus an application
+guard raising a stable DomainError before the insert, so an operator never meets a raw CHECK
+failure. No real row is within nine orders of magnitude of this bound.
+
+**Decided** (Salman, 2026-10-07): use the exact derived bound, in the schema **and** in the domain,
+from one named constant — `MAX_UNIT_PRICE_MINOR = 922_429_446_630n`. `MAX_MINOR` is not weakened.
+
+## 24. 🔴 Two guards, and why conflating them would be wrong
+
+They look similar and they are not the same rule:
+
+| | guard | what it is for |
+|---|---|---|
+| **A** | `MAX_UNIT_PRICE_MINOR` = 922,429,446,630 | keeps `quantity_milli * unit_price_minor + 500` inside signed 64-bit **INTEGER**, because SQLite answers an overflow with a silent REAL |
+| **B** | `MAX_MINOR` = 10^15 (`money.ts`, pre-existing) | bounds an **amount** the ledger is willing to record at all |
+
+**A price at exactly bound A is a valid PRICE. It does not follow that it forms a valid sale LINE.**
+At the maximum quantity its total is 9,223,372,036,853,370 minor units — 9.2× past bound B — so B
+refuses the line. That refusal is **expected and correct**, and it is reported as an amount problem
+(`MONEY_OUT_OF_RANGE`), never as an overflow (`PRICE_OUT_OF_RANGE`). The tests assert both codes
+precisely so the two can never be read as one.
+
+So the evidence splits:
+
+```
+A  the validator accepts exactly 922429446630, and rejects 922429446631 as PRICE_OUT_OF_RANGE
+   9999000 * 922429446630 + 500  ->  typeof=integer      (the multiplication stays exact)
+   9999000 * 922429446631 + 500  ->  typeof=real    🔴   (which is why it is forbidden)
+
+B  the largest price whose TOTAL is storable at the maximum quantity is 100,010,001,000 —
+   derived, not chosen — and one above it is refused as MONEY_OUT_OF_RANGE
+```
+
+One consequence worth stating plainly: because B bites first, **the overflow cannot be reached
+through `lineTotal` at all**. A is a guard on the arithmetic itself, kept because the database's own
+CHECK has no B in front of it.

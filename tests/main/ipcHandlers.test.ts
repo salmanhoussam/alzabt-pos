@@ -25,7 +25,7 @@ function errCode(r: IpcResult<unknown>): string {
 
 const goodSale = () => ({
   idempotencyKey: newKey(),
-  lines: [{ productId: "prod-0003", quantity: 3 }],
+  lines: [{ productId: "prod-0003", quantityMilli: 3000 }],
   paymentMethod: "cash",
   expectedTotalMinor: "597",
 });
@@ -106,7 +106,7 @@ describe("IPC surface", () => {
     ]) {
       expect(errCode(ipc.createSale({ ...goodSale(), ...extra })), JSON.stringify(extra)).toBe("INVALID_INPUT");
     }
-    const lineWithPrice = { ...goodSale(), lines: [{ productId: "prod-0003", quantity: 3, unitPrice: "1" }] };
+    const lineWithPrice = { ...goodSale(), lines: [{ productId: "prod-0003", quantityMilli: 3000, unitPrice: "1" }] };
     expect(errCode(ipc.createSale(lineWithPrice))).toBe("INVALID_INPUT");
     expect(countRows(db).sales).toBe(0);
     db.close();
@@ -123,10 +123,14 @@ describe("IPC surface", () => {
       [{ expectedTotalMinor: "596" }, "TOTAL_MISMATCH"],
       [{ paymentMethod: "crypto" }, "INVALID_PAYMENT_METHOD"],
       [{ lines: [] }, "INVALID_INPUT"],
-      [{ lines: [{ productId: "prod-0003", quantity: 1.5 }] }, "INVALID_INPUT"],
-      [{ lines: [{ productId: "prod-0003", quantity: "3" }] }, "INVALID_INPUT"],
-      [{ lines: [{ productId: "prod-0003", quantity: -3 }] }, "INVALID_QUANTITY"],
-      [{ lines: [{ productId: "x' OR 1=1 --", quantity: 1 }], expectedTotalMinor: "0" }, "UNKNOWN_PRODUCT"],
+      // quantityMilli is an INTEGER count of thousandths: 1.5 of a thousandth is not a quantity.
+      [{ lines: [{ productId: "prod-0003", quantityMilli: 1.5 }] }, "INVALID_INPUT"],
+      [{ lines: [{ productId: "prod-0003", quantityMilli: "3000" }] }, "INVALID_INPUT"],
+      // Was INVALID_QUANTITY from the domain; the IPC boundary now refuses the range itself.
+      [{ lines: [{ productId: "prod-0003", quantityMilli: -3000 }] }, "INVALID_INPUT"],
+      [{ lines: [{ productId: "prod-0003", quantityMilli: 9999001 }] }, "INVALID_INPUT"],
+      [{ lines: [{ productId: "prod-0003", quantity: 3 }] }, "INVALID_INPUT"], // the old key is gone
+      [{ lines: [{ productId: "x' OR 1=1 --", quantityMilli: 1000 }], expectedTotalMinor: "0" }, "UNKNOWN_PRODUCT"],
       [{ idempotencyKey: "short" }, "INVALID_INPUT"],
     ];
     for (const [patch, code] of cases) {
@@ -209,14 +213,14 @@ describe("IPC surface", () => {
     expect(productId.length).toBe(77);
     const r = ipc.createSale({
       idempotencyKey: newKey(),
-      lines: [{ productId, quantity: 2 }],
+      lines: [{ productId, quantityMilli: 2000 }],
       paymentMethod: "cash",
       expectedTotalMinor: "100",
     });
-    expect(r).toMatchObject({ ok: true, data: { sale: { lines: [{ productName: "مياه", quantity: 2 }] } } });
+    expect(r).toMatchObject({ ok: true, data: { sale: { lines: [{ productName: "مياه", quantityMilli: 2000, saleUnit: "piece" }] } } });
     // Longer than the shared limit is still refused as input.
     expect(
-      ipc.createSale({ idempotencyKey: newKey(), lines: [{ productId: "y".repeat(129), quantity: 1 }], paymentMethod: "cash", expectedTotalMinor: "1" }),
+      ipc.createSale({ idempotencyKey: newKey(), lines: [{ productId: "y".repeat(129), quantityMilli: 1000 }], paymentMethod: "cash", expectedTotalMinor: "1" }),
     ).toMatchObject({ ok: false, error: { code: "INVALID_INPUT" } });
     db.close();
   });

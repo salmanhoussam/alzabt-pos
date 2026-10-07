@@ -455,7 +455,9 @@ export class PosService {
         JSON.stringify({
           cashierId: cashier.id,
           paymentMethod: input.paymentMethod,
-          lines: input.lines.map((l) => [l.productId, l.quantity]),
+          // Exact thousandths, never a decimal string: 2.5 and 2.500 cannot hash differently,
+          // and 2 kg vs 2.001 kg cannot hash the same.
+          lines: input.lines.map((l) => [l.productId, l.quantityMilli]),
           expectedTotalMinor: input.expectedTotalMinor.toString(),
         }),
       )
@@ -502,7 +504,8 @@ export class PosService {
         productId: l.productId,
         sku: l.sku,
         productName: l.productName,
-        quantity: l.quantity,
+        saleUnit: l.saleUnit,
+        quantityMilli: l.quantityMilli,
         unitPriceMinor: l.unitPrice.minor,
         lineTotalMinor: l.lineTotal.minor,
       })),

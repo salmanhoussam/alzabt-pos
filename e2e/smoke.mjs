@@ -133,8 +133,8 @@ await page.getByRole("button", { name: "New sale" }).click();
 
 // Forged calls straight through window.pos (what a compromised renderer could try).
 const forged = await page.evaluate(async () => ({
-  extraField: await window.pos.createSale({ idempotencyKey: "forged-key-0001", lines: [{ productId: "prod-0001", quantity: 1 }], paymentMethod: "cash", expectedTotalMinor: "1", unitPrice: "1" }),
-  wrongTotal: await window.pos.createSale({ idempotencyKey: "forged-key-0002", lines: [{ productId: "prod-0001", quantity: 1 }], paymentMethod: "cash", expectedTotalMinor: "1" }),
+  extraField: await window.pos.createSale({ idempotencyKey: "forged-key-0001", lines: [{ productId: "prod-0001", quantityMilli: 1000 }], paymentMethod: "cash", expectedTotalMinor: "1", unitPrice: "1" }),
+  wrongTotal: await window.pos.createSale({ idempotencyKey: "forged-key-0002", lines: [{ productId: "prod-0001", quantityMilli: 1000 }], paymentMethod: "cash", expectedTotalMinor: "1" }),
 }));
 log("forged:", JSON.stringify(forged));
 assert(!forged.extraField.ok && forged.extraField.error.code === "INVALID_INPUT", "forged extra field rejected");

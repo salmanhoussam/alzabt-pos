@@ -53,9 +53,9 @@ const { service } = makeHarness(dbPath, { repository: repositories[mode] });
 service.createSale({
   idempotencyKey: `crash-child-${mode}`,
   lines: [
-    { productId: "prod-0001", quantity: 2 },
-    { productId: "prod-0005", quantity: 1 },
-    { productId: "prod-0007", quantity: 3 },
+    { productId: "prod-0001", quantityMilli: 2000 },
+    { productId: "prod-0005", quantityMilli: 1000 },
+    { productId: "prod-0007", quantityMilli: 3000 },
   ],
   paymentMethod: "cash",
   expectedTotalMinor: 1955n,

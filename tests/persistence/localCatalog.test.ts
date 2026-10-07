@@ -111,7 +111,7 @@ describe("local catalog import", () => {
     const before = h.service.createSale({
       idempotencyKey: newKey(),
       paymentMethod: "cash",
-      lines: [{ productId: "prod-0001", quantity: 1 }],
+      lines: [{ productId: "prod-0001", quantityMilli: 1000 }],
       expectedTotalMinor: 250n,
     }).sale;
     imported(h.service.importCatalogCsv("catalog.csv", FILE));
@@ -119,14 +119,14 @@ describe("local catalog import", () => {
       idempotencyKey: newKey(),
       paymentMethod: "cash",
       lines: [
-        { productId: pepsi, quantity: 3 },
-        { productId: screw, quantity: 2 },
+        { productId: pepsi, quantityMilli: 3000 },
+        { productId: screw, quantityMilli: 2000 },
       ],
       expectedTotalMinor: 2700n,
     });
-    expect(sale.lines.map((l) => [l.productName, l.sku, l.quantity, l.unitPrice.minor, l.lineTotal.minor])).toEqual([
-      ["بيبسي 330 مل", "", 3, 100n, 300n],
-      ['علبة بسكويت 2"', "", 2, 1200n, 2400n],
+    expect(sale.lines.map((l) => [l.productName, l.sku, l.quantityMilli, l.unitPrice.minor, l.lineTotal.minor])).toEqual([
+      ["بيبسي 330 مل", "", 3000, 100n, 300n],
+      ['علبة بسكويت 2"', "", 2000, 1200n, 2400n],
     ]);
     expect(h.service.getSale(before.id).sale).toEqual(before); // history not rewritten
     expect(countRows(h.db)).toEqual({ sales: 2, lines: 3, voids: 0 });
@@ -136,7 +136,7 @@ describe("local catalog import", () => {
   it("after a restart the till starts on the local catalog, with the sale still in the ledger", () => {
     const h = makeHarness(t.dbPath);
     imported(h.service.importCatalogCsv("catalog.csv", FILE));
-    h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: pepsi, quantity: 1 }], expectedTotalMinor: 100n });
+    h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: pepsi, quantityMilli: 1000 }], expectedTotalMinor: 100n });
     h.db.close();
 
     const db = openDatabase(t.dbPath);

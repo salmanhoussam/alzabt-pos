@@ -10,7 +10,7 @@ beforeEach(() => {
 });
 afterEach(() => t.cleanup());
 
-const espressoX2 = { lines: [{ productId: "prod-0001", quantity: 2 }], expectedTotalMinor: 500n };
+const espressoX2 = { lines: [{ productId: "prod-0001", quantityMilli: 2000 }], expectedTotalMinor: 500n };
 
 function codeOf(fn: () => unknown): string {
   try {
@@ -49,8 +49,8 @@ describe("completing a sale", () => {
       idempotencyKey: newKey(),
       paymentMethod: "external",
       lines: [
-        { productId: "prod-0002", quantity: 2 },
-        { productId: "prod-0008", quantity: 1 },
+        { productId: "prod-0002", quantityMilli: 2000 },
+        { productId: "prod-0008", quantityMilli: 1000 },
       ],
       expectedTotalMinor: 1083n, // 2 x 3.75 + 3.33
     });
@@ -65,9 +65,9 @@ describe("completing a sale", () => {
     });
     expect(sale.total.minor).toBe(1083n);
     expect(sale.subtotal.minor).toBe(1083n);
-    expect(sale.lines.map((l) => [l.sku, l.productName, l.quantity, l.unitPrice.minor, l.lineTotal.minor])).toEqual([
-      ["COF-LAT", "Caffè Latte", 2, 375n, 750n],
-      ["CKE-CHO", "Chocolate Cake Slice", 1, 333n, 333n],
+    expect(sale.lines.map((l) => [l.sku, l.productName, l.quantityMilli, l.unitPrice.minor, l.lineTotal.minor])).toEqual([
+      ["COF-LAT", "Caffè Latte", 2000, 375n, 750n],
+      ["CKE-CHO", "Chocolate Cake Slice", 1000, 333n, 333n],
     ]);
     db.close();
   });
@@ -130,7 +130,7 @@ describe("C: duplicate completion", () => {
         service.createSale({
           idempotencyKey: key,
           paymentMethod: "cash",
-          lines: [{ productId: "prod-0001", quantity: 3 }],
+          lines: [{ productId: "prod-0001", quantityMilli: 3000 }],
           expectedTotalMinor: 750n,
         }),
       ),
@@ -164,7 +164,7 @@ describe("D: catalog changes never alter a recorded sale", () => {
     const after = makeHarness(t.dbPath, { clock, catalogSource: changed });
     const stored = after.service.getSale(sale.id).sale;
     expect(stored).toEqual(sale);
-    expect(stored.lines[0]).toMatchObject({ productName: "Espresso", sku: "COF-ESP", quantity: 2 });
+    expect(stored.lines[0]).toMatchObject({ productName: "Espresso", sku: "COF-ESP", quantityMilli: 2000 });
     expect(stored.lines[0]!.unitPrice.minor).toBe(250n);
     expect(after.service.getTodaySales().grossSales.minor).toBe(500n);
 
@@ -172,7 +172,7 @@ describe("D: catalog changes never alter a recorded sale", () => {
     after.service.createSale({
       idempotencyKey: newKey(),
       paymentMethod: "cash",
-      lines: [{ productId: "prod-0001", quantity: 1 }],
+      lines: [{ productId: "prod-0001", quantityMilli: 1000 }],
       expectedTotalMinor: 999n,
     });
     expect(after.service.getTodaySales().grossSales.minor).toBe(1499n);
@@ -186,7 +186,7 @@ describe("E: voids", () => {
     const keep = service.createSale({
       idempotencyKey: newKey(),
       paymentMethod: "cash",
-      lines: [{ productId: "prod-0007", quantity: 2 }],
+      lines: [{ productId: "prod-0007", quantityMilli: 2000 }],
       expectedTotalMinor: 820n,
     });
     const cancel = service.createSale({ idempotencyKey: newKey(), paymentMethod: "card", ...espressoX2 });
@@ -246,7 +246,7 @@ describe("persistence across restart", () => {
     const b = first.service.createSale({
       idempotencyKey: newKey(),
       paymentMethod: "other",
-      lines: [{ productId: "prod-0006", quantity: 4 }],
+      lines: [{ productId: "prod-0006", quantityMilli: 4000 }],
       expectedTotalMinor: 600n,
     });
     first.service.voidSale(a.sale.id, "test void");

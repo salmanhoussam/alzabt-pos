@@ -35,7 +35,7 @@ describe("migrations", () => {
     const { db, service } = makeHarness(t.dbPath); // opens with all migrations
     service.createSale({
       idempotencyKey: newKey(),
-      lines: [{ productId: "prod-0001", quantity: 1 }],
+      lines: [{ productId: "prod-0001", quantityMilli: 1000 }],
       paymentMethod: "cash",
       expectedTotalMinor: 250n,
     });
@@ -68,7 +68,7 @@ describe("ledger constraints enforced by SQLite itself", () => {
     const { db, service } = makeHarness(t.dbPath);
     const { sale } = service.createSale({
       idempotencyKey: newKey(),
-      lines: [{ productId: "prod-0001", quantity: 1 }],
+      lines: [{ productId: "prod-0001", quantityMilli: 1000 }],
       paymentMethod: "cash",
       expectedTotalMinor: 250n,
     });
@@ -91,14 +91,14 @@ describe("ledger constraints enforced by SQLite itself", () => {
     const { db, service } = makeHarness(t.dbPath);
     const { sale } = service.createSale({
       idempotencyKey: newKey(),
-      lines: [{ productId: "prod-0002", quantity: 2 }],
+      lines: [{ productId: "prod-0002", quantityMilli: 2000 }],
       paymentMethod: "card",
       expectedTotalMinor: 750n,
     });
     service.voidSale(sale.id, "customer changed mind");
     expect(() => db.prepare("UPDATE sales SET total_minor = 1 WHERE id = ?").run(sale.id)).toThrow(/immutable/);
     expect(() => db.prepare("DELETE FROM sales WHERE id = ?").run(sale.id)).toThrow(/cannot be deleted/);
-    expect(() => db.prepare("UPDATE sale_lines SET quantity = 9").run()).toThrow(/immutable/);
+    expect(() => db.prepare("UPDATE sale_lines SET quantity_milli = 9").run()).toThrow(/immutable/);
     expect(() => db.prepare("DELETE FROM sale_lines").run()).toThrow(/cannot be deleted/);
     expect(() => db.prepare("UPDATE voids SET reason = 'other'").run()).toThrow(/immutable/);
     expect(() => db.prepare("DELETE FROM voids").run()).toThrow(/cannot be deleted/);
@@ -110,29 +110,33 @@ describe("ledger constraints enforced by SQLite itself", () => {
     const { db, service } = makeHarness(t.dbPath);
     const { sale } = service.createSale({
       idempotencyKey: newKey(),
-      lines: [{ productId: "prod-0001", quantity: 1 }],
+      lines: [{ productId: "prod-0001", quantityMilli: 1000 }],
       paymentMethod: "cash",
       expectedTotalMinor: 250n,
     });
     expect(() =>
       db
         .prepare(
-          `INSERT INTO sale_lines (id, sale_id, line_no, product_id, sku, product_name, quantity, unit_price_minor, line_total_minor)
-           VALUES ('extra', ?, 2, 'prod-0001', 'COF-ESP', 'Espresso', 1, 250, 250)`,
+          `INSERT INTO sale_lines (id, sale_id, line_no, product_id, sku, product_name, sale_unit,
+                                   quantity_milli, unit_price_minor, line_total_minor)
+           VALUES ('extra', ?, 2, 'prod-0001', 'COF-ESP', 'Espresso', 'piece', 1000, 250, 250)`,
         )
         .run(sale.id),
     ).toThrow(/already holds all of its lines/);
     db.close();
   });
 
-  it("a line total that is not quantity x unit price is rejected", () => {
+  it("a line total that is not the exact rounded product of quantity and unit price is rejected", () => {
     const { db } = makeHarness(t.dbPath);
     db.exec("PRAGMA foreign_keys = OFF"); // isolate the CHECK from the FK
+    // 3 x 1.99 is 597, not 598. Was `quantity 3` against `quantity * unit_price`; it is now
+    // `quantity_milli 3000` against the rounded rule, which admits exactly one value.
     expect(() =>
       db
         .prepare(
-          `INSERT INTO sale_lines (id, sale_id, line_no, product_id, sku, product_name, quantity, unit_price_minor, line_total_minor)
-           VALUES ('l', 's', 1, 'p', 'S', 'n', 3, 199, 598)`,
+          `INSERT INTO sale_lines (id, sale_id, line_no, product_id, sku, product_name, sale_unit,
+                                   quantity_milli, unit_price_minor, line_total_minor)
+           VALUES ('l', 's', 1, 'p', 'S', 'n', 'piece', 3000, 199, 598)`,
         )
         .run(),
     ).toThrow(/CHECK constraint failed/);
