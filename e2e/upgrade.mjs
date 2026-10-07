@@ -10,6 +10,9 @@
 //   Scenario B — the field-pilot build (schema v3, imported catalog) → 0.1.1:
 //     node e2e/upgrade.mjs seed-v3
 //     node e2e/upgrade.mjs verify-from-v3
+//   Scenario D — the canonical current main build (68fdf03, schema v4, exact quantity) → this build:
+//     node e2e/upgrade.mjs seed-v4
+//     node e2e/upgrade.mjs verify-from-v4
 //
 // E2E_EXECUTABLE is the installed exe. The script asserts the profile path it actually used and
 // prints it, and reads the ledger file directly (app closed) for schema/backup evidence.
@@ -264,16 +267,19 @@ if (PHASE === "seed-v2") {
 
   const f = ledgerFacts();
   log("ledger after upgrade + new sale:", JSON.stringify(f));
-  // Was `f.schema === 3`; migration 4 makes a v2 ledger land on v4 in one upgrade.
-  assert(f.schema === 4 && f.integrity === "ok", "migrated to schema v4, integrity ok");
+  // Was `f.schema === 3`, then 4; migration 5 makes a v2 ledger land on v5 in ONE upgrade.
+  assert(f.schema === 5 && f.integrity === "ok", `migrated to schema v5, integrity ok (got ${f.schema})`);
+  // The audit table was created on the way, and starts empty — nothing is reconstructed.
+  assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
   // Two Espressos at 2.50 and one at 2.50, all WHOLE pieces, so every quantity scaled by 1000.
   assert(f.quantities.every((q) => q % 1000 === 0), `every migrated quantity is a whole number of units: ${JSON.stringify(f.quantities)}`);
   assert(f.unknownUnits === 2, `the 2 pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
   assert(JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1, "receipts 1,2 kept and 3 continues the sequence");
   const backups = backupFiles();
   log("backups:", JSON.stringify(backups));
-  const pre = backups.find((b) => /^pre-migration-v2-to-v4-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, "a pre-migration backup was taken before v2→v4");
+  // The name carries the real span, and that span widened with each migration: v2→v3, v2→v4, now v2→v5.
+  const pre = backups.find((b) => /^pre-migration-v2-to-v5-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, `a pre-migration backup was taken before v2→v5 (got ${JSON.stringify(backups)})`);
   const copy = new Database(join(DEFAULT_PROFILE, "backups", pre), { readonly: true });
   const preSchema = Number(copy.prepare("SELECT max(version) AS n FROM schema_migrations").get().n);
   const preSales = Number(copy.prepare("SELECT count(*) AS n FROM sales").get().n);
@@ -344,8 +350,8 @@ if (PHASE === "seed-v2") {
   // 🔴 INVERTED by migration 4. This used to assert that NO pre-migration backup existed, because
   // v3→v3 migrated nothing. v3→v4 is a real migration, so the backup is now mandatory — and it must
   // hold the OLD schema, which is the only thing that makes the migration recoverable.
-  const pre3 = backupFiles().find((b) => /^pre-migration-v3-to-v4-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre3, `a pre-migration backup was taken before v3→v4 (got ${JSON.stringify(backupFiles())})`);
+  const pre3 = backupFiles().find((b) => /^pre-migration-v3-to-v5-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre3, `a pre-migration backup was taken before v3→v5 (got ${JSON.stringify(backupFiles())})`);
   const copy3 = new Database(join(DEFAULT_PROFILE, "backups", pre3), { readonly: true });
   const preCols = copy3.prepare("PRAGMA table_info(sale_lines)").all().map((c) => c.name);
   const preSchema3 = Number(copy3.prepare("SELECT max(version) AS n FROM schema_migrations").get().n);
@@ -373,8 +379,9 @@ if (PHASE === "seed-v2") {
   await app.close();
   const f = ledgerFacts();
   log("final ledger:", JSON.stringify(f));
-  // Was `f.schema === 3`.
-  assert(f.schema === 4 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", "final ledger intact at v4");
+  // Was `f.schema === 3`, then 4.
+  assert(f.schema === 5 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", `final ledger intact at v5 (got ${f.schema})`);
+  assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
   // TWO, not three: seed-v3's first sale is ONE line holding 2 x مياه (hence quantity_milli 2000),
   // and its second is one line. The third line is the sale this phase itself rang up, which does
   // carry its unit.
@@ -438,11 +445,12 @@ if (PHASE === "seed-v2") {
 
   const f = ledgerFacts();
   log("ledger after the upgrade:", JSON.stringify(f));
-  assert(f.schema === 4 && f.integrity === "ok", `migrated to schema v4, integrity ok (got ${f.schema})`);
+  assert(f.schema === 5 && f.integrity === "ok", `migrated to schema v5, integrity ok (got ${f.schema})`);
+  assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
   assert(f.quantities.every((q) => q % 1000 === 0), `migrated quantities are whole: ${JSON.stringify(f.quantities)}`);
   assert(f.unknownUnits === 2, `both pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
   assert(productUnit("SYN-ROPE") === "kg", `the product's unit survived as kg (got ${productUnit("SYN-ROPE")})`);
-  const pre = backupFiles().find((b) => /^pre-migration-v3-to-v4-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  const pre = backupFiles().find((b) => /^pre-migration-v3-to-v5-\d{8}T\d{6}Z\.sqlite$/.test(b));
   assert(pre, `a pre-migration backup exists (got ${JSON.stringify(backupFiles())})`);
 
   // 🔴 And the point of the whole migration: a FRACTIONAL sale of that same product now works.
@@ -472,6 +480,9 @@ if (PHASE === "seed-v2") {
   assert(JSON.stringify(f2.quantities) === "[1000,1000,2500]", `the fractional quantity is stored exactly: ${JSON.stringify(f2.quantities)}`);
   assert(f2.unknownUnits === 2, "the new line records its unit; only the two legacy lines are unknown");
   assert(JSON.stringify(f2.receipts) === "[1,2,3]" && f2.integrity === "ok", "receipt sequence continued and the ledger is sound");
+  // 🔴 A SALE writes no audit event. Migration 5 audits master data, not the sales ledger, which has
+  // its own immutable semantics — so three sales and a void leave the trail exactly as it was.
+  assert(f2.audit === 0, `selling does not write audit events (got ${f2.audit})`);
 } else if (PHASE === "seed-v4") {
   // Scenario D — the canonical CURRENT MAIN build (68fdf03, schema v4: exact quantity + sale_unit,
   // and NO durable audit). This is the profile a shop would really be upgraded from.
