@@ -61,7 +61,19 @@ async function launch() {
 }
 
 const product = (page, name) => page.locator("button.product", { hasText: name });
-const tab = (page, name) => page.getByRole("button", { name, exact: true }).click();
+// 🔴 Tabs by data-testid in THIS build, not by visible text: the terminal's default language is
+// Arabic, so an E2E that clicks "Sell" or "History" would pass only while the UI happens to be
+// English. But this script is the one E2E that also drives PREVIOUS RELEASES, to seed the ledger
+// it then upgrades — and those builds shipped before the attribute existed, so they can only be
+// driven by their visible text, which in them is always English. Hence both, chosen by what the
+// running build actually has rather than by which phase we think we are in.
+const TAB_IDS = { "Sell": "sell", "Today's Sales": "today", History: "history", Tools: "tools", Products: "products" };
+const tab = async (page, name) => {
+  await page.waitForSelector(".tabs button"); // the header is rendered in every build, old and new
+  const byId = page.locator(`[data-testid="tab-${TAB_IDS[name]}"]`);
+  if (await byId.count()) return byId.click();
+  return page.getByRole("button", { name, exact: true }).click();
+};
 const stub = (app, kind, path) =>
   app.evaluate(
     ({ dialog }, [k, p]) => {

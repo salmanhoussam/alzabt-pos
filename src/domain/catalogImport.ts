@@ -10,7 +10,7 @@
  *   name_en             optional; empty means "no English name" — never invented
  *   price               selling price as a plain decimal ("12", "3.50"); > 0; no "$", no commas
  *   currency            must equal the terminal currency
- *   base_unit           piece | box
+ *   base_unit           one of BASE_UNITS (src/domain/catalog.ts): piece | box | pack | kg | meter | other
  *   price_needs_review  0 | 1 — 1 marks a placeholder price the merchant must still set
  *
  * ALL OR NOTHING: if any row is rejected the whole file is refused and nothing is written, so a

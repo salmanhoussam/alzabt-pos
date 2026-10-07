@@ -31,7 +31,14 @@ import {
 } from "../domain/pinLockout";
 import type { CashierFixture } from "../fixtures/cashiers";
 import type { TerminalConfig } from "../fixtures/terminal";
-import { CSV_SOURCE, type CatalogRepository, type ImportCounts } from "../persistence/catalogRepository";
+import { validateProductDraft, type ProductDraft } from "../domain/productDraft";
+import {
+  type AdminProductRow,
+  CSV_SOURCE,
+  type CatalogRepository,
+  type ImportCounts,
+  MANUAL_SOURCE,
+} from "../persistence/catalogRepository";
 import type { PinStateRepository } from "../persistence/pinStateRepository";
 import type { SaleRepository } from "../persistence/saleRepository";
 import { type Cashier, pinMatches } from "./cashierAuth";
@@ -46,6 +53,47 @@ export interface PosServiceDeps {
   readonly terminal: TerminalConfig;
   readonly now?: () => Date;
   readonly newId?: () => string;
+  /**
+   * Called after every administrative write, with the actor and a before/after diff. Wired in
+   * main.ts to the file logger, so "who changed this price" is answerable TODAY without a schema
+   * change — see the honest limits of that in `AuditEvent` below.
+   */
+  readonly audit?: (event: AuditEvent) => void;
+}
+
+/**
+ * One administrative action by one operator. This is NOT the sales ledger (immutable, in SQLite)
+ * and NOT the future inventory movement ledger — it records who changed master data.
+ *
+ * 🔴 WHAT THIS IS AND IS NOT, TODAY. The only sink wired is the application log file. That makes
+ * the record append-only and timestamped, and it answers a support question by reading a file. It
+ * is NOT queryable from the app, NOT retained forever, and NOT protected by database triggers. The
+ * real `audit_events` table is a proposed migration awaiting approval; this hook is what the same
+ * events will be written through when it lands, so no call site changes then.
+ *
+ * NEVER carries a PIN, a PIN hash, a token or any secret: the fields below are the whole contract.
+ */
+export type AuditAction =
+  | "PRODUCT_CREATED"
+  | "PRODUCT_UPDATED"
+  | "PRODUCT_DEACTIVATED"
+  | "PRODUCT_ACTIVATED"
+  | "PRICE_CHANGED"
+  | "UNIT_CHANGED"
+  | "CATALOG_IMPORTED";
+
+export interface AuditEvent {
+  readonly id: string;
+  readonly at: string;
+  readonly actorId: string;
+  readonly actorName: string;
+  readonly action: AuditAction;
+  readonly entityType: "product" | "catalog";
+  readonly entityId: string;
+  readonly source: string;
+  /** Changed fields only, as { before, after } — never the whole row, never a secret. */
+  readonly changes?: Readonly<Record<string, { readonly before: unknown; readonly after: unknown }>>;
+  readonly reason?: string;
 }
 
 export interface CreateSaleInput {
@@ -205,6 +253,12 @@ export class PosService {
     const next = loadCatalog(source);
     this.assertTerminalCurrency(next);
     this.catalog = next;
+    this.record(cashier, "CATALOG_IMPORTED", "catalog", CSV_SOURCE, CSV_SOURCE, {
+      rows: { before: null, after: rows.length },
+      inserted: { before: null, after: counts.inserted },
+      updated: { before: null, after: counts.updated },
+      deactivated: { before: null, after: counts.deactivated },
+    });
     return {
       status: "imported",
       rowCount: rows.length,
@@ -226,6 +280,165 @@ export class PosService {
       throw new DomainError("NOT_AVAILABLE", "There is no imported catalog to export yet");
     }
     return { csv: toImportCsv(rows), productCount: rows.length };
+  }
+
+  // ── Product administration ──────────────────────────────────────────────────────────────────────
+  //
+  // Master data. Every write goes through here, re-reads the local catalog and replaces the live
+  // one, so the Sell screen and the price used at checkout can never lag behind an edit. A past
+  // sale is untouched by construction: `sale_lines` holds its own name/SKU/price snapshot and no
+  // sale references these rows.
+
+  private requireStore(): CatalogRepository {
+    const store = this.deps.catalogStore;
+    if (!store) throw new DomainError("NOT_AVAILABLE", "Product management is not available on this terminal");
+    return store;
+  }
+
+  /**
+   * Reloads the live catalog from the local table after an administrative write. When the last
+   * active product has just been deactivated the local catalog is empty; the till then falls back
+   * to the bundled demo fixture exactly as a fresh install does, rather than holding a stale list.
+   */
+  private refreshCatalogFromStore(store: CatalogRepository): void {
+    const currency = this.deps.terminal.currency;
+    const local = store.loadActiveSource(currency);
+    const next = local ? loadCatalog(local) : this.deps.catalog;
+    this.assertTerminalCurrency(next);
+    this.catalog = next;
+  }
+
+  private record(
+    cashier: Cashier,
+    action: AuditAction,
+    entityType: AuditEvent["entityType"],
+    entityId: string,
+    source: string,
+    changes?: AuditEvent["changes"],
+  ): void {
+    this.deps.audit?.({
+      id: this.newId(),
+      at: this.now().toISOString(),
+      actorId: cashier.id,
+      actorName: cashier.name,
+      action,
+      entityType,
+      entityId,
+      source,
+      ...(changes && Object.keys(changes).length > 0 ? { changes } : {}),
+    });
+  }
+
+  /** Every local product, active and inactive — the administration list, not the sellable catalog. */
+  listProducts(): AdminProductRow[] {
+    this.requireCashier();
+    return this.requireStore().listAll();
+  }
+
+  /**
+   * Creates one product from what the operator typed. `price_needs_review` is 0: a typed price is a
+   * real price, unlike a placeholder that arrives in a file.
+   */
+  createProduct(draft: ProductDraft): AdminProductRow {
+    const cashier = this.requireCashier();
+    const store = this.requireStore();
+    const valid = validateProductDraft(draft, this.deps.terminal.currency);
+    if (valid.sku !== null && store.findBySku(valid.sku)) {
+      throw new DomainError("DUPLICATE_SKU", `Another product already uses the SKU '${valid.sku}'`);
+    }
+    const row = store.createManual(
+      {
+        nameAr: valid.nameAr,
+        nameEn: valid.nameEn,
+        sku: valid.sku,
+        priceMinor: valid.price.minor,
+        currency: valid.price.currency,
+        baseUnit: valid.baseUnit,
+      },
+      this.now(),
+    );
+    this.refreshCatalogFromStore(store);
+    this.record(cashier, "PRODUCT_CREATED", "product", row.id, row.source, {
+      name_ar: { before: null, after: row.name_ar },
+      selling_price_minor: { before: null, after: row.selling_price_minor.toString() },
+      base_unit: { before: null, after: row.base_unit },
+    });
+    return row;
+  }
+
+  /**
+   * Edits an existing product — imported or manual. Identity (`source`, `source_key`) is never
+   * changed, so a later re-import still recognises an imported row it has edited.
+   *
+   * A price or unit change emits its OWN audit action in addition to PRODUCT_UPDATED, because
+   * "who changed this item's price" must be answerable without reading every diff.
+   */
+  updateProduct(id: string, draft: ProductDraft, isActive: boolean): AdminProductRow {
+    const cashier = this.requireCashier();
+    const store = this.requireStore();
+    const before = store.findById(id);
+    if (!before) throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
+    const valid = validateProductDraft(draft, before.currency);
+    if (valid.sku !== null) {
+      const owner = store.findBySku(valid.sku);
+      if (owner && owner.id !== id) {
+        throw new DomainError("DUPLICATE_SKU", `Another product already uses the SKU '${valid.sku}'`);
+      }
+    }
+    const after = store.updateProduct(
+      id,
+      {
+        nameAr: valid.nameAr,
+        nameEn: valid.nameEn,
+        sku: valid.sku,
+        priceMinor: valid.price.minor,
+        baseUnit: valid.baseUnit,
+        isActive,
+      },
+      this.now(),
+    );
+    this.refreshCatalogFromStore(store);
+
+    const changes: Record<string, { before: unknown; after: unknown }> = {};
+    const diff = (field: string, b: unknown, a: unknown) => {
+      if (b !== a) changes[field] = { before: b, after: a };
+    };
+    diff("name_ar", before.name_ar, after.name_ar);
+    diff("name_en", before.name_en, after.name_en);
+    diff("sku", before.sku, after.sku);
+    diff("selling_price_minor", before.selling_price_minor.toString(), after.selling_price_minor.toString());
+    diff("base_unit", before.base_unit, after.base_unit);
+    diff("is_active", before.is_active === 1n, after.is_active === 1n);
+
+    if (before.selling_price_minor !== after.selling_price_minor) {
+      this.record(cashier, "PRICE_CHANGED", "product", id, after.source, {
+        selling_price_minor: {
+          before: before.selling_price_minor.toString(),
+          after: after.selling_price_minor.toString(),
+        },
+      });
+    }
+    if (before.base_unit !== after.base_unit) {
+      this.record(cashier, "UNIT_CHANGED", "product", id, after.source, {
+        base_unit: { before: before.base_unit, after: after.base_unit },
+      });
+    }
+    this.record(cashier, "PRODUCT_UPDATED", "product", id, after.source, changes);
+    return after;
+  }
+
+  /** Deactivates or reactivates. Never deletes — a product that has been sold stays on record. */
+  setProductActive(id: string, active: boolean): AdminProductRow {
+    const cashier = this.requireCashier();
+    const store = this.requireStore();
+    const before = store.findById(id);
+    if (!before) throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
+    const after = store.setActive(id, active, this.now());
+    this.refreshCatalogFromStore(store);
+    this.record(cashier, active ? "PRODUCT_ACTIVATED" : "PRODUCT_DEACTIVATED", "product", id, after.source, {
+      is_active: { before: before.is_active === 1n, after: active },
+    });
+    return after;
   }
 
   // ── Sales ───────────────────────────────────────────────────────────────────────────────────────

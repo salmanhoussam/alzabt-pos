@@ -6,14 +6,17 @@ import { HistoryScreen } from "./screens/HistoryScreen";
 import { LoginScreen } from "./screens/LoginScreen";
 import { SellScreen } from "./screens/SellScreen";
 import { TodayScreen } from "./screens/TodayScreen";
+import { ProductsScreen } from "./screens/ProductsScreen";
 import { ToolsScreen } from "./screens/ToolsScreen";
+import { useT } from "./i18n";
 
-type Tab = "sell" | "today" | "history" | "tools";
+type Tab = "sell" | "today" | "history" | "products" | "tools";
 
 type ExportNotice = { status: "exported"; what: "catalog" | "backup"; fileName: string; productCount?: number };
 type ErrorNotice = { status: "error"; title: string; message: string };
 
 export function App() {
+  const { t, lang, setLanguage } = useT();
   const [cashier, setCashier] = useState<CashierDto | null | undefined>(undefined);
   const [tab, setTab] = useState<Tab>("sell");
   // Bumped after a catalog import so the Sell screen reloads the catalog from the main process.
@@ -80,30 +83,39 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <strong className="brand">Alzabt POS</strong>
+        <strong className="brand">{t("app.name")}</strong>
         <nav className="tabs">
-          <button className={tab === "sell" ? "tab active" : "tab"} onClick={() => setTab("sell")}>
-            Sell
-          </button>
-          <button className={tab === "today" ? "tab active" : "tab"} onClick={() => setTab("today")}>
-            Today's Sales
-          </button>
-          <button className={tab === "history" ? "tab active" : "tab"} onClick={() => setTab("history")}>
-            History
-          </button>
-          <button className={tab === "tools" ? "tab active" : "tab"} onClick={() => setTab("tools")}>
-            Tools
-          </button>
+          {(["sell", "today", "history", "products", "tools"] as const).map((name) => (
+            <button
+              key={name}
+              className={tab === name ? "tab active" : "tab"}
+              onClick={() => setTab(name)}
+              data-testid={`tab-${name}`}
+            >
+              {t(`nav.${name}`)}
+            </button>
+          ))}
         </nav>
-        <span className="muted">{cashier.name}</span>
+        <span className="muted" dir="auto">
+          {cashier.name}
+        </span>
+        <button
+          className="btn ghost"
+          onClick={() => setLanguage(lang === "ar" ? "en" : "ar")}
+          data-testid="lang-toggle"
+          lang={lang === "ar" ? "en" : "ar"}
+        >
+          {t("lang.toggle")}
+        </button>
         <button className="btn ghost" onClick={logout}>
-          Log out
+          {t("action.logout")}
         </button>
       </header>
       <main className="content">
         {tab === "sell" && <SellScreen key={catalogVersion} />}
         {tab === "today" && <TodayScreen />}
         {tab === "history" && <HistoryScreen />}
+        {tab === "products" && <ProductsScreen />}
         {tab === "tools" && (
           <ToolsScreen onImportCatalog={importCatalog} onExportCatalog={exportCatalog} onExportBackup={exportBackup} />
         )}

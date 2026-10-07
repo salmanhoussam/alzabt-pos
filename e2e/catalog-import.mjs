@@ -23,6 +23,10 @@ mkdirSync(SHOTS, { recursive: true });
 const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["--no-sandbox"] : [];
 const home = mkdtempSync(join(tmpdir(), "pos-e2e-catalog-"));
 const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData"), ALZABT_POS_DISABLE_AUTOSTART: "1" };
+// 🔴 Tabs are selected by data-testid, NOT by their visible text. The terminal's default language
+// is Arabic, so "Sell" / "History" / "Today's Sales" / "Tools" are no longer the rendered labels —
+// an E2E that clicks by English name passes only while the UI happens to be English, which is
+// exactly the kind of test that goes green for the wrong reason. The test id is language-neutral.
 const log = (...a) => console.log("•", ...a);
 const assert = (cond, msg) => {
   if (!cond) throw new Error("ASSERTION FAILED: " + msg);
@@ -60,7 +64,7 @@ const saveTo = (app, path) =>
   app.evaluate(({ dialog }, p) => {
     dialog.showSaveDialogSync = () => p;
   }, path);
-const tools = (page) => page.getByRole("button", { name: "Tools", exact: true }).click();
+const tools = (page) => page.locator('[data-testid="tab-tools"]').click();
 const EXPECTED = JSON.parse(readFileSync(join(APP, "dist", "build-info.json"), "utf8"));
 const Database = createRequire(import.meta.url)("better-sqlite3");
 const product = (page, name) => page.locator("button.product", { hasText: name });
@@ -80,7 +84,7 @@ await page.getByRole("button", { name: "Import catalog" }).click();
 await page.waitForSelector("text=Catalog NOT imported");
 assert(await page.locator(".import-report").getByText("Line 2").isVisible(), "a malformed price is rejected with its line number");
 await page.getByRole("button", { name: "OK" }).click();
-await page.getByRole("button", { name: "Sell", exact: true }).click();
+await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Espresso").waitFor({ state: "visible", timeout: 10000 });
 assert((await page.locator("button.product").count()) === 8, "rejected import changed nothing (8 demo products)");
 
@@ -126,10 +130,10 @@ await app.close();
 ({ app, page } = await launch());
 assert((await page.locator("button.product").count()) === 4, "after restart the local catalog is still there");
 assert((await product(page, "Espresso").count()) === 0, "after restart the fixture does not come back");
-await page.getByRole("button", { name: "History" }).click();
+await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
 assert((await page.locator(".history-table tbody tr").count()) === 1, "after restart the sale is in history");
-await page.getByRole("button", { name: "Today's Sales" }).click();
+await page.locator('[data-testid="tab-today"]').click();
 await page.waitForSelector(".stats");
 const stats = await page.locator(".stats").innerText();
 assert(stats.includes("14.00 USD"), "today's sales show 14.00 USD after restart");

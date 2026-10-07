@@ -5,6 +5,7 @@
  * Money crosses this boundary as a string of minor units ("1250" = 12.50 USD), never a number.
  */
 import type { PaymentMethod } from "../domain/sale";
+import type { Language, TerminalSettings } from "./i18n";
 
 export const CHANNELS = {
   listCashiers: "pos:listCashiers",
@@ -20,6 +21,12 @@ export const CHANNELS = {
   exportCatalog: "pos:exportCatalog",
   exportBackup: "pos:exportBackup",
   getAppInfo: "pos:getAppInfo",
+  listProducts: "pos:listProducts",
+  createProduct: "pos:createProduct",
+  updateProduct: "pos:updateProduct",
+  setProductActive: "pos:setProductActive",
+  getSettings: "pos:getSettings",
+  setTerminalLanguage: "pos:setTerminalLanguage",
 } as const;
 
 export type ChannelName = keyof typeof CHANNELS;
@@ -151,6 +158,58 @@ export interface AppInfoDto {
   readonly build: string;
 }
 
+/**
+ * A product as the ADMINISTRATION screen sees it — every field, active or not. Distinct from
+ * ProductDto, which is the sellable projection the Sell screen uses: the admin list must show
+ * inactive products and where a product came from, and the sell list must not.
+ *
+ * Money crosses as a decimal string of minor units here too; `price` is the human decimal form so
+ * the edit form can show exactly what will be re-parsed, with no formatting round-trip.
+ */
+export interface AdminProductDto {
+  readonly id: string;
+  readonly source: string;
+  readonly sourceKey: string;
+  readonly sku: string | null;
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+  readonly price: MoneyDto;
+  /** The same amount as a plain decimal ("12.50") — what the edit form puts in its price box. */
+  readonly priceDecimal: string;
+  readonly baseUnit: string;
+  readonly priceNeedsReview: boolean;
+  readonly isActive: boolean;
+  readonly updatedAt: string;
+}
+
+/** What the operator typed. Optional fields are null when not given — never an empty string. */
+export interface ProductDraftRequest {
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+  readonly sku: string | null;
+  readonly price: string;
+  readonly baseUnit: string;
+}
+
+export interface CreateProductRequest {
+  readonly draft: ProductDraftRequest;
+}
+
+export interface UpdateProductRequest {
+  readonly id: string;
+  readonly draft: ProductDraftRequest;
+  readonly isActive: boolean;
+}
+
+export interface SetProductActiveRequest {
+  readonly id: string;
+  readonly isActive: boolean;
+}
+
+export interface SetTerminalLanguageRequest {
+  readonly language: Language;
+}
+
 export interface IpcError {
   readonly code: string;
   readonly message: string;
@@ -173,4 +232,10 @@ export interface PosApi {
   exportCatalog(): Promise<IpcResult<ExportResponse>>;
   exportBackup(): Promise<IpcResult<ExportResponse>>;
   getAppInfo(): Promise<IpcResult<AppInfoDto>>;
+  listProducts(): Promise<IpcResult<AdminProductDto[]>>;
+  createProduct(req: CreateProductRequest): Promise<IpcResult<AdminProductDto>>;
+  updateProduct(req: UpdateProductRequest): Promise<IpcResult<AdminProductDto>>;
+  setProductActive(req: SetProductActiveRequest): Promise<IpcResult<AdminProductDto>>;
+  getSettings(): Promise<IpcResult<TerminalSettings>>;
+  setTerminalLanguage(req: SetTerminalLanguageRequest): Promise<IpcResult<TerminalSettings>>;
 }

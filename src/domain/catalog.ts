@@ -35,8 +35,28 @@ export interface CatalogSource {
  */
 export const MAX_PRODUCT_ID_LENGTH = 128;
 
-/** Units a product may be sold in today. Fractional units (kg, m) need fractional quantities first. */
-export const BASE_UNITS: ReadonlyArray<string> = Object.freeze(["piece", "box"]);
+/**
+ * Units a product may be sold in. Validated here rather than in the schema (migration 3 declares
+ * `base_unit TEXT NOT NULL CHECK (length(base_unit) > 0)`), which is why this list can grow with
+ * NO migration — the reason the first offline release could add four units for free.
+ *
+ * 🔴 QUANTITIES ARE STILL WHOLE NUMBERS. `kg` and `meter` are listed because a shop genuinely sells
+ * in them and the invoice must print them, but until the fractional-quantity migration lands a
+ * product priced per kg can only be sold in WHOLE kg. That limit is enforced in one place
+ * (`assertQuantity` in cart.ts) and surfaced to the operator on the product screen; it is a stated
+ * limitation, not a silent rounding — nothing anywhere converts a fraction into a float.
+ */
+export const BASE_UNITS: ReadonlyArray<string> = Object.freeze([
+  "piece",
+  "box",
+  "pack",
+  "kg",
+  "meter",
+  "other",
+]);
+
+/** Units whose real-world quantities are fractional, and which therefore still sell in whole units. */
+export const FRACTIONAL_IN_REALITY: ReadonlyArray<string> = Object.freeze(["kg", "meter"]);
 
 /**
  * Approved catalog naming rule: name_ar is required, name_en is optional, and an English display

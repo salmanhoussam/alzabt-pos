@@ -27,6 +27,10 @@ const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["
 const home = mkdtempSync(join(tmpdir(), "pos-e2e-home-"));
 // Isolate the ledger in a throw-away profile on every OS (honoured by src/main/main.ts).
 const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
+// 🔴 Tabs are selected by data-testid, NOT by their visible text. The terminal's default language
+// is Arabic, so "Sell" / "History" / "Today's Sales" / "Tools" are no longer the rendered labels —
+// an E2E that clicks by English name passes only while the UI happens to be English, which is
+// exactly the kind of test that goes green for the wrong reason. The test id is language-neutral.
 const log = (...a) => console.log("•", ...a);
 const assert = (cond, msg) => {
   if (!cond) throw new Error("ASSERTION FAILED: " + msg);
@@ -80,7 +84,10 @@ const surface = await page.evaluate(() => ({
 }));
 log("renderer surface:", JSON.stringify(surface));
 assert(surface.require === "undefined" && surface.process === "undefined" && surface.ipcRenderer === "undefined", "renderer has no require/process/ipcRenderer");
-assert(JSON.stringify(surface.posKeys) === JSON.stringify(["createSale","currentCashier","exportBackup","exportCatalog","getAppInfo","getCatalog","getSaleHistory","getTodaySales","importCatalog","listCashiers","login","logout","voidSale"]), "window.pos exposes only the 13 business methods");
+// The surface is asserted by NAME, not by count, so a new channel has to be added here deliberately.
+// It was 13 before offline product management; the six it adds are createProduct, listProducts,
+// updateProduct, setProductActive, getSettings and setTerminalLanguage.
+assert(JSON.stringify(surface.posKeys) === JSON.stringify(["createProduct","createSale","currentCashier","exportBackup","exportCatalog","getAppInfo","getCatalog","getSaleHistory","getSettings","getTodaySales","importCatalog","listCashiers","listProducts","login","logout","setProductActive","setTerminalLanguage","updateProduct","voidSale"]), "window.pos exposes exactly the 19 business methods, and nothing else");
 await page.screenshot({ path: SHOTS + "01-login.png" });
 
 // Wrong PIN first.
@@ -134,7 +141,7 @@ assert(!forged.extraField.ok && forged.extraField.error.code === "INVALID_INPUT"
 assert(!forged.wrongTotal.ok && forged.wrongTotal.error.code === "TOTAL_MISMATCH", "forged total rejected");
 
 // Today's sales.
-await page.getByRole("button", { name: "Today's Sales" }).click();
+await page.locator('[data-testid="tab-today"]').click();
 await page.waitForSelector(".stats");
 assert((await stat(page, "Completed sales")) === "2", "today: 2 completed sales");
 assert((await stat(page, "Gross sales")) === "20.77 USD", "today gross 14.80 + 5.97 = 20.77");
@@ -142,7 +149,7 @@ assert((await stat(page, "Net sales")) === "20.77 USD", "today net 20.77 before 
 await page.screenshot({ path: SHOTS + "05-today.png" });
 
 // Void receipt #2 from history.
-await page.getByRole("button", { name: "History" }).click();
+await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
 await page.locator("tr", { hasText: "card" }).getByRole("button", { name: "Void" }).click();
 await page.getByPlaceholder("e.g. wrong item rung up").fill("customer cancelled");
@@ -151,7 +158,7 @@ await page.getByRole("button", { name: "Confirm void" }).click();
 await page.waitForSelector("tr.voided");
 await page.screenshot({ path: SHOTS + "07-history.png" });
 
-await page.getByRole("button", { name: "Today's Sales" }).click();
+await page.locator('[data-testid="tab-today"]').click();
 await page.waitForSelector(".stats");
 assert((await stat(page, "Voided sales")) === "1", "today: 1 voided");
 assert((await stat(page, "Gross sales")) === "20.77 USD", "gross unchanged by the void");
@@ -163,13 +170,13 @@ log("app closed normally");
 // ── Run 2: restart, data must still be there ─────────────────────────────────────────────────────
 ({ app, page } = await launch());
 await login(page, "Cashier Two", "2222");
-await page.getByRole("button", { name: "Today's Sales" }).click();
+await page.locator('[data-testid="tab-today"]').click();
 await page.waitForSelector(".stats");
 assert((await stat(page, "Completed sales")) === "2" && (await stat(page, "Net sales")) === "14.80 USD", "after restart: 2 sales, net 14.80 persisted");
 
 // A third sale, then HARD-KILL the Electron main process (no clean shutdown) — the main process
 // only: its helper processes are left alone, exactly as an application crash would leave them.
-await page.getByRole("button", { name: "Sell" }).click();
+await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Water 500ml").click();
 await page.getByRole("button", { name: "Complete sale" }).click();
 await page.getByRole("button", { name: "Other" }).click();
@@ -211,25 +218,25 @@ assert(leftovers.length === 0, `all ${beforeKill.length} process(es) of the kill
 // ── Run 3: relaunch straight after the hard kill — no reboot, no manual cleanup ────────────────
 ({ app, page } = await launch());
 await login(page, "Cashier One", "1111");
-await page.getByRole("button", { name: "Today's Sales" }).click();
+await page.locator('[data-testid="tab-today"]').click();
 await page.waitForSelector(".stats");
 assert((await stat(page, "Completed sales")) === "3", "after the hard kill: sale #3 (committed just before it) survived");
 assert((await stat(page, "Net sales")) === "15.55 USD", "net 14.80 + 0.75 = 15.55");
 await page.screenshot({ path: SHOTS + "08-today-after-kill.png" });
 
 // The recovered till takes a new sale.
-await page.getByRole("button", { name: "Sell" }).click();
+await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Zaatar Manousheh").click();
 await product(page, "Zaatar Manousheh").click();
 await page.getByRole("button", { name: "Complete sale" }).click();
 await page.getByRole("button", { name: "Cash" }).click();
 await page.waitForSelector("text=Receipt #4");
 await page.getByRole("button", { name: "New sale" }).click();
-await page.getByRole("button", { name: "Today's Sales" }).click();
+await page.locator('[data-testid="tab-today"]').click();
 await page.waitForSelector(".stats");
 assert((await stat(page, "Completed sales")) === "4", "new sale #4 completed after recovery");
 assert((await stat(page, "Net sales")) === "18.55 USD", "net 15.55 + 2×1.50 = 18.55");
-await page.getByRole("button", { name: "History" }).click();
+await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
 const rows = await page.locator(".history-table tbody tr").count();
 assert(rows === 4, "history lists 4 sales");

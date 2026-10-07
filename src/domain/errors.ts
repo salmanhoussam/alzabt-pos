@@ -26,7 +26,10 @@ export type DomainErrorCode =
   | "INVALID_INPUT"
   | "LEDGER_INTEGRITY"
   | "IMPORT_REJECTED"
-  | "NOT_AVAILABLE";
+  | "NOT_AVAILABLE"
+  | "PRODUCT_NOT_FOUND"
+  | "DUPLICATE_SKU"
+  | "UNSUPPORTED_UNIT";
 
 export class DomainError extends Error {
   constructor(

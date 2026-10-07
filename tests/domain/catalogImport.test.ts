@@ -81,7 +81,7 @@ describe("validateImport", () => {
         "1,شيبس,,1.00,USD,piece,0", // duplicate source_id
         "3,,,1.00,USD,piece,0", // empty name_ar
         "4,مياه,,1.00,LBP,piece,0", // wrong currency
-        "5,مياه,,1.00,USD,kg,0", // unsupported unit
+        "5,مياه,,1.00,USD,litre,0", // unsupported unit (was "kg" until kg became sellable — see BASE_UNITS)
         "6,مياه,,1.00,USD,piece,yes", // bad flag
         "7,مياه,,1.00,USD,piece", // missing field
         "bad id,مياه,,1.00,USD,piece,0",
@@ -90,6 +90,26 @@ describe("validateImport", () => {
     );
     expect(rejected.map((r) => r.line)).toEqual([3, 4, 5, 6, 7, 8, 9]);
     expect(rejected[0]!.reason).toMatch(/already used on line 2/);
+  });
+
+  it("accepts every unit this terminal sells in, and still refuses one it does not", () => {
+    // BASE_UNITS grew from ["piece","box"] to six units for the first offline release. An import
+    // file written by the merchant may therefore use any of them; anything else is still refused.
+    const { rows, rejected } = validateImport(
+      csv(
+        "1,حبة,,1.00,USD,piece,0",
+        "2,علبة,,1.00,USD,box,0",
+        "3,كيس,,1.00,USD,pack,0",
+        "4,كيلو,,1.00,USD,kg,0",
+        "5,متر,,1.00,USD,meter,0",
+        "6,أخرى,,1.00,USD,other,0",
+        "7,لتر,,1.00,USD,litre,0",
+      ),
+      "USD",
+    );
+    expect(rows.map((r) => r.baseUnit)).toEqual(["piece", "box", "pack", "kg", "meter", "other"]);
+    expect(rejected.map((r) => r.line)).toEqual([8]);
+    expect(rejected[0]!.reason).toMatch(/unit/i);
   });
 
   it("refuses a file with the wrong header or no products", () => {

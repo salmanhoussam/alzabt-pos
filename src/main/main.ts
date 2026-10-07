@@ -31,6 +31,7 @@ import { buildLabel, readBuildInfo } from "./buildInfo";
 import { CHANNEL_NAMES, type IpcHandlerOptions, type PickedFile, type SavedFile, createIpcHandlers } from "./ipcHandlers";
 import { type LedgerFs, planLedgerOpen, recordLedger } from "./ledgerGuard";
 import { type Logger, createFileLogger, nullLogger } from "./logger";
+import { SettingsStore } from "./settingsStore";
 import { classifyStartupError, startupFailureMessage } from "./startupFailure";
 
 const RENDERER_INDEX = join(__dirname, "..", "..", "renderer", "index.html");
@@ -262,6 +263,10 @@ function startTill(): void {
   console.info(`[pos] catalog: ${start.origin}, ${start.catalog.products.length} products`);
   diag("catalog", { origin: start.origin, products: start.catalog.products.length });
   log.info("catalog", { origin: start.origin, products: start.catalog.products.length });
+  // Operator settings (language) live in a small JSON file beside the ledger, not in it.
+  const settings = new SettingsStore(userData);
+  log.info("settings", { ...settings.get() });
+
   const service = new PosService({
     repository: new SaleRepository(db),
     pinStates: new PinStateRepository(db),
@@ -269,6 +274,9 @@ function startTill(): void {
     catalogStore,
     cashiers: FIXTURE_CASHIERS,
     terminal: FIXTURE_TERMINAL,
+    // Administrative actions go to the application log: "who changed this price" is answerable
+    // today, from a file, with no schema change. The real audit table is a proposed migration.
+    audit: (event) => log.info("audit", { ...event }),
   });
   registerIpc(service, {
     saveCatalogExport,
@@ -276,6 +284,10 @@ function startTill(): void {
     appInfo: () => ({ version: BUILD_INFO.version, build: BUILD_INFO.build }),
     afterSale: maybeDailyBackup,
     logger: log,
+    settings: {
+      get: () => settings.get(),
+      setTerminalLanguage: (lang) => settings.setTerminalLanguage(lang),
+    },
   });
   mainWindow = createWindow();
 
