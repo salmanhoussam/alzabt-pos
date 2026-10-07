@@ -1,13 +1,16 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AuditRow } from "../../src/domain/audit";
 import { PosService } from "../../src/application/posService";
 import { type Catalog, type CatalogSource, loadCatalog } from "../../src/domain/catalog";
 import { FIXTURE_CASHIERS } from "../../src/fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../../src/fixtures/catalog";
 import { FIXTURE_TERMINAL, type TerminalConfig } from "../../src/fixtures/terminal";
+import { AuditRepository } from "../../src/persistence/auditRepository";
 import { CatalogRepository } from "../../src/persistence/catalogRepository";
 import { type Db, openDatabase } from "../../src/persistence/db";
+import { MIGRATIONS } from "../../src/persistence/migrations";
 import { PinStateRepository } from "../../src/persistence/pinStateRepository";
 import { SaleRepository } from "../../src/persistence/saleRepository";
 
@@ -36,6 +39,8 @@ export interface Harness {
   readonly repository: SaleRepository;
   readonly service: PosService;
   readonly clock: TestClock;
+  /** The real durable audit trail, on the same connection — so tests read what was really stored. */
+  readonly audit: AuditRepository;
 }
 
 export function makeHarness(
@@ -47,23 +52,31 @@ export function makeHarness(
     repository?: (db: Db) => SaleRepository;
     terminal?: TerminalConfig;
     login?: boolean;
+    /** Swap in a failing audit repository, or pass null to wire none at all (fail-closed tests). */
+    auditStore?: AuditRepository | null;
+    /** The diagnostic mirror, if a test wants to observe it. */
+    auditSink?: (row: AuditRow) => void;
   } = {},
 ): Harness {
   const db = openDatabase(dbPath);
   try {
     const repository = opts.repository ? opts.repository(db) : new SaleRepository(db);
     const clock = opts.clock ?? new TestClock();
+    const audit = new AuditRepository(db, { appVersion: "test", schemaVersion: MIGRATIONS.length });
     const service = new PosService({
       repository,
       pinStates: new PinStateRepository(db),
       catalog: opts.catalog ?? loadCatalog(opts.catalogSource ?? FIXTURE_CATALOG),
       catalogStore: new CatalogRepository(db),
+      auditStore: opts.auditStore === null ? undefined : (opts.auditStore ?? audit),
+      transact: (fn) => db.transaction(fn).immediate(),
       cashiers: FIXTURE_CASHIERS,
       terminal: opts.terminal ?? FIXTURE_TERMINAL,
       now: clock.now,
+      audit: opts.auditSink,
     });
     if (opts.login !== false) service.login("cashier-01", "1111");
-    return { db, repository, service, clock };
+    return { db, repository, service, clock, audit };
   } catch (err) {
     db.close(); // never leave a handle open on a failed setup (Windows cannot delete open files)
     throw err;

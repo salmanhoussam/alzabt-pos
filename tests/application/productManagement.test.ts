@@ -4,8 +4,10 @@
  * cannot be sold.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AuditEvent } from "../../src/application/posService";
 import { PosService } from "../../src/application/posService";
+import type { AuditRow } from "../../src/domain/audit";
+import { AuditRepository } from "../../src/persistence/auditRepository";
+import { MIGRATIONS } from "../../src/persistence/migrations";
 import { loadCatalog } from "../../src/domain/catalog";
 import { FIXTURE_CASHIERS } from "../../src/fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../../src/fixtures/catalog";
@@ -19,24 +21,33 @@ import { TestClock, type TempDir, newKey, tempDir } from "../helpers/harness";
 let t: TempDir;
 let db: Db;
 let service: PosService;
-let audit: AuditEvent[];
+/** The DIAGNOSTIC mirror. The record of truth is `trail`, read back out of SQLite. */
+let mirrored: AuditRow[];
+/** The durable trail itself, on the same connection the service writes through. */
+let trail: AuditRepository;
 let clock: TestClock;
 
 function build(): void {
-  audit = [];
+  mirrored = [];
   clock = new TestClock();
+  trail = new AuditRepository(db, { appVersion: "test", schemaVersion: MIGRATIONS.length });
   service = new PosService({
     repository: new SaleRepository(db),
     pinStates: new PinStateRepository(db),
     catalog: loadCatalog(FIXTURE_CATALOG),
     catalogStore: new CatalogRepository(db),
+    auditStore: trail,
+    transact: (fn) => db.transaction(fn).immediate(),
     cashiers: FIXTURE_CASHIERS,
     terminal: FIXTURE_TERMINAL,
     now: clock.now,
-    audit: (e) => audit.push(e),
+    audit: (row) => mirrored.push(row),
   });
   service.login("cashier-01", "1111");
 }
+
+/** Every stored event, oldest first — `seq` order, which is the only ordering authority. */
+const stored = (): AuditRow[] => trail.listRecent(500).reverse();
 
 beforeEach(() => {
   t = tempDir();
@@ -93,17 +104,37 @@ describe("createProduct", () => {
     expect(() => service.createProduct(draft)).toThrow(/logged in/);
   });
 
-  it("records an audit event naming the actor — no PIN, no secret", () => {
+  it("writes a DURABLE audit event naming the actor — no PIN, no secret", () => {
     const row = service.createProduct(draft);
-    const event = audit.find((e) => e.action === "PRODUCT_CREATED");
-    expect(event).toBeDefined();
-    expect(event!.actorId).toBe("cashier-01");
-    expect(event!.entityId).toBe(row.id);
-    expect(event!.entityType).toBe("product");
+    const events = stored();
+    expect(events).toHaveLength(1);
+    const event = events[0]!;
+    expect(event.event_type).toBe("PRODUCT_CREATED");
+    expect(event.actor_id).toBe("cashier-01");
+    expect(event.actor_name).toBe(FIXTURE_CASHIERS[0]!.name);
+    // 🔴 This build has no role model, so it records that it does not know, rather than guessing.
+    expect(event.actor_tier).toBe("unspecified");
+    expect(event.entity_id).toBe(row.id);
+    expect(event.entity_type).toBe("product");
+    expect(event.seq).toBe(1);
+    // The whole audited state, every `before` null — the same shape an edit uses.
+    expect(JSON.parse(event.changed_json)).toEqual({
+      base_unit: { before: null, after: "piece" },
+      currency: { before: null, after: "USD" },
+      is_active: { before: null, after: true },
+      name_ar: { before: null, after: "مفتاح أحمر" },
+      name_en: { before: null, after: "Red Wrench" },
+      price_needs_review: { before: null, after: false },
+      selling_price_minor: { before: null, after: "400" },
+      sku: { before: null, after: "SKU-001" },
+    });
+    expect(JSON.parse(event.metadata_json!)).toEqual({ origin: "manual_entry", source: "manual" });
     const serialised = JSON.stringify(event);
     for (const secret of ["pin", "Pin", "PIN", "hash", "token", "1111"]) {
       expect(serialised, `audit must not contain '${secret}'`).not.toContain(secret);
     }
+    // The diagnostic mirror saw the same committed row; it is a copy, not the record.
+    expect(mirrored.map((m) => m.id)).toEqual([event.id]);
   });
 });
 
@@ -136,23 +167,42 @@ describe("updateProduct", () => {
     expect(after).toEqual(before);
   });
 
-  it("emits PRICE_CHANGED and UNIT_CHANGED in addition to PRODUCT_UPDATED", () => {
+  /**
+   * 🔴 CONTRACT CHANGE, migration 5. Earlier builds emitted THREE events for one edit —
+   * PRICE_CHANGED, UNIT_CHANGED and PRODUCT_UPDATED — to the rotating logfile. In a durable table
+   * that is two rows restating what the third already carries, and it double-counts in any "how
+   * many changes today" question. One user action is now exactly one PRODUCT_UPDATED row; the price
+   * and the unit are fields inside its diff.
+   */
+  it("one edit is ONE PRODUCT_UPDATED row, however many fields moved", () => {
     const row = service.createProduct(draft);
-    audit.length = 0;
-    service.updateProduct(row.id, { ...draft, price: "7.00", baseUnit: "kg" }, true);
-    const actions = audit.map((e) => e.action);
-    expect(actions).toContain("PRICE_CHANGED");
-    expect(actions).toContain("UNIT_CHANGED");
-    expect(actions).toContain("PRODUCT_UPDATED");
-    const priced = audit.find((e) => e.action === "PRICE_CHANGED")!;
-    expect(priced.changes!.selling_price_minor).toEqual({ before: "400", after: "700" });
+    service.updateProduct(row.id, { ...draft, price: "7.00", baseUnit: "kg", nameEn: "Green Wrench" }, true);
+    const events = stored();
+    expect(events.map((e) => e.event_type)).toEqual(["PRODUCT_CREATED", "PRODUCT_UPDATED"]);
+    expect(events.map((e) => e.seq)).toEqual([1, 2]);
+    // Exactly the fields that moved, no others, keys sorted, money as a decimal string.
+    expect(events[1]!.changed_json).toBe(
+      JSON.stringify({
+        base_unit: { before: "piece", after: "kg" },
+        name_en: { before: "Red Wrench", after: "Green Wrench" },
+        selling_price_minor: { before: "400", after: "700" },
+      }),
+    );
   });
 
-  it("emits no PRICE_CHANGED when the price did not change", () => {
+  it("a price that did not change is not in the diff", () => {
     const row = service.createProduct(draft);
-    audit.length = 0;
     service.updateProduct(row.id, { ...draft, nameEn: "Wrench" }, true);
-    expect(audit.map((e) => e.action)).not.toContain("PRICE_CHANGED");
+    const diff = JSON.parse(stored()[1]!.changed_json) as Record<string, unknown>;
+    expect(Object.keys(diff)).toEqual(["name_en"]);
+  });
+
+  it("an edit that changes nothing writes NO audit row", () => {
+    service.createProduct(draft);
+    expect(stored()).toHaveLength(1);
+    const row = service.listProducts()[0]!;
+    service.updateProduct(row.id, draft, true);
+    expect(stored()).toHaveLength(1);
   });
 
   it("refuses a SKU already used by a different product, but allows keeping its own", () => {
@@ -205,13 +255,19 @@ describe("deactivation", () => {
     expect(service.getCatalog().products.map((p) => p.id)).toEqual(FIXTURE_CATALOG.products.map((p) => p.id));
   });
 
-  it("records who deactivated it", () => {
+  it("records who deactivated it, durably", () => {
     const row = service.createProduct(draft);
-    audit.length = 0;
     service.setProductActive(row.id, false);
-    const e = audit.find((x) => x.action === "PRODUCT_DEACTIVATED")!;
-    expect(e.actorName).toBe(FIXTURE_CASHIERS[0]!.name);
-    expect(e.changes!.is_active).toEqual({ before: true, after: false });
+    const e = stored()[1]!;
+    expect(e.event_type).toBe("PRODUCT_DEACTIVATED");
+    expect(e.actor_name).toBe(FIXTURE_CASHIERS[0]!.name);
+    expect(JSON.parse(e.changed_json)).toEqual({ is_active: { before: true, after: false } });
+  });
+
+  it("a toggle to the state it is already in writes no event", () => {
+    const row = service.createProduct(draft);
+    service.setProductActive(row.id, true);
+    expect(stored()).toHaveLength(1);
   });
 });
 

@@ -7,6 +7,7 @@
 import { formatDecimal, money } from "../domain/money";
 import { type CatalogSource, displayName } from "../domain/catalog";
 import type { ExportRow, ImportRow } from "../domain/catalogImport";
+import type { AuditScalar } from "../domain/audit";
 import type { Db } from "./db";
 
 /** The only import source in the field pilot: a merchant CSV in the strict import format. */
@@ -19,6 +20,58 @@ export const CSV_SOURCE = "merchant-csv";
  * `source` stays an honest record of where a product came from.
  */
 export const MANUAL_SOURCE = "manual";
+
+/**
+ * The audited fields of a product, normalised for the audit trail: booleans as booleans, money as
+ * bigint, everything else as it is stored. ONE projection, used for a manual edit and for an import
+ * alike, so the two can never disagree about what a change looks like.
+ */
+export type AuditedProductState = Readonly<Record<string, AuditScalar>>;
+
+export function auditedProductState(row: {
+  readonly sku: string | null;
+  readonly name_ar: string;
+  readonly name_en: string | null;
+  readonly selling_price_minor: bigint;
+  readonly currency: string;
+  readonly base_unit: string;
+  readonly price_needs_review: bigint;
+  readonly is_active: bigint;
+}): AuditedProductState {
+  return {
+    base_unit: row.base_unit,
+    currency: row.currency,
+    is_active: row.is_active === 1n,
+    name_ar: row.name_ar,
+    name_en: row.name_en,
+    price_needs_review: row.price_needs_review === 1n,
+    selling_price_minor: row.selling_price_minor,
+    sku: row.sku,
+  };
+}
+
+/**
+ * Exactly what an import did to ONE product. Returned by `applyImport` so the caller can write the
+ * durable audit INSIDE the same transaction.
+ *
+ * 🔴 Why the repository returns this instead of taking an audit callback: a callback would put
+ * arbitrary caller code inside the repository's transaction, where a throw means a half-written
+ * import, and it would make the repository's behaviour depend on what it was handed. A bounded,
+ * typed change-set keeps the transaction boundary legible and the repository ignorant of auditing.
+ */
+export interface ProductChange {
+  readonly id: string;
+  readonly kind: "inserted" | "updated" | "deactivated";
+  /** null for an insertion — there was no previous state. */
+  readonly before: AuditedProductState | null;
+  readonly after: AuditedProductState;
+}
+
+export interface ImportOutcome {
+  readonly counts: ImportCounts;
+  /** One entry per product the import actually touched. Unchanged products are absent. */
+  readonly changes: ReadonlyArray<ProductChange>;
+}
 
 export interface ImportCounts {
   readonly inserted: number;
@@ -151,10 +204,17 @@ export class CatalogRepository {
     }));
   }
 
-  /** Applies a fully validated import in ONE transaction: all rows land, or none do. */
-  applyImport(source: string, rows: ReadonlyArray<ImportRow>, meta: ImportMeta): ImportCounts {
+  /**
+   * Applies a fully validated import in ONE transaction: all rows land, or none do — and returns
+   * both the summary counts AND the exact per-product change-set, so the caller can append the
+   * durable audit events inside this same transaction.
+   *
+   * Called from inside the service's outer transaction, where this inner one becomes a SAVEPOINT;
+   * called directly (older callers, tests) it is still a complete transaction of its own.
+   */
+  applyImport(source: string, rows: ReadonlyArray<ImportRow>, meta: ImportMeta): ImportOutcome {
     return this.db
-      .transaction((): ImportCounts => {
+      .transaction((): ImportOutcome => {
         const now = meta.now.toISOString();
         const find = this.db.prepare(
           `SELECT id, sku, name_ar, name_en, selling_price_minor, currency, base_unit, price_needs_review, is_active
@@ -174,6 +234,7 @@ export class CatalogRepository {
         let inserted = 0;
         let updated = 0;
         let unchanged = 0;
+        const changes: ProductChange[] = [];
         for (const r of rows) {
           const params = {
             id: productIdFor(source, r.sourceId),
@@ -188,9 +249,22 @@ export class CatalogRepository {
             now,
           };
           const existing = find.get(source, r.sourceId) as ProductRow | undefined;
+          // The state this row will hold after the import. An import never writes `sku`, so an
+          // existing row keeps the SKU it already has; a new row is inserted with NULL.
+          const after = auditedProductState({
+            sku: existing?.sku ?? null,
+            name_ar: r.nameAr,
+            name_en: r.nameEn,
+            selling_price_minor: r.priceMinor,
+            currency: r.currency,
+            base_unit: r.baseUnit,
+            price_needs_review: r.priceNeedsReview ? 1n : 0n,
+            is_active: 1n,
+          });
           if (!existing) {
             insert.run(params);
             inserted += 1;
+            changes.push({ id: params.id, kind: "inserted", before: null, after });
           } else if (
             existing.name_ar === r.nameAr &&
             existing.name_en === r.nameEn &&
@@ -204,6 +278,12 @@ export class CatalogRepository {
           } else {
             update.run(params);
             updated += 1;
+            changes.push({
+              id: params.id,
+              kind: "updated",
+              before: auditedProductState(existing),
+              after,
+            });
           }
         }
 
@@ -216,14 +296,22 @@ export class CatalogRepository {
           "UPDATE catalog_products SET is_active = 0, updated_at = ? WHERE source = ? AND source_key = ?",
         );
         let deactivated = 0;
-        for (const { source_key } of active) {
-          if (!keep.has(source_key)) {
-            deactivate.run(now, source, source_key);
+        for (const row of active) {
+          if (!keep.has(row.source_key)) {
+            deactivate.run(now, source, row.source_key);
             deactivated += 1;
+            // Only `is_active` moves, so only `is_active` is recorded. The counts say "7
+            // deactivated"; these rows say WHICH seven, which the counts cannot.
+            changes.push({
+              id: productIdFor(source, row.source_key),
+              kind: "deactivated",
+              before: { is_active: true },
+              after: { is_active: false },
+            });
           }
         }
 
-        const counts = { inserted, updated, unchanged, deactivated };
+        const counts: ImportCounts = { inserted, updated, unchanged, deactivated };
         this.db
           .prepare(
             `INSERT INTO catalog_imports (id, source, file_name, file_sha256, row_count, inserted, updated, unchanged,
@@ -232,7 +320,7 @@ export class CatalogRepository {
           )
           .run(meta.importId, source, meta.fileName, meta.fileSha256, rows.length, inserted, updated, unchanged,
             deactivated, meta.cashierId, now);
-        return counts;
+        return { counts, changes };
       })
       .immediate();
   }
@@ -361,7 +449,16 @@ export class CatalogRepository {
       .immediate();
   }
 
-  /** Deactivate or reactivate. There is deliberately no delete: a sold product stays on record. */
+  /**
+   * Deactivate or reactivate. There is deliberately no delete: a sold product stays on record.
+   *
+   * 🔴 NO TRANSACTION HERE, ON PURPOSE. Until Migration 5 this method had none by accident — a bare
+   * read, UPDATE, read — which was the one mutation path in the application that was not atomic.
+   * It is not given an inner transaction of its own now, because that would be the wrong fix: the
+   * whole operation (this write plus its durable audit row) runs under the service-owned outer
+   * transaction in `PosService.setProductActive`. A second, narrower transaction here would only
+   * add a savepoint that proves nothing.
+   */
   setActive(id: string, active: boolean, now: Date): AdminProductRow {
     const before = this.findById(id);
     if (!before) throw new Error(`catalog: no product '${id}'`);

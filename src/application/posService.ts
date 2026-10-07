@@ -33,12 +33,22 @@ import type { CashierFixture } from "../fixtures/cashiers";
 import type { TerminalConfig } from "../fixtures/terminal";
 import { validateProductDraft, type ProductDraft } from "../domain/productDraft";
 import {
+  AUDITED_PRODUCT_FIELDS,
+  type AuditDraft,
+  type AuditEventType,
+  type AuditRow,
+  CURRENT_ACTOR_TIER,
+  diffAuditedFields,
+} from "../domain/audit";
+import {
   type AdminProductRow,
   CSV_SOURCE,
   type CatalogRepository,
   type ImportCounts,
   MANUAL_SOURCE,
+  auditedProductState,
 } from "../persistence/catalogRepository";
+import type { AuditRepository } from "../persistence/auditRepository";
 import type { PinStateRepository } from "../persistence/pinStateRepository";
 import type { SaleRepository } from "../persistence/saleRepository";
 import { type Cashier, pinMatches } from "./cashierAuth";
@@ -54,47 +64,40 @@ export interface PosServiceDeps {
   readonly now?: () => Date;
   readonly newId?: () => string;
   /**
-   * Called after every administrative write, with the actor and a before/after diff. Wired in
-   * main.ts to the file logger, so "who changed this price" is answerable TODAY without a schema
-   * change — see the honest limits of that in `AuditEvent` below.
+   * The durable audit trail (migration 5). It writes through the SAME connection as the
+   * repositories, inside `transact`. Required whenever `catalogStore` is present — see
+   * `requireProductStack`.
    */
-  readonly audit?: (event: AuditEvent) => void;
+  readonly auditStore?: AuditRepository;
+  /**
+   * Runs `fn` inside ONE `BEGIN IMMEDIATE` on the same SQLite connection the repositories use.
+   * This is the whole of the atomicity guarantee: the business mutation and its audit row are one
+   * transaction, so neither can exist without the other. Orchestration by convention would not be
+   * the same thing.
+   */
+  readonly transact?: <T>(fn: () => T) => T;
+  /**
+   * A DIAGNOSTIC mirror of each committed audit row, called AFTER the transaction commits. Wired
+   * in main.ts to the rotating logfile, which is useful for field support and is NOT the record of
+   * truth — it rotates and is deleted. A throw here is swallowed: operational logging may never
+   * roll back or invalidate a business mutation that has already committed.
+   */
+  readonly audit?: (row: AuditRow) => void;
 }
 
 /**
- * One administrative action by one operator. This is NOT the sales ledger (immutable, in SQLite)
- * and NOT the future inventory movement ledger — it records who changed master data.
+ * 🔴 WHERE THE AUDIT RECORD LIVES, AS OF MIGRATION 5.
  *
- * 🔴 WHAT THIS IS AND IS NOT, TODAY. The only sink wired is the application log file. That makes
- * the record append-only and timestamped, and it answers a support question by reading a file. It
- * is NOT queryable from the app, NOT retained forever, and NOT protected by database triggers. The
- * real `audit_events` table is a proposed migration awaiting approval; this hook is what the same
- * events will be written through when it lands, so no call site changes then.
+ * The record of truth is `audit_events` in SQLite: append-only, enforced by database triggers, and
+ * written INSIDE the same transaction as the mutation it describes. Before migration 5 these events
+ * went only to the rotating JSON logfile — which rotates, is eventually deleted, and was written
+ * after the business commit, so it could never be the accountability record. That logfile is kept,
+ * unchanged, for diagnostics, and it now MIRRORS committed audit rows.
  *
- * NEVER carries a PIN, a PIN hash, a token or any secret: the fields below are the whole contract.
+ * The event registry, the field allowlist and the fail-closed serialization all live in ONE place,
+ * `src/domain/audit.ts`. Nothing here invents a field or an event type.
  */
-export type AuditAction =
-  | "PRODUCT_CREATED"
-  | "PRODUCT_UPDATED"
-  | "PRODUCT_DEACTIVATED"
-  | "PRODUCT_ACTIVATED"
-  | "PRICE_CHANGED"
-  | "UNIT_CHANGED"
-  | "CATALOG_IMPORTED";
-
-export interface AuditEvent {
-  readonly id: string;
-  readonly at: string;
-  readonly actorId: string;
-  readonly actorName: string;
-  readonly action: AuditAction;
-  readonly entityType: "product" | "catalog";
-  readonly entityId: string;
-  readonly source: string;
-  /** Changed fields only, as { before, after } — never the whole row, never a secret. */
-  readonly changes?: Readonly<Record<string, { readonly before: unknown; readonly after: unknown }>>;
-  readonly reason?: string;
-}
+export type { AuditRow, AuditEventType } from "../domain/audit";
 
 export interface CreateSaleInput {
   readonly idempotencyKey: string;
@@ -235,30 +238,97 @@ export class PosService {
    */
   importCatalogCsv(fileName: string, bytes: Uint8Array): CatalogImportResult {
     const cashier = this.requireCashier();
-    const store = this.deps.catalogStore;
-    if (!store) throw new DomainError("NOT_AVAILABLE", "Catalog import is not available on this terminal");
+    const { store, auditStore, transact } = this.requireProductStack();
     const currency = this.deps.terminal.currency;
     const { rows, rejected } = validateImport(decodeUtf8Strict(bytes), currency);
     if (rejected.length > 0) return { status: "rejected", rejected };
 
-    const counts = store.applyImport(CSV_SOURCE, rows, {
-      importId: this.newId(),
-      fileName: fileName.slice(0, 200),
-      fileSha256: createHash("sha256").update(bytes).digest("hex"),
-      cashierId: cashier.id,
-      now: this.now(),
+    const instant = this.now();
+    const importId = this.newId();
+    const safeFileName = fileName.slice(0, 200);
+    const fileSha256 = createHash("sha256").update(bytes).digest("hex");
+
+    // ONE transaction covers the upserts, the deactivations, the catalog_imports summary row AND
+    // every audit event. A fault anywhere inside leaves the catalog and the audit trail exactly as
+    // they were: everything or nothing.
+    const written: AuditRow[] = [];
+    const counts = transact((): ImportCounts => {
+      const outcome = store.applyImport(CSV_SOURCE, rows, {
+        importId,
+        fileName: safeFileName,
+        fileSha256,
+        cashierId: cashier.id,
+        now: instant,
+      });
+
+      // The summary first, so it holds the lowest `seq` of the import and the per-product events
+      // that follow read as its consequences. Bounded metadata only — never a CSV row, never the
+      // file.
+      written.push(
+        auditStore.append(
+          this.auditDraft(
+            cashier,
+            "CATALOG_IMPORTED",
+            "catalog",
+            importId,
+            instant,
+            {},
+            {
+              origin: "catalog_import",
+              file_name: safeFileName,
+              file_sha256: fileSha256,
+              row_count: rows.length,
+              inserted: outcome.counts.inserted,
+              updated: outcome.counts.updated,
+              unchanged: outcome.counts.unchanged,
+              deactivated: outcome.counts.deactivated,
+            },
+          ),
+          this.newId(),
+        ),
+      );
+
+      // One event per product the import actually touched; unchanged products produce none. An
+      // inserted product gets PRODUCT_CREATED with its whole audited state — the trail answers
+      // "which products did this import introduce" directly, rather than leaving it to be inferred
+      // later from created_at and source.
+      for (const change of outcome.changes) {
+        const eventType: AuditEventType =
+          change.kind === "inserted"
+            ? "PRODUCT_CREATED"
+            : change.kind === "updated"
+              ? "PRODUCT_UPDATED"
+              : "PRODUCT_DEACTIVATED";
+        written.push(
+          auditStore.append(
+            this.auditDraft(
+              cashier,
+              eventType,
+              "product",
+              change.id,
+              instant,
+              diffAuditedFields(
+                change.before,
+                change.after,
+                change.kind === "deactivated" ? ["is_active"] : AUDITED_PRODUCT_FIELDS,
+              ),
+              { origin: "catalog_import", catalog_import_id: importId, source: CSV_SOURCE },
+            ),
+            this.newId(),
+          ),
+        );
+      }
+      return outcome.counts;
     });
+
+    // Only once the import is durable does the live catalog move. Refreshing before COMMIT would
+    // mean a rolled-back import had already replaced the catalog the till is selling from.
     const source = store.loadActiveSource(currency);
     if (!source) throw new DomainError("LEDGER_INTEGRITY", "Imported catalog could not be read back");
     const next = loadCatalog(source);
     this.assertTerminalCurrency(next);
     this.catalog = next;
-    this.record(cashier, "CATALOG_IMPORTED", "catalog", CSV_SOURCE, CSV_SOURCE, {
-      rows: { before: null, after: rows.length },
-      inserted: { before: null, after: counts.inserted },
-      updated: { before: null, after: counts.updated },
-      deactivated: { before: null, after: counts.deactivated },
-    });
+    this.mirror(written);
     return {
       status: "imported",
       rowCount: rows.length,
@@ -308,25 +378,74 @@ export class PosService {
     this.catalog = next;
   }
 
-  private record(
+  /**
+   * Everything a product or catalog audit event needs except its own changes and metadata. The
+   * actor tier is `CURRENT_ACTOR_TIER` — 'unspecified' — because this build genuinely cannot know
+   * one; see the reasoning at that constant.
+   */
+  private auditDraft(
     cashier: Cashier,
-    action: AuditAction,
-    entityType: AuditEvent["entityType"],
+    eventType: AuditEventType,
+    entityType: "product" | "catalog",
     entityId: string,
-    source: string,
-    changes?: AuditEvent["changes"],
-  ): void {
-    this.deps.audit?.({
-      id: this.newId(),
-      at: this.now().toISOString(),
-      actorId: cashier.id,
-      actorName: cashier.name,
-      action,
+    instant: Date,
+    changes: AuditDraft["changes"],
+    metadata: AuditDraft["metadata"],
+  ): AuditDraft {
+    return {
+      eventType,
       entityType,
       entityId,
-      source,
-      ...(changes && Object.keys(changes).length > 0 ? { changes } : {}),
-    });
+      actorId: cashier.id,
+      actorName: cashier.name,
+      actorTier: CURRENT_ACTOR_TIER,
+      occurredAt: instant,
+      businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
+      changes,
+      metadata,
+    };
+  }
+
+  /**
+   * Mirrors committed rows to the diagnostic log. Called only after COMMIT, and it cannot fail the
+   * operation: the mutation is already durable, and a logging fault must not be reported as a
+   * failed sale or a failed edit.
+   */
+  private mirror(rows: ReadonlyArray<AuditRow>): void {
+    const sink = this.deps.audit;
+    if (!sink) return;
+    for (const row of rows) {
+      try {
+        sink(row);
+      } catch {
+        // diagnostics never undo a committed write
+      }
+    }
+  }
+
+  /**
+   * Product management needs three things together: the catalog table, the durable audit trail, and
+   * one transaction that covers both.
+   *
+   * 🔴 FAIL CLOSED. A terminal that can change master data but cannot durably record WHO changed it
+   * does not get to change master data. That is why this refuses rather than quietly writing an
+   * unaudited edit — the whole point of migration 5 would otherwise be optional at runtime.
+   */
+  private requireProductStack(): {
+    readonly store: CatalogRepository;
+    readonly auditStore: AuditRepository;
+    readonly transact: <T>(fn: () => T) => T;
+  } {
+    const store = this.requireStore();
+    const auditStore = this.deps.auditStore;
+    const transact = this.deps.transact;
+    if (!auditStore || !transact) {
+      throw new DomainError(
+        "NOT_AVAILABLE",
+        "Product management is unavailable: the durable audit trail is not wired on this terminal",
+      );
+    }
+    return { store, auditStore, transact };
   }
 
   /** Every local product, active and inactive — the administration list, not the sellable catalog. */
@@ -341,28 +460,49 @@ export class PosService {
    */
   createProduct(draft: ProductDraft): AdminProductRow {
     const cashier = this.requireCashier();
-    const store = this.requireStore();
+    const { store, auditStore, transact } = this.requireProductStack();
     const valid = validateProductDraft(draft, this.deps.terminal.currency);
-    if (valid.sku !== null && store.findBySku(valid.sku)) {
-      throw new DomainError("DUPLICATE_SKU", `Another product already uses the SKU '${valid.sku}'`);
-    }
-    const row = store.createManual(
-      {
-        nameAr: valid.nameAr,
-        nameEn: valid.nameEn,
-        sku: valid.sku,
-        priceMinor: valid.price.minor,
-        currency: valid.price.currency,
-        baseUnit: valid.baseUnit,
-      },
-      this.now(),
-    );
-    this.refreshCatalogFromStore(store);
-    this.record(cashier, "PRODUCT_CREATED", "product", row.id, row.source, {
-      name_ar: { before: null, after: row.name_ar },
-      selling_price_minor: { before: null, after: row.selling_price_minor.toString() },
-      base_unit: { before: null, after: row.base_unit },
+    const instant = this.now();
+    const written: AuditRow[] = [];
+
+    const row = transact((): AdminProductRow => {
+      // The SKU check moved inside the transaction: outside it, two near-simultaneous creates could
+      // both pass the check and only the unique index would catch the second one.
+      if (valid.sku !== null && store.findBySku(valid.sku)) {
+        throw new DomainError("DUPLICATE_SKU", `Another product already uses the SKU '${valid.sku}'`);
+      }
+      const created = store.createManual(
+        {
+          nameAr: valid.nameAr,
+          nameEn: valid.nameEn,
+          sku: valid.sku,
+          priceMinor: valid.price.minor,
+          currency: valid.price.currency,
+          baseUnit: valid.baseUnit,
+        },
+        instant,
+      );
+      // A creation records its WHOLE audited state, with every `before` null — the same
+      // representation an edit uses, so there is one format and not two.
+      written.push(
+        auditStore.append(
+          this.auditDraft(
+            cashier,
+            "PRODUCT_CREATED",
+            "product",
+            created.id,
+            instant,
+            diffAuditedFields(null, auditedProductState(created)),
+            { origin: "manual_entry", source: created.source },
+          ),
+          this.newId(),
+        ),
+      );
+      return created;
     });
+
+    this.refreshCatalogFromStore(store);
+    this.mirror(written);
     return row;
   }
 
@@ -375,69 +515,105 @@ export class PosService {
    */
   updateProduct(id: string, draft: ProductDraft, isActive: boolean): AdminProductRow {
     const cashier = this.requireCashier();
-    const store = this.requireStore();
-    const before = store.findById(id);
-    if (!before) throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
-    const valid = validateProductDraft(draft, before.currency);
-    if (valid.sku !== null) {
-      const owner = store.findBySku(valid.sku);
-      if (owner && owner.id !== id) {
-        throw new DomainError("DUPLICATE_SKU", `Another product already uses the SKU '${valid.sku}'`);
+    const { store, auditStore, transact } = this.requireProductStack();
+    const instant = this.now();
+    const written: AuditRow[] = [];
+
+    const after = transact((): AdminProductRow => {
+      const before = store.findById(id);
+      if (!before) throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
+      const valid = validateProductDraft(draft, before.currency);
+      if (valid.sku !== null) {
+        const owner = store.findBySku(valid.sku);
+        if (owner && owner.id !== id) {
+          throw new DomainError("DUPLICATE_SKU", `Another product already uses the SKU '${valid.sku}'`);
+        }
       }
-    }
-    const after = store.updateProduct(
-      id,
-      {
-        nameAr: valid.nameAr,
-        nameEn: valid.nameEn,
-        sku: valid.sku,
-        priceMinor: valid.price.minor,
-        baseUnit: valid.baseUnit,
-        isActive,
-      },
-      this.now(),
-    );
-    this.refreshCatalogFromStore(store);
-
-    const changes: Record<string, { before: unknown; after: unknown }> = {};
-    const diff = (field: string, b: unknown, a: unknown) => {
-      if (b !== a) changes[field] = { before: b, after: a };
-    };
-    diff("name_ar", before.name_ar, after.name_ar);
-    diff("name_en", before.name_en, after.name_en);
-    diff("sku", before.sku, after.sku);
-    diff("selling_price_minor", before.selling_price_minor.toString(), after.selling_price_minor.toString());
-    diff("base_unit", before.base_unit, after.base_unit);
-    diff("is_active", before.is_active === 1n, after.is_active === 1n);
-
-    if (before.selling_price_minor !== after.selling_price_minor) {
-      this.record(cashier, "PRICE_CHANGED", "product", id, after.source, {
-        selling_price_minor: {
-          before: before.selling_price_minor.toString(),
-          after: after.selling_price_minor.toString(),
+      const updated = store.updateProduct(
+        id,
+        {
+          nameAr: valid.nameAr,
+          nameEn: valid.nameEn,
+          sku: valid.sku,
+          priceMinor: valid.price.minor,
+          baseUnit: valid.baseUnit,
+          isActive,
         },
-      });
-    }
-    if (before.base_unit !== after.base_unit) {
-      this.record(cashier, "UNIT_CHANGED", "product", id, after.source, {
-        base_unit: { before: before.base_unit, after: after.base_unit },
-      });
-    }
-    this.record(cashier, "PRODUCT_UPDATED", "product", id, after.source, changes);
+        instant,
+      );
+      // ONE event for one user action, however many fields moved — price, unit, name, SKU and
+      // active status all travel in this single diff. Separate PRICE_CHANGED / UNIT_CHANGED rows
+      // (which earlier builds wrote to the logfile) would restate what this row already carries and
+      // would double-count in any "how many changes today" question.
+      const changes = diffAuditedFields(auditedProductState(before), auditedProductState(updated));
+      if (Object.keys(changes).length > 0) {
+        written.push(
+          auditStore.append(
+            this.auditDraft(cashier, "PRODUCT_UPDATED", "product", id, instant, changes, {
+              origin: "manual_entry",
+              source: updated.source,
+            }),
+            this.newId(),
+          ),
+        );
+      }
+      return updated;
+    });
+
+    this.refreshCatalogFromStore(store);
+    this.mirror(written);
     return after;
   }
 
-  /** Deactivates or reactivates. Never deletes — a product that has been sold stays on record. */
+  /**
+   * Deactivates or reactivates. Never deletes — a product that has been sold stays on record.
+   *
+   * This is a DIFFERENT event from an edit that happens to flip `is_active`, and deliberately so:
+   * they are two different operator intents arriving through two different IPC channels. The list's
+   * toggle says "stop selling this"; an edit says "these are the product's new details". The
+   * durable trail keeps that distinction rather than flattening both into PRODUCT_UPDATED.
+   */
   setProductActive(id: string, active: boolean): AdminProductRow {
     const cashier = this.requireCashier();
-    const store = this.requireStore();
-    const before = store.findById(id);
-    if (!before) throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
-    const after = store.setActive(id, active, this.now());
-    this.refreshCatalogFromStore(store);
-    this.record(cashier, active ? "PRODUCT_ACTIVATED" : "PRODUCT_DEACTIVATED", "product", id, after.source, {
-      is_active: { before: before.is_active === 1n, after: active },
+    const { store, auditStore, transact } = this.requireProductStack();
+    const instant = this.now();
+    const written: AuditRow[] = [];
+
+    // 🔴 The whole operation is under ONE service-owned transaction. `CatalogRepository.setActive`
+    // deliberately has none of its own: until migration 5 it had no transaction at all, which was
+    // the one atomicity hole left in the application, and this is where it closes.
+    const after = transact((): AdminProductRow => {
+      const before = store.findById(id);
+      if (!before) throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
+      const updated = store.setActive(id, active, instant);
+      const changes = diffAuditedFields(
+        { is_active: before.is_active === 1n },
+        { is_active: updated.is_active === 1n },
+        ["is_active"],
+      );
+      // Toggling a product to the state it is already in changed nothing, and nothing is not an
+      // event.
+      if (Object.keys(changes).length > 0) {
+        written.push(
+          auditStore.append(
+            this.auditDraft(
+              cashier,
+              active ? "PRODUCT_ACTIVATED" : "PRODUCT_DEACTIVATED",
+              "product",
+              id,
+              instant,
+              changes,
+              { origin: "manual_entry", source: updated.source },
+            ),
+            this.newId(),
+          ),
+        );
+      }
+      return updated;
     });
+
+    this.refreshCatalogFromStore(store);
+    this.mirror(written);
     return after;
   }
 

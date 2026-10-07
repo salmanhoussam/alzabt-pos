@@ -30,6 +30,9 @@ const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["
 const home = mkdtempSync(join(tmpdir(), "pos-e2e-products-"));
 const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
 
+const Database = createRequire(import.meta.url)("better-sqlite3");
+const LEDGER = join(home, "userData", "alzabt-pos-ledger.sqlite");
+
 const log = (...a) => console.log("•", ...a);
 const assert = (cond, msg) => {
   if (!cond) throw new Error("ASSERTION FAILED: " + msg);
@@ -225,6 +228,91 @@ await page.waitForSelector('[data-testid="product-row"]');
 assert((await rows(page).count()) === 2, "both products came back from SQLite after the restart");
 assert((await page.locator(".row-inactive").count()) === 1, "the deactivated product is still inactive");
 await app.close();
+
+// ── 7 · 🔴 The DURABLE audit trail, read out of the real ledger ─────────────────────────────────
+//
+// Everything above went through the installed app's real IPC and real SQLite. This section is the
+// evidence a unit test cannot give: that the operator's own clicks left an append-only, durable
+// account of themselves in the real %APPDATA% ledger, and that it is still there after a restart.
+// The app is CLOSED before this read — every other ledger read in this suite waits for that too.
+{
+  const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
+  try {
+    const n = (sql) => Number(db.prepare(sql).get().n);
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 5, "the installed app's ledger is at schema v5");
+
+    const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
+    const types = rows.map((r) => r.event_type);
+    // Two creations, one edit, one deactivation — exactly what was done on screen above.
+    assert(
+      types.filter((t) => t === "PRODUCT_CREATED").length === 2,
+      `both typed products left a PRODUCT_CREATED row (${types.filter((t) => t === "PRODUCT_CREATED").length})`,
+    );
+    assert(types.includes("PRODUCT_UPDATED"), "the price edit left a PRODUCT_UPDATED row");
+    assert(types.includes("PRODUCT_DEACTIVATED"), "the deactivation left a PRODUCT_DEACTIVATED row");
+    // 🔴 ONE row per user action: the price edit did NOT also write PRICE_CHANGED / UNIT_CHANGED.
+    assert(
+      !types.includes("PRICE_CHANGED") && !types.includes("UNIT_CHANGED"),
+      "no duplicate PRICE_CHANGED / UNIT_CHANGED rows — the price lives inside the diff",
+    );
+
+    assert(
+      rows.every((r, i) => Number(r.seq) === i + 1),
+      "seq is a gapless increasing sequence, which is the only ordering authority",
+    );
+    assert(
+      rows.every((r) => r.actor_id === "cashier-01" && r.actor_name === "Cashier One"),
+      "every row names the operator who did it",
+    );
+    assert(
+      rows.every((r) => r.actor_tier === "unspecified"),
+      "the actor tier is recorded as unknown rather than guessed (this build has no role model)",
+    );
+
+    // The real price edit, with its real old value — 4.00 became 9.00 on screen.
+    const edit = rows.find((r) => r.event_type === "PRODUCT_UPDATED");
+    const diff = JSON.parse(edit.changed_json);
+    assert(
+      diff.selling_price_minor?.before === "400" && diff.selling_price_minor?.after === "900",
+      `the edit recorded 4.00 -> 9.00 as exact minor units (${JSON.stringify(diff.selling_price_minor)})`,
+    );
+
+    // No PIN, no hash, no token anywhere in the stored trail.
+    const raw = JSON.stringify(rows);
+    for (const needle of ["pin", "Pin", "PIN", "hash", "token", "secret", "1111"]) {
+      assert(!raw.includes(needle), `the stored audit trail contains no '${needle}'`);
+    }
+  } finally {
+    db.close();
+  }
+}
+
+// ── 8 · 🔴 Append-only, enforced by SQLite in the installed app's own ledger ─────────────────────
+{
+  const db = new Database(LEDGER, { fileMustExist: true });
+  try {
+    let updateRejected = false;
+    let deleteRejected = false;
+    try {
+      db.prepare("UPDATE audit_events SET actor_name = 'Someone Else'").run();
+    } catch (err) {
+      updateRejected = /append-only/.test(String(err.message));
+    }
+    try {
+      db.prepare("DELETE FROM audit_events").run();
+    } catch (err) {
+      deleteRejected = /cannot be deleted/.test(String(err.message));
+    }
+    assert(updateRejected, "UPDATE on audit_events is rejected by the database itself");
+    assert(deleteRejected, "DELETE on audit_events is rejected by the database itself");
+    assert(
+      db.prepare("SELECT count(*) AS n FROM audit_events").get().n > 0,
+      "and the trail is still intact after both attempts",
+    );
+  } finally {
+    db.close();
+  }
+}
 
 log("product management E2E: all assertions passed");
 log("screenshots in", SHOTS);

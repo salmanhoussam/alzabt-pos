@@ -148,7 +148,49 @@ function ledgerFacts() {
         .all()
         .map((r) => Number(r.q)),
       unknownUnits: lineHasSaleUnit(db) ? n("SELECT count(*) AS n FROM sale_lines WHERE sale_unit IS NULL") : null,
+      // Migration 5. `null` means the table does not exist yet, which is the honest answer for any
+      // ledger a pre-v5 build wrote — never 0, which would claim an empty trail that is not there.
+      audit: tables.includes("audit_events") ? n("SELECT count(*) AS n FROM audit_events") : null,
+      auditTypes: tables.includes("audit_events")
+        ? db
+            .prepare("SELECT event_type AS t, count(*) AS n FROM audit_events GROUP BY event_type ORDER BY t")
+            .all()
+            .map((r) => `${r.t}=${Number(r.n)}`)
+            .join(",")
+        : null,
       integrity: db.pragma("integrity_check", { simple: true }),
+    };
+  } finally {
+    db.close();
+  }
+}
+
+/** Every audit row, oldest first. The app must be CLOSED. */
+function auditRows() {
+  const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
+  try {
+    return db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
+  } finally {
+    db.close();
+  }
+}
+
+/** Proves the append-only triggers really are in the installed app's own ledger. */
+function auditIsAppendOnly() {
+  const db = new Database(LEDGER, { fileMustExist: true });
+  try {
+    const refused = (sql, pattern) => {
+      try {
+        db.prepare(sql).run();
+        return false;
+      } catch (err) {
+        return pattern.test(String(err.message));
+      }
+    };
+    return {
+      update: refused("UPDATE audit_events SET actor_name = 'Someone Else'", /append-only/),
+      delete: refused("DELETE FROM audit_events", /cannot be deleted/),
+      intact: Number(db.prepare("SELECT count(*) AS n FROM audit_events").get().n),
     };
   } finally {
     db.close();
@@ -430,8 +472,155 @@ if (PHASE === "seed-v2") {
   assert(JSON.stringify(f2.quantities) === "[1000,1000,2500]", `the fractional quantity is stored exactly: ${JSON.stringify(f2.quantities)}`);
   assert(f2.unknownUnits === 2, "the new line records its unit; only the two legacy lines are unknown");
   assert(JSON.stringify(f2.receipts) === "[1,2,3]" && f2.integrity === "ok", "receipt sequence continued and the ledger is sound");
+} else if (PHASE === "seed-v4") {
+  // Scenario D — the canonical CURRENT MAIN build (68fdf03, schema v4: exact quantity + sale_unit,
+  // and NO durable audit). This is the profile a shop would really be upgraded from.
+  assert(!existsSync(LEDGER), "scenario starts with no ledger in the real profile");
+  const { app, page } = await launch();
+  const cat = writeCatalog();
+  await stub(app, "open", cat.file);
+  await tab(page, "Tools");
+  await page.getByRole("button", { name: "Import catalog" }).click();
+  await page.waitForSelector("text=Catalog imported");
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+
+  await tab(page, "Products");
+  await page.locator('[data-testid="add-product"]').click();
+  await page.waitForSelector('[data-testid="field-nameAr"]');
+  await page.locator('[data-testid="field-nameAr"]').fill("حبل قنب");
+  const formInputs = page.locator(".product-form input");
+  await formInputs.nth(1).fill("Hemp Rope");
+  await formInputs.nth(2).fill("SYN-ROPE");
+  await page.locator('[data-testid="field-price"]').fill("4.00");
+  await page.locator('[data-testid="field-unit"]').selectOption("kg");
+  await page.locator('[data-testid="save-product"]').click();
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="product-row"]').length >= 1);
+
+  // A FRACTIONAL sale, which only this build onward can make — it must survive to v5 untouched.
+  await tab(page, "Sell");
+  await page.waitForSelector("button.product");
+  await product(page, "SYN-ROPE").click();
+  const qty = page.locator('[data-testid^="qty-"]').first();
+  await qty.fill("2.5");
+  await qty.press("Enter");
+  await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("10.00"));
+  await page.getByRole("button", { name: "Complete sale" }).click();
+  await page.getByRole("button", { name: "Cash" }).click();
+  await page.waitForSelector("text=Receipt #1");
+  await page.getByRole("button", { name: "New sale" }).click();
+  await sell(page, ["مياه"], "Card", 2);
+  await voidCardSale(page);
+  await page.screenshot({ path: SHOTS + "upgrade-d1-old-v4.png" });
+  await app.close();
+
+  const f = ledgerFacts();
+  log("ledger after seeding with the CURRENT MAIN build:", JSON.stringify(f));
+  assert(f.schema === 4, `the current main build wrote schema v4 (got ${f.schema})`);
+  assert(f.sales === 2 && f.voids === 1, "2 sales and 1 void");
+  assert(JSON.stringify(f.quantities) === "[2500,1000]", `the fractional quantity was stored exactly: ${JSON.stringify(f.quantities)}`);
+  assert(f.unknownUnits === 0, "every line of a v4-written ledger records its sale unit");
+  // 🔴 And the thing migration 5 adds: this build has no audit table at all.
+  assert(f.audit === null, "the v4 build has no audit_events table — nothing to backfill from");
+} else if (PHASE === "verify-from-v4") {
+  let { app, page } = await launch();
+  await assertBuildLine(page);
+
+  // Everything the old build wrote is still there.
+  await tab(page, "Products");
+  await page.waitForSelector('[data-testid="product-row"]');
+  const rows = await page.locator('[data-testid="product-row"]').allInnerTexts();
+  const rope = rows.find((r) => r.includes("حبل قنب"));
+  assert(rope, `the manually added product survived the upgrade (rows: ${rows.length})`);
+  assert(rope.includes("SYN-ROPE") && rope.includes("4.00"), `its SKU and price survived: ${rope.replace(/\s+/g, " ")}`);
+  const h = await historyRows(page);
+  assert(h.rows === 2 && h.voided === 1, "history after upgrade: both sales, the void preserved");
+  await app.close();
+
+  const f = ledgerFacts();
+  log("ledger after the v4 -> v5 upgrade:", JSON.stringify(f));
+  assert(f.schema === 5 && f.integrity === "ok", `migrated to schema v5, integrity ok (got ${f.schema})`);
+  assert(f.sales === 2 && f.voids === 1, "sales and voids untouched by migration 5");
+  // 🔴 Migration 4's behaviour is unchanged: the fractional quantity is still exactly 2500.
+  assert(JSON.stringify(f.quantities) === "[2500,1000]", `quantities untouched: ${JSON.stringify(f.quantities)}`);
+  assert(f.unknownUnits === 0, "sale units untouched");
+  assert(productUnit("SYN-ROPE") === "kg", `the product's unit survived as kg (got ${productUnit("SYN-ROPE")})`);
+  // 🔴 The trail starts EMPTY. No pre-v5 history is invented out of the rotating logfile.
+  assert(f.audit === 0, `the audit trail exists and starts empty (got ${f.audit})`);
+  const pre = backupFiles().find((b) => /^pre-migration-v4-to-v5-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, `a verified pre-migration v4->v5 backup exists (got ${JSON.stringify(backupFiles())})`);
+
+  // ── A real product mutation on the new build must leave a durable audit row ────────────────────
+  ({ app, page } = await launch());
+  await tab(page, "Products");
+  await page.waitForSelector('[data-testid="product-row"]');
+  const ropeRow = page.locator('[data-testid="product-row"]', { hasText: "SYN-ROPE" }).first();
+  await ropeRow.getByRole("button").first().click();
+  await page.waitForSelector('[data-testid="field-price"]');
+  await page.locator('[data-testid="field-price"]').fill("6.00");
+  await page.locator('[data-testid="save-product"]').click();
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+  await page.waitForFunction(() => document.body.innerText.includes("6.00"));
+  await page.screenshot({ path: SHOTS + "upgrade-d2-audited-edit.png" });
+  await app.close();
+
+  let audit = auditRows();
+  assert(audit.length === 1, `the edit left exactly one audit row (got ${audit.length})`);
+  assert(audit[0].event_type === "PRODUCT_UPDATED", `and it is a PRODUCT_UPDATED (got ${audit[0].event_type})`);
+  assert(Number(audit[0].seq) === 1, "its seq starts at 1 on a freshly migrated ledger");
+  assert(audit[0].actor_id === "cashier-01" && audit[0].actor_name === "Cashier One", "it names the operator");
+  assert(audit[0].actor_tier === "unspecified", "and records the tier as unknown rather than guessing");
+  const diff = JSON.parse(audit[0].changed_json);
+  assert(
+    diff.selling_price_minor?.before === "400" && diff.selling_price_minor?.after === "600",
+    `it recorded 4.00 -> 6.00 exactly (${JSON.stringify(diff.selling_price_minor)})`,
+  );
+  assert(!JSON.stringify(audit).includes("PRICE_CHANGED"), "one user action is one row — no duplicate PRICE_CHANGED");
+
+  // ── It survives a restart ──────────────────────────────────────────────────────────────────────
+  ({ app, page } = await launch());
+  await tab(page, "Products");
+  await page.waitForSelector('[data-testid="product-row"]');
+  await app.close();
+  const afterRestart = auditRows();
+  assert(afterRestart.length === 1 && afterRestart[0].id === audit[0].id, "the audit row survived a restart");
+
+  // ── Append-only, in the installed app's real ledger ───────────────────────────────────────────
+  const guard = auditIsAppendOnly();
+  assert(guard.update, "UPDATE on audit_events is rejected by SQLite itself");
+  assert(guard.delete, "DELETE on audit_events is rejected by SQLite itself");
+  assert(guard.intact === 1, "and the trail is intact after both attempts");
+
+  // ── A new catalog import produces the expected summary and entity rows ────────────────────────
+  ({ app, page } = await launch());
+  const cat2 = writeCatalog();
+  await stub(app, "open", cat2.file);
+  await tab(page, "Tools");
+  await page.getByRole("button", { name: "Import catalog" }).click();
+  await page.waitForSelector("text=Catalog imported");
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+  await app.close();
+
+  audit = auditRows();
+  const imported = audit.filter((r) => r.event_type === "CATALOG_IMPORTED");
+  assert(imported.length === 1, `the re-import wrote exactly one CATALOG_IMPORTED summary (got ${imported.length})`);
+  const meta = JSON.parse(imported[0].metadata_json);
+  assert(meta.origin === "catalog_import" && /^[0-9a-f]{64}$/.test(meta.file_sha256), "its metadata names the file by digest");
+  assert(typeof meta.row_count === "number" && meta.row_count > 0, `and the bounded counts (${JSON.stringify(meta)})`);
+  // The identical file was imported again, so every catalogued row is unchanged: summary only.
+  const sinceImport = audit.filter((r) => Number(r.seq) > 1);
+  assert(
+    sinceImport.length === 1 && sinceImport[0].event_type === "CATALOG_IMPORTED",
+    `an identical re-import writes the summary and no product events (got ${sinceImport.map((r) => r.event_type).join(",")})`,
+  );
+  const f2 = ledgerFacts();
+  log("final ledger:", JSON.stringify(f2));
+  assert(f2.integrity === "ok" && f2.schema === 5, "the ledger is sound and still at v5");
+  assert(JSON.stringify(f2.quantities) === "[2500,1000]", "no sale was disturbed by any of this");
 } else {
-  console.error("usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main");
+  console.error(
+    "usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main|seed-v4|verify-from-v4",
+  );
   process.exit(2);
 }
 log(`UPGRADE PHASE ${PHASE} PASSED — profile ${DEFAULT_PROFILE}`);
