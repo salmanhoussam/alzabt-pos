@@ -164,6 +164,11 @@ await page.screenshot({ path: SHOTS + "P6-deactivated.png" });
 assert(true, "a deactivated product is still listed, marked inactive");
 
 await tab(page, "sell");
+// count() does not wait, and SellScreen renders "Loading catalog…" with no product buttons until
+// its own fetch resolves — so counting straight after the tab click read the loading frame and saw
+// 0 of 2. The pane only exists after the catalog is in hand, which is the same guard the Products
+// screen already gave the assertions above.
+await page.waitForSelector(".products-pane");
 const sellable = await page.locator("button.product").count();
 assert(sellable === 1, `only the active product is sellable (${sellable} of 2)`);
 
