@@ -161,7 +161,7 @@ jobs:
       # last build before migration 4, and so the one a real shop would be upgrading FROM).
       - name: Build previous releases for the upgrade test
         run: |
-          foreach ($ref in @("7c7edcc3ac5c5df3c3f7fea14f27b532196413d4", "24bdc22560e6f72e8cadc361c8a23151dc6a9681", "6699f97c163008d44d4644be4ef2954d1a9634c4")) {
+          foreach ($ref in @("7c7edcc3ac5c5df3c3f7fea14f27b532196413d4", "24bdc22560e6f72e8cadc361c8a23151dc6a9681", "6699f97c163008d44d4644be4ef2954d1a9634c4", "68fdf039a7ab29b0c44a76c6bfce6aca42cb58fc")) {
             $dir = "..\old-$($ref.Substring(0,7))"
             git worktree add --detach $dir $ref
             Push-Location $dir
@@ -247,6 +247,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "verify-from-main failed" }
           Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host "Profile after the migration-4 upgrade:"
+          Get-ChildItem $posProfile -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: "Upgrade D: canonical current main (schema v4, exact quantity) -> this build, real %APPDATA% profile"
+        run: |
+          $posProfile = Join-Path $env:APPDATA "Alzabt POS"
+          if (Test-Path $posProfile) { Remove-Item $posProfile -Recurse -Force }
+          # 68fdf03 is the canonical main installer a shop would really be upgraded from.
+          $old = Get-ChildItem ..\old-68fdf03\release -Filter "*Setup*.exe" | Select-Object -First 1
+          Write-Host "Upgrading FROM: $($old.Name)"
+          $p = Start-Process -FilePath $old.FullName -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "old installer exit $($p.ExitCode)" }
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/upgrade.mjs seed-v4
+          if ($LASTEXITCODE -ne 0) { throw "seed-v4 failed" }
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          $p = Start-Process -FilePath "${{ steps.installer.outputs.path }}" -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "new installer (over current main) exit $($p.ExitCode)" }
+          node e2e/upgrade.mjs verify-from-v4
+          if ($LASTEXITCODE -ne 0) { throw "verify-from-v4 failed" }
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host "Profile after the migration-5 upgrade:"
           Get-ChildItem $posProfile -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
 
       - name: Upload E2E screenshots

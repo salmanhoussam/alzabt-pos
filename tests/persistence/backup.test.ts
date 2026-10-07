@@ -69,6 +69,31 @@ describe("snapshotDatabase (export backup)", () => {
     h.db.close();
   });
 
+  /**
+   * 🔴 A v5 backup that does not verify `audit_events` is not a verified backup. `tableCounts()`
+   * SKIPS a table it was not told about, silently, so leaving the audit trail out of
+   * COUNTED_TABLES would have produced snapshots that looked verified while proving nothing about
+   * the one table migration 5 added.
+   */
+  it("verifies the durable audit trail's row count too", () => {
+    const h = makeHarness(t.dbPath);
+    h.service.createProduct({ nameAr: "صنف", nameEn: "Item", sku: "SYN-1", price: "4.00", baseUnit: "piece" });
+    const row = h.service.listProducts()[0]!;
+    h.service.setProductActive(row.id, false);
+    expect(h.audit.count()).toBe(2);
+
+    const dest = join(t.dir, "with-audit.sqlite");
+    const snap = snapshotDatabase(h.db, dest);
+    expect(snap.counts.audit_events).toBe(2);
+
+    const copy = new Database(dest, { readonly: true });
+    expect(Number((copy.prepare("SELECT count(*) AS n FROM audit_events").get() as { n: number }).n)).toBe(2);
+    // And it is still append-only inside the snapshot: the triggers travelled with the schema.
+    expect(() => copy.prepare("DELETE FROM audit_events").run()).toThrow();
+    copy.close();
+    h.db.close();
+  });
+
   it("replaces an existing file only with a verified snapshot and leaves no partial file", () => {
     const h = makeHarness(t.dbPath);
     sell(h, 1);

@@ -221,4 +221,91 @@ WHEN NEW.sale_unit IS NULL
 BEGIN SELECT RAISE(ABORT, 'ledger: a sale line must record the unit it was sold in'); END;
 `,
   },
+  {
+    version: 5,
+    name: "durable_local_audit",
+    // ── The authoritative durable business audit trail ──────────────────────────────────────────
+    //
+    // Purely ADDITIVE: one new table, four indexes, three triggers. No existing table is altered,
+    // no existing trigger is touched, and NOTHING is backfilled — `audit_events` starts empty on a
+    // migrated ledger, and that is deliberate and truthful. The rotating JSON logfile that carried
+    // audit lines until now rotates and is deleted, was written AFTER the business commit, and is
+    // therefore not transactionally trustworthy historical evidence; inventing pre-v5 history out
+    // of it would be worse than having none. The durable trail starts here, prospectively.
+    //
+    // WHY `seq` AND NOT `occurred_at` FOR ORDERING: the clock is injectable (frozen to a constant
+    // in tests) and one user action may emit several events, so two rows can legitimately share
+    // `occurred_at` to the millisecond. Timestamp equality is allowed on purpose; `seq` is the only
+    // ordering authority, allocated as max(seq)+1 inside the same BEGIN IMMEDIATE as the business
+    // mutation — exactly how sales.receipt_number is allocated.
+    //
+    // WHY TEXT TIMESTAMPS: every other table in this ledger stores ISO-8601 UTC text
+    // (sales.completed_at, voids.created_at, catalog_products.updated_at). Consistency beats
+    // cleverness, and GLOB can then shape-check them as it already does for business_date.
+    //
+    // NO FOREIGN KEY TO AN ACTOR — and it is not merely unwise, it is impossible: there is no
+    // cashiers TABLE, the cashiers are a TypeScript fixture. actor_id/actor_name/actor_tier are
+    // plain snapshots, exactly as sale_lines.product_name is, so editing or removing an actor
+    // tomorrow cannot invalidate or erase a historical row.
+    //
+    // 🔴 WHAT THE TRIGGERS DO AND DO NOT PROTECT. They make UPDATE and DELETE impossible through
+    // this application and through any normal SQL access to the table, and they make a back-dated
+    // seq impossible. They are NOT tamper-proof against someone who owns the file: DROP TABLE does
+    // not fire BEFORE DELETE, and the sqlite3 CLI can do as it likes. Hash chaining would raise
+    // that bar and is deliberately NOT in this migration.
+    sql: `
+CREATE TABLE audit_events (
+  id             TEXT    PRIMARY KEY,
+  seq            INTEGER NOT NULL UNIQUE CHECK (seq > 0),
+  event_type     TEXT    NOT NULL CHECK (event_type IN
+                   ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED',
+                    'PRODUCT_DEACTIVATED', 'CATALOG_IMPORTED')),
+  entity_type    TEXT    NOT NULL CHECK (entity_type IN ('product', 'catalog')),
+  entity_id      TEXT    NOT NULL CHECK (length(entity_id) > 0),
+  actor_id       TEXT    NOT NULL CHECK (length(actor_id) > 0),
+  actor_name     TEXT    NOT NULL CHECK (length(trim(actor_name)) > 0),
+  actor_tier     TEXT    NOT NULL CHECK (actor_tier IN
+                   ('owner', 'admin', 'cashier', 'system', 'unspecified')),
+  occurred_at    TEXT    NOT NULL CHECK (occurred_at GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date  TEXT    NOT NULL CHECK (business_date GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  changed_json   TEXT    NOT NULL CHECK (json_valid(changed_json)
+                                         AND json_type(changed_json) = 'object'),
+  metadata_json  TEXT             CHECK (metadata_json IS NULL
+                                         OR (json_valid(metadata_json)
+                                             AND json_type(metadata_json) = 'object')),
+  app_version    TEXT    NOT NULL CHECK (length(app_version) > 0),
+  schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+  -- A product event may only describe a product, and an import only the catalog. The same pairing
+  -- is enforced in src/domain/audit.ts; this is the backstop that no code path can talk past.
+  CHECK (
+    (entity_type = 'product' AND event_type IN
+       ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED', 'PRODUCT_DEACTIVATED'))
+    OR (entity_type = 'catalog' AND event_type = 'CATALOG_IMPORTED')
+  )
+) STRICT;
+
+-- Four indexes, each for one named question. "Newest events" needs none: seq is UNIQUE, so
+-- ORDER BY seq DESC LIMIT n is already an index scan. No specialized JSON index is created here:
+-- there is no audit query UI yet, and coupling the schema to one JSON field before a real query
+-- has been measured would be premature.
+CREATE INDEX audit_events_entity ON audit_events (entity_type, entity_id, seq DESC);
+CREATE INDEX audit_events_type   ON audit_events (event_type, seq DESC);
+CREATE INDEX audit_events_actor  ON audit_events (actor_id, seq DESC);
+CREATE INDEX audit_events_date   ON audit_events (business_date, seq DESC);
+
+CREATE TRIGGER audit_events_immutable_update BEFORE UPDATE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: the audit trail is append-only'); END;
+CREATE TRIGGER audit_events_immutable_delete BEFORE DELETE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: audit events cannot be deleted'); END;
+
+-- The one thing a CHECK cannot do: a CHECK sees only its own row, so it cannot know the current
+-- max(seq). Back-dating a row to slot it between two existing events is therefore the single
+-- forgery a CHECK is blind to, and this trigger is what closes it.
+CREATE TRIGGER audit_events_seq_monotonic BEFORE INSERT ON audit_events
+WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
+BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
+`,
+  },
 ];

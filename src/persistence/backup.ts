@@ -25,7 +25,23 @@ export const BACKUP_DIR_NAME = "backups";
 /** Daily snapshots kept. Two weeks covers "it was fine last week" on a single shop PC. */
 export const DAILY_RETENTION = 14;
 
-const COUNTED_TABLES = ["sales", "sale_lines", "voids", "catalog_products", "schema_migrations"] as const;
+/**
+ * Tables whose row counts a snapshot must reproduce exactly before it is accepted as a backup.
+ *
+ * 🔴 `audit_events` is here because a v5 backup that does not verify the audit trail is not a
+ * verified backup — `tableCounts()` SKIPS a table it is not told about, silently, so leaving it out
+ * would have produced snapshots that looked verified while proving nothing about the one table
+ * migration 5 added. The skip is also what keeps this list safe for a pre-v5 database, where the
+ * table does not exist yet.
+ */
+const COUNTED_TABLES = [
+  "sales",
+  "sale_lines",
+  "voids",
+  "catalog_products",
+  "audit_events",
+  "schema_migrations",
+] as const;
 const DAILY_RE = /^daily-(\d{4}-\d{2}-\d{2})\.sqlite$/;
 
 export class BackupError extends Error {

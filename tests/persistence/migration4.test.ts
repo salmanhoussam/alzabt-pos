@@ -17,6 +17,8 @@ import { type TempDir, makeHarness, newKey, tempDir } from "../helpers/harness";
 
 /** The schema version migration 4 upgrades FROM. */
 const V3 = 3;
+/** Migration 4 is the subject here, so this file always migrates to EXACTLY v4, never to latest. */
+const V4 = 4;
 
 let t: TempDir;
 beforeEach(() => {
@@ -53,8 +55,13 @@ const triggers = (db: Db) =>
 
 describe("migration 4 — v3 to v4", () => {
   it("is the fourth migration, and 1-3 are not touched by it", () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4]);
+    // Was exactly [1, 2, 3, 4] until migration 5 (durable_local_audit) was appended. Migration 4's
+    // own position and content are what this file is about, and neither moved.
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5]);
     expect(MIGRATIONS[3]!.name).toBe("exact_sale_quantity");
+    // Migration 5 is additive and must not reach into this one's table either.
+    expect(MIGRATIONS[4]!.name).toBe("durable_local_audit");
+    expect(MIGRATIONS[4]!.sql).not.toMatch(/sale_lines/i);
     // Nothing in migration 4's own SQL alters an earlier table's definition.
     for (const forbidden of [/ALTER TABLE sales\b/i, /DROP TABLE sales\b/i, /catalog_products/i, /cashier_pin_state/i]) {
       expect(MIGRATIONS[3]!.sql, String(forbidden)).not.toMatch(forbidden);
@@ -73,8 +80,8 @@ describe("migration 4 — v3 to v4", () => {
       return { rows, sales };
     })();
 
-    const db = openDatabase(t.dbPath, MIGRATIONS, { fileMustExist: true });
-    expect(schemaVersion(db)).toBe(4);
+    const db = openDatabase(t.dbPath, MIGRATIONS.slice(0, V4), { fileMustExist: true });
+    expect(schemaVersion(db)).toBe(V4);
     const after = lines(db);
 
     expect(after).toHaveLength(before.rows.length);

@@ -22,6 +22,7 @@ import { BACKUP_DIR_NAME, createPreMigrationBackup, ensureDailyBackup, snapshotD
 import { CatalogRepository } from "../persistence/catalogRepository";
 import { type Db, openDatabase, schemaVersion } from "../persistence/db";
 import { MIGRATIONS } from "../persistence/migrations";
+import { AuditRepository } from "../persistence/auditRepository";
 import { PinStateRepository } from "../persistence/pinStateRepository";
 import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
@@ -274,9 +275,20 @@ function startTill(): void {
     catalogStore,
     cashiers: FIXTURE_CASHIERS,
     terminal: FIXTURE_TERMINAL,
-    // Administrative actions go to the application log: "who changed this price" is answerable
-    // today, from a file, with no schema change. The real audit table is a proposed migration.
-    audit: (event) => log.info("audit", { ...event }),
+    // The durable audit trail (migration 5) and the transaction that binds it to the business
+    // mutation. Both use THIS connection — there is no second database handle anywhere, because
+    // atomicity across two connections would not be atomicity.
+    auditStore: new AuditRepository(db, {
+      appVersion: BUILD_INFO.version,
+      schemaVersion: MIGRATIONS.length,
+    }),
+    transact: (fn) => {
+      if (!db) throw new Error("ledger is not open");
+      return db.transaction(fn).immediate();
+    },
+    // The rotating logfile now MIRRORS committed audit rows, for field support. It is no longer the
+    // record — audit_events is — and it rotates, so it must never be treated as one.
+    audit: (row) => log.info("audit", { ...row }),
   });
   registerIpc(service, {
     saveCatalogExport,
