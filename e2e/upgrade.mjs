@@ -333,7 +333,11 @@ if (PHASE === "seed-v2") {
   log("final ledger:", JSON.stringify(f));
   // Was `f.schema === 3`.
   assert(f.schema === 4 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", "final ledger intact at v4");
-  assert(f.unknownUnits === 3, `the 3 pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
+  // TWO, not three: seed-v3's first sale is ONE line holding 2 x مياه (hence quantity_milli 2000),
+  // and its second is one line. The third line is the sale this phase itself rang up, which does
+  // carry its unit.
+  assert(f.unknownUnits === 2, `the 2 pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
+  assert(JSON.stringify(f.quantities) === "[2000,1000,1000]", `quantities: 2 x مياه scaled to 2000, the rest 1000 (got ${JSON.stringify(f.quantities)})`);
 } else if (PHASE === "seed-main") {
   // Scenario C — the PRODUCT MANAGEMENT build (main, schema v3, manual products, Arabic default).
   assert(!existsSync(LEDGER), "scenario starts with no ledger in the real profile");
