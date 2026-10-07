@@ -116,7 +116,10 @@ await page.waitForFunction(() => document.querySelectorAll('[data-testid="produc
 // ── 4 · Edit, and the price of a past sale ──────────────────────────────────────────────────────
 // Sell one first, so the edit below has a real invoice to leave alone.
 await tab(page, "sell");
-await page.locator("button.product", { hasText: "مفتاح أحمر" }).click();
+// The sell list shows ONE name per product, and displayName() is `nameEn ?? nameAr` — so this
+// product reads "Red Wrench" here while the Products screen shows it in Arabic. Clicking it by
+// SKU is both language-neutral and indifferent to that rule, which is this file's own standard.
+await page.locator("button.product", { hasText: "E2E-001" }).click();
 await page.getByRole("button", { name: "Cash" }).click();
 await page.waitForSelector("text=Sale completed");
 const receipt = await page.locator(".receipt").innerText();
