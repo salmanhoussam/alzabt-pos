@@ -143,7 +143,14 @@ await page.getByRole("button", { name: "Complete sale" }).click();
 await page.getByRole("button", { name: "Cash" }).click();
 await page.waitForSelector("text=Sale completed");
 const fractionalReceipt = await page.locator(".receipt").innerText();
-assert(fractionalReceipt.includes("2.5 kg"), `the receipt states the quantity AND its unit (${fractionalReceipt.replace(/\s+/g, " ").slice(0, 120)})`);
+const receiptFlat = fractionalReceipt.replace(/\s+/g, " ").trim();
+// 🔴 The ORDER, not just the presence: on an RTL terminal this line used to render as
+// "2.5 USD 2.50 × kg". The quantity, its unit, the ×, the price and the currency must read in that
+// sequence, which is what the bdi isolation in components/LineMath.tsx pins.
+assert(
+  receiptFlat.includes("2.5 kg × 2.50 USD"),
+  `the receipt reads quantity -> unit -> × -> price -> currency ("${receiptFlat.slice(0, 140)}")`,
+);
 assert(fractionalReceipt.includes("6.25"), "the receipt total is 6.25");
 await page.screenshot({ path: SHOTS + "P7-fractional-sale.png" });
 await page.getByRole("button", { name: /^(حسناً|OK|Close|New sale)$/ }).first().click().catch(() => {});

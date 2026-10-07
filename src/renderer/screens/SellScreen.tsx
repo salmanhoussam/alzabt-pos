@@ -7,6 +7,7 @@ import { PAYMENT_METHODS, type PaymentMethod } from "../../domain/sale";
 import { fromCatalogDto } from "../../shared/dto";
 import type { SaleDto } from "../../shared/ipcContract";
 import { call, errorText, newIdempotencyKey, pos } from "../api";
+import { LineMath } from "../components/LineMath";
 import { Receipt } from "./Receipt";
 
 const METHOD_LABEL: Record<PaymentMethod, string> = {
@@ -145,7 +146,7 @@ export function SellScreen() {
                 <div className="line-main">
                   <span dir="auto">{l.productName}</span>
                   <span className="muted">
-                    {formatDecimal(l.unitPrice)} × {formatQuantity(l.quantityMilli)} {l.saleUnit}
+                    <LineMath quantityMilli={l.quantityMilli} saleUnit={l.saleUnit} unitPrice={l.unitPrice} />
                   </span>
                 </div>
                 <div className="qty">

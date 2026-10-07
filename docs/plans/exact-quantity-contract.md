@@ -426,4 +426,35 @@ worst-case product is 9.999e17 against a ceiling of 9.223e18, a 9.2× margin. Pl
 guard raising a stable DomainError before the insert, so an operator never meets a raw CHECK
 failure. No real row is within nine orders of magnitude of this bound.
 
-**This is the one open decision.** It was asked and not answered, so nothing is implemented on it.
+**Decided** (Salman, 2026-10-07): use the exact derived bound, in the schema **and** in the domain,
+from one named constant — `MAX_UNIT_PRICE_MINOR = 922_429_446_630n`. `MAX_MINOR` is not weakened.
+
+## 24. 🔴 Two guards, and why conflating them would be wrong
+
+They look similar and they are not the same rule:
+
+| | guard | what it is for |
+|---|---|---|
+| **A** | `MAX_UNIT_PRICE_MINOR` = 922,429,446,630 | keeps `quantity_milli * unit_price_minor + 500` inside signed 64-bit **INTEGER**, because SQLite answers an overflow with a silent REAL |
+| **B** | `MAX_MINOR` = 10^15 (`money.ts`, pre-existing) | bounds an **amount** the ledger is willing to record at all |
+
+**A price at exactly bound A is a valid PRICE. It does not follow that it forms a valid sale LINE.**
+At the maximum quantity its total is 9,223,372,036,853,370 minor units — 9.2× past bound B — so B
+refuses the line. That refusal is **expected and correct**, and it is reported as an amount problem
+(`MONEY_OUT_OF_RANGE`), never as an overflow (`PRICE_OUT_OF_RANGE`). The tests assert both codes
+precisely so the two can never be read as one.
+
+So the evidence splits:
+
+```
+A  the validator accepts exactly 922429446630, and rejects 922429446631 as PRICE_OUT_OF_RANGE
+   9999000 * 922429446630 + 500  ->  typeof=integer      (the multiplication stays exact)
+   9999000 * 922429446631 + 500  ->  typeof=real    🔴   (which is why it is forbidden)
+
+B  the largest price whose TOTAL is storable at the maximum quantity is 100,010,001,000 —
+   derived, not chosen — and one above it is refused as MONEY_OUT_OF_RANGE
+```
+
+One consequence worth stating plainly: because B bites first, **the overflow cannot be reached
+through `lineTotal` at all**. A is a guard on the arithmetic itself, kept because the database's own
+CHECK has no B in front of it.

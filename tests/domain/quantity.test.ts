@@ -170,18 +170,7 @@ describe("the line total — exact integer round-half-up", () => {
     expect(code(() => lineTotal(usd(0n), 2500, "kg"))).toBe("ZERO_VALUE_LINE");
   });
 
-  it("🔴 the ledger's own money range bites BEFORE the overflow ceiling, and that is the stronger guard", () => {
-    // Measured, and it corrects an assumption worth stating: MAX_UNIT_PRICE_MINOR is accepted as a
-    // PRICE, but the total it produces at the maximum quantity is 9,223,372,036,853,370 minor units,
-    // which is 9.2x past money.ts's MAX_MINOR (10^15). So the amount guard refuses the result first,
-    // and the overflow can never actually be reached through lineTotal.
-    expect(() => assertUnitPriceMinor(MAX_UNIT_PRICE_MINOR)).not.toThrow();
-    expect(code(() => lineTotal(usd(MAX_UNIT_PRICE_MINOR), MAX_QUANTITY_MILLI, "piece"))).toBe(
-      "MONEY_OUT_OF_RANGE",
-    );
-  });
-
-  it("the largest price that is storable at the maximum quantity, and the next one up", () => {
+  it("the largest price whose LINE TOTAL is storable at the maximum quantity, and the next one up", () => {
     // 100,010,001,000 is exactly the largest unit price whose total at 9999 units still fits
     // MAX_MINOR. It is derived here rather than asserted as a magic number.
     // (q*p + 500) / 1000 <= MAX_MINOR, with integer division, means q*p + 500 <= MAX_MINOR*1000 + 999.
@@ -194,7 +183,22 @@ describe("the line total — exact integer round-half-up", () => {
   });
 });
 
-describe("overflow — the reason the unit price has a ceiling", () => {
+/**
+ * 🔴 TWO DIFFERENT GUARDS, and they must not be conflated.
+ *
+ *   A · the PRICE OVERFLOW guard — MAX_UNIT_PRICE_MINOR. Its only job is to keep
+ *       `quantity_milli * unit_price_minor + 500` inside signed 64-bit INTEGER, because SQLite does
+ *       not raise on overflow: it silently yields a REAL, and a money CHECK would then be evaluated
+ *       in floating point.
+ *
+ *   B · the BUSINESS LINE-TOTAL guard — money.ts's MAX_MINOR (10^15). Its job is to bound an amount
+ *       the ledger is willing to record at all.
+ *
+ * A price at exactly bound A is a VALID PRICE. It does not follow that it forms a valid sale LINE:
+ * at the maximum quantity its total is 9.2x past bound B, so guard B refuses it. That refusal is
+ * expected and correct — it is NOT an overflow-guard failure, and nothing here weakens MAX_MINOR.
+ */
+describe("A · the price overflow guard — the reason the unit price has a ceiling", () => {
   it("the constant is exactly floor((2^63 - 1 - 500) / MAX_QUANTITY_MILLI)", () => {
     const derived = (2n ** 63n - 1n - 500n) / BigInt(MAX_QUANTITY_MILLI);
     expect(MAX_UNIT_PRICE_MINOR).toBe(derived);
@@ -230,6 +234,32 @@ describe("overflow — the reason the unit price has a ceiling", () => {
       ).toBe("integer");
       db.close();
     }
+  });
+});
+
+describe("B · the business line-total guard — a separate limit, with a separate meaning", () => {
+  it("MAX_MINOR still bounds what the ledger will record, and is NOT relaxed by the overflow guard", () => {
+    // The price is accepted by guard A and the line is still refused by guard B. Both are correct.
+    expect(() => assertUnitPriceMinor(MAX_UNIT_PRICE_MINOR)).not.toThrow();
+    expect(code(() => lineTotal(usd(MAX_UNIT_PRICE_MINOR), MAX_QUANTITY_MILLI, "piece"))).toBe(
+      "MONEY_OUT_OF_RANGE",
+    );
+  });
+
+  it("a refusal by guard B is reported as an AMOUNT problem, never as an overflow", () => {
+    // The distinction is visible in the error code the operator's layer receives.
+    expect(code(() => lineTotal(usd(MAX_UNIT_PRICE_MINOR), MAX_QUANTITY_MILLI, "piece"))).not.toBe(
+      "PRICE_OUT_OF_RANGE",
+    );
+    expect(code(() => lineTotal(usd(MAX_UNIT_PRICE_MINOR + 1n), MAX_QUANTITY_MILLI, "piece"))).toBe(
+      "PRICE_OUT_OF_RANGE",
+    );
+  });
+
+  it("the two bounds are genuinely different numbers, and A is the looser one", () => {
+    const storableAtMaxQuantity = (10n ** 15n * 1000n + 999n - 500n) / BigInt(MAX_QUANTITY_MILLI);
+    expect(storableAtMaxQuantity).toBeLessThan(MAX_UNIT_PRICE_MINOR);
+    expect(MAX_UNIT_PRICE_MINOR / storableAtMaxQuantity).toBe(9n);
   });
 });
 
