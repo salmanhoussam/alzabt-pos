@@ -154,8 +154,12 @@ await page.locator("button.product", { hasText: "E2E-001" }).click();
 const wholeBox = page.locator('[data-testid^="qty-"]').first();
 await wholeBox.fill("1.5");
 await wholeBox.press("Enter");
-await page.waitForSelector("text=/whole units|وحدات كاملة/");
-assert(true, "a fraction typed against a piece product is refused, not rounded");
+await page.waitForSelector(".cart .error");
+const refusal = (await page.locator(".cart .error").innerText()).trim();
+// 🔴 This is the assertion that caught a real defect: errorText() only unwrapped an ApiError, so a
+// DomainError raised in the renderer read "Unexpected error" and told the operator nothing.
+assert(refusal !== "Unexpected error", `the refusal explains itself rather than saying "Unexpected error" (got "${refusal}")`);
+assert(/whole units/.test(refusal), `a fraction against a piece product is refused in words: "${refusal}"`);
 await page.locator('[data-testid="tab-today"]').click();
 await tab(page, "sell");
 await page.waitForSelector(".products-pane");
