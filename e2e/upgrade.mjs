@@ -360,6 +360,13 @@ if (PHASE === "seed-v2") {
   assert(preSchema3 === 3 && preSales3 === 2, "the backup holds the OLD v3 ledger (2 sales)");
   assert(preCols.includes("quantity") && !preCols.includes("quantity_milli"), "the backup is recoverable at the PRE-migration-4 schema");
 
+  // Migration 5 ran on the way, and left the trail EMPTY — measured HERE, before this phase does
+  // anything that would legitimately write to it. The sale rung up above wrote nothing: migration 5
+  // audits master data, not the sales ledger.
+  const afterMigration = ledgerFacts();
+  assert(afterMigration.schema === 5, `migrated to schema v5 (got ${afterMigration.schema})`);
+  assert(afterMigration.audit === 0, `the durable audit trail exists and starts empty (got ${afterMigration.audit})`);
+
   ({ app, page } = await launch());
   const h2 = await historyRows(page);
   assert(h2.rows === 3 && h2.voided === 1, "after restart: old and new sales are all there");
@@ -381,7 +388,14 @@ if (PHASE === "seed-v2") {
   log("final ledger:", JSON.stringify(f));
   // Was `f.schema === 3`, then 4.
   assert(f.schema === 5 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", `final ledger intact at v5 (got ${f.schema})`);
-  assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
+  // 🔴 And the export → re-import above is now AUDITED: exactly one CATALOG_IMPORTED summary and
+  // ZERO product events, because the re-imported file is byte-identical and changed nothing. That
+  // is the low-noise property the import audit model was chosen for, measured on the installed app.
+  assert(f.audit === 1, `the re-import wrote exactly one audit row (got ${f.audit})`);
+  assert(
+    f.auditTypes === "CATALOG_IMPORTED=1",
+    `and it is the summary alone, with no per-product events (got "${f.auditTypes}")`,
+  );
   // TWO, not three: seed-v3's first sale is ONE line holding 2 x مياه (hence quantity_milli 2000),
   // and its second is one line. The third line is the sale this phase itself rang up, which does
   // carry its unit.
