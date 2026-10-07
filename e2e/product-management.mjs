@@ -120,6 +120,8 @@ await tab(page, "sell");
 // product reads "Red Wrench" here while the Products screen shows it in Arabic. Clicking it by
 // SKU is both language-neutral and indifferent to that rule, which is this file's own standard.
 await page.locator("button.product", { hasText: "E2E-001" }).click();
+// Payment methods live behind "Complete sale" — the cart does not take a method directly.
+await page.getByRole("button", { name: "Complete sale" }).click();
 await page.getByRole("button", { name: "Cash" }).click();
 await page.waitForSelector("text=Sale completed");
 const receipt = await page.locator(".receipt").innerText();
