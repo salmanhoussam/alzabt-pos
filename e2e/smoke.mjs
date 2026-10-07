@@ -84,7 +84,10 @@ const surface = await page.evaluate(() => ({
 }));
 log("renderer surface:", JSON.stringify(surface));
 assert(surface.require === "undefined" && surface.process === "undefined" && surface.ipcRenderer === "undefined", "renderer has no require/process/ipcRenderer");
-assert(JSON.stringify(surface.posKeys) === JSON.stringify(["createSale","currentCashier","exportBackup","exportCatalog","getAppInfo","getCatalog","getSaleHistory","getTodaySales","importCatalog","listCashiers","login","logout","voidSale"]), "window.pos exposes only the 13 business methods");
+// The surface is asserted by NAME, not by count, so a new channel has to be added here deliberately.
+// It was 13 before offline product management; the six it adds are createProduct, listProducts,
+// updateProduct, setProductActive, getSettings and setTerminalLanguage.
+assert(JSON.stringify(surface.posKeys) === JSON.stringify(["createProduct","createSale","currentCashier","exportBackup","exportCatalog","getAppInfo","getCatalog","getSaleHistory","getSettings","getTodaySales","importCatalog","listCashiers","listProducts","login","logout","setProductActive","setTerminalLanguage","updateProduct","voidSale"]), "window.pos exposes exactly the 19 business methods, and nothing else");
 await page.screenshot({ path: SHOTS + "01-login.png" });
 
 // Wrong PIN first.
