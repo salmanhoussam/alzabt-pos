@@ -81,6 +81,20 @@ async function launch() {
 }
 
 const tab = (page, name) => page.locator(`[data-testid="tab-${name}"]`).click();
+
+/**
+ * Types into a field that commits on BLUR, then actually blurs it.
+ *
+ * 🔴 The invoice sheet's header and line fields commit `onBlur`, deliberately — a round trip per
+ * keystroke would ask the service to reprice an invoice on every digit. `fill()` alone does NOT
+ * blur, so a filled field is typed and never saved. That is how the paid amount silently stayed at
+ * zero here, and it is also how the customer name was being dropped without any assertion noticing.
+ */
+async function commit(page, id, value) {
+  const field = page.locator(`[data-testid="${id}"]`);
+  await field.fill(value);
+  await field.press("Tab");
+}
 const testid = (page, id) => page.locator(`[data-testid="${id}"]`);
 const textOf = async (page, id) => (await testid(page, id).innerText()).trim();
 
@@ -226,11 +240,11 @@ await page.waitForSelector('[data-testid="add-row"]');
 assert((await textOf(page, "sheet-number")).startsWith("—"), "a draft shows no invoice number");
 assert((await textOf(page, "sheet-status")).length > 0, "the sheet says it is a draft");
 
-await testid(page, "sheet-customer").fill("زبون اختباري");
-await page.locator('.inv-customer input[dir="ltr"]').first().fill("70-000000");
-await testid(page, "sheet-date").fill("2026-10-08");
-// The header write is a round trip; wait for the sheet to be interactive again. (An earlier version
-// of this line filtered the date INPUT on hasText, which is meaningless — an input has no text.)
+await commit(page, "sheet-customer", "زبون اختباري");
+const phone = page.locator('.inv-customer input[dir="ltr"]').first();
+await phone.fill("70-000000");
+await phone.press("Tab");
+await commit(page, "sheet-date", "2026-10-08");
 await page.waitForSelector('[data-testid="add-row"]');
 
 // Row 1 — chosen from the existing catalog, then left exactly as prefilled (MATCHED).
@@ -268,7 +282,7 @@ assert(subtotal.includes("496.15"), `the subtotal is 5.00 + 13.00 + 3.75 + 474.4
 const totalBefore = await textOf(page, "sheet-total");
 assert(totalBefore.includes("496.15"), `with tax off the total equals the subtotal (got ${totalBefore})`);
 
-await testid(page, "sheet-paid").fill("96.15");
+await commit(page, "sheet-paid", "96.15");
 // Wait for the SERVICE's answer to come back and render, not for a guessed interval.
 await page.locator('[data-testid="sheet-balance"]').filter({ hasText: "400.00" }).waitFor({ timeout: 20000 });
 const balance = await textOf(page, "sheet-balance");
@@ -311,6 +325,11 @@ await app.close();
   assert(Number(inv.subtotal_minor) === 49615, `the STORED subtotal is 49615 minor units (got ${inv.subtotal_minor})`);
   assert(Number(inv.total_minor) === 49615 && Number(inv.balance_due_minor) === 40000, "stored total and balance are exact");
   assert(inv.amount_in_words && inv.amount_in_words.length > 10, "the amount in words is frozen onto the document");
+  // 🔴 The customer snapshot really reached the database. Nothing asserted this before, which is
+  // exactly why a field that was typed but never committed went unnoticed.
+  assert(inv.customer_name === "زبون اختباري", `the customer snapshot persisted (got ${inv.customer_name})`);
+  assert(inv.customer_phone === "70-000000", `and the phone (got ${inv.customer_phone})`);
+  assert(inv.invoice_date === "2026-10-08", `and the date the operator typed (got ${inv.invoice_date})`);
   const issuer = JSON.parse(inv.issuer_snapshot_json);
   assert(issuer.name_ar === "متجر اختباري للفحص", "the issuer snapshot is frozen onto the invoice");
   assert(issuer.taxpayer_number === "TP-E2E-1" && issuer.vat_number === "VAT-E2E-3", "and it carries the official numbers separately");

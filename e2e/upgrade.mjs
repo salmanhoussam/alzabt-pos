@@ -837,9 +837,14 @@ if (PHASE === "seed-v2") {
   await page.waitForSelector('[data-testid="add-row"]');
   assert((await invText(page, "sheet-number")).startsWith("—"), "a draft has no invoice number");
 
+  // 🔴 These fields commit on BLUR by design, so `fill()` alone types without saving.
   await invTestid(page, "sheet-customer").fill("زبون الترقية");
-  await page.locator('.inv-customer input[dir="ltr"]').first().fill("70-999999");
+  await invTestid(page, "sheet-customer").press("Tab");
+  const ePhone = page.locator('.inv-customer input[dir="ltr"]').first();
+  await ePhone.fill("70-999999");
+  await ePhone.press("Tab");
   await invTestid(page, "sheet-date").fill("2026-10-08");
+  await invTestid(page, "sheet-date").press("Tab");
   await page.waitForSelector('[data-testid="add-row"]');
 
   // A · an existing catalog product, at its catalog price, with a known unit label -> MATCHED
@@ -861,6 +866,7 @@ if (PHASE === "seed-v2") {
   const sub = await invText(page, "sheet-subtotal");
   assert(sub.includes("13.25"), `the subtotal is 13.25 (got ${sub})`);
   await invTestid(page, "sheet-paid").fill("3.25");
+  await invTestid(page, "sheet-paid").press("Tab");
   // Wait for the service's recomputed balance to render, not for a guessed interval.
   await page.locator('[data-testid="sheet-balance"]').filter({ hasText: "10.00" }).waitFor({ timeout: 20000 });
   const bal = await invText(page, "sheet-balance");
@@ -889,6 +895,8 @@ if (PHASE === "seed-v2") {
     assert(Number(inv.subtotal_minor) === 1325, `the stored subtotal is 1325 minor units (got ${inv.subtotal_minor})`);
     assert(Number(inv.balance_due_minor) === 1000, `the stored balance is 1000 (got ${inv.balance_due_minor})`);
     assert(inv.amount_in_words && inv.amount_in_words.length > 8, "the amount in words is frozen onto it");
+    assert(inv.customer_name === "زبون الترقية", `the customer snapshot persisted (got ${inv.customer_name})`);
+    assert(inv.invoice_date === "2026-10-08", `and the date the operator typed (got ${inv.invoice_date})`);
     const issuer = JSON.parse(inv.issuer_snapshot_json);
     assert(issuer.name_ar === "متجر اختباري للترقية" && issuer.taxpayer_number === "TP-E-1", "the issuer snapshot is present");
 
