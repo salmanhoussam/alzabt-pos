@@ -46,6 +46,22 @@ const Database = createRequire(import.meta.url)("better-sqlite3");
 const LEDGER = join(home, "userData", "alzabt-pos-ledger.sqlite");
 
 const log = (...a) => console.log("•", ...a);
+
+/**
+ * Waits for a CONDITION, not for a duration.
+ *
+ * 🔴 A fixed sleep is the wrong instrument here: `printToPDF` on a cold Windows runner can take far
+ * longer than any number I would guess, and a sleep that is too short fails as "the PDF was never
+ * written" — which is indistinguishable from the feature being broken.
+ */
+async function until(what, predicate, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await predicate()) return;
+    if (Date.now() > deadline) throw new Error(`TIMED OUT waiting for ${what} after ${timeoutMs}ms`);
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
 let passed = 0;
 const assert = (cond, msg) => {
   if (!cond) throw new Error("ASSERTION FAILED: " + msg);
@@ -192,7 +208,9 @@ assert((await textOf(page, "sheet-status")).length > 0, "the sheet says it is a 
 await testid(page, "sheet-customer").fill("زبون اختباري");
 await page.locator('.inv-customer input[dir="ltr"]').first().fill("70-000000");
 await testid(page, "sheet-date").fill("2026-10-08");
-await page.waitForTimeout(300);
+// The header write is a round trip; wait for the sheet to be interactive again. (An earlier version
+// of this line filtered the date INPUT on hasText, which is meaningless — an input has no text.)
+await page.waitForSelector('[data-testid="add-row"]');
 
 // Row 1 — chosen from the existing catalog, then left exactly as prefilled (MATCHED).
 await testid(page, "add-row").click();
@@ -229,7 +247,8 @@ const totalBefore = await textOf(page, "sheet-total");
 assert(totalBefore.includes("496.15"), `with tax off the total equals the subtotal (got ${totalBefore})`);
 
 await testid(page, "sheet-paid").fill("96.15");
-await page.waitForTimeout(400);
+// Wait for the SERVICE's answer to come back and render, not for a guessed interval.
+await page.locator('[data-testid="sheet-balance"]').filter({ hasText: "400.00" }).waitFor({ timeout: 20000 });
 const balance = await textOf(page, "sheet-balance");
 assert(balance.includes("400.00"), `the balance due is 496.15 - 96.15 = 400.00 (got ${balance})`);
 assert((await textOf(page, "sheet-words")).includes("("), "the amount in words is not shown yet — it is frozen at finalize");
@@ -461,7 +480,7 @@ await testid(page, "field-nameAr").fill("اسم صنف جديد");
 await testid(page, "field-price").fill("99.00");
 await testid(page, "save-product").click();
 await page.getByRole("button", { name: /^(حسناً|OK)$/ }).click();
-await page.waitForTimeout(500);
+await page.waitForSelector('[data-testid="product-row"]');
 
 // Reopen the OLD invoice.
 await tab(page, "invoices");
@@ -484,7 +503,7 @@ await app.evaluate(({ dialog }, target) => {
   dialog.showSaveDialogSync = () => target;
 }, pdfPath);
 await testid(page, "save-pdf").click();
-await page.waitForTimeout(4000);
+await until(`the PDF at ${pdfPath}`, () => existsSync(pdfPath) && statSync(pdfPath).size > 0);
 assert(existsSync(pdfPath), `a PDF was generated at ${pdfPath}`);
 const size = statSync(pdfPath).size;
 assert(size > 2000, `the PDF is a real document (${size} bytes)`);

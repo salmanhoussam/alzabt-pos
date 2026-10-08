@@ -835,7 +835,7 @@ if (PHASE === "seed-v2") {
   await invTestid(page, "sheet-customer").fill("زبون الترقية");
   await page.locator('.inv-customer input[dir="ltr"]').first().fill("70-999999");
   await invTestid(page, "sheet-date").fill("2026-10-08");
-  await page.waitForTimeout(400);
+  await page.waitForSelector('[data-testid="add-row"]');
 
   // A · an existing catalog product, at its catalog price, with a known unit label -> MATCHED
   await invoiceRow(page, { description: "حبل قنب", quantity: "1", unit: "كيلو", price: "4.00" });
@@ -856,7 +856,8 @@ if (PHASE === "seed-v2") {
   const sub = await invText(page, "sheet-subtotal");
   assert(sub.includes("13.25"), `the subtotal is 13.25 (got ${sub})`);
   await invTestid(page, "sheet-paid").fill("3.25");
-  await page.waitForTimeout(500);
+  // Wait for the service's recomputed balance to render, not for a guessed interval.
+  await page.locator('[data-testid="sheet-balance"]').filter({ hasText: "10.00" }).waitFor({ timeout: 20000 });
   const bal = await invText(page, "sheet-balance");
   assert(bal.includes("10.00"), `the balance due is 13.25 - 3.25 = 10.00 (got ${bal})`);
   await page.screenshot({ path: SHOTS + "upgrade-e2-draft.png" });
@@ -1033,7 +1034,7 @@ if (PHASE === "seed-v2") {
   await page.locator('[data-testid="field-price"]').fill("77.00");
   await page.locator('[data-testid="save-product"]').click();
   await page.getByRole("button", { name: /^(حسناً|OK)$/ }).click();
-  await page.waitForTimeout(800);
+  await page.waitForSelector('[data-testid="product-row"]');
 
   await tab(page, "Invoices");
   await page.waitForSelector('[data-testid="history-table"]');
@@ -1053,11 +1054,15 @@ if (PHASE === "seed-v2") {
 
   // ── PDF, from the frozen invoice ───────────────────────────────────────────────────────────────
   const pdf = join(tmpdir(), `alzabt-invoice-61-${process.pid}.pdf`);
-  await app.evaluate(({ dialog }, target) => {
-    dialog.showSaveDialogSync = () => target;
-  }, pdf);
+  await stub(app, "save", pdf); // the file's own helper, not a second hand-rolled dialog stub
   await invTestid(page, "save-pdf").click();
-  await page.waitForTimeout(6000);
+  // 🔴 A CONDITION, not a duration: printToPDF on a cold runner can take far longer than any
+  // interval I would guess, and too short a sleep fails as "no PDF" — indistinguishable from the
+  // feature being broken.
+  for (let waited = 0; !(existsSync(pdf) && statSync(pdf).size > 0); waited += 250) {
+    if (waited > 60000) throw new Error(`TIMED OUT waiting for the PDF at ${pdf}`);
+    await new Promise((r) => setTimeout(r, 250));
+  }
   assert(existsSync(pdf), `a PDF was generated (${pdf})`);
   const bytes = statSync(pdf).size;
   assert(bytes > 2000, `the PDF is a real document (${bytes} bytes)`);
