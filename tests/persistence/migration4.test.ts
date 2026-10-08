@@ -55,13 +55,15 @@ const triggers = (db: Db) =>
 
 describe("migration 4 — v3 to v4", () => {
   it("is the fourth migration, and 1-3 are not touched by it", () => {
-    // Was exactly [1, 2, 3, 4] until migration 5 (durable_local_audit) was appended. Migration 4's
-    // own position and content are what this file is about, and neither moved.
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5]);
+    // Was [1, 2, 3, 4], then [1..5]. Migration 4's own position and content are what this file is
+    // about, and neither has moved through either later addition.
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(MIGRATIONS[3]!.name).toBe("exact_sale_quantity");
     // Migration 5 is additive and must not reach into this one's table either.
     expect(MIGRATIONS[4]!.name).toBe("durable_local_audit");
     expect(MIGRATIONS[4]!.sql).not.toMatch(/sale_lines/i);
+    expect(MIGRATIONS[5]!.name).toBe("manual_invoices");
+    expect(MIGRATIONS[5]!.sql).not.toMatch(/\bsale_lines\b/i);
     // Nothing in migration 4's own SQL alters an earlier table's definition.
     for (const forbidden of [/ALTER TABLE sales\b/i, /DROP TABLE sales\b/i, /catalog_products/i, /cashier_pin_state/i]) {
       expect(MIGRATIONS[3]!.sql, String(forbidden)).not.toMatch(forbidden);

@@ -85,9 +85,18 @@ const surface = await page.evaluate(() => ({
 log("renderer surface:", JSON.stringify(surface));
 assert(surface.require === "undefined" && surface.process === "undefined" && surface.ipcRenderer === "undefined", "renderer has no require/process/ipcRenderer");
 // The surface is asserted by NAME, not by count, so a new channel has to be added here deliberately.
-// It was 13 before offline product management; the six it adds are createProduct, listProducts,
+// It was 13 before offline product management; the six that added are createProduct, listProducts,
 // updateProduct, setProductActive, getSettings and setTerminalLanguage.
-assert(JSON.stringify(surface.posKeys) === JSON.stringify(["createProduct","createSale","currentCashier","exportBackup","exportCatalog","getAppInfo","getCatalog","getSaleHistory","getSettings","getTodaySales","importCatalog","listCashiers","listProducts","login","logout","setProductActive","setTerminalLanguage","updateProduct","voidSale"]), "window.pos exposes exactly the 19 business methods, and nothing else");
+// It went 19 -> 44 with manual invoices (migration 6): the twenty-five invoice channels below.
+//
+// 🔴 This assertion did its job. It FAILED the first Windows gate for migration 6, because the
+// channels had been added to the contract, the handlers, the preload and the unit-level surface
+// test — and not here. That is exactly why it is written by name: the one place that is not
+// derived from the contract is the one place a human has to notice.
+assert(
+  JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","createInvoiceDraft","createProduct","createSale","currentCashier","discardInvoiceDraft","exportBackup","exportCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getInvoice","getSaleHistory","getSettings","getTodaySales","importCatalog","listCashiers","listInvoiceDrafts","listInvoices","listProducts","listReconciliation","listReconciliationQueue","login","logout","pickInvoiceLogo","printInvoice","removeInvoiceLine","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchInvoices","setNextInvoiceNumber","setProductActive","setTerminalLanguage","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
+  `window.pos exposes exactly the 44 business methods, and nothing else (got ${surface.posKeys.length})`,
+);
 await page.screenshot({ path: SHOTS + "01-login.png" });
 
 // Wrong PIN first.

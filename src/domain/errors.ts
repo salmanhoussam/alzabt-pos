@@ -33,7 +33,16 @@ export type DomainErrorCode =
   // migration 4 — exact quantities
   | "FRACTION_NOT_ALLOWED"
   | "ZERO_VALUE_LINE"
-  | "PRICE_OUT_OF_RANGE";
+  | "PRICE_OUT_OF_RANGE"
+  // migration 6 — manual invoices and catalog reconciliation
+  | "INVOICE_NOT_FOUND"
+  | "INVOICE_NOT_DRAFT"
+  | "INVOICE_NOT_FINALIZABLE"
+  | "COMPANY_PROFILE_REQUIRED"
+  | "INVOICE_NUMBERING_LOCKED"
+  | "RECONCILIATION_NOT_FOUND"
+  | "RECONCILIATION_ALREADY_RESOLVED"
+  | "RESOLUTION_INCOMPLETE";
 
 export class DomainError extends Error {
   constructor(

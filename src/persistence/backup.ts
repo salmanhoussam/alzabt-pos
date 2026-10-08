@@ -34,12 +34,27 @@ export const DAILY_RETENTION = 14;
  * migration 5 added. The skip is also what keeps this list safe for a pre-v5 database, where the
  * table does not exist yet.
  */
-const COUNTED_TABLES = [
+// 🔴 EVERY durable table belongs here. A backup is verified by comparing row counts between the
+// live ledger and the snapshot, and this list is what gets compared — so a table that is NOT named
+// here is silently skipped, and a backup missing every row of it would still verify as good.
+//
+// The four migration-6 tables were added for that reason, the same way `audit_events` was added
+// with migration 5. `catalog_imports` (migration 3) and `cashier_pin_state` (migration 2) were
+// added at the same time, because they had NEVER been listed — a real pre-existing gap, found not
+// by reading this list but by the derived test in tests/persistence/backup.test.ts, which compares
+// it against the real schema. That test is why the next migration cannot repeat the omission.
+export const COUNTED_TABLES = [
   "sales",
   "sale_lines",
   "voids",
   "catalog_products",
+  "catalog_imports",
+  "cashier_pin_state",
   "audit_events",
+  "company_profile",
+  "invoices",
+  "invoice_lines",
+  "invoice_reconciliation",
   "schema_migrations",
 ] as const;
 const DAILY_RE = /^daily-(\d{4}-\d{2}-\d{2})\.sqlite$/;

@@ -6,13 +6,7 @@ import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  BackupError,
-  DAILY_RETENTION,
-  createPreMigrationBackup,
-  ensureDailyBackup,
-  snapshotDatabase,
-} from "../../src/persistence/backup";
+import { BackupError, COUNTED_TABLES, DAILY_RETENTION, createPreMigrationBackup, ensureDailyBackup, snapshotDatabase } from "../../src/persistence/backup";
 import { openDatabase, schemaVersion } from "../../src/persistence/db";
 import { MIGRATIONS } from "../../src/persistence/migrations";
 import { insertLegacySale } from "../helpers/legacyLedger";
@@ -224,5 +218,43 @@ describe("daily backup", () => {
     const h = makeHarness(t.dbPath);
     expect(() => ensureDailyBackup(h.db, join(t.dir, "backups"), "05/10/2026")).toThrow(BackupError);
     h.db.close();
+  });
+});
+
+describe("the verified-backup contract covers EVERY durable table", () => {
+  /**
+   * 🔴 A DERIVED CHECK, not a list of names, and that distinction is the whole point.
+   *
+   * A backup is verified by comparing row counts between the live ledger and the snapshot, and
+   * `COUNTED_TABLES` is what gets compared. A table absent from that list is SILENTLY SKIPPED: a
+   * snapshot missing every row of it would still verify as a good backup.
+   *
+   * Migration 5 had to add `audit_events` to the list by hand. Migration 6 had to add four more,
+   * and that omission survived the whole local suite and a Windows gate — because nothing asserted
+   * the relationship. This test asserts it against the real schema instead, so the NEXT migration
+   * cannot forget: adding a table without listing it here fails here, by name.
+   */
+  it("every table a fully migrated ledger has is counted", () => {
+    const t = tempDir();
+    const db = openDatabase(t.dbPath);
+    try {
+      const present = (
+        db
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+          .all() as Array<{ name: string }>
+      ).map((r) => r.name);
+      const missing = present.filter((name) => !(COUNTED_TABLES as ReadonlyArray<string>).includes(name));
+      expect(missing).toEqual([]);
+      // And nothing is listed that does not exist, which would be a stale entry.
+      const stale = (COUNTED_TABLES as ReadonlyArray<string>).filter((name) => !present.includes(name));
+      expect(stale).toEqual([]);
+      // The four migration-6 tables specifically, named so the intent is readable.
+      for (const table of ["company_profile", "invoices", "invoice_lines", "invoice_reconciliation"]) {
+        expect(COUNTED_TABLES as ReadonlyArray<string>).toContain(table);
+      }
+    } finally {
+      db.close();
+      t.cleanup();
+    }
   });
 });

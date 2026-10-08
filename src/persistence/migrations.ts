@@ -308,4 +308,212 @@ WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
 BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
 `,
   },
+  {
+    version: 6,
+    name: "manual_invoices",
+    // ── The manual invoice, its issuer, and the catalog reconciliation queue ─────────────────────
+    //
+    // Purely ADDITIVE: four new tables, their indexes and their triggers. Migrations 1-5 are not
+    // touched, and NOTHING is synthesized — a migrated ledger has zero invoices, zero invoice lines
+    // and zero reconciliation rows, which is the honest state of a shop that has not written one
+    // yet.
+    //
+    // 🔴 AN INVOICE IS NOT A SALE, BY DECISION. Nothing here references `sales`, writes to it, or
+    // is read by the daily report. Finalizing an invoice enters no till total, moves no stock and
+    // creates no customer ledger entry. `paid_minor` and `balance_due_minor` are fields ON THE
+    // DOCUMENT, not an accounts-receivable system.
+    //
+    // 🔴 WHY A DRAFT CANNOT LIVE IN `sale_lines`, measured rather than preferred: `sale_lines` has
+    // forbidden UPDATE and DELETE by trigger since migration 1, and a draft invoice is edited.
+    // Reusing the ledger's tables was therefore impossible, not merely inelegant. What IS reused is
+    // every primitive: integer minor units, `quantity_milli` at scale 1000, the same half-up line
+    // arithmetic and the same overflow bound as migration 4.
+    //
+    // THE ISSUER IS SNAPSHOTTED, not referenced. `company_profile` is live settings; a finalized
+    // invoice carries `issuer_snapshot_json`. Changing the shop's phone number tomorrow must not
+    // change an invoice issued yesterday, and a foreign key would have done exactly that.
+    //
+    // IMMUTABILITY APPLIES ONLY ONCE FINAL. A draft is meant to be edited; a finalized invoice is a
+    // commercial document. The triggers below express that difference instead of forcing one rule
+    // on both. Correction of a finalized invoice (credit note / replacement) is future scope and is
+    // deliberately NOT faked by allowing an edit.
+    sql: `
+-- One row, the shop's own identity. A CHECK pins the id so a second row is impossible.
+--
+-- The three official identifiers are SEPARATE optional fields on purpose: a taxpayer number, a
+-- commercial register number and a VAT registration number are three different things, and
+-- collapsing them would print one under another's label. Printing them does NOT make an invoice
+-- legally or tax compliant, and nothing in this schema claims otherwise.
+CREATE TABLE company_profile (
+  id                   TEXT    PRIMARY KEY CHECK (id = 'company'),
+  name_ar              TEXT    NOT NULL CHECK (length(trim(name_ar)) > 0),
+  name_en              TEXT    CHECK (name_en IS NULL OR length(trim(name_en)) > 0),
+  legal_name           TEXT    CHECK (legal_name IS NULL OR length(trim(legal_name)) > 0),
+  tagline              TEXT,
+  address              TEXT,
+  phone1               TEXT,
+  phone2               TEXT,
+  email                TEXT,
+  logo_path            TEXT,
+  taxpayer_number      TEXT,
+  commercial_register  TEXT,
+  vat_number           TEXT,
+  -- Tax is OFF unless this says otherwise, and the rate lives in basis points so it is exact:
+  -- 1100 = 11.00%. No rate is hard-coded anywhere in the application.
+  tax_enabled          INTEGER NOT NULL CHECK (tax_enabled IN (0, 1)),
+  tax_rate_bp          INTEGER NOT NULL CHECK (tax_rate_bp >= 0 AND tax_rate_bp <= 10000),
+  tax_label            TEXT,
+  -- The next number to assign. A shop continuing a paper invoice book starts at 61, not 1; this may
+  -- only be set while no invoice has been finalized yet, which the service enforces.
+  next_invoice_number  INTEGER NOT NULL CHECK (next_invoice_number > 0),
+  created_at           TEXT    NOT NULL,
+  updated_at           TEXT    NOT NULL
+) STRICT;
+
+CREATE TABLE invoices (
+  id                   TEXT    PRIMARY KEY,
+  status               TEXT    NOT NULL CHECK (status IN ('draft', 'final')),
+  -- NULL while a draft. SQLite's UNIQUE permits many NULLs, which is exactly what is wanted: the
+  -- number is scarce and is assigned at FINALIZE, not when a disposable draft is opened.
+  invoice_number       INTEGER UNIQUE CHECK (invoice_number IS NULL OR invoice_number > 0),
+  invoice_date         TEXT    CHECK (invoice_date IS NULL OR invoice_date GLOB
+                           '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  currency             TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  customer_name        TEXT,
+  customer_address     TEXT,
+  customer_phone       TEXT,
+  notes                TEXT,
+  subtotal_minor       INTEGER NOT NULL CHECK (subtotal_minor >= 0),
+  tax_minor            INTEGER NOT NULL CHECK (tax_minor >= 0),
+  total_minor          INTEGER NOT NULL CHECK (total_minor >= 0),
+  paid_minor           INTEGER NOT NULL CHECK (paid_minor >= 0),
+  balance_due_minor    INTEGER NOT NULL CHECK (balance_due_minor >= 0),
+  amount_in_words      TEXT,
+  issuer_snapshot_json TEXT    CHECK (issuer_snapshot_json IS NULL
+                                      OR (json_valid(issuer_snapshot_json)
+                                          AND json_type(issuer_snapshot_json) = 'object')),
+  tax_snapshot_json    TEXT    CHECK (tax_snapshot_json IS NULL
+                                      OR (json_valid(tax_snapshot_json)
+                                          AND json_type(tax_snapshot_json) = 'object')),
+  created_by_id        TEXT    NOT NULL CHECK (length(created_by_id) > 0),
+  created_by_name      TEXT    NOT NULL CHECK (length(trim(created_by_name)) > 0),
+  created_at           TEXT    NOT NULL,
+  updated_at           TEXT    NOT NULL,
+  finalized_at         TEXT,
+  -- The arithmetic the document itself prints, checked by the database.
+  CHECK (total_minor = subtotal_minor + tax_minor),
+  CHECK (balance_due_minor = total_minor - paid_minor),
+  CHECK (paid_minor <= total_minor),
+  -- What being FINAL means, as a constraint rather than a convention: a finalized invoice has its
+  -- number, its date, its words and its issuer frozen onto it, or it is not final.
+  CHECK (
+    status = 'draft'
+    OR (invoice_number IS NOT NULL
+        AND invoice_date IS NOT NULL
+        AND amount_in_words IS NOT NULL
+        AND length(trim(amount_in_words)) > 0
+        AND issuer_snapshot_json IS NOT NULL
+        AND finalized_at IS NOT NULL)
+  )
+) STRICT;
+
+CREATE INDEX invoices_status ON invoices (status, created_at DESC);
+CREATE INDEX invoices_number ON invoices (invoice_number DESC);
+CREATE INDEX invoices_date ON invoices (invoice_date DESC);
+
+CREATE TABLE invoice_lines (
+  id                TEXT    PRIMARY KEY,
+  invoice_id        TEXT    NOT NULL REFERENCES invoices (id),
+  line_no           INTEGER NOT NULL CHECK (line_no > 0),
+  -- Free text, always. The operator may write what the catalog has never heard of.
+  description       TEXT,
+  -- Exactly as printed: "حبة", "كيلو", "كيس (50PCS)". Historical truth, never rewritten.
+  unit_label        TEXT,
+  -- Present only when a known mapping exists or the operator chose one. Fails CLOSED: a unit added
+  -- to BASE_UNITS later is not silently accepted here until a migration says so.
+  canonical_unit    TEXT    CHECK (canonical_unit IS NULL OR canonical_unit IN
+                        ('piece', 'box', 'pack', 'kg', 'meter', 'other')),
+  -- Set when the operator picked an existing product during entry. NOT a foreign key: the invoice
+  -- must survive unchanged whatever later happens to the catalog row.
+  product_id        TEXT,
+  quantity_milli    INTEGER NOT NULL CHECK (quantity_milli > 0 AND quantity_milli <= 9999000),
+  unit_price_minor  INTEGER NOT NULL CHECK (unit_price_minor >= 0 AND unit_price_minor <= 922429446630),
+  -- The identical half-up rule the sales ledger uses, so the two can never disagree about money.
+  line_total_minor  INTEGER NOT NULL
+      CHECK (line_total_minor = (quantity_milli * unit_price_minor + 500) / 1000),
+  created_at        TEXT    NOT NULL,
+  UNIQUE (invoice_id, line_no)
+) STRICT;
+
+CREATE INDEX invoice_lines_invoice_id ON invoice_lines (invoice_id, line_no);
+CREATE INDEX invoice_lines_product_id ON invoice_lines (product_id) WHERE product_id IS NOT NULL;
+
+-- The catalog review queue. Operational state, NOT a ledger: a row is updated as a person works
+-- through it, exactly like cashier_pin_state. The decision it records is what matters, and the
+-- decision never alters the finalized invoice it came from.
+CREATE TABLE invoice_reconciliation (
+  id                   TEXT    PRIMARY KEY,
+  invoice_id           TEXT    NOT NULL REFERENCES invoices (id),
+  invoice_line_id      TEXT    NOT NULL UNIQUE REFERENCES invoice_lines (id),
+  classification       TEXT    NOT NULL CHECK (classification IN
+                           ('MATCHED', 'PRICE_DIFFERENCE', 'UNIT_DIFFERENCE', 'DESCRIPTION_DIFFERENCE',
+                            'MULTIPLE_DIFFERENCES', 'PRODUCT_NOT_FOUND', 'AMBIGUOUS_MATCH')),
+  match_tier           TEXT    NOT NULL CHECK (match_tier IN
+                           ('explicit', 'sku', 'name_ar', 'name_en', 'none')),
+  matched_product_id   TEXT,
+  candidates_json      TEXT    CHECK (candidates_json IS NULL
+                                      OR (json_valid(candidates_json)
+                                          AND json_type(candidates_json) = 'array')),
+  differences_json     TEXT    NOT NULL CHECK (json_valid(differences_json)
+                                               AND json_type(differences_json) = 'array'),
+  status               TEXT    NOT NULL CHECK (status IN
+                           ('PENDING', 'KEPT_CATALOG', 'UPDATED_CATALOG', 'CREATED_PRODUCT',
+                            'LINKED_PRODUCT', 'KEPT_INVOICE_ONLY', 'FAILED')),
+  selected_fields_json TEXT    CHECK (selected_fields_json IS NULL
+                                      OR (json_valid(selected_fields_json)
+                                          AND json_type(selected_fields_json) = 'array')),
+  resolved_at          TEXT,
+  resolution_actor_id   TEXT,
+  resolution_actor_name TEXT,
+  failure_code         TEXT,
+  failure_message      TEXT,
+  attempt_count        INTEGER NOT NULL CHECK (attempt_count >= 0),
+  created_at           TEXT    NOT NULL,
+  updated_at           TEXT    NOT NULL,
+  -- A resolved item names who resolved it and when. PENDING and FAILED are the two that still need
+  -- a person, and FAILED must say why.
+  CHECK (status = 'PENDING' OR status = 'FAILED'
+         OR (resolved_at IS NOT NULL AND resolution_actor_id IS NOT NULL)),
+  CHECK (status <> 'FAILED' OR failure_code IS NOT NULL)
+) STRICT;
+
+CREATE INDEX invoice_reconciliation_status ON invoice_reconciliation (status, created_at DESC);
+CREATE INDEX invoice_reconciliation_invoice ON invoice_reconciliation (invoice_id);
+CREATE INDEX invoice_reconciliation_class ON invoice_reconciliation (classification, status);
+
+-- ── Immutability, once and only once an invoice is FINAL ────────────────────────────────────────
+--
+-- A draft is edited freely: that is what a draft is for. These fire on OLD.status = 'final', so the
+-- draft -> final transition itself passes, and everything after it does not.
+CREATE TRIGGER invoices_final_immutable_update BEFORE UPDATE ON invoices
+WHEN OLD.status = 'final'
+BEGIN SELECT RAISE(ABORT, 'invoice: a finalized invoice is immutable'); END;
+
+CREATE TRIGGER invoices_final_immutable_delete BEFORE DELETE ON invoices
+WHEN OLD.status = 'final'
+BEGIN SELECT RAISE(ABORT, 'invoice: a finalized invoice cannot be deleted'); END;
+
+CREATE TRIGGER invoice_lines_final_immutable_update BEFORE UPDATE ON invoice_lines
+WHEN (SELECT status FROM invoices WHERE id = OLD.invoice_id) = 'final'
+BEGIN SELECT RAISE(ABORT, 'invoice: a finalized invoice line is immutable'); END;
+
+CREATE TRIGGER invoice_lines_final_immutable_delete BEFORE DELETE ON invoice_lines
+WHEN (SELECT status FROM invoices WHERE id = OLD.invoice_id) = 'final'
+BEGIN SELECT RAISE(ABORT, 'invoice: a finalized invoice line cannot be deleted'); END;
+
+CREATE TRIGGER invoice_lines_closed_invoice BEFORE INSERT ON invoice_lines
+WHEN (SELECT status FROM invoices WHERE id = NEW.invoice_id) = 'final'
+BEGIN SELECT RAISE(ABORT, 'invoice: a finalized invoice cannot take new lines'); END;
+`,
+  },
 ];

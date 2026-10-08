@@ -142,6 +142,40 @@ type LoginOutcome =
   | { readonly kind: "wrong"; readonly left: number }
   | { readonly kind: "locked"; readonly remainingMs: number };
 
+/**
+ * Where a product write came from, and the one state change only an explicit decision may make.
+ *
+ * Added in step 4 so invoice reconciliation can write through THIS service rather than growing a
+ * second catalog write path. It is optional everywhere and defaults to exactly what every caller
+ * before it did: `origin: "manual_entry"`, no invoice, `price_needs_review` left alone.
+ */
+export interface ProductWriteProvenance {
+  /** `manual_entry` (the product screen) or `invoice_reconciliation`. Lands in audit metadata. */
+  readonly origin: string;
+  /** The finalized invoice a reconciliation edit came from. Lands in audit metadata. */
+  readonly invoiceId?: string;
+  /**
+   * Explicitly sets `price_needs_review`. Absent leaves it unchanged.
+   *
+   * 🔴 Only `false`, and only from an operator who explicitly accepted an invoice price as the
+   * catalog price, ever clears it. Keeping the catalog price, a failed update, or changing an
+   * unrelated field all leave it exactly as it was.
+   */
+  readonly priceNeedsReview?: boolean;
+}
+
+const MANUAL_PROVENANCE: ProductWriteProvenance = Object.freeze({ origin: "manual_entry" });
+
+/** The audit metadata a product write carries — bounded scalars only, per the audit contract. */
+function provenanceMetadata(
+  provenance: ProductWriteProvenance,
+  source: string,
+): Record<string, string> {
+  const meta: Record<string, string> = { origin: provenance.origin, source };
+  if (provenance.invoiceId !== undefined) meta.invoice_id = provenance.invoiceId;
+  return meta;
+}
+
 export class PosService {
   private readonly repository: SaleRepository;
   private readonly now: () => Date;
@@ -458,7 +492,7 @@ export class PosService {
    * Creates one product from what the operator typed. `price_needs_review` is 0: a typed price is a
    * real price, unlike a placeholder that arrives in a file.
    */
-  createProduct(draft: ProductDraft): AdminProductRow {
+  createProduct(draft: ProductDraft, provenance: ProductWriteProvenance = MANUAL_PROVENANCE): AdminProductRow {
     const cashier = this.requireCashier();
     const { store, auditStore, transact } = this.requireProductStack();
     const valid = validateProductDraft(draft, this.deps.terminal.currency);
@@ -493,7 +527,7 @@ export class PosService {
             created.id,
             instant,
             diffAuditedFields(null, auditedProductState(created)),
-            { origin: "manual_entry", source: created.source },
+            provenanceMetadata(provenance, created.source),
           ),
           this.newId(),
         ),
@@ -513,7 +547,12 @@ export class PosService {
    * A price or unit change emits its OWN audit action in addition to PRODUCT_UPDATED, because
    * "who changed this item's price" must be answerable without reading every diff.
    */
-  updateProduct(id: string, draft: ProductDraft, isActive: boolean): AdminProductRow {
+  updateProduct(
+    id: string,
+    draft: ProductDraft,
+    isActive: boolean,
+    provenance: ProductWriteProvenance = MANUAL_PROVENANCE,
+  ): AdminProductRow {
     const cashier = this.requireCashier();
     const { store, auditStore, transact } = this.requireProductStack();
     const instant = this.now();
@@ -538,6 +577,7 @@ export class PosService {
           priceMinor: valid.price.minor,
           baseUnit: valid.baseUnit,
           isActive,
+          priceNeedsReview: provenance.priceNeedsReview,
         },
         instant,
       );
@@ -549,10 +589,15 @@ export class PosService {
       if (Object.keys(changes).length > 0) {
         written.push(
           auditStore.append(
-            this.auditDraft(cashier, "PRODUCT_UPDATED", "product", id, instant, changes, {
-              origin: "manual_entry",
-              source: updated.source,
-            }),
+            this.auditDraft(
+              cashier,
+              "PRODUCT_UPDATED",
+              "product",
+              id,
+              instant,
+              changes,
+              provenanceMetadata(provenance, updated.source),
+            ),
             this.newId(),
           ),
         );

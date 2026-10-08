@@ -8,7 +8,7 @@ import { loadCatalog } from "../../src/domain/catalog";
 import { IMPORT_HEADER } from "../../src/domain/catalogImport";
 import { DomainError } from "../../src/domain/errors";
 import { FIXTURE_CATALOG } from "../../src/fixtures/catalog";
-import { createIpcHandlers } from "../../src/main/ipcHandlers";
+import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import { CSV_SOURCE, CatalogRepository, productIdFor } from "../../src/persistence/catalogRepository";
 import { openDatabase } from "../../src/persistence/db";
 import { type TempDir, countRows, makeHarness, newKey, tempDir } from "../helpers/harness";
@@ -174,12 +174,12 @@ describe("importCatalog IPC handler", () => {
   it("takes no payload, needs a login, reads only the file the main-process dialog picked", () => {
     const h = makeHarness(t.dbPath, { login: false });
     let picks = 0;
-    const ipc = createIpcHandlers(h.service, {
+    const ipc = syncHandlers(createIpcHandlers(h.service, {
       pickCatalogFile: () => {
         picks += 1;
         return picks === 1 ? null : { name: "catalog.csv", bytes: FILE };
       },
-    });
+    }));
     expect(ipc.importCatalog(undefined)).toMatchObject({ ok: false, error: { code: "NOT_LOGGED_IN" } });
     expect(picks).toBe(0); // no dialog before login
     h.service.login("cashier-01", "1111");

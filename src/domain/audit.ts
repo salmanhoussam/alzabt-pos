@@ -92,8 +92,25 @@ export const AUDITED_PRODUCT_FIELDS = [
 ] as const;
 export type AuditedProductField = (typeof AUDITED_PRODUCT_FIELDS)[number];
 
-/** Metadata keys a PRODUCT_* event may carry. */
-export const AUDIT_PRODUCT_METADATA_KEYS = ["catalog_import_id", "origin", "source"] as const;
+/**
+ * Metadata keys a PRODUCT_* event may carry.
+ *
+ * `invoice_id` was added for invoice reconciliation (step 4): a catalog edit made while reviewing
+ * invoice 61 must say which document it came from, or "why did this price change" is unanswerable.
+ * It is ONE bounded scalar added to the allowlist — the fail-closed rule, the secret-key rejection
+ * and the scalar-only value rule are untouched, and `origin` already existed, so the value
+ * "invoice_reconciliation" needed no change at all.
+ *
+ * 🔴 NO NEW EVENT TYPE. A price changed during reconciliation is a PRODUCT_UPDATED, exactly like a
+ * price changed on the product screen. A PRICE_CHANGED type would split one fact across two
+ * vocabularies and double-count every "how many changes today" question.
+ */
+export const AUDIT_PRODUCT_METADATA_KEYS = [
+  "catalog_import_id",
+  "invoice_id",
+  "origin",
+  "source",
+] as const;
 
 /**
  * Metadata keys the CATALOG_IMPORTED summary may carry — the bounded summary only. CSV row
