@@ -753,6 +753,10 @@ if (PHASE === "seed-v2") {
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="product-row"]').length >= 1);
 
   // Representative v5 business data: two sales and a void.
+  // 🔴 `sell()` does not navigate — it clicks product tiles on whatever screen is showing. Adding a
+  // product left us on Products, so the Sell tab has to be selected first. Scenario D does exactly
+  // this; mine went straight to selling and waited forever for a tile that was not on screen.
+  await tab(page, "Sell");
   await sell(page, ["بيبسي 330 مل"], "Cash", 1);
   await page.getByRole("button", { name: "New sale" }).click();
   await sell(page, ["مياه"], "Card", 2);
