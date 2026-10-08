@@ -72,7 +72,19 @@ h1, h2 { margin: 0 0 12px; }
 .qty-n { min-width: 32px; text-align: center; font-size: 18px; }
 .total { display: flex; justify-content: space-between; font-size: 22px; padding: 12px 0; font-variant-numeric: tabular-nums; }
 
-.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); display: grid; place-items: center; }
+/* 🔴 The overlay is `position: fixed`, so anything the dialog pushes past the viewport cannot be
+   scrolled to — the page behind it does not move. With `place-items: center` a tall dialog overflows
+   BOTH edges, and its lowest controls become unreachable. That was not theoretical: the invoice
+   reconciliation panel for a not-found product is long (a create form, a product chooser, and the
+   keep actions), and the Windows E2E found its "Keep invoice only" button present in the DOM and
+   permanently not visible. That button is the decision that always works — a resolution screen whose
+   safe way out can be off-screen is exactly the dead end this feature is built to avoid.
+
+   The dialog is therefore capped to the viewport and scrolls inside itself, which also means
+   centring stays safe because the dialog can no longer exceed its container. */
+.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); display: grid; place-items: center;
+           padding: 16px; overflow: auto; }
+.overlay > .card { max-height: calc(100vh - 32px); overflow-y: auto; }
 .dialog { width: 520px; }
 .methods { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
 .row { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
@@ -145,7 +157,9 @@ h1, h2 { margin: 0 0 12px; }
 .inv-logo-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .inv-header-preview { flex: 1 0 100%; border: 1px dashed var(--line, #d9dce1); border-radius: 6px; padding: 10px; }
 .inv-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.inv-actions.inv-keep { border-top: 1px solid var(--line, #d9dce1); padding-top: 10px; margin-top: 10px; }
+/* The safe way out stays in view while the panel's own content scrolls past it. */
+.inv-actions.inv-keep { border-top: 1px solid var(--line, #d9dce1); padding-top: 10px; margin-top: 10px;
+                        position: sticky; bottom: 0; background: var(--card, #fff); }
 
 .inv-sheet { display: flex; flex-direction: column; gap: 12px; }
 .inv-sheet-head { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: flex-start;
