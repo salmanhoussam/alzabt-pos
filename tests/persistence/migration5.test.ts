@@ -22,6 +22,7 @@ import { SaleRepository } from "../../src/persistence/saleRepository";
 import { type TempDir, tempDir } from "../helpers/harness";
 
 const V4 = 4;
+/** Migration 5 is this file's subject, so it always migrates to EXACTLY v5, never to latest. */
 const V5 = 5;
 
 let t: TempDir;
@@ -139,8 +140,13 @@ function v4Ledger(): { sales: number; lines: number; voids: number; products: nu
 
 describe("migration 5 — v4 to v5", () => {
   it("is the fifth migration, and it touches no earlier table", () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5]);
+    // Was exactly [1, 2, 3, 4, 5] until migration 6 (manual_invoices) was appended. Migration 5's
+    // own position and content are what this file is about, and neither moved.
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(MIGRATIONS[4]!.name).toBe("durable_local_audit");
+    // Migration 6 is additive and must not reach into this one's table either.
+    expect(MIGRATIONS[5]!.name).toBe("manual_invoices");
+    expect(MIGRATIONS[5]!.sql).not.toMatch(/audit_events/i);
     const sql = MIGRATIONS[4]!.sql;
     // Additive means additive: nothing alters, drops or even mentions an existing business table.
     for (const forbidden of [
@@ -170,7 +176,7 @@ describe("migration 5 — v4 to v5", () => {
 
   it("a real v4 ledger reaches v5 with every sale, line, void and product intact", () => {
     const before = v4Ledger();
-    const db = openDatabase(t.dbPath, MIGRATIONS, { fileMustExist: true });
+    const db = openDatabase(t.dbPath, MIGRATIONS.slice(0, V5), { fileMustExist: true });
     try {
       expect(schemaVersion(db)).toBe(V5);
       expect({
@@ -208,7 +214,7 @@ describe("migration 5 — v4 to v5", () => {
 
   it("🔴 the audit trail starts EMPTY — no pre-v5 history is invented", () => {
     v4Ledger();
-    const db = openDatabase(t.dbPath, MIGRATIONS, { fileMustExist: true });
+    const db = openDatabase(t.dbPath, MIGRATIONS.slice(0, V5), { fileMustExist: true });
     try {
       expect(count(db, "audit_events")).toBe(0);
     } finally {
@@ -217,7 +223,7 @@ describe("migration 5 — v4 to v5", () => {
   });
 
   it("creates the table, exactly four indexes and exactly three triggers", () => {
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, MIGRATIONS.slice(0, V5));
     try {
       expect(
         (db.prepare("PRAGMA table_info(audit_events)").all() as Array<{ name: string }>).map((c) => c.name),
@@ -273,7 +279,7 @@ describe("migration 5 — v4 to v5", () => {
 
   it("🔴 an older build refuses a v5 ledger and does not write one byte", () => {
     v4Ledger();
-    openDatabase(t.dbPath, MIGRATIONS, { fileMustExist: true }).close();
+    openDatabase(t.dbPath, MIGRATIONS.slice(0, V5), { fileMustExist: true }).close();
     const bytesBefore = readFileSync(t.dbPath);
     const sizeBefore = statSync(t.dbPath).size;
 
@@ -286,7 +292,7 @@ describe("migration 5 — v4 to v5", () => {
   });
 
   it("an edited migration 5 is refused rather than silently diverging", () => {
-    openDatabase(t.dbPath, MIGRATIONS).close();
+    openDatabase(t.dbPath, MIGRATIONS.slice(0, V5)).close();
     const edited = [
       ...MIGRATIONS.slice(0, V4),
       { ...MIGRATIONS[4]!, sql: MIGRATIONS[4]!.sql.replace("audit_events_actor", "audit_events_actor_x") },
@@ -295,11 +301,11 @@ describe("migration 5 — v4 to v5", () => {
   });
 
   it("opening an already-v5 ledger applies nothing and changes no checksum", () => {
-    openDatabase(t.dbPath, MIGRATIONS).close();
-    const first = openDatabase(t.dbPath, MIGRATIONS, { fileMustExist: true });
+    openDatabase(t.dbPath, MIGRATIONS.slice(0, V5)).close();
+    const first = openDatabase(t.dbPath, MIGRATIONS.slice(0, V5), { fileMustExist: true });
     const rows = first.prepare("SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version").all();
     first.close();
-    const second = openDatabase(t.dbPath, MIGRATIONS, { fileMustExist: true });
+    const second = openDatabase(t.dbPath, MIGRATIONS.slice(0, V5), { fileMustExist: true });
     try {
       expect(
         second.prepare("SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version").all(),
@@ -311,7 +317,7 @@ describe("migration 5 — v4 to v5", () => {
   });
 
   it("a fresh install reaches v5 directly, with an empty trail", () => {
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, MIGRATIONS.slice(0, V5));
     try {
       expect(schemaVersion(db)).toBe(V5);
       expect(count(db, "audit_events")).toBe(0);

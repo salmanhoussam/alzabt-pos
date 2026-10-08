@@ -139,6 +139,17 @@ export interface ProductEdit {
   readonly priceMinor: bigint;
   readonly baseUnit: string;
   readonly isActive: boolean;
+  /**
+   * Explicitly sets `price_needs_review`. ABSENT means "leave it exactly as it is", which is what
+   * every caller before step 4 meant by never mentioning the column at all — so the default
+   * behaviour is byte-identical to before this field existed.
+   *
+   * 🔴 Why this is explicit rather than inferred: the flag marks a price the shop has not yet
+   * confirmed. Writing a new price does not by itself confirm it — an import writes prices too. It
+   * is cleared only when a person deliberately accepts a price as correct, and the one caller that
+   * does so says so here.
+   */
+  readonly priceNeedsReview?: boolean;
 }
 
 export class CatalogRepository {
@@ -429,7 +440,8 @@ export class CatalogRepository {
           .prepare(
             `UPDATE catalog_products
                 SET sku = @sku, name_ar = @nameAr, name_en = @nameEn, selling_price_minor = @price,
-                    base_unit = @baseUnit, is_active = @active, updated_at = @now
+                    base_unit = @baseUnit, is_active = @active, price_needs_review = @needsReview,
+                    updated_at = @now
               WHERE id = @id`,
           )
           .run({
@@ -440,6 +452,14 @@ export class CatalogRepository {
             price: input.priceMinor,
             baseUnit: input.baseUnit,
             active: input.isActive ? 1 : 0,
+            // Undefined carries the current value forward, so this statement cannot silently
+            // clear a review flag that nobody asked it to clear.
+            needsReview:
+              input.priceNeedsReview === undefined
+                ? Number(before.price_needs_review)
+                : input.priceNeedsReview
+                  ? 1
+                  : 0,
             now: now.toISOString(),
           });
         const row = this.findById(id);

@@ -13,6 +13,10 @@ import { type Db, openDatabase } from "../../src/persistence/db";
 import { MIGRATIONS } from "../../src/persistence/migrations";
 import { PinStateRepository } from "../../src/persistence/pinStateRepository";
 import { SaleRepository } from "../../src/persistence/saleRepository";
+import { InvoiceService } from "../../src/application/invoiceService";
+import { CompanyProfileRepository } from "../../src/persistence/companyProfileRepository";
+import { InvoiceRepository } from "../../src/persistence/invoiceRepository";
+import { ReconciliationRepository } from "../../src/persistence/reconciliationRepository";
 
 export interface TempDir {
   readonly dir: string;
@@ -41,6 +45,15 @@ export interface Harness {
   readonly clock: TestClock;
   /** The real durable audit trail, on the same connection — so tests read what was really stored. */
   readonly audit: AuditRepository;
+  /**
+   * The manual-invoice stack (migration 6), on the SAME connection and the SAME `transact`, wired
+   * to the REAL `PosService` — so a test that asserts "an audit row was written" is asserting about
+   * the real product service and not about a fake that agreed with it.
+   */
+  readonly invoices: InvoiceService;
+  readonly invoiceStore: InvoiceRepository;
+  readonly reconciliationStore: ReconciliationRepository;
+  readonly companyStore: CompanyProfileRepository;
 }
 
 export function makeHarness(
@@ -56,6 +69,8 @@ export function makeHarness(
     auditStore?: AuditRepository | null;
     /** The diagnostic mirror, if a test wants to observe it. */
     auditSink?: (row: AuditRow) => void;
+    /** A deterministic id source for the invoice stack. Default: a per-harness counter. */
+    ids?: () => string;
   } = {},
 ): Harness {
   const db = openDatabase(dbPath);
@@ -75,8 +90,23 @@ export function makeHarness(
       now: clock.now,
       audit: opts.auditSink,
     });
+    const invoiceStore = new InvoiceRepository(db);
+    const reconciliationStore = new ReconciliationRepository(db);
+    const companyStore = new CompanyProfileRepository(db);
+    let idSeq = 0;
+    const invoices = new InvoiceService({
+      invoices: invoiceStore,
+      reconciliation: reconciliationStore,
+      company: companyStore,
+      catalogStore: new CatalogRepository(db),
+      products: service,
+      transact: (fn) => db.transaction(fn).immediate(),
+      terminal: opts.terminal ?? FIXTURE_TERMINAL,
+      now: clock.now,
+      newId: opts.ids ?? (() => `id-${(idSeq += 1).toString().padStart(4, "0")}`),
+    });
     if (opts.login !== false) service.login("cashier-01", "1111");
-    return { db, repository, service, clock, audit };
+    return { db, repository, service, clock, audit, invoices, invoiceStore, reconciliationStore, companyStore };
   } catch (err) {
     db.close(); // never leave a handle open on a failed setup (Windows cannot delete open files)
     throw err;
