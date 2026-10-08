@@ -90,6 +90,19 @@ const tab = (page, name) => page.locator(`[data-testid="tab-${name}"]`).click();
  * blur, so a filled field is typed and never saved. That is how the paid amount silently stayed at
  * zero here, and it is also how the customer name was being dropped without any assertion noticing.
  */
+/**
+ * Every value the line rows actually display.
+ *
+ * 🔴 The sheet renders a line's description, unit and unit price as `<input>` elements, and
+ * `innerText` NEVER includes an input's value. Asserting `innerText.includes(description)` therefore
+ * fails even when the value is right — and, worse, the matching negative assertion
+ * (`not.includes(newName)`) passes for the wrong reason, because no input value is in that string at
+ * all. Read the values.
+ */
+async function lineValues(page) {
+  return page.locator('[data-testid="sheet-line"] input').evaluateAll((els) => els.map((e) => e.value));
+}
+
 async function commit(page, id, value) {
   const field = page.locator(`[data-testid="${id}"]`);
   await field.fill(value);
@@ -537,9 +550,13 @@ await page.waitForSelector('[data-testid="sheet-readonly"]');
 const reopened = await textOf(page, "sheet-issuer");
 assert(reopened.includes("متجر اختباري للفحص"), `the reopened invoice shows its FROZEN issuer (got "${reopened}")`);
 assert(!reopened.includes("اسم جديد تماماً"), "not the shop's new name");
-const sheetText = (await page.locator(".inv-sheet").innerText()).trim();
-assert(sheetText.includes("مفك براغي اختباري"), "the historical line description is unchanged");
-assert(!sheetText.includes("اسم صنف جديد"), "not the product's new name");
+const shown = await lineValues(page);
+assert(shown.includes("مفك براغي اختباري"), `the historical line description is unchanged (got ${JSON.stringify(shown)})`);
+assert(!shown.includes("اسم صنف جديد"), "not the product's new name");
+// The frozen unit price too — 5.00 as written on the invoice, not the 99.00 the product now costs.
+assert(shown.includes("5.00"), `the historical unit price is unchanged (got ${JSON.stringify(shown)})`);
+assert(!shown.includes("99.00"), "not the product's new price");
+assert(shown.includes("كيس (50PCS)"), "the historical unit label is unchanged");
 await page.screenshot({ path: SHOTS + "I10-frozen-reopened.png" });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════

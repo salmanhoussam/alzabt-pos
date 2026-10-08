@@ -1059,12 +1059,17 @@ if (PHASE === "seed-v2") {
   const reopened = await invText(page, "sheet-issuer");
   assert(reopened.includes("متجر اختباري للترقية"), `the reopened invoice shows its FROZEN issuer (got "${reopened}")`);
   assert(!reopened.includes("اسم مختلف"), "not the shop's new name");
-  const sheet = (await page.locator(".inv-sheet").innerText()).trim();
-  assert(sheet.includes("بيبسي 330 مل"), "the historical line description is unchanged");
-  assert(!sheet.includes("اسم منتج مختلف"), "not the product's new name");
-  assert(sheet.includes("1.50"), "the historical unit price is unchanged");
-  assert(!sheet.includes("77.00"), "not the product's new price");
-  assert(sheet.includes("كيس (50PCS)"), "the historical unit label is unchanged");
+  // 🔴 Descriptions, units and unit prices render as <input> elements, and `innerText` never
+  // includes an input's value — so this reads the VALUES. The earlier innerText form failed on the
+  // positive assertions and passed the negative ones for the wrong reason.
+  const shown = await page
+    .locator('[data-testid="sheet-line"] input')
+    .evaluateAll((els) => els.map((e) => e.value));
+  assert(shown.includes("بيبسي 330 مل"), `the historical line description is unchanged (got ${JSON.stringify(shown)})`);
+  assert(!shown.includes("اسم منتج مختلف"), "not the product's new name");
+  assert(shown.includes("1.50"), `the historical unit price is unchanged (got ${JSON.stringify(shown)})`);
+  assert(!shown.includes("77.00"), "not the product's new price");
+  assert(shown.includes("كيس (50PCS)"), "the historical unit label is unchanged");
   await page.screenshot({ path: SHOTS + "upgrade-e6-frozen.png" });
 
   // ── PDF, from the frozen invoice ───────────────────────────────────────────────────────────────
