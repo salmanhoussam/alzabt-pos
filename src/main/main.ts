@@ -210,7 +210,10 @@ async function renderInvoicePdf(invoiceId: string): Promise<Buffer> {
     return await win.webContents.printToPDF({
       pageSize: "A4",
       printBackground: true,
-      margins: { marginType: "default" },
+      // 🔴 Zero margins HERE on purpose: the document's own `@page { margin: 14mm 12mm }` is what
+      // positions the invoice on the sheet, and it is what the unit tests assert. Electron's own
+      // default of ~1cm would be added on top of it, silently narrowing the page the tests measured.
+      margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
   } finally {
     win.destroy();

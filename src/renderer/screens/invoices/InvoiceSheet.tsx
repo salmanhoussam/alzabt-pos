@@ -610,7 +610,7 @@ export function InvoiceSheet({
             <ul className="inv-picker">
               {matches.map((p) => (
                 <li key={p.id}>
-                  <button className="btn ghost wide" onClick={() => pick(p)}>
+                  <button className="btn ghost wide" onClick={() => pick(p)} data-testid="picker-option">
                     <span>{p.nameAr}</span>
                     <span className="muted" dir="ltr">
                       {p.priceDecimal} · {p.baseUnit}

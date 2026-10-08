@@ -13,12 +13,14 @@
 //   Scenario D — the canonical current main build (68fdf03, schema v4, exact quantity) → this build:
 //     node e2e/upgrade.mjs seed-v4
 //     node e2e/upgrade.mjs verify-from-v4
+//     node e2e/upgrade.mjs seed-v5        (scenario E: the real v5 main, 69f1a22)
+//     node e2e/upgrade.mjs verify-from-v5
 //
 // E2E_EXECUTABLE is the installed exe. The script asserts the profile path it actually used and
 // prints it, and reads the ledger file directly (app closed) for schema/backup evidence.
 // Synthetic Arabic data and fake prices only.
 import { _electron as electron } from "playwright-core";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -70,7 +72,14 @@ const product = (page, name) => page.locator("button.product", { hasText: name }
 // it then upgrades — and those builds shipped before the attribute existed, so they can only be
 // driven by their visible text, which in them is always English. Hence both, chosen by what the
 // running build actually has rather than by which phase we think we are in.
-const TAB_IDS = { "Sell": "sell", "Today's Sales": "today", History: "history", Tools: "tools", Products: "products" };
+const TAB_IDS = {
+  "Sell": "sell",
+  "Today's Sales": "today",
+  History: "history",
+  Tools: "tools",
+  Products: "products",
+  Invoices: "invoices",
+};
 const tab = async (page, name) => {
   await page.waitForSelector(".tabs button"); // the header is rendered in every build, old and new
   const byId = page.locator(`[data-testid="tab-${TAB_IDS[name]}"]`);
@@ -161,7 +170,19 @@ function ledgerFacts() {
             .map((r) => `${r.t}=${Number(r.n)}`)
             .join(",")
         : null,
+      // Migration 6. `null` means the table does not exist yet — the honest answer for any ledger a
+      // pre-v6 build wrote. Never 0, which would claim an empty invoice book that is not there.
+      invoices: tables.includes("invoices") ? n("SELECT count(*) AS n FROM invoices") : null,
+      invoiceLines: tables.includes("invoice_lines") ? n("SELECT count(*) AS n FROM invoice_lines") : null,
+      reconciliation: tables.includes("invoice_reconciliation")
+        ? n("SELECT count(*) AS n FROM invoice_reconciliation")
+        : null,
+      companyProfile: tables.includes("company_profile") ? n("SELECT count(*) AS n FROM company_profile") : null,
+      invoiceNumber: tables.includes("invoices")
+        ? n("SELECT coalesce(max(invoice_number), 0) AS n FROM invoices")
+        : null,
       integrity: db.pragma("integrity_check", { simple: true }),
+      foreignKeys: JSON.stringify(db.pragma("foreign_key_check")),
     };
   } finally {
     db.close();
@@ -198,6 +219,64 @@ function auditIsAppendOnly() {
   } finally {
     db.close();
   }
+}
+
+/** Every row of one invoice table, for the Scenario E proofs. The app must be CLOSED. */
+function invoiceRows(table, order = "rowid") {
+  const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
+  try {
+    return db.prepare(`SELECT * FROM ${table} ORDER BY ${order}`).all();
+  } finally {
+    db.close();
+  }
+}
+
+/** One product row by its Arabic name (the app must be closed). */
+function productByName(nameAr) {
+  const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
+  try {
+    return db.prepare("SELECT * FROM catalog_products WHERE name_ar = ?").get(nameAr) ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+/** Proves migration 6's immutability triggers are in the INSTALLED app's own ledger. */
+function invoiceIsImmutable() {
+  const db = new Database(LEDGER, { fileMustExist: true });
+  try {
+    const refused = (sql, pattern) => {
+      try {
+        db.prepare(sql).run();
+        return false;
+      } catch (err) {
+        return pattern.test(String(err.message));
+      }
+    };
+    return {
+      invoiceUpdate: refused("UPDATE invoices SET customer_name = 'someone else'", /immutable/),
+      invoiceDelete: refused("DELETE FROM invoices", /cannot be deleted/),
+      lineUpdate: refused("UPDATE invoice_lines SET unit_price_minor = 1, line_total_minor = 1", /immutable/),
+      lineDelete: refused("DELETE FROM invoice_lines", /cannot be deleted/),
+      intact: Number(db.prepare("SELECT count(*) AS n FROM invoices WHERE status = 'final'").get().n),
+    };
+  } finally {
+    db.close();
+  }
+}
+
+const invTestid = (page, id) => page.locator(`[data-testid="${id}"]`);
+const invText = async (page, id) => (await invTestid(page, id).innerText()).trim();
+
+/** Adds one invoice row through the sheet exactly as an operator would. */
+async function invoiceRow(page, { description, quantity, unit, price }) {
+  await invTestid(page, "add-row").click();
+  await invTestid(page, "new-line-description").fill(description);
+  await invTestid(page, "new-line-quantity").fill(quantity);
+  await invTestid(page, "new-line-unit").fill(unit);
+  await invTestid(page, "new-line-price").fill(price);
+  await invTestid(page, "new-line-save").click();
+  await page.waitForSelector('[data-testid="new-line-save"]', { state: "detached" });
 }
 
 /** A catalog product's stored base_unit, read from the ledger (the app must be closed). */
@@ -642,9 +721,397 @@ if (PHASE === "seed-v2") {
   log("final ledger:", JSON.stringify(f2));
   assert(f2.integrity === "ok" && f2.schema === 5, "the ledger is sound and still at v5");
   assert(JSON.stringify(f2.quantities) === "[2500,1000]", "no sale was disturbed by any of this");
+} else if (PHASE === "seed-v5") {
+  // ── Scenario E, part 1 — the REAL legal v5 main build (69f1a22, schema v5: durable audit, and
+  // NO invoice tables). This is the profile a shop would actually be upgraded from, created by
+  // running that build's own UI, not by writing a database that pretends to be v5.
+  assert(!existsSync(LEDGER), "scenario starts with no ledger in the real profile");
+  const { app, page } = await launch();
+  const cat = writeCatalog();
+  await stub(app, "open", cat.file);
+  await tab(page, "Tools");
+  await page.getByRole("button", { name: "Import catalog" }).click();
+  await page.waitForSelector("text=Catalog imported");
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+
+  // A manual product, sold by weight — so the upgrade has a fractional quantity to preserve.
+  await tab(page, "Products");
+  await page.locator('[data-testid="add-product"]').click();
+  await page.waitForSelector('[data-testid="field-nameAr"]');
+  await page.locator('[data-testid="field-nameAr"]').fill("حبل قنب");
+  const inputs = page.locator(".product-form input");
+  await inputs.nth(1).fill("Hemp Rope");
+  await inputs.nth(2).fill("SYN-ROPE");
+  await page.locator('[data-testid="field-price"]').fill("4.00");
+  await page.locator('[data-testid="field-unit"]').selectOption("kg");
+  await page.locator('[data-testid="save-product"]').click();
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="product-row"]').length >= 1);
+
+  // Representative v5 business data: two sales and a void.
+  await sell(page, ["بيبسي 330 مل"], "Cash", 1);
+  await page.getByRole("button", { name: "New sale" }).click();
+  await sell(page, ["مياه"], "Card", 2);
+  await page.getByRole("button", { name: "New sale" }).click();
+  await voidCardSale(page);
+  await app.close();
+
+  const f = ledgerFacts();
+  log("v5 baseline ledger:", JSON.stringify(f));
+  assert(f.schema === 5, `the baseline really is schema v5 (got ${f.schema})`);
+  assert(f.sales === 2 && f.voids === 1, "two sales and one void exist");
+  assert(f.catalog === 5, `four imported products plus the manual one are active (got ${f.catalog})`);
+  assert(f.audit !== null && f.audit > 0, "v5 already has the durable audit trail");
+  // 🔴 THE INVOICE TABLES DO NOT EXIST YET. `null`, not 0 — the honest answer for a v5 ledger.
+  assert(f.invoices === null, "a v5 ledger has no invoices table at all");
+  assert(f.invoiceLines === null && f.reconciliation === null, "nor invoice_lines nor invoice_reconciliation");
+  assert(f.companyProfile === null, "nor company_profile");
+  log("V5 BASELINE READY:", JSON.stringify({ sales: f.sales, voids: f.voids, catalog: f.catalog, audit: f.audit, receipts: f.receipts }));
+} else if (PHASE === "verify-from-v5") {
+  // ── Scenario E, part 2 — the feature build installed OVER that real v5 profile ────────────────
+  assert(existsSync(LEDGER), "the v5 ledger is still there");
+  const beforeAudit = ledgerFacts().audit;
+
+  let { app, page } = await launch();
+  await assertBuildLine(page);
+  await app.close();
+
+  const m = ledgerFacts();
+  log("after migration:", JSON.stringify(m));
+  assert(m.schema === 6, `the schema moved to v6 (got ${m.schema})`);
+  assert(m.integrity === "ok", "integrity_check is ok");
+  assert(m.foreignKeys === "[]", `foreign_key_check is empty (got ${m.foreignKeys})`);
+  // Old business data survived, byte for byte.
+  assert(m.sales === 2 && m.voids === 1, "the two v5 sales and the void are untouched");
+  assert(JSON.stringify(m.receipts) === "[1,2]", "the receipt sequence is unchanged");
+  assert(m.catalog === 5, "the catalog is unchanged");
+  assert(m.audit === beforeAudit, `migrating wrote no audit events (${beforeAudit} -> ${m.audit})`);
+  // 🔴 NOTHING WAS SYNTHESIZED. A migrated ledger holds no invoice history, because that is the
+  // honest state of a shop that has not written one.
+  assert(m.invoices === 0, `invoices is EMPTY, not absent (got ${m.invoices})`);
+  assert(m.invoiceLines === 0, `invoice_lines is empty (got ${m.invoiceLines})`);
+  assert(m.reconciliation === 0, `invoice_reconciliation is empty (got ${m.reconciliation})`);
+  assert(m.companyProfile === 0, `company_profile starts empty by design (got ${m.companyProfile})`);
+  assert(m.invoiceNumber === 0, "and no invoice number has been assigned");
+
+  // ── Company profile ────────────────────────────────────────────────────────────────────────────
+  ({ app, page } = await launch());
+  await tab(page, "Invoices");
+  await page.waitForSelector('[data-testid="inv-tab-company"]');
+  assert(await invTestid(page, "company-required").isVisible(), "the terminal says the shop details are missing");
+  await invTestid(page, "company-name-ar").fill("متجر اختباري للترقية");
+  await page.locator('.inv-company input[dir="ltr"]').first().fill("Upgrade Test Store");
+  await page.locator('[data-testid="company-taxpayer"]').fill("TP-E-1");
+  await page.locator('.inv-company input').nth(4).fill("شارع الاختبار");
+  await page.locator('.inv-company input').nth(5).fill("01-234567");
+  await invTestid(page, "company-next-number").fill("61");
+  await invTestid(page, "company-save").click();
+  await page.waitForSelector('[data-testid="company-notice"]');
+  await page.screenshot({ path: SHOTS + "upgrade-e1-company.png" });
+  await app.close();
+
+  {
+    const profile = invoiceRows("company_profile")[0];
+    assert(profile !== undefined, "the company profile persisted");
+    assert(profile.name_ar === "متجر اختباري للترقية", "with its Arabic name");
+    assert(profile.name_en === "Upgrade Test Store", "and its trade name");
+    assert(profile.taxpayer_number === "TP-E-1", "and one optional official identifier");
+    assert(Number(profile.next_invoice_number) === 61, "and the configured starting number");
+    assert(invoiceRows("company_profile").length === 1, "exactly one profile row");
+  }
+
+  // ── The invoice ────────────────────────────────────────────────────────────────────────────────
+  ({ app, page } = await launch());
+  await tab(page, "Invoices");
+  await page.waitForSelector('[data-testid="new-invoice"]');
+  await invTestid(page, "new-invoice").click();
+  await page.waitForSelector('[data-testid="add-row"]');
+  assert((await invText(page, "sheet-number")).startsWith("—"), "a draft has no invoice number");
+
+  await invTestid(page, "sheet-customer").fill("زبون الترقية");
+  await page.locator('.inv-customer input[dir="ltr"]').first().fill("70-999999");
+  await invTestid(page, "sheet-date").fill("2026-10-08");
+  await page.waitForTimeout(400);
+
+  // A · an existing catalog product, at its catalog price, with a known unit label -> MATCHED
+  await invoiceRow(page, { description: "حبل قنب", quantity: "1", unit: "كيلو", price: "4.00" });
+  // B · an existing product at a DIFFERENT price -> PRICE_DIFFERENCE
+  await invoiceRow(page, { description: "بيبسي 330 مل", quantity: "2", unit: "حبة", price: "1.50" });
+  // C · free text with a NON-CANONICAL unit the build has never heard of -> PRODUCT_NOT_FOUND
+  await invoiceRow(page, { description: "صنف جديد غير موجود", quantity: "3", unit: "كيس (50PCS)", price: "1.25" });
+  // D · a product whose price_needs_review is already 1 (the import's placeholder row), at a real
+  //     price -> PRICE_DIFFERENCE on exactly the row the flag rule is about.
+  await invoiceRow(page, { description: "شيبس", quantity: "1", unit: "حبة", price: "2.50" });
+
+  assert((await invTestid(page, "sheet-line").count()) === 4, "four rows are on the sheet");
+  const totals = (await invTestid(page, "sheet-line-total").allInnerTexts()).map((s) => s.trim());
+  assert(totals[0].includes("4.00"), `row A total 1 x 4.00 (got ${totals[0]})`);
+  assert(totals[1].includes("3.00"), `row B total 2 x 1.50 (got ${totals[1]})`);
+  assert(totals[2].includes("3.75"), `row C total 3 x 1.25 (got ${totals[2]})`);
+  assert(totals[3].includes("2.50"), `row D total 1 x 2.50 (got ${totals[3]})`);
+  const sub = await invText(page, "sheet-subtotal");
+  assert(sub.includes("13.25"), `the subtotal is 13.25 (got ${sub})`);
+  await invTestid(page, "sheet-paid").fill("3.25");
+  await page.waitForTimeout(500);
+  const bal = await invText(page, "sheet-balance");
+  assert(bal.includes("10.00"), `the balance due is 13.25 - 3.25 = 10.00 (got ${bal})`);
+  await page.screenshot({ path: SHOTS + "upgrade-e2-draft.png" });
+
+  await invTestid(page, "finalize").click();
+  await page.waitForSelector('[data-testid="finalize-confirm"]');
+  await invTestid(page, "finalize-confirm-yes").click();
+  await page.waitForSelector('[data-testid="finalized-notice"]');
+  const notice = await invText(page, "finalized-notice");
+  assert(notice.includes("61"), `the notice names invoice #61 (got "${notice.split("\n")[0]}")`);
+  await page.screenshot({ path: SHOTS + "upgrade-e3-finalized.png" });
+  await invTestid(page, "review-now").click();
+  await page.waitForSelector('[data-testid="review-table"]');
+  await app.close();
+
+  // ── What finalization really wrote ─────────────────────────────────────────────────────────────
+  {
+    const f = ledgerFacts();
+    log("after finalize:", JSON.stringify(f));
+    assert(f.invoices === 1 && f.invoiceLines === 4, "one invoice with four lines");
+    assert(f.invoiceNumber === 61, `a unique number was assigned: 61 (got ${f.invoiceNumber})`);
+    const inv = invoiceRows("invoices")[0];
+    assert(inv.status === "final", "the draft became final");
+    assert(Number(inv.subtotal_minor) === 1325, `the stored subtotal is 1325 minor units (got ${inv.subtotal_minor})`);
+    assert(Number(inv.balance_due_minor) === 1000, `the stored balance is 1000 (got ${inv.balance_due_minor})`);
+    assert(inv.amount_in_words && inv.amount_in_words.length > 8, "the amount in words is frozen onto it");
+    const issuer = JSON.parse(inv.issuer_snapshot_json);
+    assert(issuer.name_ar === "متجر اختباري للترقية" && issuer.taxpayer_number === "TP-E-1", "the issuer snapshot is present");
+
+    // Line snapshots are frozen, including the unit label the build cannot map.
+    const lines = invoiceRows("invoice_lines", "line_no");
+    assert(lines.length === 4, "four line snapshots");
+    assert(lines[2].unit_label === "كيس (50PCS)", "the non-canonical unit label was stored verbatim");
+    assert(lines[2].canonical_unit === null, "and no canonical unit was invented for it");
+    assert(Number(lines[1].unit_price_minor) === 150, "row B's invoice price is frozen at 1.50");
+
+    // 🔴 The immutability triggers are in the INSTALLED app's own ledger.
+    const guard = invoiceIsImmutable();
+    assert(guard.invoiceUpdate, "SQLite refuses to edit a finalized invoice");
+    assert(guard.invoiceDelete, "SQLite refuses to delete it");
+    assert(guard.lineUpdate && guard.lineDelete, "and refuses to edit or delete its lines");
+    assert(guard.intact === 1, "and the invoice is intact after all four attempts");
+
+    const recon = invoiceRows("invoice_reconciliation").map((r) => `${r.classification}:${r.status}`).sort();
+    log("reconciliation:", JSON.stringify(recon));
+    assert(recon.filter((r) => r === "MATCHED:KEPT_CATALOG").length === 1, "the matched row uses the designed resolved state");
+    assert(recon.filter((r) => r.startsWith("PRICE_DIFFERENCE:PENDING")).length === 2, "both price differences wait for a person");
+    assert(recon.filter((r) => r.startsWith("PRODUCT_NOT_FOUND:PENDING")).length === 1, "the unknown product waits for a person");
+
+    // 🔴 THE V1 BOUNDARY: issuing an invoice is not a sale and moves no stock.
+    assert(f.sales === 2, `still exactly the two v5 sales (got ${f.sales})`);
+    assert(f.voids === 1, "still exactly the one v5 void");
+    assert(JSON.stringify(f.quantities) === "[1000,1000]", "no sale line was disturbed");
+    assert(f.audit === beforeAudit, `finalizing wrote no catalog audit event (${beforeAudit} -> ${f.audit})`);
+    const tables = invoiceRows("sqlite_master", "name").filter((r) => r.type === "table").map((r) => r.name);
+    assert(!tables.some((t) => /stock|inventory|movement/i.test(t)), "and there is no stock table for it to have moved");
+  }
+
+  // ── PRICE_DIFFERENCE on the price_needs_review row: update the catalog from the invoice ────────
+  const chipsBefore = productByName("شيبس");
+  assert(Number(chipsBefore.price_needs_review) === 1, "the placeholder-priced product still needs review");
+  assert(Number(chipsBefore.selling_price_minor) === 1, "its catalog price is still the 0.01 placeholder");
+
+  ({ app, page } = await launch());
+  await tab(page, "Invoices");
+  await invTestid(page, "inv-tab-review").click();
+  await page.waitForSelector('[data-testid="review-table"]');
+  assert((await invTestid(page, "review-row").count()) === 3, "three items need review");
+  const chipsRow = page.locator('[data-testid="review-row"]').filter({ hasText: "شيبس" });
+  await chipsRow.first().locator('[data-testid="review-resolve"]').click();
+  await page.waitForSelector('[data-testid="resolve-panel"]');
+  assert(await invTestid(page, "resolve-keep-catalog").isVisible(), "the panel always offers a safe keep action");
+  await page.screenshot({ path: SHOTS + "upgrade-e4-resolve-price.png" });
+  await invTestid(page, "resolve-update").click();
+  await page.waitForSelector('[data-testid="resolve-panel"]', { state: "detached" });
+  await app.close();
+
+  {
+    const chips = productByName("شيبس");
+    assert(Number(chips.selling_price_minor) === 250, `the catalog price became 2.50 (got ${chips.selling_price_minor})`);
+    // 🔴 The approved rule: an explicit, successful invoice-price update clears the flag.
+    assert(Number(chips.price_needs_review) === 0, "and price_needs_review was cleared");
+    assert(Number(chips.is_active) === 1, "the product is still active — reconciliation never touched is_active");
+
+    const audits = auditRows();
+    const updates = audits.filter((a) => a.event_type === "PRODUCT_UPDATED");
+    assert(updates.length === 1, `exactly one PRODUCT_UPDATED was written (got ${updates.length})`);
+    assert(audits.length === beforeAudit + 1, `and exactly one new audit row in total (got ${audits.length - beforeAudit})`);
+    const meta = JSON.parse(updates[0].metadata_json);
+    assert(meta.origin === "invoice_reconciliation", `the audit says where it came from (${meta.origin})`);
+    assert(typeof meta.invoice_id === "string" && meta.invoice_id.length > 0, "and which invoice");
+    const diff = JSON.parse(updates[0].changed_json);
+    assert(diff.selling_price_minor.before === "1" && diff.selling_price_minor.after === "250", "with the exact before/after");
+    assert(diff.price_needs_review.before === true && diff.price_needs_review.after === false, "and the flag's real transition");
+    assert(!("is_active" in diff), "is_active is NOT in the diff");
+    // 🔴 A price change is a PRODUCT_UPDATED. There is no PRICE_CHANGED event type.
+    assert(!JSON.stringify(audits).includes("PRICE_CHANGED"), "no PRICE_CHANGED event exists");
+  }
+
+  // ── A keep action: zero mutation, zero audit, out of the queue ─────────────────────────────────
+  const auditAfterUpdate = ledgerFacts().audit;
+  const pepsiBefore = productByName("بيبسي 330 مل");
+
+  ({ app, page } = await launch());
+  await tab(page, "Invoices");
+  await invTestid(page, "inv-tab-review").click();
+  await page.waitForSelector('[data-testid="review-table"]');
+  const pepsiRow = page.locator('[data-testid="review-row"]').filter({ hasText: "بيبسي" });
+  await pepsiRow.first().locator('[data-testid="review-resolve"]').click();
+  await page.waitForSelector('[data-testid="resolve-panel"]');
+  await invTestid(page, "resolve-keep-catalog").click();
+  await page.waitForSelector('[data-testid="resolve-panel"]', { state: "detached" });
+
+  // ── PRODUCT_NOT_FOUND exposes Add / Link / Keep ────────────────────────────────────────────────
+  const missingRow = page.locator('[data-testid="review-row"]').filter({ hasText: "غير موجود" });
+  await missingRow.first().locator('[data-testid="review-resolve"]').click();
+  await page.waitForSelector('[data-testid="resolve-not-found"]');
+  assert(await invTestid(page, "resolve-create").isVisible(), "Add to catalog is offered");
+  assert(await invTestid(page, "resolve-link").isVisible(), "Link existing is offered");
+  assert(await invTestid(page, "resolve-keep-invoice").isVisible(), "Keep invoice only is offered");
+  assert(
+    (await invTestid(page, "resolve-name-ar").inputValue()).includes("غير موجود"),
+    "the Add form is prefilled from what the invoice observed",
+  );
+  await page.screenshot({ path: SHOTS + "upgrade-e5-resolve-not-found.png" });
+  // 🔴 An unsupported free-text unit does not silently mutate the catalog: creating without naming
+  // a canonical unit is REFUSED, and the item stays in the queue.
+  await invTestid(page, "resolve-create").click();
+  await page.waitForSelector('[data-testid="resolve-error"]');
+  assert(await invTestid(page, "resolve-error").isVisible(), "creating a product from an unmappable unit is refused, with a reason");
+  await invTestid(page, "resolve-keep-invoice").click();
+  await page.waitForSelector('[data-testid="resolve-panel"]', { state: "detached" });
+  await app.close();
+
+  {
+    const pepsi = productByName("بيبسي 330 مل");
+    assert(
+      Number(pepsi.selling_price_minor) === Number(pepsiBefore.selling_price_minor),
+      "Keep catalog unchanged mutated no product",
+    );
+    assert(ledgerFacts().audit === auditAfterUpdate, "and wrote no product audit event");
+    const settled = invoiceRows("invoice_reconciliation").filter((r) => r.status !== "PENDING" && r.status !== "FAILED");
+    assert(settled.length === 4, `every item left the unresolved queue (${settled.length} of 4 settled)`);
+    assert(settled.some((r) => r.status === "KEPT_CATALOG" && r.classification === "PRICE_DIFFERENCE"), "the keep decision is recorded");
+    assert(settled.some((r) => r.status === "KEPT_INVOICE_ONLY"), "and so is keep-invoice-only");
+    assert(
+      settled.every((r) => r.resolution_actor_id === "cashier-01"),
+      "each one names the operator who decided it",
+    );
+    // The catalog gained no product from a refused creation.
+    assert(ledgerFacts().catalog === 5, "no product was created by the refused attempt");
+  }
+
+  // ── The historical snapshot survives changes to the shop AND the catalog ───────────────────────
+  const frozenIssuer = invoiceRows("invoices")[0].issuer_snapshot_json;
+  const frozenLines = JSON.stringify(
+    invoiceRows("invoice_lines", "line_no").map((l) => [l.description, String(l.unit_price_minor), l.unit_label]),
+  );
+
+  ({ app, page } = await launch());
+  await tab(page, "Invoices");
+  await invTestid(page, "inv-tab-company").click();
+  await page.waitForSelector('[data-testid="company-name-ar"]');
+  await invTestid(page, "company-name-ar").fill("اسم مختلف تماماً");
+  await invTestid(page, "company-save").click();
+  await page.waitForSelector('[data-testid="company-notice"]');
+
+  await tab(page, "Products");
+  await page.waitForSelector('[data-testid="product-row"]');
+  await page
+    .locator('[data-testid="product-row"]')
+    .filter({ hasText: "بيبسي" })
+    .first()
+    .getByRole("button", { name: /^(تعديل|Edit)$/ })
+    .click();
+  await page.waitForSelector('[data-testid="field-nameAr"]');
+  await page.locator('[data-testid="field-nameAr"]').fill("اسم منتج مختلف");
+  await page.locator('[data-testid="field-price"]').fill("77.00");
+  await page.locator('[data-testid="save-product"]').click();
+  await page.waitForTimeout(800);
+
+  await tab(page, "Invoices");
+  await page.waitForSelector('[data-testid="history-table"]');
+  assert((await invTestid(page, "history-row").count()) === 1, "the invoice is in history");
+  await invTestid(page, "history-open").first().click();
+  await page.waitForSelector('[data-testid="sheet-readonly"]');
+  const reopened = await invText(page, "sheet-issuer");
+  assert(reopened.includes("متجر اختباري للترقية"), `the reopened invoice shows its FROZEN issuer (got "${reopened}")`);
+  assert(!reopened.includes("اسم مختلف"), "not the shop's new name");
+  const sheet = (await page.locator(".inv-sheet").innerText()).trim();
+  assert(sheet.includes("بيبسي 330 مل"), "the historical line description is unchanged");
+  assert(!sheet.includes("اسم منتج مختلف"), "not the product's new name");
+  assert(sheet.includes("1.50"), "the historical unit price is unchanged");
+  assert(!sheet.includes("77.00"), "not the product's new price");
+  assert(sheet.includes("كيس (50PCS)"), "the historical unit label is unchanged");
+  await page.screenshot({ path: SHOTS + "upgrade-e6-frozen.png" });
+
+  // ── PDF, from the frozen invoice ───────────────────────────────────────────────────────────────
+  const pdf = join(tmpdir(), `alzabt-invoice-61-${process.pid}.pdf`);
+  await app.evaluate(({ dialog }, target) => {
+    dialog.showSaveDialogSync = () => target;
+  }, pdf);
+  await invTestid(page, "save-pdf").click();
+  await page.waitForTimeout(6000);
+  assert(existsSync(pdf), `a PDF was generated (${pdf})`);
+  const bytes = statSync(pdf).size;
+  assert(bytes > 2000, `the PDF is a real document (${bytes} bytes)`);
+  await app.close();
+
+  assert(invoiceRows("invoices")[0].issuer_snapshot_json === frozenIssuer, "generating the PDF did not alter the frozen issuer");
+
+  // ── Restart: everything durable is still there ─────────────────────────────────────────────────
+  ({ app, page } = await launch());
+  await tab(page, "Invoices");
+  await page.waitForSelector('[data-testid="history-table"]');
+  assert((await invTestid(page, "history-row").count()) === 1, "the invoice survived a restart");
+  assert((await invText(page, "sheet-number").catch(() => "")) !== undefined, "history rendered");
+  await app.close();
+
+  // ── Final DB proof ─────────────────────────────────────────────────────────────────────────────
+  {
+    const f = ledgerFacts();
+    const chips = productByName("شيبس");
+    const recon = invoiceRows("invoice_reconciliation").map((r) => `${r.classification}:${r.status}`).sort();
+    log(
+      "SCENARIO E FINAL:",
+      JSON.stringify({
+        schema: f.schema,
+        integrity: f.integrity,
+        foreignKeys: f.foreignKeys,
+        invoices: f.invoices,
+        invoiceLines: f.invoiceLines,
+        reconciliation: f.reconciliation,
+        invoiceNumber: f.invoiceNumber,
+        chipsPriceMinor: Number(chips.selling_price_minor),
+        chipsNeedsReview: Number(chips.price_needs_review),
+        chipsActive: Number(chips.is_active),
+        audit: f.audit,
+        auditTypes: f.auditTypes,
+        sales: f.sales,
+        voids: f.voids,
+      }),
+    );
+    assert(f.schema === 6 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v6");
+    assert(f.invoices === 1 && f.invoiceLines === 4 && f.reconciliation === 4, "the invoice, its lines and its review rows persist");
+    assert(f.invoiceNumber === 61, "the invoice number is unchanged after every restart");
+    assert(
+      JSON.stringify(invoiceRows("invoice_lines", "line_no").map((l) => [l.description, String(l.unit_price_minor), l.unit_label])) ===
+        frozenLines,
+      "every line snapshot is byte-for-byte what it was",
+    );
+    assert(Number(chips.selling_price_minor) === 250 && Number(chips.price_needs_review) === 0, "the product mutation persists");
+    assert(recon.filter((r) => r.endsWith(":PENDING")).length === 0, "no item was left unresolved");
+    assert(f.sales === 2 && f.voids === 1, "and the v5 sales ledger is exactly as it was found");
+    assert(f.audit === beforeAudit + 1, `the audit trail grew by exactly one row (${beforeAudit} -> ${f.audit})`);
+  }
 } else {
   console.error(
-    "usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main|seed-v4|verify-from-v4",
+    "usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main|seed-v4|verify-from-v4|seed-v5|verify-from-v5",
   );
   process.exit(2);
 }

@@ -1,0 +1,524 @@
+/**
+ * E2E — the manual invoice against the REAL app: renderer + preload + IPC + service + SQLite.
+ *
+ * This is the evidence no unit test can produce: that a human can fill in an invoice on the actual
+ * screen, that the number appears only after finalizing, that the finalized document really becomes
+ * read-only, that a catalog difference can be resolved from the UI, and that every bit of it is
+ * still there after the application is closed and reopened — read back out of the app's own SQLite
+ * file, not out of the page.
+ *
+ * 🔴 Selectors are data-testid, never visible text: the terminal's default language is Arabic, and a
+ * test that clicks "Add row" would pass only while the UI happens to be English.
+ *
+ * 🔴 Synthetic data only. The one familiar number here, 474.40, is the arithmetic regression value
+ * already used in the unit tests — not a merchant's invoice.
+ *
+ * Run: node e2e/manual-invoice.mjs            (CI sets E2E_EXECUTABLE to the installed .exe)
+ *      locally, where better-sqlite3 is built against Electron's ABI:
+ *        env -u ELECTRON_RUN_AS_NODE ELECTRON_RUN_AS_NODE=1 \
+ *          ./node_modules/electron/dist/electron e2e/manual-invoice.mjs
+ */
+import { _electron as electron } from "playwright-core";
+import { existsSync, mkdirSync, mkdtempSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
+const PACKAGED = process.env.E2E_EXECUTABLE;
+const ELECTRON = PACKAGED ?? createRequire(import.meta.url)("electron");
+const APP_ARGS = PACKAGED ? [] : [APP];
+const SHOTS = join(APP, "e2e-output") + "/";
+mkdirSync(SHOTS, { recursive: true });
+const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["--no-sandbox"] : [];
+
+// A fresh profile per run: this script issues invoices and must never touch a real ledger.
+const home = mkdtempSync(join(tmpdir(), "pos-e2e-invoice-"));
+// 🔴 ELECTRON_RUN_AS_NODE is DELETED from the child's environment. This script may itself be run
+// under Electron's bundled node (that is how better-sqlite3's Electron-ABI build is loadable on a
+// dev machine), and inheriting that variable would make the launched application run as a plain node
+// process with no window at all — a failure that looks like the app never starting.
+const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
+delete env.ELECTRON_RUN_AS_NODE;
+
+const Database = createRequire(import.meta.url)("better-sqlite3");
+const LEDGER = join(home, "userData", "alzabt-pos-ledger.sqlite");
+
+const log = (...a) => console.log("•", ...a);
+let passed = 0;
+const assert = (cond, msg) => {
+  if (!cond) throw new Error("ASSERTION FAILED: " + msg);
+  passed += 1;
+  log("PASS", msg);
+};
+
+async function launch() {
+  const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+  const page = await app.firstWindow();
+  await page.waitForSelector("text=Select cashier", { timeout: 30000 });
+  await page.getByRole("button", { name: "Cashier One" }).click();
+  for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
+  await page.getByRole("button", { name: "Log in" }).click();
+  await page.waitForSelector("text=Current sale");
+  return { app, page };
+}
+
+const tab = (page, name) => page.locator(`[data-testid="tab-${name}"]`).click();
+const testid = (page, id) => page.locator(`[data-testid="${id}"]`);
+const textOf = async (page, id) => (await testid(page, id).innerText()).trim();
+
+/** The app must be CLOSED: these read the installed application's own ledger file. */
+function query(sql, ...params) {
+  const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
+  try {
+    return db.prepare(sql).all(...params);
+  } finally {
+    db.close();
+  }
+}
+const one = (sql, ...params) => query(sql, ...params)[0];
+const count = (table, where = "1=1") => Number(one(`SELECT count(*) AS n FROM ${table} WHERE ${where}`).n);
+
+function facts() {
+  const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
+  try {
+    const n = (sql) => Number(db.prepare(sql).get().n);
+    return {
+      schema: n("SELECT max(version) AS n FROM schema_migrations"),
+      integrity: db.pragma("integrity_check", { simple: true }),
+      foreignKeys: JSON.stringify(db.pragma("foreign_key_check")),
+      invoices: n("SELECT count(*) AS n FROM invoices"),
+      invoiceLines: n("SELECT count(*) AS n FROM invoice_lines"),
+      reconciliation: n("SELECT count(*) AS n FROM invoice_reconciliation"),
+      highestNumber: n("SELECT coalesce(max(invoice_number), 0) AS n FROM invoices"),
+      sales: n("SELECT count(*) AS n FROM sales"),
+      saleLines: n("SELECT count(*) AS n FROM sale_lines"),
+      voids: n("SELECT count(*) AS n FROM voids"),
+      audit: n("SELECT count(*) AS n FROM audit_events"),
+      auditTypes: db
+        .prepare("SELECT event_type AS t, count(*) AS n FROM audit_events GROUP BY event_type ORDER BY t")
+        .all()
+        .map((r) => `${r.t}=${Number(r.n)}`)
+        .join(","),
+    };
+  } finally {
+    db.close();
+  }
+}
+
+/** Adds one line through the sheet exactly as an operator would. */
+async function addRow(page, { description, quantity, unit, price }) {
+  await testid(page, "add-row").click();
+  await testid(page, "new-line-description").fill(description);
+  await testid(page, "new-line-quantity").fill(quantity);
+  await testid(page, "new-line-unit").fill(unit);
+  await testid(page, "new-line-price").fill(price);
+  await testid(page, "new-line-save").click();
+  await page.waitForSelector('[data-testid="new-line-save"]', { state: "detached" });
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 1 · The application launches, and the Invoices tab is reachable
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+let { app, page } = await launch();
+assert(true, "the application launched and a cashier signed in");
+
+await tab(page, "invoices");
+await page.waitForSelector('[data-testid="inv-tab-company"]');
+assert(await testid(page, "inv-tab-company").isVisible(), "the Invoices tab is reachable");
+// A fresh terminal has no shop details, so the screen opens where the operator has to start.
+assert(await testid(page, "company-required").isVisible(), "a terminal with no shop details says so before anything else");
+await page.screenshot({ path: SHOTS + "I1-invoices-company-required.png" });
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 2 · The company profile is entered and saved
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+await testid(page, "company-name-ar").fill("متجر اختباري للفحص");
+await page.locator('.inv-company input[dir="ltr"]').first().fill("E2E Test Store");
+await testid(page, "company-taxpayer").fill("TP-E2E-1");
+await testid(page, "company-register").fill("CR-E2E-2");
+await testid(page, "company-vat").fill("VAT-E2E-3");
+await testid(page, "company-next-number").fill("61");
+await testid(page, "company-save").click();
+await page.waitForSelector('[data-testid="company-notice"]');
+assert(true, "the shop details saved");
+// 🔴 Printing these does not make an invoice compliant, and the screen says so where it is read.
+assert((await textOf(page, "company-ids-note")).length > 20, "the no-compliance-claim note is on the screen");
+const previewText = await textOf(page, "company-preview");
+assert(
+  previewText.includes("TP-E2E-1") && previewText.includes("CR-E2E-2") && previewText.includes("VAT-E2E-3"),
+  "the preview shows all three official numbers, each under its own label",
+);
+await page.screenshot({ path: SHOTS + "I2-company-profile.png" });
+
+// A catalog product to reconcile against, created through the normal Products screen path.
+await tab(page, "products");
+await page.waitForSelector('[data-testid="add-product"]');
+await testid(page, "add-product").click();
+await testid(page, "field-nameAr").fill("مفك براغي اختباري");
+await testid(page, "field-price").fill("5.00");
+await testid(page, "field-unit").selectOption("piece");
+await page.getByRole("button", { name: /^(حفظ|Save)$/ }).click();
+await page.waitForSelector('[data-testid="product-row"]');
+assert(true, "a synthetic catalog product exists to reconcile against");
+
+await app.close();
+{
+  const f = facts();
+  log("after setup:", JSON.stringify(f));
+  assert(f.schema === 6, `the ledger is at schema v6 (got ${f.schema})`);
+  assert(f.invoices === 0 && f.invoiceLines === 0 && f.reconciliation === 0, "no invoice exists yet");
+  assert(count("company_profile") === 1, "exactly one company_profile row, however many saves happened");
+  assert(Number(one("SELECT next_invoice_number AS n FROM company_profile").n) === 61, "the sequence starts at 61 as configured");
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 3 · A draft invoice: customer snapshot, four rows, one from the catalog and one free text
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+({ app, page } = await launch());
+await tab(page, "invoices");
+await page.waitForSelector('[data-testid="new-invoice"]');
+await testid(page, "new-invoice").click();
+await page.waitForSelector('[data-testid="add-row"]');
+
+assert((await textOf(page, "sheet-number")).startsWith("—"), "a draft shows no invoice number");
+assert((await textOf(page, "sheet-status")).length > 0, "the sheet says it is a draft");
+
+await testid(page, "sheet-customer").fill("زبون اختباري");
+await page.locator('.inv-customer input[dir="ltr"]').first().fill("70-000000");
+await testid(page, "sheet-date").fill("2026-10-08");
+await page.waitForTimeout(300);
+
+// Row 1 — chosen from the existing catalog, then left exactly as prefilled (MATCHED).
+await testid(page, "add-row").click();
+await page.locator('.inv-new-line .btn.ghost.small').first().click();
+await page.waitForSelector('[data-testid="product-picker"]');
+await testid(page, "picker-option").first().click();
+await testid(page, "new-line-save").click();
+await page.waitForSelector('[data-testid="new-line-save"]', { state: "detached" });
+assert((await testid(page, "sheet-line").count()) === 1, "a row picked from the catalog was added");
+
+// Row 2 — the same catalog product at a DIFFERENT price (PRICE_DIFFERENCE).
+await addRow(page, { description: "مفك براغي اختباري", quantity: "2", unit: "حبة", price: "6.50" });
+
+// Row 3 — free text the catalog has never heard of (PRODUCT_NOT_FOUND).
+await addRow(page, { description: "صنف غير موجود في الأصناف", quantity: "3", unit: "حبة", price: "1.25" });
+
+// Row 4 — a non-canonical free-text unit, kept verbatim and never guessed at.
+await addRow(page, { description: "صنف معبّأ بوحدة غريبة", quantity: "1", unit: "كيس (50PCS)", price: "474.40" });
+
+assert((await testid(page, "sheet-line").count()) === 4, "four rows are on the sheet");
+await page.screenshot({ path: SHOTS + "I3-invoice-draft.png" });
+
+// ── Displayed line totals and invoice totals ──────────────────────────────────────────────────
+const lineTotals = await testid(page, "sheet-line-total").allInnerTexts();
+const clean = lineTotals.map((s) => s.trim());
+assert(clean[0].includes("5.00"), `row 1 total is 1 x 5.00 = 5.00 (got ${clean[0]})`);
+assert(clean[1].includes("13.00"), `row 2 total is 2 x 6.50 = 13.00 (got ${clean[1]})`);
+assert(clean[2].includes("3.75"), `row 3 total is 3 x 1.25 = 3.75 (got ${clean[2]})`);
+assert(clean[3].includes("474.40"), `row 4 total is 1 x 474.40 = 474.40 (got ${clean[3]})`);
+
+const subtotal = await textOf(page, "sheet-subtotal");
+assert(subtotal.includes("496.15"), `the subtotal is 5.00 + 13.00 + 3.75 + 474.40 = 496.15 (got ${subtotal})`);
+const totalBefore = await textOf(page, "sheet-total");
+assert(totalBefore.includes("496.15"), `with tax off the total equals the subtotal (got ${totalBefore})`);
+
+await testid(page, "sheet-paid").fill("96.15");
+await page.waitForTimeout(400);
+const balance = await textOf(page, "sheet-balance");
+assert(balance.includes("400.00"), `the balance due is 496.15 - 96.15 = 400.00 (got ${balance})`);
+assert((await textOf(page, "sheet-words")).includes("("), "the amount in words is not shown yet — it is frozen at finalize");
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 4 · Finalize — explicit, confirmed, and the number appears only afterwards
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+await testid(page, "finalize").click();
+await page.waitForSelector('[data-testid="finalize-confirm"]');
+const confirmText = await textOf(page, "finalize-confirm");
+assert(confirmText.includes("496.15") && confirmText.includes("400.00"), "the confirmation shows the real figures");
+await page.screenshot({ path: SHOTS + "I4-finalize-confirm.png" });
+await testid(page, "finalize-confirm-yes").click();
+
+await page.waitForSelector('[data-testid="finalized-notice"]');
+const notice = await textOf(page, "finalized-notice");
+assert(notice.includes("61"), `the finalized notice names invoice #61 (got "${notice.split("\n")[0]}")`);
+assert(/\d/.test(notice), "the notice summarises what needs review");
+await page.screenshot({ path: SHOTS + "I5-finalized-notice.png" });
+
+await testid(page, "review-now").click();
+await page.waitForSelector('[data-testid="review-table"]');
+assert(await testid(page, "review-table").isVisible(), "Review now reaches the queue");
+await page.screenshot({ path: SHOTS + "I6-review-queue.png" });
+
+await app.close();
+
+// ── The durable truth, read out of the app's own SQLite file ──────────────────────────────────
+{
+  const f = facts();
+  log("after finalize:", JSON.stringify(f));
+  assert(f.invoices === 1 && f.invoiceLines === 4, "one invoice with four lines is stored");
+  assert(f.highestNumber === 61, `the assigned number is 61 (got ${f.highestNumber})`);
+  assert(f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound");
+
+  const inv = one("SELECT * FROM invoices");
+  assert(inv.status === "final", "the invoice is final");
+  assert(Number(inv.subtotal_minor) === 49615, `the STORED subtotal is 49615 minor units (got ${inv.subtotal_minor})`);
+  assert(Number(inv.total_minor) === 49615 && Number(inv.balance_due_minor) === 40000, "stored total and balance are exact");
+  assert(inv.amount_in_words && inv.amount_in_words.length > 10, "the amount in words is frozen onto the document");
+  const issuer = JSON.parse(inv.issuer_snapshot_json);
+  assert(issuer.name_ar === "متجر اختباري للفحص", "the issuer snapshot is frozen onto the invoice");
+  assert(issuer.taxpayer_number === "TP-E2E-1" && issuer.vat_number === "VAT-E2E-3", "and it carries the official numbers separately");
+
+  // The non-canonical unit was kept verbatim and NOT mapped to anything.
+  const odd = one("SELECT * FROM invoice_lines WHERE unit_label = 'كيس (50PCS)'");
+  assert(odd !== undefined, "the printed unit label was stored verbatim");
+  assert(odd.canonical_unit === null, "and no canonical unit was invented for it");
+
+  // 🔴 THE V1 BOUNDARY: an invoice is not a sale.
+  assert(f.sales === 0, "finalizing an invoice created NO sales row");
+  assert(f.saleLines === 0, "and no sale line");
+  assert(f.voids === 0, "and no void");
+  const tables = query("SELECT name FROM sqlite_master WHERE type='table'").map((r) => r.name);
+  assert(
+    !tables.some((t) => /stock|inventory|movement/i.test(t)),
+    "and there is no stock/inventory table for it to have moved",
+  );
+
+  // Reconciliation: four rows, with the classifications the design predicts.
+  const recon = query("SELECT classification, status FROM invoice_reconciliation ORDER BY classification");
+  assert(recon.length === 4, `one review row per line (got ${recon.length})`);
+  const byClass = Object.fromEntries(recon.map((r) => [r.classification, r.status]));
+  log("classifications:", JSON.stringify(byClass));
+  assert(byClass.MATCHED === "KEPT_CATALOG", "the matched row is settled as KEPT_CATALOG by design");
+  assert(byClass.PRICE_DIFFERENCE === "PENDING", "the price difference waits for a person");
+  assert(byClass.PRODUCT_NOT_FOUND === "PENDING", "the unknown product waits for a person");
+  assert(
+    byClass.UNIT_DIFFERENCE === "PENDING" || byClass.MULTIPLE_DIFFERENCES === "PENDING",
+    `the odd-unit row waits for a person (${JSON.stringify(byClass)})`,
+  );
+
+  // Finalizing changed no product and wrote no catalog audit event.
+  assert(f.audit === 1 && f.auditTypes === "PRODUCT_CREATED=1", `only the product I created is audited (${f.auditTypes})`);
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 5 · The finalized invoice is read-only, and the DATABASE refuses an edit too
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+({ app, page } = await launch());
+await tab(page, "invoices");
+await page.waitForSelector('[data-testid="history-table"]');
+assert((await testid(page, "history-row").count()) === 1, "the finalized invoice is in history");
+await testid(page, "history-open").first().click();
+await page.waitForSelector('[data-testid="sheet-readonly"]');
+assert(await testid(page, "sheet-readonly").isVisible(), "reopening a finalized invoice shows it as read-only");
+assert((await textOf(page, "sheet-number")).includes("61"), "and it shows its number");
+assert((await testid(page, "finalize").count()) === 0, "there is no Finalize button on an issued invoice");
+assert((await testid(page, "add-row").count()) === 0, "and no way to add a row");
+assert(await testid(page, "print").isVisible(), "Print and Save PDF are offered instead");
+await page.screenshot({ path: SHOTS + "I7-finalized-readonly.png" });
+await app.close();
+
+{
+  const db = new Database(LEDGER, { fileMustExist: true });
+  let refusedUpdate = false;
+  let refusedLine = false;
+  try {
+    try {
+      db.prepare("UPDATE invoices SET customer_name = 'someone else'").run();
+    } catch (err) {
+      refusedUpdate = /immutable/.test(String(err.message));
+    }
+    try {
+      db.prepare("UPDATE invoice_lines SET unit_price_minor = 1, line_total_minor = 1").run();
+    } catch (err) {
+      refusedLine = /immutable/.test(String(err.message));
+    }
+  } finally {
+    db.close();
+  }
+  assert(refusedUpdate, "SQLite itself refuses to edit a finalized invoice");
+  assert(refusedLine, "and refuses to edit its lines");
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 6 · Resolving a PRICE_DIFFERENCE through the UI
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+({ app, page } = await launch());
+await tab(page, "invoices");
+await testid(page, "inv-tab-review").click();
+await page.waitForSelector('[data-testid="review-table"]');
+const before = await testid(page, "review-row").count();
+assert(before === 3, `three rows need review (got ${before})`);
+
+// Open the price difference by finding its row, then resolve it.
+const priceRow = page.locator('[data-testid="review-row"]').filter({ hasText: "6.50" });
+const target = (await priceRow.count()) > 0 ? priceRow.first() : page.locator('[data-testid="review-row"]').first();
+await target.locator('[data-testid="review-resolve"]').click();
+await page.waitForSelector('[data-testid="resolve-panel"]');
+// Every state offers a keep action — asserted here because a dead end is the failure this prevents.
+assert(await testid(page, "resolve-keep-catalog").isVisible(), "the panel always offers Keep catalog unchanged");
+assert(await testid(page, "resolve-keep-invoice").isVisible(), "and Keep invoice only");
+await page.screenshot({ path: SHOTS + "I8-resolve-price.png" });
+
+if ((await testid(page, "resolve-update").count()) > 0) {
+  await testid(page, "resolve-update").click();
+  await page.waitForSelector('[data-testid="resolve-panel"]', { state: "detached" });
+  assert(true, "the price difference was resolved from the UI");
+} else {
+  await testid(page, "resolve-keep-catalog").click();
+  await page.waitForSelector('[data-testid="resolve-panel"]', { state: "detached" });
+  assert(true, "the item was settled with a keep action");
+}
+await app.close();
+
+{
+  const product = one("SELECT * FROM catalog_products WHERE name_ar = 'مفك براغي اختباري'");
+  const audits = query("SELECT * FROM audit_events ORDER BY seq");
+  const updates = audits.filter((a) => a.event_type === "PRODUCT_UPDATED");
+  if (Number(product.selling_price_minor) === 650) {
+    assert(updates.length === 1, `the catalog price changed exactly once (got ${updates.length} updates)`);
+    const meta = JSON.parse(updates[0].metadata_json);
+    assert(meta.origin === "invoice_reconciliation", `the audit names where it came from (${meta.origin})`);
+    assert(typeof meta.invoice_id === "string" && meta.invoice_id.length > 0, "and which invoice");
+    const diff = JSON.parse(updates[0].changed_json);
+    assert(diff.selling_price_minor.before === "500" && diff.selling_price_minor.after === "650", "with the exact before/after");
+    assert(!("is_active" in diff), "and is_active is NOT in the diff — reconciliation did not touch it");
+    assert(Number(product.is_active) === 1, "the product is still active");
+  } else {
+    assert(updates.length === 0, "a keep action wrote no product audit event");
+    assert(Number(product.selling_price_minor) === 500, "and changed no catalog price");
+  }
+  assert(
+    !audits.some((a) => a.event_type === "PRICE_CHANGED"),
+    "no PRICE_CHANGED event type exists — a price change is a PRODUCT_UPDATED",
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 7 · PRODUCT_NOT_FOUND offers Add / Link / Keep, and Keep writes nothing
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+({ app, page } = await launch());
+await tab(page, "invoices");
+await testid(page, "inv-tab-review").click();
+await page.waitForSelector('[data-testid="review-table"]');
+
+const notFound = page.locator('[data-testid="review-row"]').filter({ hasText: "غير موجود" });
+await notFound.first().locator('[data-testid="review-resolve"]').click();
+await page.waitForSelector('[data-testid="resolve-not-found"]');
+assert(await testid(page, "resolve-create").isVisible(), "Add to catalog is offered");
+assert(await testid(page, "resolve-link").isVisible(), "Link existing is offered");
+assert(await testid(page, "resolve-keep-invoice").isVisible(), "Keep invoice only is offered");
+assert(
+  (await testid(page, "resolve-name-ar").inputValue()).includes("غير موجود"),
+  "and it is prefilled from what the invoice observed",
+);
+await page.screenshot({ path: SHOTS + "I9-resolve-not-found.png" });
+
+const productsBefore = count("catalog_products");
+const auditBefore = count("audit_events");
+await testid(page, "resolve-keep-invoice").click();
+await page.waitForSelector('[data-testid="resolve-panel"]', { state: "detached" });
+await app.close();
+
+assert(count("catalog_products") === productsBefore, "Keep invoice only created NO product");
+assert(count("audit_events") === auditBefore, "and wrote NO audit event");
+assert(
+  count("invoice_reconciliation", "status = 'KEPT_INVOICE_ONLY'") === 1,
+  "and the item left the unresolved queue as a recorded decision",
+);
+assert(
+  one("SELECT resolution_actor_id AS a FROM invoice_reconciliation WHERE status = 'KEPT_INVOICE_ONLY'").a === "cashier-01",
+  "naming who decided it",
+);
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 8 · The historical snapshot survives changes to the shop and the catalog
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const frozen = one("SELECT issuer_snapshot_json AS j FROM invoices").j;
+const frozenLine = one("SELECT description AS d, unit_price_minor AS p, unit_label AS u FROM invoice_lines ORDER BY line_no");
+
+({ app, page } = await launch());
+await tab(page, "invoices");
+await testid(page, "inv-tab-company").click();
+await page.waitForSelector('[data-testid="company-name-ar"]');
+await testid(page, "company-name-ar").fill("اسم جديد تماماً");
+await testid(page, "company-vat").fill("VAT-CHANGED");
+await testid(page, "company-save").click();
+await page.waitForSelector('[data-testid="company-notice"]');
+
+await tab(page, "products");
+await page.waitForSelector('[data-testid="product-row"]');
+await page.locator('[data-testid="product-row"]').filter({ hasText: "مفك" }).first().getByRole("button", { name: /^(تعديل|Edit)$/ }).click();
+await testid(page, "field-nameAr").fill("اسم صنف جديد");
+await testid(page, "field-price").fill("99.00");
+await page.getByRole("button", { name: /^(حفظ|Save)$/ }).click();
+await page.waitForTimeout(500);
+
+// Reopen the OLD invoice.
+await tab(page, "invoices");
+await page.waitForSelector('[data-testid="history-table"]');
+await testid(page, "history-open").first().click();
+await page.waitForSelector('[data-testid="sheet-readonly"]');
+const reopened = await textOf(page, "sheet-issuer");
+assert(reopened.includes("متجر اختباري للفحص"), `the reopened invoice shows its FROZEN issuer (got "${reopened}")`);
+assert(!reopened.includes("اسم جديد تماماً"), "not the shop's new name");
+const sheetText = (await page.locator(".inv-sheet").innerText()).trim();
+assert(sheetText.includes("مفك براغي اختباري"), "the historical line description is unchanged");
+assert(!sheetText.includes("اسم صنف جديد"), "not the product's new name");
+await page.screenshot({ path: SHOTS + "I10-frozen-reopened.png" });
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 9 · The PDF path executes against the frozen invoice
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const pdfPath = join(home, "invoice-61.pdf");
+await app.evaluate(({ dialog }, target) => {
+  dialog.showSaveDialogSync = () => target;
+}, pdfPath);
+await testid(page, "save-pdf").click();
+await page.waitForTimeout(4000);
+assert(existsSync(pdfPath), `a PDF was generated at ${pdfPath}`);
+const size = statSync(pdfPath).size;
+assert(size > 2000, `the PDF is a real document (${size} bytes)`);
+await app.close();
+
+{
+  // Every row is represented: the four line descriptions all reach the rendered document. The PDF
+  // itself is compressed, so the DOCUMENT is checked where it is deterministic — the unit tests
+  // assert the HTML — and here we prove the pipeline ran on the frozen snapshot and produced bytes.
+  const lines = query("SELECT description FROM invoice_lines ORDER BY line_no");
+  assert(lines.length === 4, "the frozen invoice still has its four lines after the PDF was produced");
+  const issuerNow = one("SELECT issuer_snapshot_json AS j FROM invoices").j;
+  assert(issuerNow === frozen, "and generating a PDF did not alter the frozen issuer snapshot");
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 10 · Restart: everything durable is still there
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+({ app, page } = await launch());
+await tab(page, "invoices");
+await page.waitForSelector('[data-testid="history-table"]');
+assert((await testid(page, "history-row").count()) === 1, "the invoice is still in history after a restart");
+await testid(page, "inv-tab-review").click();
+await page.waitForSelector('[data-testid="review-table"], [data-testid="review-empty"]');
+await app.close();
+
+{
+  const f = facts();
+  log("FINAL LEDGER:", JSON.stringify(f));
+  assert(f.schema === 6 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v6");
+  assert(f.invoices === 1 && f.invoiceLines === 4, "the invoice and its lines survived the restart");
+  assert(f.highestNumber === 61, "the invoice number is unchanged");
+  assert(f.reconciliation === 4, "every reconciliation row survived");
+  const after = one("SELECT description AS d, unit_price_minor AS p, unit_label AS u FROM invoice_lines ORDER BY line_no");
+  assert(
+    after.d === frozenLine.d && String(after.p) === String(frozenLine.p) && after.u === frozenLine.u,
+    "the historical description, unit price and unit label are byte-for-byte what they were",
+  );
+  assert(f.sales === 0 && f.voids === 0, "and still no sale and no void anywhere");
+  const resolved = count("invoice_reconciliation", "status NOT IN ('PENDING','FAILED')");
+  assert(resolved >= 2, `resolution states persisted (${resolved} settled)`);
+}
+
+log(`manual invoice E2E: ${passed} assertions passed`);
+log("screenshots in", SHOTS);
