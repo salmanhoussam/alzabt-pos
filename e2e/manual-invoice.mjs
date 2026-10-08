@@ -155,10 +155,20 @@ await page.locator('.inv-company input[dir="ltr"]').first().fill("E2E Test Store
 await testid(page, "company-taxpayer").fill("TP-E2E-1");
 await testid(page, "company-register").fill("CR-E2E-2");
 await testid(page, "company-vat").fill("VAT-E2E-3");
-await testid(page, "company-next-number").fill("61");
 await testid(page, "company-save").click();
 await page.waitForSelector('[data-testid="company-notice"]');
 assert(true, "the shop details saved");
+
+// 🔴 The numbering is a SEPARATE operation with its own button, because `setNextInvoiceNumber` is
+// refused once an invoice has been issued while saving the shop's details never is. The first
+// version of this script assumed one Save did both, and the invoice sequence stayed at 1 — the
+// assertion below is what caught that.
+await testid(page, "company-next-number").fill("61");
+await testid(page, "company-numbering-save").click();
+await page.waitForFunction(
+  () => document.querySelector('[data-testid="company-next-number"]')?.value === "61",
+);
+assert(true, "the shop continuing a paper invoice book set its next number to 61");
 // 🔴 Printing these does not make an invoice compliant, and the screen says so where it is read.
 assert((await textOf(page, "company-ids-note")).length > 20, "the no-compliance-claim note is on the screen");
 const previewText = await textOf(page, "company-preview");
@@ -181,7 +191,18 @@ await testid(page, "field-unit").selectOption("piece");
 await testid(page, "save-product").click();
 await page.getByRole("button", { name: /^(حسناً|OK)$/ }).click();
 await page.waitForSelector('[data-testid="product-row"]');
-assert(true, "a synthetic catalog product exists to reconcile against");
+// A second product, so one invoice row can differ ONLY in its unit. Without it, a row carrying an
+// unmappable unit is simply PRODUCT_NOT_FOUND — there is nothing to compare the unit against, and
+// UNIT_DIFFERENCE never arises. That is what the first version of this script got wrong.
+await testid(page, "add-product").click();
+await page.waitForSelector('[data-testid="field-nameAr"]');
+await testid(page, "field-nameAr").fill("صنف بوحدة قياسية");
+await testid(page, "field-price").fill("474.40");
+await testid(page, "field-unit").selectOption("piece");
+await testid(page, "save-product").click();
+await page.getByRole("button", { name: /^(حسناً|OK)$/ }).click();
+await page.waitForFunction(() => document.querySelectorAll('[data-testid="product-row"]').length === 2);
+assert(true, "two synthetic catalog products exist to reconcile against");
 
 await app.close();
 {
@@ -227,8 +248,9 @@ await addRow(page, { description: "مفك براغي اختباري", quantity: 
 // Row 3 — free text the catalog has never heard of (PRODUCT_NOT_FOUND).
 await addRow(page, { description: "صنف غير موجود في الأصناف", quantity: "3", unit: "حبة", price: "1.25" });
 
-// Row 4 — a non-canonical free-text unit, kept verbatim and never guessed at.
-await addRow(page, { description: "صنف معبّأ بوحدة غريبة", quantity: "1", unit: "كيس (50PCS)", price: "474.40" });
+// Row 4 — an EXISTING product at its catalog price, written with a unit this build cannot map.
+// Price and name agree, so the only difference is the unit, and it is `comparable: false`.
+await addRow(page, { description: "صنف بوحدة قياسية", quantity: "1", unit: "كيس (50PCS)", price: "474.40" });
 
 assert((await testid(page, "sheet-line").count()) === 4, "four rows are on the sheet");
 await page.screenshot({ path: SHOTS + "I3-invoice-draft.png" });
@@ -316,13 +338,20 @@ await app.close();
   assert(byClass.MATCHED === "KEPT_CATALOG", "the matched row is settled as KEPT_CATALOG by design");
   assert(byClass.PRICE_DIFFERENCE === "PENDING", "the price difference waits for a person");
   assert(byClass.PRODUCT_NOT_FOUND === "PENDING", "the unknown product waits for a person");
-  assert(
-    byClass.UNIT_DIFFERENCE === "PENDING" || byClass.MULTIPLE_DIFFERENCES === "PENDING",
-    `the odd-unit row waits for a person (${JSON.stringify(byClass)})`,
-  );
+  assert(byClass.UNIT_DIFFERENCE === "PENDING", `the odd-unit row waits for a person (${JSON.stringify(byClass)})`);
+
+  // 🔴 And it is "we cannot tell", not "they differ": the invoice's unit maps to nothing, so the
+  // difference is recorded as not comparable rather than as a disagreement.
+  const unitItem = query("SELECT differences_json AS d FROM invoice_reconciliation WHERE classification = 'UNIT_DIFFERENCE'")[0];
+  const unitDiff = JSON.parse(unitItem.d)[0];
+  assert(unitDiff.field === "base_unit", "the difference is on the unit");
+  assert(unitDiff.comparable === false, `and it is marked NOT comparable (got ${JSON.stringify(unitDiff)})`);
+  assert(unitDiff.invoice === "كيس (50PCS)", "carrying the printed label verbatim");
 
   // Finalizing changed no product and wrote no catalog audit event.
-  assert(f.audit === 1 && f.auditTypes === "PRODUCT_CREATED=1", `only the product I created is audited (${f.auditTypes})`);
+  // TWO products were created in setup, so two PRODUCT_CREATED rows — and nothing else. Finalizing
+  // an invoice is not a catalog event, which is what this really asserts.
+  assert(f.audit === 2 && f.auditTypes === "PRODUCT_CREATED=2", `only the two products I created are audited (${f.auditTypes})`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -374,10 +403,10 @@ await page.waitForSelector('[data-testid="review-table"]');
 const before = await testid(page, "review-row").count();
 assert(before === 3, `three rows need review (got ${before})`);
 
-// Open the price difference by finding its row, then resolve it.
-const priceRow = page.locator('[data-testid="review-row"]').filter({ hasText: "6.50" });
-const target = (await priceRow.count()) > 0 ? priceRow.first() : page.locator('[data-testid="review-row"]').first();
-await target.locator('[data-testid="review-resolve"]').click();
+// 🔴 Select by CLASSIFICATION, not by text. The row shows the description and a translated badge;
+// it does not show the price at all, so an earlier version of this filtered on "6.50", matched
+// nothing, and silently fell back to whichever row happened to be first.
+await page.locator('[data-classification="PRICE_DIFFERENCE"]').first().locator('[data-testid="review-resolve"]').click();
 await page.waitForSelector('[data-testid="resolve-panel"]');
 // Every state offers a keep action — asserted here because a dead end is the failure this prevents.
 assert(await testid(page, "resolve-keep-catalog").isVisible(), "the panel always offers Keep catalog unchanged");
@@ -426,8 +455,7 @@ await tab(page, "invoices");
 await testid(page, "inv-tab-review").click();
 await page.waitForSelector('[data-testid="review-table"]');
 
-const notFound = page.locator('[data-testid="review-row"]').filter({ hasText: "غير موجود" });
-await notFound.first().locator('[data-testid="review-resolve"]').click();
+await page.locator('[data-classification="PRODUCT_NOT_FOUND"]').first().locator('[data-testid="review-resolve"]').click();
 await page.waitForSelector('[data-testid="resolve-not-found"]');
 assert(await testid(page, "resolve-create").isVisible(), "Add to catalog is offered");
 assert(await testid(page, "resolve-link").isVisible(), "Link existing is offered");

@@ -135,7 +135,9 @@ export function ReconciliationQueue({ focusInvoiceId }: { readonly focusInvoiceI
           </thead>
           <tbody>
             {items.map((item) => (
-              <tr key={item.id} data-testid="review-row">
+              // The classification travels as an attribute so a test can pick a row without
+              // depending on the terminal's language — the badge text below is translated.
+              <tr key={item.id} data-testid="review-row" data-classification={item.classification}>
                 <td dir="ltr">#{item.invoiceNumber ?? "—"}</td>
                 <td>{item.line?.description ?? "—"}</td>
                 <td>

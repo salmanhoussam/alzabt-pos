@@ -253,7 +253,10 @@ export function CompanyProfileForm({ onSaved }: { onSaved?: (p: CompanyProfileDt
             {t("inv.company.numberingLocked")}
           </p>
         ) : (
-          <button className="btn" onClick={applyNumbering} disabled={!saved}>
+          // 🔴 Its OWN button, because it is its own operation: `setNextInvoiceNumber` is refused
+          // once any invoice has been issued, while saving the shop's details never is. One button
+          // for both would have hidden that difference from the operator.
+          <button className="btn" onClick={applyNumbering} disabled={!saved} data-testid="company-numbering-save">
             {t("action.save")}
           </button>
         )}

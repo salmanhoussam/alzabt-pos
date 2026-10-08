@@ -808,9 +808,14 @@ if (PHASE === "seed-v2") {
   await page.locator('[data-testid="company-taxpayer"]').fill("TP-E-1");
   await page.locator('.inv-company input').nth(4).fill("شارع الاختبار");
   await page.locator('.inv-company input').nth(5).fill("01-234567");
-  await invTestid(page, "company-next-number").fill("61");
   await invTestid(page, "company-save").click();
   await page.waitForSelector('[data-testid="company-notice"]');
+  // The numbering is its own operation, with its own button and its own guard.
+  await invTestid(page, "company-next-number").fill("61");
+  await invTestid(page, "company-numbering-save").click();
+  await page.waitForFunction(
+    () => document.querySelector('[data-testid="company-next-number"]')?.value === "61",
+  );
   await page.screenshot({ path: SHOTS + "upgrade-e1-company.png" });
   await app.close();
 
@@ -926,7 +931,9 @@ if (PHASE === "seed-v2") {
   await invTestid(page, "inv-tab-review").click();
   await page.waitForSelector('[data-testid="review-table"]');
   assert((await invTestid(page, "review-row").count()) === 3, "three items need review");
-  const chipsRow = page.locator('[data-testid="review-row"]').filter({ hasText: "شيبس" });
+  // The price-difference row for the placeholder-priced product, picked by description AND
+  // classification so neither a translation nor row order can send this to the wrong item.
+  const chipsRow = page.locator('[data-classification="PRICE_DIFFERENCE"]').filter({ hasText: "شيبس" });
   await chipsRow.first().locator('[data-testid="review-resolve"]').click();
   await page.waitForSelector('[data-testid="resolve-panel"]');
   assert(await invTestid(page, "resolve-keep-catalog").isVisible(), "the panel always offers a safe keep action");
@@ -965,14 +972,14 @@ if (PHASE === "seed-v2") {
   await tab(page, "Invoices");
   await invTestid(page, "inv-tab-review").click();
   await page.waitForSelector('[data-testid="review-table"]');
-  const pepsiRow = page.locator('[data-testid="review-row"]').filter({ hasText: "بيبسي" });
+  const pepsiRow = page.locator('[data-classification="PRICE_DIFFERENCE"]').filter({ hasText: "بيبسي" });
   await pepsiRow.first().locator('[data-testid="review-resolve"]').click();
   await page.waitForSelector('[data-testid="resolve-panel"]');
   await invTestid(page, "resolve-keep-catalog").click();
   await page.waitForSelector('[data-testid="resolve-panel"]', { state: "detached" });
 
   // ── PRODUCT_NOT_FOUND exposes Add / Link / Keep ────────────────────────────────────────────────
-  const missingRow = page.locator('[data-testid="review-row"]').filter({ hasText: "غير موجود" });
+  const missingRow = page.locator('[data-classification="PRODUCT_NOT_FOUND"]');
   await missingRow.first().locator('[data-testid="review-resolve"]').click();
   await page.waitForSelector('[data-testid="resolve-not-found"]');
   assert(await invTestid(page, "resolve-create").isVisible(), "Add to catalog is offered");
