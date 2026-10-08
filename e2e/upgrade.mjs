@@ -1138,7 +1138,22 @@ if (PHASE === "seed-v2") {
     assert(Number(chips.selling_price_minor) === 250 && Number(chips.price_needs_review) === 0, "the product mutation persists");
     assert(recon.filter((r) => r.endsWith(":PENDING")).length === 0, "no item was left unresolved");
     assert(f.sales === 2 && f.voids === 1, "and the v5 sales ledger is exactly as it was found");
-    assert(f.audit === beforeAudit + 1, `the audit trail grew by exactly one row (${beforeAudit} -> ${f.audit})`);
+    // 🔴 TWO rows, not one, and naming both is the point: the reconciliation price update, and the
+    // ordinary product edit this scenario makes AFTERWARDS on purpose to prove the finalized
+    // invoice's snapshot does not follow it. The earlier assertion inside the reconciliation block
+    // is the one that pins the update itself to exactly one row.
+    assert(
+      f.audit === beforeAudit + 2,
+      `the trail grew by exactly two rows — one reconciliation update, one deliberate catalog edit (${beforeAudit} -> ${f.audit})`,
+    );
+    const finalUpdates = auditRows().filter((a) => a.event_type === "PRODUCT_UPDATED");
+    assert(finalUpdates.length === 2, `both are PRODUCT_UPDATED (got ${finalUpdates.map((a) => a.event_type).join(",")})`);
+    // And they are told apart by PROVENANCE, which is what the metadata is for.
+    const origins = finalUpdates.map((a) => JSON.parse(a.metadata_json).origin).sort();
+    assert(
+      JSON.stringify(origins) === JSON.stringify(["invoice_reconciliation", "manual_entry"]),
+      `one came from reconciliation and one from the product screen (got ${JSON.stringify(origins)})`,
+    );
   }
 } else {
   console.error(
