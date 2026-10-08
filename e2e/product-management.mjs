@@ -239,7 +239,9 @@ await app.close();
   const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
   try {
     const n = (sql) => Number(db.prepare(sql).get().n);
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 5, "the installed app's ledger is at schema v5");
+    // Was 5 before migration 6 (manual invoices). The version this build migrates a ledger TO is a
+    // transition, not an invariant, so the old value is named here the way upgrade.mjs names its own.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 6, "the installed app's ledger is at schema v6");
 
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
     const types = rows.map((r) => r.event_type);
