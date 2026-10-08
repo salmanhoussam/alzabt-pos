@@ -757,10 +757,11 @@ if (PHASE === "seed-v2") {
   // product left us on Products, so the Sell tab has to be selected first. Scenario D does exactly
   // this; mine went straight to selling and waited forever for a tile that was not on screen.
   await tab(page, "Sell");
+  // 🔴 `sell()` already clicks "New sale" as its last step, so consecutive calls need nothing
+  // between them — every other phase in this file chains them directly. An extra click here waited
+  // for a button that the helper had already consumed.
   await sell(page, ["بيبسي 330 مل"], "Cash", 1);
-  await page.getByRole("button", { name: "New sale" }).click();
   await sell(page, ["مياه"], "Card", 2);
-  await page.getByRole("button", { name: "New sale" }).click();
   await voidCardSale(page);
   await app.close();
 
