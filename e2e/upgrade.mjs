@@ -346,8 +346,8 @@ if (PHASE === "seed-v2") {
 
   const f = ledgerFacts();
   log("ledger after upgrade + new sale:", JSON.stringify(f));
-  // Was `f.schema === 3`, then 4; migration 5 makes a v2 ledger land on v5 in ONE upgrade.
-  assert(f.schema === 5 && f.integrity === "ok", `migrated to schema v5, integrity ok (got ${f.schema})`);
+  // Was `f.schema === 3`, then 4, then 5; migration 6 makes a v2 ledger land on v6 in ONE upgrade.
+  assert(f.schema === 6 && f.integrity === "ok", `migrated to schema v6, integrity ok (got ${f.schema})`);
   // The audit table was created on the way, and starts empty — nothing is reconstructed.
   assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
   // Two Espressos at 2.50 and one at 2.50, all WHOLE pieces, so every quantity scaled by 1000.
@@ -443,7 +443,8 @@ if (PHASE === "seed-v2") {
   // anything that would legitimately write to it. The sale rung up above wrote nothing: migration 5
   // audits master data, not the sales ledger.
   const afterMigration = ledgerFacts();
-  assert(afterMigration.schema === 5, `migrated to schema v5 (got ${afterMigration.schema})`);
+  // Was 5 before migration 6.
+  assert(afterMigration.schema === 6, `migrated to schema v6 (got ${afterMigration.schema})`);
   assert(afterMigration.audit === 0, `the durable audit trail exists and starts empty (got ${afterMigration.audit})`);
 
   ({ app, page } = await launch());
@@ -465,8 +466,8 @@ if (PHASE === "seed-v2") {
   await app.close();
   const f = ledgerFacts();
   log("final ledger:", JSON.stringify(f));
-  // Was `f.schema === 3`, then 4.
-  assert(f.schema === 5 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", `final ledger intact at v5 (got ${f.schema})`);
+  // Was `f.schema === 3`, then 4, then 5.
+  assert(f.schema === 6 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", `final ledger intact at v6 (got ${f.schema})`);
   // 🔴 And the export → re-import above is now AUDITED: exactly one CATALOG_IMPORTED summary and
   // ZERO product events, because the re-imported file is byte-identical and changed nothing. That
   // is the low-noise property the import audit model was chosen for, measured on the installed app.
@@ -538,7 +539,8 @@ if (PHASE === "seed-v2") {
 
   const f = ledgerFacts();
   log("ledger after the upgrade:", JSON.stringify(f));
-  assert(f.schema === 5 && f.integrity === "ok", `migrated to schema v5, integrity ok (got ${f.schema})`);
+  // Was 5 before migration 6.
+  assert(f.schema === 6 && f.integrity === "ok", `migrated to schema v6, integrity ok (got ${f.schema})`);
   assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
   assert(f.quantities.every((q) => q % 1000 === 0), `migrated quantities are whole: ${JSON.stringify(f.quantities)}`);
   assert(f.unknownUnits === 2, `both pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
@@ -642,9 +644,10 @@ if (PHASE === "seed-v2") {
   await app.close();
 
   const f = ledgerFacts();
-  log("ledger after the v4 -> v5 upgrade:", JSON.stringify(f));
-  assert(f.schema === 5 && f.integrity === "ok", `migrated to schema v5, integrity ok (got ${f.schema})`);
-  assert(f.sales === 2 && f.voids === 1, "sales and voids untouched by migration 5");
+  log("ledger after the v4 -> v6 upgrade:", JSON.stringify(f));
+  // Was 5 before migration 6: a v4 ledger now lands on v6 in ONE upgrade.
+  assert(f.schema === 6 && f.integrity === "ok", `migrated to schema v6, integrity ok (got ${f.schema})`);
+  assert(f.sales === 2 && f.voids === 1, "sales and voids untouched by migrations 5 and 6");
   // 🔴 Migration 4's behaviour is unchanged: the fractional quantity is still exactly 2500.
   assert(JSON.stringify(f.quantities) === "[2500,1000]", `quantities untouched: ${JSON.stringify(f.quantities)}`);
   assert(f.unknownUnits === 0, "sale units untouched");
@@ -719,7 +722,8 @@ if (PHASE === "seed-v2") {
   );
   const f2 = ledgerFacts();
   log("final ledger:", JSON.stringify(f2));
-  assert(f2.integrity === "ok" && f2.schema === 5, "the ledger is sound and still at v5");
+  // Was 5 before migration 6.
+  assert(f2.integrity === "ok" && f2.schema === 6, "the ledger is sound and still at v6");
   assert(JSON.stringify(f2.quantities) === "[2500,1000]", "no sale was disturbed by any of this");
 } else if (PHASE === "seed-v5") {
   // ── Scenario E, part 1 — the REAL legal v5 main build (69f1a22, schema v5: durable audit, and
