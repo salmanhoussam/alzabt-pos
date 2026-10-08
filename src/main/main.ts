@@ -6,11 +6,12 @@
  * windows, every permission request denied, and every IPC call checked to come from our own
  * window's top frame.
  */
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, dialog, ipcMain, session } from "electron";
 import { PosService, startupCatalog } from "../application/posService";
+import { InvoiceService } from "../application/invoiceService";
 import { businessDateOf } from "../domain/businessDay";
 import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
@@ -23,9 +24,14 @@ import { CatalogRepository } from "../persistence/catalogRepository";
 import { type Db, openDatabase, schemaVersion } from "../persistence/db";
 import { MIGRATIONS } from "../persistence/migrations";
 import { AuditRepository } from "../persistence/auditRepository";
+import { CompanyProfileRepository } from "../persistence/companyProfileRepository";
+import { InvoiceRepository } from "../persistence/invoiceRepository";
+import { ReconciliationRepository } from "../persistence/reconciliationRepository";
 import { PinStateRepository } from "../persistence/pinStateRepository";
 import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
+import { toInvoiceViewDto } from "../shared/dto";
+import { renderInvoiceDocument } from "./invoiceDocument";
 import { AUTO_START_MARKER_FILE, applyAutoStart } from "./autoStart";
 import { diag, diagEnabled } from "./diagnostics";
 import { buildLabel, readBuildInfo } from "./buildInfo";
@@ -40,6 +46,7 @@ const RENDERER_URL = pathToFileURL(RENDERER_INDEX).toString();
 
 let mainWindow: BrowserWindow | null = null;
 let db: Db | null = null;
+let invoices: InvoiceService | null = null;
 let log: Logger = nullLogger;
 
 // dist/main/main/main.js → dist/build-info.json (written at build time by scripts/write-build-info.mjs).
@@ -118,6 +125,132 @@ function saveCatalogExport(suggestedName: string, contents: string): SavedFile |
   });
   if (!path) return null;
   writeAtomic(path, contents);
+  return { fileName: basename(path) };
+}
+
+// ── The invoice logo, and printing a finalized invoice ─────────────────────────────────────────
+//
+// 🔴 THE RENDERER NEVER NAMES A PATH AND NEVER SUPPLIES HTML. It sends an invoice id; everything
+// below loads the FROZEN document from the database and renders it here. The logo is the one file
+// an operator chooses, and it is chosen in a native dialog in THIS process, copied into the app's
+// own branding folder, and stored as a bare file name — so a stored profile can never point at an
+// arbitrary location on disk, and a later render cannot be redirected anywhere else.
+
+const BRANDING_DIR = "branding";
+const LOGO_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"];
+
+function brandingDir(): string {
+  const dir = join(app.getPath("userData"), BRANDING_DIR);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Native image picker. Returns the BARE file name it stored, or null when cancelled.
+ *
+ * The extension is checked against a fixed list before the copy, and the stored name is built here
+ * rather than taken from the chosen file, so neither a path separator nor a `..` can survive.
+ */
+function pickInvoiceLogo(): string | null {
+  if (!mainWindow) return null;
+  const picked = dialog.showOpenDialogSync(mainWindow, {
+    title: "Choose the invoice logo",
+    properties: ["openFile"],
+    filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp"] }],
+  });
+  const path = picked?.[0];
+  if (!path) return null;
+  const ext = extname(path).toLowerCase();
+  if (!LOGO_EXTENSIONS.includes(ext)) {
+    throw new DomainError("INVALID_INPUT", "Choose a PNG, JPG or WEBP image");
+  }
+  if (statSync(path).size > 4 * 1024 * 1024) {
+    throw new DomainError("INVALID_INPUT", "Choose an image smaller than 4 MB");
+  }
+  // The name is OURS, not the chosen file's: one logo, one known name, no traversal possible.
+  const stored = `invoice-logo${ext}`;
+  copyFileSync(path, join(brandingDir(), stored));
+  log.info("invoice-logo-chosen", { stored, bytes: statSync(path).size });
+  return stored;
+}
+
+/**
+ * A stored logo name turned into a file URL, or null.
+ *
+ * Anything that is not a plain file name living in the branding folder is refused rather than
+ * resolved — a profile row edited outside the application must not become a way to read an
+ * arbitrary file into a printed document.
+ */
+function logoUrlFor(stored: string | null): string | null {
+  if (!stored || stored.includes("/") || stored.includes("\\") || stored.includes("..")) return null;
+  if (!LOGO_EXTENSIONS.includes(extname(stored).toLowerCase())) return null;
+  const path = join(app.getPath("userData"), BRANDING_DIR, stored);
+  if (resolve(path) !== resolve(join(app.getPath("userData"), BRANDING_DIR, basename(stored)))) return null;
+  if (!existsSync(path)) return null;
+  return pathToFileURL(path).toString();
+}
+
+/**
+ * Renders a FINALIZED invoice to A4 PDF bytes in an offscreen window.
+ *
+ * The window runs with JavaScript DISABLED: the document is static HTML and needs none, and a print
+ * surface that cannot execute script is one less thing to reason about. The HTML comes from
+ * `renderInvoiceDocument`, which takes the frozen DTO and nothing else.
+ */
+async function renderInvoicePdf(invoiceId: string): Promise<Buffer> {
+  if (!invoices) throw new DomainError("NOT_AVAILABLE", "Invoices are not available");
+  const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
+  const html = renderInvoiceDocument(view, { logoUrl: logoUrlFor(view.invoice.issuer?.logoPath ?? null) });
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
+  });
+  try {
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    return await win.webContents.printToPDF({
+      pageSize: "A4",
+      printBackground: true,
+      margins: { marginType: "default" },
+    });
+  } finally {
+    win.destroy();
+  }
+}
+
+async function printInvoiceDocument(invoiceId: string): Promise<"printed" | "cancelled"> {
+  if (!invoices) throw new DomainError("NOT_AVAILABLE", "Invoices are not available");
+  const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
+  const html = renderInvoiceDocument(view, { logoUrl: logoUrlFor(view.invoice.issuer?.logoPath ?? null) });
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
+  });
+  try {
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    const printed = await new Promise<boolean>((done) => {
+      win.webContents.print({ silent: false, printBackground: true }, (success) => done(success));
+    });
+    log.info("invoice-printed", { id: invoiceId, number: view.invoice.invoiceNumber, printed });
+    return printed ? "printed" : "cancelled";
+  } finally {
+    win.destroy();
+  }
+}
+
+/** Native "save as" + the A4 PDF of the frozen invoice. */
+async function saveInvoicePdfFile(invoiceId: string): Promise<SavedFile | null> {
+  if (!mainWindow || !invoices) return null;
+  const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
+  const suggested = `invoice-${view.invoice.invoiceNumber ?? "draft"}.pdf`;
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save invoice PDF",
+    defaultPath: join(app.getPath("documents"), suggested),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await renderInvoicePdf(invoiceId);
+  writeFileSync(path, pdf);
+  log.info("invoice-pdf-saved", { id: invoiceId, number: view.invoice.invoiceNumber, bytes: pdf.length });
   return { fileName: basename(path) };
 }
 
@@ -290,7 +423,27 @@ function startTill(): void {
     // record — audit_events is — and it rotates, so it must never be treated as one.
     audit: (row) => log.info("audit", { ...row }),
   });
+  // The manual-invoice stack (migration 6), on THIS connection and THIS transaction provider, with
+  // `service` as its only route to the catalog — so an invoice can never write a product except
+  // through PosService and its migration-5 audit row.
+  invoices = new InvoiceService({
+    invoices: new InvoiceRepository(db),
+    reconciliation: new ReconciliationRepository(db),
+    company: new CompanyProfileRepository(db),
+    catalogStore,
+    products: service,
+    transact: (fn) => {
+      if (!db) throw new Error("ledger is not open");
+      return db.transaction(fn).immediate();
+    },
+    terminal: FIXTURE_TERMINAL,
+  });
+
   registerIpc(service, {
+    invoices,
+    pickInvoiceLogo,
+    printInvoice: printInvoiceDocument,
+    saveInvoicePdf: saveInvoicePdfFile,
     saveCatalogExport,
     exportBackup: () => exportBackup(plan.ledgerPath),
     appInfo: () => ({ version: BUILD_INFO.version, build: BUILD_INFO.build }),

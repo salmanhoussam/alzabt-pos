@@ -3,7 +3,7 @@
  * with hostile and malformed payloads exactly as the renderer could send them.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CHANNEL_NAMES, createIpcHandlers } from "../../src/main/ipcHandlers";
+import { CHANNEL_NAMES, createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import { CHANNELS, type IpcResult } from "../../src/shared/ipcContract";
 import { type TempDir, countRows, makeHarness, newKey, tempDir } from "../helpers/harness";
 
@@ -15,7 +15,7 @@ afterEach(() => t.cleanup());
 
 function setup() {
   const h = makeHarness(t.dbPath, { login: false });
-  return { ...h, ipc: createIpcHandlers(h.service) };
+  return { ...h, ipc: syncHandlers(createIpcHandlers(h.service)) };
 }
 
 function errCode(r: IpcResult<unknown>): string {
@@ -33,9 +33,15 @@ const goodSale = () => ({
 describe("IPC surface", () => {
   // The surface grew from THIRTEEN channels to NINETEEN when offline product management landed:
   // listProducts, createProduct, updateProduct, setProductActive, getSettings, setTerminalLanguage.
-  // The old value is named here on purpose — this assertion is the record of what the renderer may
-  // ask for, so every addition has to be written down, and the shape rule below still holds: each
-  // channel is one named business operation, and there is still no SQL, query, file or generic one.
+  // It then grew from NINETEEN to FORTY-FOUR with manual invoices (migration 6) — the twenty-five
+  // channels listed below the blank line.
+  //
+  // The old values are named here on purpose — this assertion is the record of what the renderer
+  // may ask for, so every addition has to be written down, and the shape rule below still holds:
+  // each channel is one named business operation, and there is still no SQL, query, file or generic
+  // one. 🔴 Note what is NOT in this list: no channel that accepts a total, a computed line total,
+  // an amount in words, an invoice number, a catalog row, a reconciliation status, HTML, or a
+  // filesystem path. Those are the things the renderer must not be able to assert.
   it("exposes only the fixed business channels — no SQL, query, file or generic invoke", () => {
     expect(CHANNEL_NAMES.sort()).toEqual(
       [
@@ -58,14 +64,61 @@ describe("IPC surface", () => {
         "setTerminalLanguage",
         "updateProduct",
         "voidSale",
+
+        // Manual invoices (migration 6)
+        "getCompanyProfile",
+        "saveCompanyProfile",
+        "setNextInvoiceNumber",
+        "createInvoiceDraft",
+        "getInvoice",
+        "updateInvoiceHeader",
+        "addInvoiceLine",
+        "updateInvoiceLine",
+        "removeInvoiceLine",
+        "discardInvoiceDraft",
+        "finalizeInvoice",
+        "listInvoices",
+        "listInvoiceDrafts",
+        "findInvoiceByNumber",
+        "searchInvoices",
+        "listReconciliation",
+        "listReconciliationQueue",
+        "resolveKeepCatalog",
+        "resolveKeepInvoiceOnly",
+        "resolveLinkProduct",
+        "resolveCreateProduct",
+        "resolveUpdateCatalog",
+        "pickInvoiceLogo",
+        "printInvoice",
+        "saveInvoicePdf",
       ].sort(),
     );
-    expect(CHANNEL_NAMES).toHaveLength(19);
+    expect(CHANNEL_NAMES).toHaveLength(44); // was 19 before manual invoices
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
+
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.
+    //
+    // 🔴 This check used to be a SUBSTRING match on /sql|query|exec|file|path|invoke|raw/. It was
+    // changed to match whole camelCase WORDS when `getCompanyProfile` arrived, because "Profile"
+    // contains the letters "file" — a false positive, not a finding. The word form is what the rule
+    // always meant, and it is strictly more precise: `pos:readFile`, `pos:execSql`, `pos:queryRaw`
+    // and `pos:invoke` are all still rejected, which the self-test below proves rather than assumes.
+    const words = (channel: string) =>
+      channel
+        .replace(/^pos:/, "")
+        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+        .toLowerCase()
+        .split(" ");
+    const FORBIDDEN = ["sql", "query", "exec", "file", "path", "invoke", "raw"];
     for (const ch of Object.values(CHANNELS)) {
-      expect(ch).not.toMatch(/sql|query|exec|file|path|invoke|raw/i);
+      for (const word of words(ch)) expect(FORBIDDEN).not.toContain(word);
     }
+    // The guard's own correctness: each of these WOULD be caught.
+    for (const bad of ["pos:execSql", "pos:readFile", "pos:queryRaw", "pos:invoke", "pos:getFilePath"]) {
+      expect(words(bad).some((w) => FORBIDDEN.includes(w))).toBe(true);
+    }
+    // And a legitimate name that merely contains one of those letter runs is not caught.
+    expect(words("pos:getCompanyProfile")).toEqual(["get", "company", "profile"]);
   });
 
   it("full flow through the handlers: login → sale → today → void → today", () => {

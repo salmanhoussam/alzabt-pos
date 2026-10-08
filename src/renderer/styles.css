@@ -127,3 +127,66 @@ h1, h2 { margin: 0 0 12px; }
 }
 .product-form .row-field { flex-direction: row; align-items: center; gap: 8px; }
 .product-form .row-field input { inline-size: auto; }
+
+/* ── Manual invoices (migration 6) ──────────────────────────────────────────────────────────────
+   Layout uses CSS LOGICAL PROPERTIES only (inline-start/inline-end, padding-inline), never left or
+   right, so the whole feature flips with `dir` on <html> and the Arabic and English terminals get
+   the same code path rather than two stylesheets. */
+.inv-screen { display: flex; flex-direction: column; gap: 12px; }
+.inv-nav { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.inv-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.inv-fieldset { border: 1px solid var(--line, #d9dce1); border-radius: 8px; padding: 12px; display: flex;
+                flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }
+.inv-fieldset h3 { flex: 1 0 100%; margin: 0; font-size: 1rem; }
+.inv-fieldset .field { flex: 1 1 220px; }
+.inv-fieldset .field.wide { flex: 1 1 100%; }
+.field.checkbox { flex: 1 0 100%; display: flex; flex-direction: row; align-items: center; gap: 8px; }
+.field.inline { flex-direction: row; align-items: center; gap: 6px; }
+.inv-logo-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.inv-header-preview { flex: 1 0 100%; border: 1px dashed var(--line, #d9dce1); border-radius: 6px; padding: 10px; }
+.inv-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.inv-actions.inv-keep { border-top: 1px solid var(--line, #d9dce1); padding-top: 10px; margin-top: 10px; }
+
+.inv-sheet { display: flex; flex-direction: column; gap: 12px; }
+.inv-sheet-head { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: flex-start;
+                  border-bottom: 2px solid var(--line, #d9dce1); padding-bottom: 8px; }
+.inv-issuer { flex: 1 1 240px; }
+.inv-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.inv-customer { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+.inv-customer .field { flex: 1 1 200px; }
+.inv-customer .field.wide { flex: 1 1 100%; }
+
+table.inv-lines { width: 100%; border-collapse: collapse; }
+table.inv-lines th, table.inv-lines td { border: 1px solid var(--line, #d9dce1); padding: 4px 6px; text-align: start; }
+table.inv-lines thead th { background: var(--thead, #f1f3f5); font-size: .85rem; }
+table.inv-lines td.num { text-align: end; width: 7rem; }
+table.inv-lines td.total { font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.inv-lines input { width: 100%; box-sizing: border-box; }
+table.inv-lines td.actions { white-space: nowrap; width: 1%; }
+.inv-new-line { background: var(--hl, #fffbe6); }
+
+.inv-totals { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.inv-totals table { border-collapse: collapse; min-width: 16rem; }
+.inv-totals th { text-align: start; padding: 4px 10px; font-weight: 600; white-space: nowrap; }
+.inv-totals td { text-align: end; padding: 4px 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.inv-totals tr.grand th, .inv-totals tr.grand td { font-weight: 700; border-top: 2px solid var(--line, #d9dce1); }
+.inv-words { flex: 1 1 260px; border: 1px solid var(--line, #d9dce1); border-radius: 6px; padding: 8px 10px; min-height: 3rem; }
+
+.inv-confirm { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 10px 0; }
+.inv-confirm dt { font-weight: 600; }
+.inv-confirm dd { margin: 0; text-align: end; font-variant-numeric: tabular-nums; }
+
+.inv-resolve { max-width: 42rem; }
+.inv-resolve-head { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; }
+.inv-resolve-head dt { font-weight: 600; }
+.inv-resolve-head dd { margin: 0; }
+.inv-resolve-actions { border-top: 1px solid var(--line, #d9dce1); padding-top: 10px; margin-top: 10px;
+                       display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.inv-resolve-actions h3 { margin: 4px 0 0; font-size: .95rem; }
+table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
+.inv-candidates ul, .inv-picker { list-style: none; margin: 6px 0; padding: 0; max-height: 14rem; overflow-y: auto; }
+.inv-candidates li label { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+.inv-picker li button { display: flex; justify-content: space-between; gap: 10px; width: 100%; }
+.badge.draft { background: #fde68a; color: #7c2d12; }
+.small { font-size: .85rem; }
+.notice { background: #eef6ff; border: 1px solid #bcd8f7; border-radius: 6px; padding: 8px 10px; }

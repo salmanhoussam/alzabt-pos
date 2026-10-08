@@ -24,14 +24,28 @@ import {
   parseMinor,
   toAdminProductDto,
   toCatalogDto,
+  toCompanyProfileDto,
+  toInvoiceDto,
+  toInvoiceViewDto,
+  toReconciliationDto,
   toSaleDto,
   toTodaySalesDto,
   toVoidDto,
 } from "../shared/dto";
+import type { CatalogUpdateSelection, InvoiceLineDraft, InvoiceService } from "../application/invoiceService";
+import { MAX_CUSTOMER_FIELD, MAX_DESCRIPTION, MAX_NOTES } from "../domain/invoice";
+import { MAX_UNIT_LABEL } from "../domain/invoiceUnits";
+import type { ReconciliationRow } from "../persistence/reconciliationRepository";
 import { type AppInfoDto, CHANNELS, type ChannelName, type IpcError, type IpcResult } from "../shared/ipcContract";
 import { type Logger, nullLogger } from "./logger";
 
-type Handler = (payload: unknown) => IpcResult<unknown>;
+/**
+ * A handler answers synchronously, or with a promise for the two channels that genuinely cannot:
+ * printing and PDF generation are asynchronous in Electron. `ipcMain.handle` accepts either, and
+ * `wrapAsync` below keeps the SAME error envelope either way — a rejected promise becomes the same
+ * `{ ok: false, error }` a thrown error does, so no failure can escape as an unhandled rejection.
+ */
+type Handler = (payload: unknown) => IpcResult<unknown> | Promise<IpcResult<unknown>>;
 
 /** A file the cashier picked in the main process's native dialog; null when they cancelled. */
 export interface PickedFile {
@@ -57,6 +71,24 @@ export interface IpcHandlerOptions {
   readonly afterSale?: () => void;
   readonly logger?: Logger;
   readonly now?: () => Date;
+  /**
+   * The manual-invoice service. Absent (an older wiring, a headless test) means every invoice
+   * channel answers NOT_AVAILABLE rather than silently doing nothing.
+   */
+  readonly invoices?: InvoiceService;
+  /**
+   * Prints a FINALIZED invoice. Main is handed only an invoice id by the renderer; this callback
+   * loads the frozen document itself and owns the print dialog. There is deliberately no channel
+   * that accepts HTML, a path, or anything else executable from the renderer.
+   */
+  readonly printInvoice?: (invoiceId: string) => Promise<"printed" | "cancelled">;
+  /** Save-as dialog + printToPDF of the frozen invoice. Null when the operator cancelled. */
+  readonly saveInvoicePdf?: (invoiceId: string) => Promise<SavedFile | null>;
+  /**
+   * Native image picker. Main copies the chosen file into its own branding folder and returns a
+   * BARE FILE NAME; the renderer never sees or supplies a path.
+   */
+  readonly pickInvoiceLogo?: () => string | null;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -89,6 +121,14 @@ function optionalStr(value: unknown, field: string, max: number): string | null 
   if (value === null || value === undefined) return null;
   if (typeof value !== "string") invalid(`'${field}' must be text`);
   if (value.length > max) invalid(`'${field}' must be at most ${max} characters`);
+  return value;
+}
+
+/** A bounded positive integer. Refuses a float, a string and anything out of range. */
+function count(value: unknown, field: string, min: number, max = 1_000_000_000): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min || value > max) {
+    invalid(`'${field}' must be a whole number between ${min} and ${max}`);
+  }
   return value;
 }
 
@@ -158,6 +198,19 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         log.error("ipc-internal-error", { channel, error: err });
         console.error("[pos] internal error", channel, err);
         return { ok: false, error: onInternal ? onInternal(payload) : GENERIC_INTERNAL };
+      }
+    };
+  }
+
+  function wrapAsync(channel: ChannelName, fn: (payload: unknown) => Promise<unknown>): Handler {
+    return async (payload) => {
+      try {
+        return { ok: true, data: await fn(payload) };
+      } catch (err) {
+        if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
+        log.error("ipc-internal-error", { channel, error: err });
+        console.error("[pos] internal error", channel, err);
+        return { ok: false, error: GENERIC_INTERNAL };
       }
     };
   }
@@ -310,7 +363,319 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       if (!options.settings) throw new DomainError("NOT_AVAILABLE", "Settings are not available here");
       return options.settings.setTerminalLanguage(o.language);
     }),
+
+    // ── Manual invoices (migration 6) ───────────────────────────────────────────────────────────
+    //
+    // 🔴 WHAT THE RENDERER CANNOT SEND, and the reason the shapes below look so narrow: no total,
+    // no subtotal, no line total, no tax amount, no amount in words, no invoice number, no catalog
+    // row, and no reconciliation status. `exactObject` refuses any extra key outright, so adding
+    // `"total"` to a payload is rejected before the service is reached — not ignored.
+    getCompanyProfile: wrap("getCompanyProfile", (p) => {
+      noPayload(p);
+      const row = invoices().getCompanyProfile();
+      return row === null ? null : toCompanyProfileDto(row);
+    }),
+    saveCompanyProfile: wrap("saveCompanyProfile", (p) => {
+      const o = exactObject(p, [
+        "nameAr",
+        "nameEn",
+        "legalName",
+        "tagline",
+        "address",
+        "phone1",
+        "phone2",
+        "email",
+        "logoPath",
+        "taxpayerNumber",
+        "commercialRegister",
+        "vatNumber",
+        "taxEnabled",
+        "taxRatePercent",
+        "taxLabel",
+      ]);
+      const saved = invoices().saveCompanyProfile({
+        nameAr: str(o.nameAr, "nameAr", MAX_PRODUCT_NAME),
+        nameEn: optionalStr(o.nameEn, "nameEn", MAX_PRODUCT_NAME),
+        legalName: optionalStr(o.legalName, "legalName", MAX_PRODUCT_NAME),
+        tagline: optionalStr(o.tagline, "tagline", MAX_CUSTOMER_FIELD),
+        address: optionalStr(o.address, "address", MAX_NOTES),
+        phone1: optionalStr(o.phone1, "phone1", MAX_CUSTOMER_FIELD),
+        phone2: optionalStr(o.phone2, "phone2", MAX_CUSTOMER_FIELD),
+        email: optionalStr(o.email, "email", MAX_CUSTOMER_FIELD),
+        logoPath: optionalStr(o.logoPath, "logoPath", MAX_NOTES),
+        // Three separate identifiers, carried separately all the way through the boundary.
+        taxpayerNumber: optionalStr(o.taxpayerNumber, "taxpayerNumber", MAX_CUSTOMER_FIELD),
+        commercialRegister: optionalStr(o.commercialRegister, "commercialRegister", MAX_CUSTOMER_FIELD),
+        vatNumber: optionalStr(o.vatNumber, "vatNumber", MAX_CUSTOMER_FIELD),
+        taxEnabled: bool(o.taxEnabled, "taxEnabled"),
+        taxRatePercent: optionalStr(o.taxRatePercent, "taxRatePercent", 8),
+        taxLabel: optionalStr(o.taxLabel, "taxLabel", MAX_CUSTOMER_FIELD),
+      });
+      log.info("company-profile-saved", { taxEnabled: saved.tax_enabled === 1n });
+      return toCompanyProfileDto(saved);
+    }),
+    setNextInvoiceNumber: wrap("setNextInvoiceNumber", (p) => {
+      const o = exactObject(p, ["nextInvoiceNumber"]);
+      return toCompanyProfileDto(invoices().setNextInvoiceNumber(count(o.nextInvoiceNumber, "nextInvoiceNumber", 1)));
+    }),
+
+    createInvoiceDraft: wrap("createInvoiceDraft", (p) => {
+      noPayload(p);
+      const view = invoices().createDraft();
+      log.info("invoice-draft-created", { id: view.invoice.id });
+      return toInvoiceViewDto(view);
+    }),
+    getInvoice: wrap("getInvoice", (p) => toInvoiceViewDto(invoices().getInvoice(invoiceId(p)))),
+    updateInvoiceHeader: wrap("updateInvoiceHeader", (p) => {
+      const o = exactObject(p, [
+        "invoiceId",
+        "invoiceDate",
+        "customerName",
+        "customerAddress",
+        "customerPhone",
+        "notes",
+        "paid",
+      ]);
+      return toInvoiceViewDto(
+        invoices().updateDraftHeader(str(o.invoiceId, "invoiceId", 100), {
+          invoiceDate: optionalStr(o.invoiceDate, "invoiceDate", 10),
+          customerName: optionalStr(o.customerName, "customerName", MAX_CUSTOMER_FIELD),
+          customerAddress: optionalStr(o.customerAddress, "customerAddress", MAX_NOTES),
+          customerPhone: optionalStr(o.customerPhone, "customerPhone", MAX_CUSTOMER_FIELD),
+          notes: optionalStr(o.notes, "notes", MAX_NOTES),
+          // A typed decimal, parsed by the domain. Never a balance the renderer worked out.
+          paid: optionalStr(o.paid, "paid", 32),
+        }),
+      );
+    }),
+    addInvoiceLine: wrap("addInvoiceLine", (p) => {
+      const o = exactObject(p, ["invoiceId", "line"]);
+      return toInvoiceViewDto(invoices().addLine(str(o.invoiceId, "invoiceId", 100), invoiceLine(o.line)));
+    }),
+    updateInvoiceLine: wrap("updateInvoiceLine", (p) => {
+      const o = exactObject(p, ["invoiceId", "lineId", "line"]);
+      return toInvoiceViewDto(
+        invoices().updateLine(str(o.invoiceId, "invoiceId", 100), str(o.lineId, "lineId", 100), invoiceLine(o.line)),
+      );
+    }),
+    removeInvoiceLine: wrap("removeInvoiceLine", (p) => {
+      const o = exactObject(p, ["invoiceId", "lineId"]);
+      return toInvoiceViewDto(
+        invoices().removeLine(str(o.invoiceId, "invoiceId", 100), str(o.lineId, "lineId", 100)),
+      );
+    }),
+    discardInvoiceDraft: wrap("discardInvoiceDraft", (p) => {
+      invoices().discardDraft(invoiceId(p));
+      return null;
+    }),
+
+    finalizeInvoice: wrap("finalizeInvoice", (p) => {
+      // The payload is an id and nothing else: every frozen value is computed in the service.
+      const view = invoices().finalizeInvoice(invoiceId(p));
+      log.info("invoice-finalized", {
+        id: view.invoice.id,
+        number: Number(view.invoice.invoice_number),
+        lines: view.lines.length,
+      });
+      return toInvoiceViewDto(view);
+    }),
+
+    listInvoices: wrap("listInvoices", (p) => {
+      const o = search(p);
+      return invoices().listFinalized(o.limit, 0).map(toInvoiceDto);
+    }),
+    listInvoiceDrafts: wrap("listInvoiceDrafts", (p) => {
+      const o = search(p);
+      return invoices().listDrafts(o.limit).map(toInvoiceDto);
+    }),
+    findInvoiceByNumber: wrap("findInvoiceByNumber", (p) => {
+      const o = exactObject(p, ["invoiceNumber"]);
+      const found = invoices().findFinalizedByNumber(count(o.invoiceNumber, "invoiceNumber", 1));
+      return found === null ? null : toInvoiceViewDto(found);
+    }),
+    searchInvoices: wrap("searchInvoices", (p) => {
+      const o = search(p);
+      return invoices().searchFinalized(o.term, o.limit).map(toInvoiceDto);
+    }),
+
+    listReconciliation: wrap("listReconciliation", (p) => {
+      const id = invoiceId(p);
+      return invoices()
+        .listReconciliation(id)
+        .map((row) => reconciliationDto(row));
+    }),
+    listReconciliationQueue: wrap("listReconciliationQueue", (p) => {
+      const o = exactObject(p, ["filter", "limit"]);
+      const filter = o.filter;
+      if (filter !== "unresolved" && filter !== "failed" && filter !== "resolved" && filter !== "all") {
+        invalid("'filter' must be 'unresolved', 'failed', 'resolved' or 'all'");
+      }
+      const limit = count(o.limit, "limit", 1, 500);
+      const counts = invoices().reconciliationCounts();
+      return {
+        items: invoices()
+          .listReconciliationByFilter(filter, limit)
+          .map((row) => reconciliationDto(row)),
+        unresolved: counts.unresolved,
+        byStatus: counts.byStatus,
+      };
+    }),
+    resolveKeepCatalog: wrap("resolveKeepCatalog", (p) =>
+      reconciliationDto(invoices().keepCatalog(reconciliationId(p))),
+    ),
+    resolveKeepInvoiceOnly: wrap("resolveKeepInvoiceOnly", (p) =>
+      reconciliationDto(invoices().keepInvoiceOnly(reconciliationId(p))),
+    ),
+    resolveLinkProduct: wrap("resolveLinkProduct", (p) => {
+      const o = exactObject(p, ["reconciliationId", "productId"]);
+      return reconciliationDto(
+        invoices().linkExistingProduct(
+          str(o.reconciliationId, "reconciliationId", 100),
+          str(o.productId, "productId", MAX_PRODUCT_ID_LENGTH),
+        ),
+      );
+    }),
+    resolveCreateProduct: wrap("resolveCreateProduct", (p) => {
+      const o = exactObject(p, ["reconciliationId", "nameAr", "nameEn", "sku", "baseUnit"]);
+      const row = invoices().createProductFromInvoice(str(o.reconciliationId, "reconciliationId", 100), {
+        nameAr: optionalStr(o.nameAr, "nameAr", MAX_PRODUCT_NAME),
+        // 🔴 Never inferred. If it is not typed here, the product has no English name.
+        nameEn: optionalStr(o.nameEn, "nameEn", MAX_PRODUCT_NAME),
+        sku: optionalStr(o.sku, "sku", MAX_SKU),
+        baseUnit: optionalStr(o.baseUnit, "baseUnit", 32),
+      });
+      log.info("reconciliation-created-product", { id: row.id, productId: row.matched_product_id });
+      return reconciliationDto(row);
+    }),
+    resolveUpdateCatalog: wrap("resolveUpdateCatalog", (p) => {
+      const o = exactObject(p, ["reconciliationId", "fields", "canonicalUnit", "nameEn"]);
+      if (!Array.isArray(o.fields) || o.fields.length === 0 || o.fields.length > 4) {
+        invalid("'fields' must be a non-empty array of field names");
+      }
+      const allowed = ["selling_price_minor", "base_unit", "name_ar", "name_en"] as const;
+      const fields = o.fields.map((f) => {
+        if (typeof f !== "string" || !(allowed as ReadonlyArray<string>).includes(f)) {
+          invalid("'fields' may only name a price, a unit or a name");
+        }
+        return f as CatalogUpdateSelection["fields"][number];
+      });
+      // 🔴 The renderer names the FIELDS. The values come from the frozen invoice line, read by the
+      // service — so the UI cannot send a price and have it written.
+      const row = invoices().updateCatalogFromInvoice(str(o.reconciliationId, "reconciliationId", 100), {
+        fields,
+        canonicalUnit: optionalStr(o.canonicalUnit, "canonicalUnit", 32) ?? undefined,
+        nameEn: optionalStr(o.nameEn, "nameEn", MAX_PRODUCT_NAME),
+      });
+      log.info("reconciliation-updated-catalog", { id: row.id, fields });
+      return reconciliationDto(row);
+    }),
+
+    // ── Print / PDF ─────────────────────────────────────────────────────────────────────────────
+    //
+    // 🔴 The renderer sends an INVOICE ID. It cannot send HTML, a file path, a command or a
+    // template. Main loads the FROZEN invoice from the database and renders it itself, so what is
+    // printed is the document that was issued and not whatever the window happens to be showing.
+    pickInvoiceLogo: wrap("pickInvoiceLogo", (p) => {
+      noPayload(p);
+      if (!options.pickInvoiceLogo) return { status: "unavailable" as const };
+      const chosen = options.pickInvoiceLogo();
+      return chosen === null ? { status: "cancelled" as const } : { status: "chosen" as const, logoPath: chosen };
+    }),
+    printInvoice: wrapAsync("printInvoice", async (p) => {
+      const id = invoiceId(p);
+      if (!options.printInvoice) return { status: "unavailable" as const };
+      requireFinalized(id);
+      return { status: await options.printInvoice(id) };
+    }),
+    saveInvoicePdf: wrapAsync("saveInvoicePdf", async (p) => {
+      const id = invoiceId(p);
+      if (!options.saveInvoicePdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      requireFinalized(id);
+      const saved = await options.saveInvoicePdf(id);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
   };
+
+  // ── Shapes used by the invoice channels only ─────────────────────────────────────────────────
+
+  function invoices(): InvoiceService {
+    if (!options.invoices) {
+      throw new DomainError("NOT_AVAILABLE", "Invoices are not available on this terminal");
+    }
+    return options.invoices;
+  }
+
+  function invoiceId(payload: unknown): string {
+    const o = exactObject(payload, ["invoiceId"]);
+    return str(o.invoiceId, "invoiceId", 100);
+  }
+
+  function reconciliationId(payload: unknown): string {
+    const o = exactObject(payload, ["reconciliationId"]);
+    return str(o.reconciliationId, "reconciliationId", 100);
+  }
+
+  function search(payload: unknown): { readonly term: string | null; readonly limit: number } {
+    const o = exactObject(payload, ["term", "limit"]);
+    return { term: optionalStr(o.term, "term", MAX_CUSTOMER_FIELD), limit: count(o.limit, "limit", 1, 500) };
+  }
+
+  function invoiceLine(value: unknown): InvoiceLineDraft {
+    const d = exactObject(value, ["description", "unitLabel", "canonicalUnit", "productId", "quantity", "unitPrice"]);
+    return {
+      description: optionalStr(d.description, "description", MAX_DESCRIPTION),
+      // Free text, kept verbatim — the printed label is historical truth.
+      unitLabel: optionalStr(d.unitLabel, "unitLabel", MAX_UNIT_LABEL),
+      canonicalUnit: optionalStr(d.canonicalUnit, "canonicalUnit", 32),
+      productId: optionalStr(d.productId, "productId", MAX_PRODUCT_ID_LENGTH),
+      // Text, not numbers: the domain parses both into exact integers and refuses a float.
+      quantity: str(d.quantity, "quantity", 32),
+      unitPrice: str(d.unitPrice, "unitPrice", 32),
+    };
+  }
+
+  /** A review item plus the frozen invoice and line behind it, which the panel needs to show. */
+  function reconciliationDto(row: ReconciliationRow) {
+    const svc = invoices();
+    return toReconciliationDto(row, {
+      invoice: svc.invoiceRowFor(row.invoice_id),
+      line: svc.invoiceLineFor(row.invoice_line_id),
+    });
+  }
+
+  /** Printing a draft is refused here rather than producing a document with no number on it. */
+  function requireFinalized(id: string): void {
+    const view = invoices().getInvoice(id);
+    if (view.invoice.status !== "final") {
+      throw new DomainError("INVOICE_NOT_DRAFT", "Only a finalized invoice can be printed");
+    }
+  }
+}
+
+/**
+ * The handler map typed as SYNCHRONOUS, for every caller that does not touch `printInvoice` or
+ * `saveInvoicePdf` — the only two channels that answer with a promise, because printing and PDF
+ * generation are asynchronous in Electron.
+ *
+ * This is a guard, not a cast that hides the difference: reaching an asynchronous channel through
+ * this view THROWS, instead of handing back a Promise typed as a result and failing somewhere else
+ * entirely. `tests/main/invoiceIpc.test.ts` asserts that those two really are the asynchronous ones,
+ * so the assumption this function makes is itself tested rather than assumed.
+ */
+export function syncHandlers(
+  handlers: Record<ChannelName, Handler>,
+): Record<ChannelName, (payload: unknown) => IpcResult<unknown>> {
+  const out = {} as Record<ChannelName, (payload: unknown) => IpcResult<unknown>>;
+  for (const name of Object.keys(handlers) as ChannelName[]) {
+    out[name] = (payload) => {
+      const result = handlers[name](payload);
+      if (result instanceof Promise) {
+        throw new Error(`ipc: channel '${name}' answers asynchronously — await it instead`);
+      }
+      return result;
+    };
+  }
+  return out;
 }
 
 /** Every handler maps to exactly one fixed channel string. */

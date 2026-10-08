@@ -7,10 +7,11 @@ import { LoginScreen } from "./screens/LoginScreen";
 import { SellScreen } from "./screens/SellScreen";
 import { TodayScreen } from "./screens/TodayScreen";
 import { ProductsScreen } from "./screens/ProductsScreen";
+import { InvoicesScreen } from "./screens/InvoicesScreen";
 import { ToolsScreen } from "./screens/ToolsScreen";
 import { useT } from "./i18n";
 
-type Tab = "sell" | "today" | "history" | "products" | "tools";
+type Tab = "sell" | "today" | "history" | "products" | "invoices" | "tools";
 
 type ExportNotice = { status: "exported"; what: "catalog" | "backup"; fileName: string; productCount?: number };
 type ErrorNotice = { status: "error"; title: string; message: string };
@@ -85,7 +86,7 @@ export function App() {
       <header className="topbar">
         <strong className="brand">{t("app.name")}</strong>
         <nav className="tabs">
-          {(["sell", "today", "history", "products", "tools"] as const).map((name) => (
+          {(["sell", "today", "history", "products", "invoices", "tools"] as const).map((name) => (
             <button
               key={name}
               className={tab === name ? "tab active" : "tab"}
@@ -116,6 +117,7 @@ export function App() {
         {tab === "today" && <TodayScreen />}
         {tab === "history" && <HistoryScreen />}
         {tab === "products" && <ProductsScreen />}
+        {tab === "invoices" && <InvoicesScreen />}
         {tab === "tools" && (
           <ToolsScreen onImportCatalog={importCatalog} onExportCatalog={exportCatalog} onExportBackup={exportBackup} />
         )}

@@ -125,6 +125,32 @@ export class ReconciliationRepository {
       .all(limit) as ReconciliationRow[];
   }
 
+  /** Only the ones that actually failed, so a retry screen is not a list of everything. */
+  listFailed(limit = 200): ReconciliationRow[] {
+    return this.db
+      .prepare(
+        `SELECT ${COLUMNS} FROM invoice_reconciliation WHERE status = 'FAILED'
+          ORDER BY updated_at DESC, id LIMIT ?`,
+      )
+      .all(limit) as ReconciliationRow[];
+  }
+
+  /** Everything already decided — the record of what was done, newest decision first. */
+  listResolved(limit = 200): ReconciliationRow[] {
+    return this.db
+      .prepare(
+        `SELECT ${COLUMNS} FROM invoice_reconciliation
+          WHERE status NOT IN ('PENDING', 'FAILED') ORDER BY resolved_at DESC, id LIMIT ?`,
+      )
+      .all(limit) as ReconciliationRow[];
+  }
+
+  listAll(limit = 200): ReconciliationRow[] {
+    return this.db
+      .prepare(`SELECT ${COLUMNS} FROM invoice_reconciliation ORDER BY created_at DESC, id LIMIT ?`)
+      .all(limit) as ReconciliationRow[];
+  }
+
   countUnresolved(): number {
     const row = this.db
       .prepare(

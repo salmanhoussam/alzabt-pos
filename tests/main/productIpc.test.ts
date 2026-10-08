@@ -3,7 +3,7 @@
  * that a business failure arrives as a code the UI can act on rather than a generic internal error.
  */
 import { describe, expect, it, vi } from "vitest";
-import { createIpcHandlers } from "../../src/main/ipcHandlers";
+import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import { DomainError } from "../../src/domain/errors";
 import type { PosService } from "../../src/application/posService";
 import type { AdminProductRow } from "../../src/persistence/catalogRepository";
@@ -35,7 +35,7 @@ function handlers(overrides: Partial<Record<string, unknown>> = {}) {
     currentCashier: vi.fn(() => ({ id: "cashier-01", name: "Cashier One" })),
     ...overrides,
   } as unknown as PosService;
-  return { h: createIpcHandlers(service), service };
+  return { h: syncHandlers(createIpcHandlers(service)), service };
 }
 
 describe("listProducts", () => {
@@ -145,7 +145,7 @@ describe("settings channels", () => {
       setTerminalLanguage: vi.fn((lang: "ar" | "en") => ({ terminalLanguage: lang, receiptLanguage: "ar" as const })),
     };
     const service = { currentCashier: () => null } as unknown as PosService;
-    const h = createIpcHandlers(service, { settings: store });
+    const h = syncHandlers(createIpcHandlers(service, { settings: store }));
     expect(h.setTerminalLanguage({ language: "en" })).toMatchObject({
       ok: true,
       data: { terminalLanguage: "en" },
@@ -157,7 +157,7 @@ describe("settings channels", () => {
 
   it("says so plainly when settings are not available instead of pretending to save", () => {
     const service = { currentCashier: () => null } as unknown as PosService;
-    const h = createIpcHandlers(service);
+    const h = syncHandlers(createIpcHandlers(service));
     expect(h.setTerminalLanguage({ language: "en" })).toMatchObject({
       ok: false,
       error: { code: "NOT_AVAILABLE" },

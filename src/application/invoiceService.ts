@@ -741,6 +741,42 @@ export class InvoiceService {
     }
   }
 
+  /** Opens a finalized invoice by the number printed on the paper. */
+  findFinalizedByNumber(invoiceNumber: number): InvoiceView | null {
+    this.requireCashier();
+    const invoice = this.deps.invoices.findByNumber(invoiceNumber);
+    if (!invoice || invoice.status !== "final") return null;
+    return { invoice, lines: this.deps.invoices.listLines(invoice.id) };
+  }
+
+  /** The frozen invoice behind a review item — read, never recomputed from today's catalog. */
+  invoiceRowFor(invoiceId: string): InvoiceRow | null {
+    this.requireCashier();
+    return this.deps.invoices.findById(invoiceId);
+  }
+
+  invoiceLineFor(lineId: string): InvoiceLineRow | null {
+    this.requireCashier();
+    return this.deps.invoices.findLine(lineId);
+  }
+
+  listReconciliationByFilter(
+    filter: "unresolved" | "failed" | "resolved" | "all",
+    limit: number,
+  ): ReconciliationRow[] {
+    this.requireCashier();
+    switch (filter) {
+      case "failed":
+        return this.deps.reconciliation.listFailed(limit);
+      case "resolved":
+        return this.deps.reconciliation.listResolved(limit);
+      case "all":
+        return this.deps.reconciliation.listAll(limit);
+      default:
+        return this.deps.reconciliation.listUnresolved(limit);
+    }
+  }
+
   listReconciliation(invoiceId: string): ReconciliationRow[] {
     this.requireCashier();
     return this.deps.reconciliation.listForInvoice(invoiceId);
