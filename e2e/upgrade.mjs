@@ -1026,16 +1026,13 @@ if (PHASE === "seed-v2") {
 
   await tab(page, "Products");
   await page.waitForSelector('[data-testid="product-row"]');
-  await page
-    .locator('[data-testid="product-row"]')
-    .filter({ hasText: "بيبسي" })
-    .first()
-    .getByRole("button", { name: /^(تعديل|Edit)$/ })
-    .click();
+  // The row's FIRST button is Edit — positional, as every other phase in this file does it.
+  await page.locator('[data-testid="product-row"]').filter({ hasText: "بيبسي" }).first().getByRole("button").first().click();
   await page.waitForSelector('[data-testid="field-nameAr"]');
   await page.locator('[data-testid="field-nameAr"]').fill("اسم منتج مختلف");
   await page.locator('[data-testid="field-price"]').fill("77.00");
   await page.locator('[data-testid="save-product"]').click();
+  await page.getByRole("button", { name: /^(حسناً|OK)$/ }).click();
   await page.waitForTimeout(800);
 
   await tab(page, "Invoices");

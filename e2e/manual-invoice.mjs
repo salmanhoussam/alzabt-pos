@@ -159,7 +159,11 @@ await testid(page, "add-product").click();
 await testid(page, "field-nameAr").fill("مفك براغي اختباري");
 await testid(page, "field-price").fill("5.00");
 await testid(page, "field-unit").selectOption("piece");
-await page.getByRole("button", { name: /^(حفظ|Save)$/ }).click();
+// The proven pattern from e2e/product-management.mjs: the testid, then dismiss the confirmation
+// overlay. Clicking by visible label would depend on the terminal's language, and leaving the
+// overlay up would block every later click with something that looks nothing like the real cause.
+await testid(page, "save-product").click();
+await page.getByRole("button", { name: /^(حسناً|OK)$/ }).click();
 await page.waitForSelector('[data-testid="product-row"]');
 assert(true, "a synthetic catalog product exists to reconcile against");
 
@@ -449,10 +453,14 @@ await page.waitForSelector('[data-testid="company-notice"]');
 
 await tab(page, "products");
 await page.waitForSelector('[data-testid="product-row"]');
-await page.locator('[data-testid="product-row"]').filter({ hasText: "مفك" }).first().getByRole("button", { name: /^(تعديل|Edit)$/ }).click();
+// The row's FIRST button is Edit and its second is the activate toggle — positional, exactly as
+// e2e/product-management.mjs does it, because neither carries a testid and the labels are localised.
+await page.locator('[data-testid="product-row"]').filter({ hasText: "مفك" }).first().getByRole("button").first().click();
+await page.waitForSelector('[data-testid="field-nameAr"]');
 await testid(page, "field-nameAr").fill("اسم صنف جديد");
 await testid(page, "field-price").fill("99.00");
-await page.getByRole("button", { name: /^(حفظ|Save)$/ }).click();
+await testid(page, "save-product").click();
+await page.getByRole("button", { name: /^(حسناً|OK)$/ }).click();
 await page.waitForTimeout(500);
 
 // Reopen the OLD invoice.
