@@ -516,4 +516,261 @@ WHEN (SELECT status FROM invoices WHERE id = NEW.invoice_id) = 'final'
 BEGIN SELECT RAISE(ABORT, 'invoice: a finalized invoice cannot take new lines'); END;
 `,
   },
+  {
+    version: 7,
+    name: "invoice_sales_integration",
+    // ── A finalized manual invoice becomes a real sale ───────────────────────────────────────────
+    //
+    // 🔴 THIS REVERSES A STATED MIGRATION 6 DECISION, and the reversal is the point. Migration 6
+    // says, in its own comment, "AN INVOICE IS NOT A SALE, BY DECISION". Field use of the released
+    // v6 build (2026-10-09) showed that is not the business behaviour the shop needs: a finalized
+    // invoice IS a sale for reporting. Migration 6's source is NOT edited — it is released and its
+    // fingerprint must stay identical. The reversal lands here, additively.
+    //
+    // WHY THIS REBUILDS TWO TABLES INSTEAD OF ADDING COLUMNS. Three things the invoice can express
+    // and the v6 ledger cannot, each measured against the real schema rather than assumed:
+    //   1. Paid 0 / Balance 100. `sales` has no paid or balance column, and `payment_method` is
+    //      NOT NULL over a closed four-value CHECK. SQLite cannot drop or replace either.
+    //   2. Tax. `sales` has no tax column and the repository refuses to COMMIT unless
+    //      total_minor = subtotal_minor, so a tax-enabled invoice is unrepresentable even when
+    //      fully paid.
+    //   3. A free-text / PRODUCT_NOT_FOUND line. `sale_lines.product_id` and `sku` are NOT NULL,
+    //      and `sale_lines_require_unit` refuses a line without a canonical unit. Forcing an
+    //      invoice line through that would mean either inventing a SKU or moving reconciliation
+    //      BEFORE finalization. Both are refused: reconciliation stays after finalization.
+    //
+    // 🔴 WHY THE ORDER BELOW IS WHAT IT IS — `sales` IS NOT A LEAF TABLE. Migration 4 could rebuild
+    // `sale_lines` plainly because nothing references it. `sales` is referenced by `voids.sale_id`
+    // AND by `sale_lines.sale_id`, and `PRAGMA foreign_keys` is ON (db.ts) while
+    // `PRAGMA foreign_keys=OFF` is SILENTLY IGNORED inside a transaction — which the migration
+    // runner always is. With foreign keys enforced, DROP TABLE performs an implicit DELETE of every
+    // row, so dropping `sales` while `voids` holds referencing rows is an immediate violation.
+    // `PRAGMA defer_foreign_keys = ON` *is* honoured inside a transaction and resets itself at
+    // COMMIT, so enforcement moves to COMMIT time, by which point the schema is whole again. That
+    // is not a trust-the-docs claim here: tests/persistence/migration7.test.ts upgrades a real v6
+    // ledger that holds sales, lines AND a void, and would fail loudly if it were wrong.
+    //
+    // `voids` is deliberately NOT rebuilt. Its shape does not change, and its reference text
+    // ("REFERENCES sales (id)") keeps resolving to whatever table carries that name — so after the
+    // rename it points at the new table with no edit. Touching it would be risk for nothing.
+    //
+    // DROP TABLE does not fire a BEFORE DELETE trigger, so the append-only rule does not block its
+    // own replacement — the same fact migration 4 relied on.
+    //
+    // NOTHING IS INVENTED FOR HISTORICAL ROWS. Every existing sale migrates as source_type='pos',
+    // invoice_id=NULL, tax_minor=0, paid_minor=total_minor, balance_due_minor=0,
+    // payment_status='paid', and its own payment_method byte for byte. A SQLite column DEFAULT
+    // cannot be another column's value, so the backfill is an explicit SELECT, not a default.
+    //
+    // THE NEW CHECKS ARE DELIBERATELY ABLE TO FAIL AN UPGRADE. `total_minor = subtotal_minor +
+    // tax_minor` must hold for every historical row; it does, because the repository has refused to
+    // commit anything else since migration 1. If a ledger somewhere violated it, this migration
+    // ABORTS and the pre-migration backup plus the v6 database are left untouched. That is the
+    // correct outcome: a loud refusal beats silently rewriting money.
+    //
+    // WHAT IS NOT BUILT HERE, on purpose: no discount, no stock movement, no accounts receivable,
+    // no credit note. `sales` stays immutable by trigger, so a balance recorded here can never be
+    // "collected" later by an UPDATE — collecting payment is a future feature with its own schema,
+    // not a side effect of this one.
+    sql: `
+PRAGMA defer_foreign_keys = ON;
+
+-- ── sales ─────────────────────────────────────────────────────────────────────────────────────
+CREATE TABLE sales_v7 (
+  id                  TEXT    PRIMARY KEY,
+  receipt_number      INTEGER NOT NULL UNIQUE CHECK (receipt_number > 0),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL,
+  -- Explicit origin. Never inferred from a string pattern in another column.
+  source_type         TEXT    NOT NULL CHECK (source_type IN ('pos', 'invoice')),
+  -- The durable link, one direction only. UNIQUE makes a second sale for the same invoice
+  -- structurally impossible; SQLite admits many NULLs in a UNIQUE column, so every POS sale is
+  -- unaffected. A real foreign key, so the link cannot point at an invoice that does not exist.
+  -- There is deliberately NO invoices.sale_id: a finalized invoice is immutable, and a second
+  -- physical pointer would have to be written into it after the fact.
+  invoice_id          TEXT    UNIQUE REFERENCES invoices (id),
+  cashier_id          TEXT    NOT NULL,
+  cashier_name        TEXT    NOT NULL,
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  subtotal_minor      INTEGER NOT NULL CHECK (subtotal_minor >= 0),
+  -- 0 for every POS sale and for a tax-disabled invoice. Copied from the invoice's FROZEN tax,
+  -- never recomputed here.
+  tax_minor           INTEGER NOT NULL CHECK (tax_minor >= 0),
+  total_minor         INTEGER NOT NULL CHECK (total_minor >= 0),
+  -- Money actually received against this sale, and what is still owed. Truthful fields, not an
+  -- accounts-receivable system: nothing updates them later, because sales are immutable.
+  paid_minor          INTEGER NOT NULL CHECK (paid_minor >= 0),
+  balance_due_minor   INTEGER NOT NULL CHECK (balance_due_minor >= 0),
+  -- 🔴 STATE, not method. 'unpaid' and 'credit' are NOT payment methods and are deliberately
+  -- absent from payment_method below.
+  payment_status      TEXT    NOT NULL CHECK (payment_status IN ('paid', 'partial', 'unpaid')),
+  -- HOW money was received, when it was. NULL means "not recorded", which is the truth for a
+  -- manual invoice that captured no method. The four values are unchanged from migration 1.
+  payment_method      TEXT    CHECK (payment_method IS NULL
+                                     OR payment_method IN ('cash', 'card', 'external', 'other')),
+  line_count          INTEGER NOT NULL CHECK (line_count > 0),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  completed_at        TEXT    NOT NULL,
+  created_at          TEXT    NOT NULL,
+  -- The arithmetic, checked by the database rather than trusted from a service.
+  CHECK (total_minor = subtotal_minor + tax_minor),
+  CHECK (paid_minor + balance_due_minor = total_minor),
+  -- The status cannot disagree with the money it describes.
+  CHECK (
+    (payment_status = 'paid'    AND balance_due_minor = 0)
+    OR (payment_status = 'unpaid'  AND paid_minor = 0 AND balance_due_minor > 0)
+    OR (payment_status = 'partial' AND paid_minor > 0 AND balance_due_minor > 0)
+  ),
+  -- 🔴 THE POS CONTRACT IS NOT WEAKENED. Only an invoice-origin sale may omit the method.
+  CHECK (source_type = 'invoice' OR payment_method IS NOT NULL),
+  -- The link exists exactly when the sale came from an invoice, in both directions.
+  CHECK ((source_type = 'invoice' AND invoice_id IS NOT NULL)
+         OR (source_type = 'pos' AND invoice_id IS NULL))
+) STRICT;
+
+INSERT INTO sales_v7 (id, receipt_number, idempotency_key, request_fingerprint, source_type,
+                      invoice_id, cashier_id, cashier_name, currency, subtotal_minor, tax_minor,
+                      total_minor, paid_minor, balance_due_minor, payment_status, payment_method,
+                      line_count, business_date, completed_at, created_at)
+SELECT id, receipt_number, idempotency_key, request_fingerprint, 'pos',
+       NULL, cashier_id, cashier_name, currency, subtotal_minor, 0,
+       total_minor, total_minor, 0, 'paid', payment_method,
+       line_count, business_date, completed_at, created_at
+  FROM sales;
+
+-- ── sale_lines ────────────────────────────────────────────────────────────────────────────────
+CREATE TABLE sale_lines_v7 (
+  id                TEXT    PRIMARY KEY,
+  -- 🔴 POINTS AT sales_v7 ON PURPOSE, not at "sales". See the swap block below: this is what makes
+  -- dropping the old parent legal. The ALTER TABLE RENAME rewrites this reference for us.
+  sale_id           TEXT    NOT NULL REFERENCES sales_v7 (id),
+  line_no           INTEGER NOT NULL CHECK (line_no > 0),
+  -- The invoice line this sale line froze, when it came from one. UNIQUE, so one invoice line can
+  -- never appear as two sale lines. NULL for every POS line.
+  invoice_line_id   TEXT    UNIQUE,
+  -- 🔴 NULLABLE FROM HERE ON, and only for an invoice-origin line. A manual invoice may sell
+  -- something the catalog has never heard of; the sale_lines_pos_shape trigger below keeps a POS
+  -- line exactly as strict as it has always been.
+  product_id        TEXT,
+  sku               TEXT,
+  product_name      TEXT    NOT NULL,
+  -- NULL means UNKNOWN. Pre-migration-4 rows are genuinely unknown; an invoice line whose printed
+  -- unit maps to no base unit is also genuinely unknown, and is NOT guessed.
+  sale_unit         TEXT             CHECK (sale_unit IS NULL OR length(trim(sale_unit)) > 0),
+  -- What the paper said, verbatim: "كيس (50PCS)". Historical commercial truth. A later catalog
+  -- reconciliation choosing 'pack' for the PRODUCT must never rewrite this.
+  unit_label        TEXT             CHECK (unit_label IS NULL OR length(trim(unit_label)) > 0),
+  quantity_milli    INTEGER NOT NULL CHECK (quantity_milli > 0 AND quantity_milli <= 9999000),
+  -- 922429446630 = floor((2^63 - 1 - 500) / 9999000), unchanged from migration 4. Above it the
+  -- multiplication overflows signed 64-bit and SQLite SILENTLY yields a REAL.
+  unit_price_minor  INTEGER NOT NULL CHECK (unit_price_minor >= 0 AND unit_price_minor <= 922429446630),
+  -- The identical half-up rule as migration 4 and as invoice_lines, so no two of the three can
+  -- ever disagree about money.
+  line_total_minor  INTEGER NOT NULL
+      CHECK (line_total_minor = (quantity_milli * unit_price_minor + 500) / 1000),
+  -- Unchanged from migration 4: fractions belong to the units named here and nowhere else. An
+  -- invoice line with no canonical unit takes the NULL branch, exactly as a pre-v4 row does.
+  CHECK (sale_unit IS NULL OR sale_unit IN ('kg', 'meter') OR quantity_milli % 1000 = 0),
+  UNIQUE (sale_id, line_no)
+) STRICT;
+
+INSERT INTO sale_lines_v7 (id, sale_id, line_no, invoice_line_id, product_id, sku, product_name,
+                           sale_unit, unit_label, quantity_milli, unit_price_minor, line_total_minor)
+SELECT id, sale_id, line_no, NULL, product_id, sku, product_name,
+       sale_unit, NULL, quantity_milli, unit_price_minor, line_total_minor
+  FROM sale_lines;
+
+-- ── voids: rebuilt only so its foreign key can follow the new parent ──────────────────────────
+-- 🔴 ITS SHAPE IS UNCHANGED — every column, CHECK and constraint below is copied from migration 1
+-- verbatim. It is rebuilt for ONE reason: its foreign key must point at the new sales table, and
+-- SQLite offers no way to repoint a foreign key in place.
+CREATE TABLE voids_v7 (
+  id              TEXT PRIMARY KEY,
+  sale_id         TEXT NOT NULL UNIQUE REFERENCES sales_v7 (id),
+  cashier_id      TEXT NOT NULL,
+  cashier_name    TEXT NOT NULL,
+  reason          TEXT NOT NULL CHECK (length(trim(reason)) >= 3),
+  business_date   TEXT NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  created_at      TEXT NOT NULL
+) STRICT;
+
+INSERT INTO voids_v7 (id, sale_id, cashier_id, cashier_name, reason, business_date, created_at)
+SELECT id, sale_id, cashier_id, cashier_name, reason, business_date, created_at FROM voids;
+
+-- ── swap ──────────────────────────────────────────────────────────────────────────────────────
+-- 🔴 THIS ORDER IS LOAD-BEARING, and it was MEASURED, not reasoned. The first version of this
+-- migration dropped the old "sales" while the new children still referenced it by that name and
+-- leaned on PRAGMA defer_foreign_keys to settle it at COMMIT. That is wrong, and it fails in a way
+-- an empty ledger hides: with foreign keys enforced, DROP TABLE performs an implicit DELETE of
+-- every row, which COUNTS one deferred violation per referencing child row — and renaming the
+-- replacement table into place afterwards never clears that counter, so COMMIT fails with
+-- "FOREIGN KEY constraint failed". A fresh database passed (no rows, no violations); a real v3
+-- ledger carrying one sale, its lines and a void failed instantly.
+--
+-- What makes it correct is that NOTHING references the old tables when they are dropped: both new
+-- children were created pointing at "sales_v7", so dropping "voids", then "sale_lines", then
+-- "sales" removes three tables that no surviving row points into. ALTER TABLE RENAME then rewrites
+-- the children's foreign keys from sales_v7 to sales for us (SQLite >= 3.25, and legacy_alter_table
+-- is never set in this app).
+DROP TABLE voids;
+DROP TABLE sale_lines;
+DROP TABLE sales;
+ALTER TABLE sales_v7 RENAME TO sales;
+ALTER TABLE sale_lines_v7 RENAME TO sale_lines;
+ALTER TABLE voids_v7 RENAME TO voids;
+
+CREATE INDEX sales_business_date ON sales (business_date);
+CREATE INDEX sale_lines_sale_id ON sale_lines (sale_id);
+-- The invoice-origin reads: "show me invoice sales", and the join back to the invoice.
+CREATE INDEX sales_source_type ON sales (source_type, completed_at DESC);
+
+-- ── the ledger's immutability, re-established exactly as it was ───────────────────────────────
+CREATE TRIGGER sales_immutable_update BEFORE UPDATE ON sales
+BEGIN SELECT RAISE(ABORT, 'ledger: completed sales are immutable'); END;
+CREATE TRIGGER sales_immutable_delete BEFORE DELETE ON sales
+BEGIN SELECT RAISE(ABORT, 'ledger: completed sales cannot be deleted'); END;
+
+CREATE TRIGGER sale_lines_immutable_update BEFORE UPDATE ON sale_lines
+BEGIN SELECT RAISE(ABORT, 'ledger: sale lines are immutable'); END;
+CREATE TRIGGER sale_lines_immutable_delete BEFORE DELETE ON sale_lines
+BEGIN SELECT RAISE(ABORT, 'ledger: sale lines cannot be deleted'); END;
+CREATE TRIGGER sale_lines_closed_sale BEFORE INSERT ON sale_lines
+WHEN (SELECT count(*) FROM sale_lines WHERE sale_id = NEW.sale_id)
+     >= (SELECT line_count FROM sales WHERE id = NEW.sale_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: sale already holds all of its lines'); END;
+
+-- 🔴 THE OLD POS LINE CONTRACT, MOVED NOT DROPPED. A table-level CHECK cannot see the parent
+-- sale's source_type, so the rule that was NOT NULL + sale_lines_require_unit becomes a
+-- source-aware trigger. It replaces sale_lines_require_unit and is STRICTLY STRONGER for a POS
+-- line: product, sku, a non-empty name, a unit, and no invoice line id.
+CREATE TRIGGER sale_lines_pos_shape BEFORE INSERT ON sale_lines
+WHEN (SELECT source_type FROM sales WHERE id = NEW.sale_id) = 'pos'
+ AND (NEW.product_id IS NULL
+      OR NEW.sku IS NULL
+      OR NEW.sale_unit IS NULL
+      OR NEW.invoice_line_id IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'ledger: a POS sale line requires its product, sku and unit'); END;
+
+-- 🔴 WHY "IS NULL" AND NOT "IS NULL OR EMPTY", measured rather than preferred. The first version of
+-- this trigger also refused an empty sku, and that BROKE A FIELD-PROVEN RULE: domain/cart.ts has
+-- snapshotted sku = "" for a product that has no SKU since Gate 1, deliberately, because
+-- sale_lines.sku was NOT NULL. Two existing tests caught it immediately. NOT NULL is exactly what
+-- the old contract said, so NOT NULL is exactly what this trigger says — no more. The two kinds of
+-- absence now both exist and mean different things: "" is a POS product with no SKU, NULL is an
+-- invoice line the catalog does not have at all.
+
+-- An invoice-origin line must name the invoice line it froze, and must still carry a real
+-- description. Everything else about it may legitimately be unknown.
+CREATE TRIGGER sale_lines_invoice_shape BEFORE INSERT ON sale_lines
+WHEN (SELECT source_type FROM sales WHERE id = NEW.sale_id) = 'invoice'
+ AND (NEW.invoice_line_id IS NULL OR length(trim(NEW.product_name)) = 0)
+BEGIN SELECT RAISE(ABORT, 'ledger: an invoice-origin sale line must name its invoice line and description'); END;
+
+-- Restored byte for byte from migration 1, because the rebuild dropped them with their table.
+CREATE TRIGGER voids_immutable_update BEFORE UPDATE ON voids
+BEGIN SELECT RAISE(ABORT, 'ledger: voids are immutable'); END;
+CREATE TRIGGER voids_immutable_delete BEFORE DELETE ON voids
+BEGIN SELECT RAISE(ABORT, 'ledger: voids cannot be deleted'); END;
+`,
+  },
 ];

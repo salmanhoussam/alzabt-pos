@@ -11,19 +11,34 @@
  */
 import { DomainError } from "../domain/errors";
 import { money } from "../domain/money";
-import type { PaymentMethod, SaleLineRecord, SaleRecord, VoidRecord } from "../domain/sale";
+import type {
+  PaymentMethod,
+  PaymentStatus,
+  SaleLineRecord,
+  SaleRecord,
+  SaleSourceType,
+  VoidRecord,
+} from "../domain/sale";
 import type { Db } from "./db";
 
 export interface NewSaleHeader {
   readonly id: string;
   readonly idempotencyKey: string;
   readonly requestFingerprint: string;
+  readonly sourceType: SaleSourceType;
+  /** Required when sourceType is "invoice", null otherwise. The database CHECK enforces both ways. */
+  readonly invoiceId: string | null;
   readonly cashierId: string;
   readonly cashierName: string;
   readonly currency: string;
   readonly subtotalMinor: bigint;
+  readonly taxMinor: bigint;
   readonly totalMinor: bigint;
-  readonly paymentMethod: PaymentMethod;
+  readonly paidMinor: bigint;
+  readonly balanceDueMinor: bigint;
+  readonly paymentStatus: PaymentStatus;
+  /** Null ONLY for an invoice-origin sale that recorded no method. Never a fabricated value. */
+  readonly paymentMethod: PaymentMethod | null;
   readonly businessDate: string;
   readonly completedAt: string;
   readonly createdAt: string;
@@ -32,10 +47,16 @@ export interface NewSaleHeader {
 export interface NewSaleLine {
   readonly id: string;
   readonly lineNo: number;
-  readonly productId: string;
-  readonly sku: string;
+  /** Set on an invoice-origin line, null on a POS line. */
+  readonly invoiceLineId: string | null;
+  /** Null only on an invoice-origin line whose product the catalog does not have yet. */
+  readonly productId: string | null;
+  readonly sku: string | null;
   readonly productName: string;
-  readonly saleUnit: string;
+  /** Null when the printed unit maps to no base unit. Never guessed. */
+  readonly saleUnit: string | null;
+  /** The unit exactly as the invoice printed it. Null on a POS line. */
+  readonly unitLabel: string | null;
   readonly quantityMilli: number;
   readonly unitPriceMinor: bigint;
   readonly lineTotalMinor: bigint;
@@ -46,12 +67,18 @@ interface SaleRow {
   receipt_number: bigint;
   idempotency_key: string;
   request_fingerprint: string;
+  source_type: SaleSourceType;
+  invoice_id: string | null;
   cashier_id: string;
   cashier_name: string;
   currency: string;
   subtotal_minor: bigint;
+  tax_minor: bigint;
   total_minor: bigint;
-  payment_method: PaymentMethod;
+  paid_minor: bigint;
+  balance_due_minor: bigint;
+  payment_status: PaymentStatus;
+  payment_method: PaymentMethod | null;
   line_count: bigint;
   business_date: string;
   completed_at: string;
@@ -62,10 +89,12 @@ interface LineRow {
   id: string;
   sale_id: string;
   line_no: bigint;
-  product_id: string;
-  sku: string;
+  invoice_line_id: string | null;
+  product_id: string | null;
+  sku: string | null;
   product_name: string;
   sale_unit: string | null;
+  unit_label: string | null;
   quantity_milli: bigint;
   unit_price_minor: bigint;
   line_total_minor: bigint;
@@ -128,12 +157,14 @@ export class SaleRepository {
   protected insertSaleHeader(header: NewSaleHeader, receiptNumber: number, lineCount: number): void {
     this.db
       .prepare(
-        `INSERT INTO sales (id, receipt_number, idempotency_key, request_fingerprint, cashier_id, cashier_name,
-                            currency, subtotal_minor, total_minor, payment_method, line_count, business_date,
-                            completed_at, created_at)
-         VALUES (@id, @receiptNumber, @idempotencyKey, @requestFingerprint, @cashierId, @cashierName,
-                 @currency, @subtotalMinor, @totalMinor, @paymentMethod, @lineCount, @businessDate,
-                 @completedAt, @createdAt)`,
+        `INSERT INTO sales (id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+                            cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor,
+                            paid_minor, balance_due_minor, payment_status, payment_method, line_count,
+                            business_date, completed_at, created_at)
+         VALUES (@id, @receiptNumber, @idempotencyKey, @requestFingerprint, @sourceType, @invoiceId,
+                 @cashierId, @cashierName, @currency, @subtotalMinor, @taxMinor, @totalMinor,
+                 @paidMinor, @balanceDueMinor, @paymentStatus, @paymentMethod, @lineCount,
+                 @businessDate, @completedAt, @createdAt)`,
       )
       .run({ ...header, receiptNumber, lineCount });
   }
@@ -141,10 +172,10 @@ export class SaleRepository {
   protected insertSaleLine(saleId: string, line: NewSaleLine): void {
     this.db
       .prepare(
-        `INSERT INTO sale_lines (id, sale_id, line_no, product_id, sku, product_name, sale_unit,
-                                 quantity_milli, unit_price_minor, line_total_minor)
-         VALUES (@id, @saleId, @lineNo, @productId, @sku, @productName, @saleUnit,
-                 @quantityMilli, @unitPriceMinor, @lineTotalMinor)`,
+        `INSERT INTO sale_lines (id, sale_id, line_no, invoice_line_id, product_id, sku, product_name,
+                                 sale_unit, unit_label, quantity_milli, unit_price_minor, line_total_minor)
+         VALUES (@id, @saleId, @lineNo, @invoiceLineId, @productId, @sku, @productName,
+                 @saleUnit, @unitLabel, @quantityMilli, @unitPriceMinor, @lineTotalMinor)`,
       )
       .run({ ...line, saleId });
   }
@@ -153,19 +184,33 @@ export class SaleRepository {
   protected verifySale(saleId: string): void {
     const row = this.db
       .prepare(
-        `SELECT s.line_count, s.subtotal_minor, s.total_minor,
+        `SELECT s.line_count, s.subtotal_minor, s.tax_minor, s.total_minor, s.paid_minor,
+                s.balance_due_minor,
                 count(l.id) AS lines, coalesce(sum(l.line_total_minor), 0) AS line_sum
            FROM sales s LEFT JOIN sale_lines l ON l.sale_id = s.id
           WHERE s.id = ? GROUP BY s.id`,
       )
       .get(saleId) as
-      | { line_count: bigint; subtotal_minor: bigint; total_minor: bigint; lines: bigint; line_sum: bigint }
+      | {
+          line_count: bigint;
+          subtotal_minor: bigint;
+          tax_minor: bigint;
+          total_minor: bigint;
+          paid_minor: bigint;
+          balance_due_minor: bigint;
+          lines: bigint;
+          line_sum: bigint;
+        }
       | undefined;
+    // Migration 7 widened this from "total === subtotal" to "total === subtotal + tax", and added
+    // the paid/balance identity. It is deliberately NOT weaker: a taxless sale still must have
+    // total === subtotal, because tax_minor is then 0.
     if (
       !row ||
       row.lines !== row.line_count ||
       row.line_sum !== row.subtotal_minor ||
-      row.total_minor !== row.subtotal_minor
+      row.total_minor !== row.subtotal_minor + row.tax_minor ||
+      row.paid_minor + row.balance_due_minor !== row.total_minor
     ) {
       throw new DomainError("LEDGER_INTEGRITY", `Sale ${saleId} does not add up; transaction rolled back`);
     }
@@ -180,6 +225,15 @@ export class SaleRepository {
 
   getSale(id: string): SaleRecord | undefined {
     const row = this.db.prepare("SELECT * FROM sales WHERE id = ?").get(id) as SaleRow | undefined;
+    return row ? this.hydrate(row) : undefined;
+  }
+
+  /**
+   * The invoice -> sale direction. There is no invoices.sale_id column on purpose: a finalized
+   * invoice is immutable, so the link lives on the sale and is read back through this UNIQUE index.
+   */
+  findByInvoiceId(invoiceId: string): SaleRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM sales WHERE invoice_id = ?").get(invoiceId) as SaleRow | undefined;
     return row ? this.hydrate(row) : undefined;
   }
 
@@ -226,10 +280,12 @@ export class SaleRepository {
         id: l.id,
         saleId: l.sale_id,
         lineNo: toSafeNumber(l.line_no, "line number"),
+        invoiceLineId: l.invoice_line_id,
         productId: l.product_id,
         sku: l.sku,
         productName: l.product_name,
         saleUnit: l.sale_unit,
+        unitLabel: l.unit_label,
         quantityMilli: toSafeNumber(l.quantity_milli, "quantity"),
         unitPrice: money(l.unit_price_minor, row.currency),
         lineTotal: money(l.line_total_minor, row.currency),
@@ -244,8 +300,14 @@ export class SaleRepository {
       cashierId: row.cashier_id,
       cashierName: row.cashier_name,
       currency: row.currency,
+      sourceType: row.source_type,
+      invoiceId: row.invoice_id,
       subtotal: money(row.subtotal_minor, row.currency),
+      tax: money(row.tax_minor, row.currency),
       total: money(row.total_minor, row.currency),
+      paid: money(row.paid_minor, row.currency),
+      balanceDue: money(row.balance_due_minor, row.currency),
+      paymentStatus: row.payment_status,
       paymentMethod: row.payment_method,
       businessDate: row.business_date,
       completedAt: row.completed_at,

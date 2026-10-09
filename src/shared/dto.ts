@@ -75,24 +75,37 @@ export function fromCatalogDto(dto: CatalogDto): Catalog {
   return { currency: dto.currency, products, byId: new Map(products.map((p) => [p.id, p])) };
 }
 
-export function toSaleDto(s: SaleRecord): SaleDto {
+/**
+ * `invoiceNumber` is passed in rather than read here: this module is a pure mapper with no database
+ * access, and the number lives on the invoice, not on the sale. Null for every till sale.
+ */
+export function toSaleDto(s: SaleRecord, invoiceNumber: number | null = null): SaleDto {
   return {
     id: s.id,
     receiptNumber: s.receiptNumber,
     cashierId: s.cashierId,
     cashierName: s.cashierName,
     currency: s.currency,
+    sourceType: s.sourceType,
+    invoiceId: s.invoiceId,
+    invoiceNumber,
     subtotal: toMoneyDto(s.subtotal),
+    tax: toMoneyDto(s.tax),
     total: toMoneyDto(s.total),
+    paid: toMoneyDto(s.paid),
+    balanceDue: toMoneyDto(s.balanceDue),
+    paymentStatus: s.paymentStatus,
     paymentMethod: s.paymentMethod,
     businessDate: s.businessDate,
     completedAt: s.completedAt,
     lines: s.lines.map((l) => ({
       lineNo: l.lineNo,
+      invoiceLineId: l.invoiceLineId,
       productId: l.productId,
       sku: l.sku,
       productName: l.productName,
       saleUnit: l.saleUnit,
+      unitLabel: l.unitLabel,
       quantityMilli: l.quantityMilli,
       unitPrice: toMoneyDto(l.unitPrice),
       lineTotal: toMoneyDto(l.lineTotal),

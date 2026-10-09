@@ -22,6 +22,9 @@ export type DomainErrorCode =
   | "SALE_NOT_FOUND"
   | "ALREADY_VOIDED"
   | "VOID_NOT_ALLOWED"
+  // A sale that came from a finalized invoice. Its honest correction is a credit note, which does
+  // not exist yet, so the POS void refuses rather than half-cancelling a commercial document.
+  | "VOID_NOT_ALLOWED_FOR_INVOICE"
   | "INVALID_REASON"
   | "INVALID_INPUT"
   | "LEDGER_INTEGRITY"

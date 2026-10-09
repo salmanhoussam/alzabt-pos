@@ -76,9 +76,11 @@ describe("ledger constraints enforced by SQLite itself", () => {
     expect(() =>
       db
         .prepare(
-          `INSERT INTO sales (id, receipt_number, idempotency_key, request_fingerprint, cashier_id, cashier_name,
-            currency, subtotal_minor, total_minor, payment_method, line_count, business_date, completed_at, created_at)
-           VALUES ('x', 99, 'raw-key-0001', 'f', 'c', 'n', 'USD', 2.5, 2.5, 'cash', 1, '2026-10-04', 't', 't')`,
+          `INSERT INTO sales (id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+            cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+            balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at, created_at)
+           VALUES ('x', 99, 'raw-key-0001', 'f', 'pos', NULL, 'c', 'n', 'USD', 2.5, 0, 2.5, 2.5, 0,
+                   'paid', 'cash', 1, '2026-10-04', 't', 't')`,
         )
         .run(),
     ).toThrow(/cannot store REAL value in INTEGER column/);

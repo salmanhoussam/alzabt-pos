@@ -4,7 +4,7 @@
  *
  * Money crosses this boundary as a string of minor units ("1250" = 12.50 USD), never a number.
  */
-import type { PaymentMethod } from "../domain/sale";
+import type { PaymentMethod, PaymentStatus, SaleSourceType } from "../domain/sale";
 import type { Language, TerminalSettings } from "./i18n";
 
 export const CHANNELS = {
@@ -83,9 +83,14 @@ export interface CatalogDto {
 
 export interface SaleLineDto {
   readonly lineNo: number;
-  readonly productId: string;
-  readonly sku: string;
+  /** The invoice line this froze, or null on a till line. */
+  readonly invoiceLineId: string | null;
+  /** Null only on an invoice-origin line whose product the catalog does not have yet. */
+  readonly productId: string | null;
+  readonly sku: string | null;
   readonly productName: string;
+  /** The unit exactly as the invoice printed it. Null on a till line. */
+  readonly unitLabel: string | null;
   /** The unit sold; null only on a line written before migration 4. */
   readonly saleUnit: string | null;
   /** Thousandths of one sale unit. Formatted for display by domain/quantity.ts. */
@@ -100,9 +105,19 @@ export interface SaleDto {
   readonly cashierId: string;
   readonly cashierName: string;
   readonly currency: string;
+  /** Where the sale came from: a till checkout, or a finalized manual invoice. */
+  readonly sourceType: SaleSourceType;
+  readonly invoiceId: string | null;
+  /** Present only for an invoice-origin sale, so history can show the document's own number. */
+  readonly invoiceNumber: number | null;
   readonly subtotal: MoneyDto;
+  readonly tax: MoneyDto;
   readonly total: MoneyDto;
-  readonly paymentMethod: PaymentMethod;
+  readonly paid: MoneyDto;
+  readonly balanceDue: MoneyDto;
+  readonly paymentStatus: PaymentStatus;
+  /** 🔴 Null means NOT RECORDED. The UI must say so, never substitute a method. */
+  readonly paymentMethod: PaymentMethod | null;
   readonly businessDate: string;
   readonly completedAt: string;
   readonly lines: ReadonlyArray<SaleLineDto>;

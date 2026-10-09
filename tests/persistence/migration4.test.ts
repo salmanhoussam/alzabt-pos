@@ -55,15 +55,29 @@ const triggers = (db: Db) =>
 
 describe("migration 4 — v3 to v4", () => {
   it("is the fourth migration, and 1-3 are not touched by it", () => {
-    // Was [1, 2, 3, 4], then [1..5]. Migration 4's own position and content are what this file is
-    // about, and neither has moved through either later addition.
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    // Was [1, 2, 3, 4], then [1..5], then [1..6]. Migration 4's own position and content are what
+    // this file is about, and neither has moved through any later addition.
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(MIGRATIONS[3]!.name).toBe("exact_sale_quantity");
     // Migration 5 is additive and must not reach into this one's table either.
     expect(MIGRATIONS[4]!.name).toBe("durable_local_audit");
     expect(MIGRATIONS[4]!.sql).not.toMatch(/sale_lines/i);
     expect(MIGRATIONS[5]!.name).toBe("manual_invoices");
     expect(MIGRATIONS[5]!.sql).not.toMatch(/\bsale_lines\b/i);
+    // 🔴 MIGRATION 7 IS THE FIRST LATER MIGRATION THAT DOES TOUCH sale_lines, and this assertion
+    // was flipped deliberately on 2026-10-09 rather than deleted. Until then this file could claim
+    // "no later migration reaches into migration 4's table" — that is no longer true: v7 rebuilds
+    // sale_lines so an invoice-origin line may carry a null product_id/sku. What must STILL hold,
+    // and is what the rest of this file proves against a v7 ledger, is that migration 4's
+    // ARITHMETIC and its unit rules survive that rebuild unchanged.
+    expect(MIGRATIONS[6]!.name).toBe("invoice_sales_integration");
+    expect(MIGRATIONS[6]!.sql).toMatch(/CREATE TABLE sale_lines_v7/);
+    // The half-up rule and the overflow ceiling are copied forward verbatim, character for
+    // character — not re-derived, not loosened.
+    expect(MIGRATIONS[6]!.sql).toContain("line_total_minor = (quantity_milli * unit_price_minor + 500) / 1000");
+    expect(MIGRATIONS[6]!.sql).toContain("unit_price_minor >= 0 AND unit_price_minor <= 922429446630");
+    expect(MIGRATIONS[6]!.sql).toContain("quantity_milli > 0 AND quantity_milli <= 9999000");
+    expect(MIGRATIONS[6]!.sql).toContain("sale_unit IS NULL OR sale_unit IN ('kg', 'meter') OR quantity_milli % 1000 = 0");
     // Nothing in migration 4's own SQL alters an earlier table's definition.
     for (const forbidden of [/ALTER TABLE sales\b/i, /DROP TABLE sales\b/i, /catalog_products/i, /cashier_pin_state/i]) {
       expect(MIGRATIONS[3]!.sql, String(forbidden)).not.toMatch(forbidden);
@@ -140,14 +154,20 @@ describe("migration 4 — v3 to v4", () => {
     db.close();
   });
 
-  it("recreates the index and all four triggers", () => {
+  it("recreates the index and all five triggers", () => {
     legacyV3Ledger();
     const db = openDatabase(t.dbPath, MIGRATIONS, { fileMustExist: true });
+    // 🔴 WAS FOUR, AND THE FOURTH WAS NAMED sale_lines_require_unit. Migration 7 replaced that one
+    // trigger with a source-aware PAIR, because a table-level rule cannot see whether the parent
+    // sale is a till checkout or a manual invoice. For a POS line the replacement is STRICTLY
+    // STRONGER — it demands the product, the sku, a non-empty name AND the unit, where the old one
+    // demanded only the unit. The loosening applies to invoice-origin lines and nothing else.
     expect(triggers(db)).toEqual([
       "sale_lines_closed_sale",
       "sale_lines_immutable_delete",
       "sale_lines_immutable_update",
-      "sale_lines_require_unit",
+      "sale_lines_invoice_shape",
+      "sale_lines_pos_shape",
     ]);
     const idx = (
       db
@@ -218,10 +238,14 @@ describe("the v4 constraints the database enforces itself", () => {
     seq = 0;
     const db = openDatabase(t.dbPath, MIGRATIONS);
     db.exec(
-      `INSERT INTO sales (id, receipt_number, idempotency_key, request_fingerprint, cashier_id, cashier_name,
-                          currency, subtotal_minor, total_minor, payment_method, line_count, business_date,
-                          completed_at, created_at)
-       VALUES ('s1', 1, 'syn-key-00000001', 'f', 'c1', 'Cashier One', 'USD', 0, 0, 'cash', 50, '2026-10-07', 't', 't')`,
+      // A synthetic POS header to hang line probes from. source_type='pos' is the point: every
+      // probe below must face the STRICT till contract, not the looser invoice-origin one.
+      `INSERT INTO sales (id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+                          cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor,
+                          paid_minor, balance_due_minor, payment_status, payment_method, line_count,
+                          business_date, completed_at, created_at)
+       VALUES ('s1', 1, 'syn-key-00000001', 'f', 'pos', NULL, 'c1', 'Cashier One', 'USD', 0, 0, 0,
+               0, 0, 'paid', 'cash', 50, '2026-10-07', 't', 't')`,
     );
     return db;
   };
@@ -251,7 +275,11 @@ describe("the v4 constraints the database enforces itself", () => {
 
   it("refuses a NEW line that does not say which unit it was sold in", () => {
     const db = openFresh();
-    expect(() => insert(db, { sale_unit: null })).toThrow(/must record the unit it was sold in/);
+    // The RULE is unchanged; only the trigger that states it has a new name. Migration 4 raised
+    // "a sale line must record the unit it was sold in" from sale_lines_require_unit; migration 7
+    // raises this from sale_lines_pos_shape, for a POS sale, and additionally covers the product
+    // and sku that used to be NOT NULL columns.
+    expect(() => insert(db, { sale_unit: null })).toThrow(/a POS sale line requires its product, sku and unit/);
     db.close();
   });
 

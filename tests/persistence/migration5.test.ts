@@ -18,7 +18,7 @@ import {
 } from "../../src/persistence/db";
 import { MIGRATIONS } from "../../src/persistence/migrations";
 import { CatalogRepository } from "../../src/persistence/catalogRepository";
-import { SaleRepository } from "../../src/persistence/saleRepository";
+import { insertLegacyVoid, insertPreV7Sale } from "../helpers/legacyLedger";
 import { type TempDir, tempDir } from "../helpers/harness";
 
 const V4 = 4;
@@ -48,7 +48,6 @@ function v4Ledger(): { sales: number; lines: number; voids: number; products: nu
   const db = openDatabase(t.dbPath, MIGRATIONS.slice(0, V4));
   try {
     expect(schemaVersion(db)).toBe(V4);
-    const sales = new SaleRepository(db);
     const store = new CatalogRepository(db);
     const at = "2026-10-05T09:00:00.000Z";
     store.createManual(
@@ -59,22 +58,20 @@ function v4Ledger(): { sales: number; lines: number; voids: number; products: nu
       { nameAr: "صنف باء", nameEn: null, sku: null, priceMinor: 250n, currency: "USD", baseUnit: "kg" },
       new Date(at),
     );
-    sales.commitSale(
-      {
-        id: "sale-1",
-        idempotencyKey: "v4-key-00000001",
-        requestFingerprint: "fp-1",
-        cashierId: "cashier-01",
-        cashierName: "Cashier One",
-        currency: "USD",
-        subtotalMinor: 1200n,
-        totalMinor: 1200n,
-        paymentMethod: "cash",
-        businessDate: "2026-10-05",
-        completedAt: at,
-        createdAt: at,
-      },
-      [
+    // 🔴 WRITTEN AS AN OLD BUILD WROTE IT, not through today's repository. Migration 7 rebuilt
+    // `sales`, so SaleRepository now inserts source_type/tax/paid/balance/payment_status — columns
+    // that do not exist at v4. Using it here would not have tested a v4 ledger at all; it would
+    // have failed outright, which is precisely what happened on 2026-10-09 and is what
+    // tests/helpers/legacyLedger.ts warned about when migration 4 created the same situation.
+    insertPreV7Sale(db, {
+      id: "sale-1",
+      receiptNumber: 1,
+      idempotencyKey: "v4-key-00000001",
+      requestFingerprint: "fp-1",
+      paymentMethod: "cash",
+      businessDate: "2026-10-05",
+      at,
+      lines: [
         {
           id: "line-1",
           lineNo: 1,
@@ -83,50 +80,36 @@ function v4Ledger(): { sales: number; lines: number; voids: number; products: nu
           productName: "Item A",
           saleUnit: "piece",
           quantityMilli: 3000,
-          unitPriceMinor: 400n,
-          lineTotalMinor: 1200n,
+          unitPriceMinor: 400,
+          lineTotalMinor: 1200,
         },
       ],
-    );
-    sales.commitSale(
-      {
-        id: "sale-2",
-        idempotencyKey: "v4-key-00000002",
-        requestFingerprint: "fp-2",
-        cashierId: "cashier-01",
-        cashierName: "Cashier One",
-        currency: "USD",
-        subtotalMinor: 625n,
-        totalMinor: 625n,
-        paymentMethod: "card",
-        businessDate: "2026-10-05",
-        completedAt: at,
-        createdAt: at,
-      },
-      [
+    });
+    insertPreV7Sale(db, {
+      id: "sale-2",
+      receiptNumber: 2,
+      idempotencyKey: "v4-key-00000002",
+      requestFingerprint: "fp-2",
+      paymentMethod: "card",
+      businessDate: "2026-10-05",
+      at,
+      lines: [
         {
           id: "line-2",
           lineNo: 1,
           productId: "manual:000002",
+          // A product with no SKU snapshots "" — the Gate 1 convention, preserved by migration 7.
           sku: "",
           productName: "صنف باء",
           saleUnit: "kg",
           // 2.5 kg at 2.50 -> exactly 6.25
           quantityMilli: 2500,
-          unitPriceMinor: 250n,
-          lineTotalMinor: 625n,
+          unitPriceMinor: 250,
+          lineTotalMinor: 625,
         },
       ],
-    );
-    sales.insertVoid({
-      id: "void-1",
-      saleId: "sale-2",
-      cashierId: "cashier-01",
-      cashierName: "Cashier One",
-      reason: "wrong item rung up",
-      businessDate: "2026-10-05",
-      createdAt: at,
     });
+    insertLegacyVoid(db, "sale-2");
     return {
       sales: count(db, "sales"),
       lines: count(db, "sale_lines"),
@@ -142,7 +125,7 @@ describe("migration 5 — v4 to v5", () => {
   it("is the fifth migration, and it touches no earlier table", () => {
     // Was exactly [1, 2, 3, 4, 5] until migration 6 (manual_invoices) was appended. Migration 5's
     // own position and content are what this file is about, and neither moved.
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(MIGRATIONS[4]!.name).toBe("durable_local_audit");
     // Migration 6 is additive and must not reach into this one's table either.
     expect(MIGRATIONS[5]!.name).toBe("manual_invoices");

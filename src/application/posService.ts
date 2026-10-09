@@ -709,11 +709,19 @@ export class PosService {
         id: saleId,
         idempotencyKey: input.idempotencyKey,
         requestFingerprint: fingerprint,
+        // A till checkout, stated rather than defaulted (migration 7). A POS sale is settled in
+        // full at completion by one real method — unchanged behaviour, now written down.
+        sourceType: "pos",
+        invoiceId: null,
         cashierId: cashier.id,
         cashierName: cashier.name,
         currency: priced.currency,
         subtotalMinor: priced.subtotal.minor,
+        taxMinor: 0n,
         totalMinor: priced.total.minor,
+        paidMinor: priced.total.minor,
+        balanceDueMinor: 0n,
+        paymentStatus: "paid",
         paymentMethod: input.paymentMethod,
         businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
         completedAt: timestamp,
@@ -722,10 +730,12 @@ export class PosService {
       priced.lines.map((l) => ({
         id: this.newId(),
         lineNo: l.lineNo,
+        invoiceLineId: null,
         productId: l.productId,
         sku: l.sku,
         productName: l.productName,
         saleUnit: l.saleUnit,
+        unitLabel: null,
         quantityMilli: l.quantityMilli,
         unitPriceMinor: l.unitPrice.minor,
         lineTotalMinor: l.lineTotal.minor,
@@ -767,6 +777,17 @@ export class PosService {
     const cleanReason = normalizeVoidReason(reason);
     const sale = this.repository.getSale(saleId);
     if (!sale) throw new DomainError("SALE_NOT_FOUND", "Sale not found");
+    // 🔴 AN INVOICE-ORIGIN SALE CANNOT BE VOIDED HERE, and the refusal is deliberate rather than an
+    // oversight. Voiding it would leave the finalized invoice looking perfectly valid while the
+    // sale it is linked to is cancelled — two documents disagreeing about whether a commercial
+    // transaction happened. The honest correction for an invoice is a credit note, which does not
+    // exist yet. Until it does, this refuses loudly instead of half-cancelling.
+    if (sale.sourceType === "invoice") {
+      throw new DomainError(
+        "VOID_NOT_ALLOWED_FOR_INVOICE",
+        "This sale comes from a finalized invoice. Invoice cancellation / credit-note workflow is not implemented yet.",
+      );
+    }
     if (this.repository.getVoid(saleId)) throw new DomainError("ALREADY_VOIDED", "This sale is already voided");
     const instant = this.now();
     const today = businessDateOf(instant, this.deps.terminal.timeZone);
