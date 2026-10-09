@@ -279,6 +279,17 @@ await app.close();
 await tab(page, "invoices");
 await page.waitForSelector('[data-testid="new-invoice"]');
 await testid(page, "new-invoice").click();
+// 🔴 THE OPERATOR NAMES THE INTENT FIRST. "+ New" no longer opens an unlabelled document: it asks
+// whether this is an OUTGOING sales invoice or INCOMING catalog intake, because the two look alike
+// on paper and mean opposite things. This is the new required step, not a dialog to dismiss.
+await page.waitForSelector('[data-testid="invoice-mode-chooser"]');
+assert(
+  await testid(page, "mode-incoming").isDisabled(),
+  "incoming intake is NAMED but not offered — nothing in this build implements it",
+);
+assert(await testid(page, "mode-incoming-soon").isVisible(), "and the screen says it is not built yet");
+await testid(page, "mode-outgoing").click();
+await page.waitForSelector('[data-testid="invoice-mode-chooser"]', { state: "detached" });
 await page.waitForSelector('[data-testid="add-row"]');
 
 assert((await textOf(page, "sheet-number")).startsWith("—"), "a draft shows no invoice number");

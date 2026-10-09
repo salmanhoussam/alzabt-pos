@@ -875,6 +875,10 @@ if (PHASE === "seed-v2") {
   await tab(page, "Invoices");
   await page.waitForSelector('[data-testid="new-invoice"]');
   await invTestid(page, "new-invoice").click();
+  // The intent chooser is the new required step — see manual-invoice.mjs for why it exists.
+  await page.waitForSelector('[data-testid="invoice-mode-chooser"]');
+  await invTestid(page, "mode-outgoing").click();
+  await page.waitForSelector('[data-testid="invoice-mode-chooser"]', { state: "detached" });
   await page.waitForSelector('[data-testid="add-row"]');
   assert((await invText(page, "sheet-number")).startsWith("—"), "a draft has no invoice number");
 
@@ -1241,6 +1245,10 @@ if (PHASE === "seed-v2") {
   await page.waitForSelector('[data-testid="company-notice"]');
   await page.waitForSelector('[data-testid="new-invoice"]');
   await invTestid(page, "new-invoice").click();
+  // The intent chooser is the new required step — see manual-invoice.mjs for why it exists.
+  await page.waitForSelector('[data-testid="invoice-mode-chooser"]');
+  await invTestid(page, "mode-outgoing").click();
+  await page.waitForSelector('[data-testid="invoice-mode-chooser"]', { state: "detached" });
   await page.waitForSelector('[data-testid="add-row"]');
   // The shared helper owns the add-row -> fill -> save cycle, so this phase cannot drift from the
   // way every other phase enters a line.
@@ -1307,6 +1315,10 @@ if (PHASE === "seed-v2") {
   await tab(page, "Invoices");
   await page.waitForSelector('[data-testid="new-invoice"]');
   await invTestid(page, "new-invoice").click();
+  // The intent chooser is the new required step — see manual-invoice.mjs for why it exists.
+  await page.waitForSelector('[data-testid="invoice-mode-chooser"]');
+  await invTestid(page, "mode-outgoing").click();
+  await page.waitForSelector('[data-testid="invoice-mode-chooser"]', { state: "detached" });
   await page.waitForSelector('[data-testid="add-row"]');
 
   // FIELD FINDING 2, proved on the upgraded profile: the add-row affordance is reachable, a second
