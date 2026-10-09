@@ -13,6 +13,7 @@ import { DomainError } from "../../src/domain/errors";
 import { InvoiceService } from "../../src/application/invoiceService";
 import { InvoiceRepository } from "../../src/persistence/invoiceRepository";
 import { ReconciliationRepository } from "../../src/persistence/reconciliationRepository";
+import { SaleRepository } from "../../src/persistence/saleRepository";
 import { CatalogRepository } from "../../src/persistence/catalogRepository";
 import { FIXTURE_TERMINAL } from "../../src/fixtures/terminal";
 import type { Difference } from "../../src/domain/invoiceMatching";
@@ -135,6 +136,7 @@ describe("what finalization writes to the review queue", () => {
       company: h.companyStore,
       catalogStore: new CatalogRepository(h.db),
       products: h.service,
+      sales: new SaleRepository(h.db),
       transact: (fn) => h.db.transaction(fn).immediate(),
       terminal: FIXTURE_TERMINAL,
       now: h.clock.now,
@@ -560,6 +562,7 @@ describe("retry is idempotent, by reading the world rather than replaying the re
       company: h.companyStore,
       catalogStore: new CatalogRepository(h.db),
       products: h.service,
+      sales: new SaleRepository(h.db),
       transact: (fn) => h.db.transaction(fn).immediate(),
       terminal: FIXTURE_TERMINAL,
       now: h.clock.now,

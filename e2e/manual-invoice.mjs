@@ -137,6 +137,25 @@ function facts() {
       highestNumber: n("SELECT coalesce(max(invoice_number), 0) AS n FROM invoices"),
       sales: n("SELECT count(*) AS n FROM sales"),
       saleLines: n("SELECT count(*) AS n FROM sale_lines"),
+      // Migration 7: the sale a finalized invoice is.
+      invoiceSales: n("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice'"),
+      posSales: n("SELECT count(*) AS n FROM sales WHERE source_type = 'pos'"),
+      linkedSales: n("SELECT count(*) AS n FROM sales WHERE invoice_id IS NOT NULL"),
+      methodlessSales: n("SELECT count(*) AS n FROM sales WHERE payment_method IS NULL"),
+      salePaid: n("SELECT coalesce(sum(paid_minor), 0) AS n FROM sales"),
+      saleBalance: n("SELECT coalesce(sum(balance_due_minor), 0) AS n FROM sales"),
+      saleTotal: n("SELECT coalesce(sum(total_minor), 0) AS n FROM sales"),
+      saleStatuses: db
+        .prepare("SELECT payment_status AS p, count(*) AS n FROM sales GROUP BY payment_status ORDER BY p")
+        .all()
+        .map((r) => `${r.p}=${Number(r.n)}`)
+        .join(","),
+      // Every invoice line that became a sale line, and the unit label it carried across.
+      saleUnitLabels: db
+        .prepare("SELECT coalesce(unit_label, '-') AS u FROM sale_lines ORDER BY line_no")
+        .all()
+        .map((r) => r.u)
+        .join("|"),
       voids: n("SELECT count(*) AS n FROM voids"),
       audit: n("SELECT count(*) AS n FROM audit_events"),
       auditTypes: db
@@ -235,7 +254,7 @@ await app.close();
 {
   const f = facts();
   log("after setup:", JSON.stringify(f));
-  assert(f.schema === 6, `the ledger is at schema v6 (got ${f.schema})`);
+  assert(f.schema === 7, `the ledger is at schema v7 (got ${f.schema})`);
   assert(f.invoices === 0 && f.invoiceLines === 0 && f.reconciliation === 0, "no invoice exists yet");
   assert(count("company_profile") === 1, "exactly one company_profile row, however many saves happened");
   assert(Number(one("SELECT next_invoice_number AS n FROM company_profile").n) === 61, "the sequence starts at 61 as configured");
@@ -352,9 +371,27 @@ await app.close();
   assert(odd !== undefined, "the printed unit label was stored verbatim");
   assert(odd.canonical_unit === null, "and no canonical unit was invented for it");
 
-  // 🔴 THE V1 BOUNDARY: an invoice is not a sale.
-  assert(f.sales === 0, "finalizing an invoice created NO sales row");
-  assert(f.saleLines === 0, "and no sale line");
+  // 🔴 THE V1 BOUNDARY WAS REVERSED ON 2026-10-09, AND THE OLD VALUES WERE ZERO. Until then this
+  // read `assert(f.sales === 0, "finalizing an invoice created NO sales row")`. Field use reversed
+  // it: a finalized invoice IS a sale for business reporting (migration 7).
+  assert(f.sales === 1, `finalizing an invoice created exactly ONE sale (got ${f.sales})`);
+  assert(f.invoiceSales === 1 && f.posSales === 0, "and it is an invoice-origin sale, not a till sale");
+  assert(f.linkedSales === 1, "linked to the invoice it came from");
+  assert(f.saleLines === f.invoiceLines, `one sale line per invoice line (${f.saleLines} vs ${f.invoiceLines})`);
+  // 🔴 THIS INVOICE IS PARTIALLY PAID — 96.15 against 496.15, typed through the UI a few steps
+  // above — so 'partial' is the correct status and the first version of this assertion ("unpaid")
+  // was wrong about the fixture, not about the code. Windows CI caught it. Asserting the real
+  // partial case is strictly better than asserting the unpaid one: it proves paid, balance and
+  // status agree on a sale where all three differ.
+  assert(f.saleStatuses === "partial=1", `its status is partial (got ${f.saleStatuses})`);
+  assert(f.salePaid === 9615, `the sale's paid amount is the invoice's 96.15 (got ${f.salePaid})`);
+  assert(f.saleBalance === 40000, `and its balance due is 400.00 (got ${f.saleBalance})`);
+  assert(f.salePaid + f.saleBalance === f.saleTotal, "paid + balance = total, on the sale itself");
+  // No payment method was invented, even though money really was received: the invoice records
+  // the AMOUNT, and never how it arrived.
+  assert(f.methodlessSales === 1, "and it records NO payment method");
+  // 🔴 THE HALF OF THE OLD BOUNDARY THAT STILL HOLDS: a sale is not a stock movement.
+  assert(f.voids === 0, "and no void");
   assert(f.voids === 0, "and no void");
   const tables = query("SELECT name FROM sqlite_master WHERE type='table'").map((r) => r.name);
   assert(
@@ -597,7 +634,7 @@ await app.close();
 {
   const f = facts();
   log("FINAL LEDGER:", JSON.stringify(f));
-  assert(f.schema === 6 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v6");
+  assert(f.schema === 7 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v7");
   assert(f.invoices === 1 && f.invoiceLines === 4, "the invoice and its lines survived the restart");
   assert(f.highestNumber === 61, "the invoice number is unchanged");
   assert(f.reconciliation === 4, "every reconciliation row survived");
@@ -606,7 +643,10 @@ await app.close();
     after.d === frozenLine.d && String(after.p) === String(frozenLine.p) && after.u === frozenLine.u,
     "the historical description, unit price and unit label are byte-for-byte what they were",
   );
-  assert(f.sales === 0 && f.voids === 0, "and still no sale and no void anywhere");
+  // Was `f.sales === 0` — see the reversal note above. What matters here is that reconciliation and
+  // reprinting did not add a SECOND sale, and that no void appeared from anywhere.
+  assert(f.invoiceSales === 1 && f.linkedSales === 1, "still exactly one linked invoice sale");
+  assert(f.posSales === 0 && f.voids === 0, "and still no till sale and no void anywhere");
   const resolved = count("invoice_reconciliation", "status NOT IN ('PENDING','FAILED')");
   assert(resolved >= 2, `resolution states persisted (${resolved} settled)`);
 }

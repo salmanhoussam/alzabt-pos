@@ -184,16 +184,70 @@ describe("totals, words and the official identifiers", () => {
     expect(html).toContain("474.40");
   });
 
-  it("omits the tax row entirely when the shop configured no tax", () => {
+  it("omits the tax row AND the redundant grand total when the shop configured no tax", () => {
     const html = renderInvoiceDocument(finalized([{ description: "صنف", quantity: "1", unitPrice: "10.00" }]));
-    // The totals block holds exactly four rows: subtotal, grand total, paid, balance due.
     const totals = /<table class="totals">([\s\S]*?)<\/table>/.exec(html)![1]!;
-    expect((totals.match(/<tr/g) ?? []).length).toBe(4);
+    // 🔴 WAS FOUR ROWS, AND THE FOURTH WAS A SECOND COPY OF THE SAME NUMBER. Until 2026-10-09 this
+    // block printed Subtotal, Grand Total, Paid, Balance Due — and with no tax and no discount,
+    // Subtotal and Grand Total are identical, which makes a reader hunt for the difference. Three
+    // rows now: one total, paid, balance due.
+    expect((totals.match(/<tr/g) ?? []).length).toBe(3);
     expect(totals).not.toMatch(/ضريبة|\bTax\b/);
-    expect(totals).toContain("Grand Total");
+    expect(totals).not.toContain("Grand Total");
+    // The single total is the emphasised row, and it carries the invoice's real total.
+    expect(totals).toMatch(/<tr class="grand">[\s\S]*?10\.00/);
     // 🔴 "Taxpayer No." is NOT a tax row — the first version of this assertion used /Tax/ against
     // the whole document and caught the identifier label. The identifier still prints.
     expect(html).toContain("Taxpayer No.");
+  });
+
+  it("prints BOTH a subtotal and a grand total once there is genuinely a difference", () => {
+    // The negative control for the test above: the grand total is not simply gone, it is gone only
+    // when it would have been a duplicate.
+    const html = renderInvoiceDocument(
+      finalized([{ description: "صنف", quantity: "1", unitPrice: "100.00" }], {
+        profile: { taxEnabled: true, taxRatePercent: "11", taxLabel: "ض.ق.م" },
+      }),
+    );
+    const totals = /<table class="totals">([\s\S]*?)<\/table>/.exec(html)![1]!;
+    // subtotal, tax, grand total, paid, balance due
+    expect((totals.match(/<tr/g) ?? []).length).toBe(5);
+    expect(totals).toContain("Grand Total");
+    expect(totals).toContain("ض.ق.م");
+  });
+
+  it("the template hierarchy is really in the document — accent, black bars, red balance", () => {
+    const html = renderInvoiceDocument(finalized([{ description: "صنف", quantity: "1", unitPrice: "10.00" }]));
+    // The accent band above the header, and a single accent colour defined once.
+    expect(html).toContain('<div class="accent-bar"></div>');
+    expect(html).toMatch(/--accent: #c1121f/);
+    // The black invoice bar, carrying the number, with white labels on it.
+    expect(html).toMatch(/\.doctitle \{[^}]*background: var\(--ink\)[^}]*color: #fff/);
+    expect(html).toMatch(/<div class="doctitle">[\s\S]*?class="docnum"/);
+    // The black item header with white labels.
+    expect(html).toMatch(/table\.lines thead th \{[\s\S]*?background: var\(--ink\);[\s\S]*?color: #fff/);
+    // The red Balance Due row — the one figure the customer acts on.
+    expect(html).toMatch(/table\.totals tr\.balance th, table\.totals tr\.balance td \{[\s\S]*?color: var\(--accent\)/);
+    expect(html).toMatch(/<tr class="balance">/);
+    // Backgrounds must survive printing, or a black bar renders white-on-white.
+    expect(html).toMatch(/print-color-adjust: exact/);
+    // The amount in words is labelled, not a bare sentence in a box.
+    expect(html).toContain("Amount in words");
+    // A boxed customer block with a shaded label column.
+    expect(html).toMatch(/\.customer th \{ background: var\(--soft\)/);
+    // And a footer rule.
+    expect(html).toMatch(/footer \{[^}]*border-top: 3px solid var\(--ink\)/);
+  });
+
+  it("🔴 hard-codes no real shop, customer or product data anywhere in the template", () => {
+    const html = renderInvoiceDocument(finalized([{ description: "صنف", quantity: "1", unitPrice: "10.00" }]));
+    // Every name, number and address on the page came from the frozen snapshot. A literal from a
+    // real shop appearing in the source would show up here.
+    for (const forbidden of ["كانسو", "Kanso", "kanso"]) {
+      expect(html).not.toContain(forbidden);
+    }
+    // The tax rate is never a literal either: with tax disabled, no percentage prints at all.
+    expect(html).not.toMatch(/\b11\s*%/);
   });
 
   it("prints the shop's own tax label and amount when it configured one", () => {

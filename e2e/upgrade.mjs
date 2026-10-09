@@ -15,6 +15,8 @@
 //     node e2e/upgrade.mjs verify-from-v4
 //     node e2e/upgrade.mjs seed-v5        (scenario E: the real v5 main, 69f1a22)
 //     node e2e/upgrade.mjs verify-from-v5
+//     node e2e/upgrade.mjs seed-v6        (scenario F: the real released v6 main, 6e3984f)
+//     node e2e/upgrade.mjs verify-from-v6
 //
 // E2E_EXECUTABLE is the installed exe. The script asserts the profile path it actually used and
 // prints it, and reads the ledger file directly (app closed) for schema/backup evidence.
@@ -139,6 +141,14 @@ function lineHasSaleUnit(db) {
   return lineColumns(db).includes("sale_unit");
 }
 
+/** True once migration 7 has widened `sales`. Probed, never assumed from the schema number. */
+function salesHasSource(db) {
+  return db
+    .prepare("PRAGMA table_info(sales)")
+    .all()
+    .some((c) => c.name === "source_type");
+}
+
 function ledgerFacts() {
   const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
   try {
@@ -180,6 +190,25 @@ function ledgerFacts() {
       companyProfile: tables.includes("company_profile") ? n("SELECT count(*) AS n FROM company_profile") : null,
       invoiceNumber: tables.includes("invoices")
         ? n("SELECT coalesce(max(invoice_number), 0) AS n FROM invoices")
+        : null,
+      // Migration 7. `null` means the column does not exist yet — the honest answer for any ledger
+      // a pre-v7 build wrote. Never 0, which would claim "no invoice sales" on a schema that cannot
+      // express the idea at all.
+      invoiceSales: salesHasSource(db) ? n("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice'") : null,
+      posSales: salesHasSource(db) ? n("SELECT count(*) AS n FROM sales WHERE source_type = 'pos'") : null,
+      linkedSales: salesHasSource(db) ? n("SELECT count(*) AS n FROM sales WHERE invoice_id IS NOT NULL") : null,
+      unpaidSales: salesHasSource(db)
+        ? n("SELECT count(*) AS n FROM sales WHERE payment_status <> 'paid'")
+        : null,
+      saleStatuses: salesHasSource(db)
+        ? db
+            .prepare("SELECT payment_status AS p, count(*) AS n FROM sales GROUP BY payment_status ORDER BY p")
+            .all()
+            .map((r) => `${r.p}=${Number(r.n)}`)
+            .join(",")
+        : null,
+      methodlessSales: salesHasSource(db)
+        ? n("SELECT count(*) AS n FROM sales WHERE payment_method IS NULL")
         : null,
       integrity: db.pragma("integrity_check", { simple: true }),
       foreignKeys: JSON.stringify(db.pragma("foreign_key_check")),
@@ -346,8 +375,8 @@ if (PHASE === "seed-v2") {
 
   const f = ledgerFacts();
   log("ledger after upgrade + new sale:", JSON.stringify(f));
-  // Was `f.schema === 3`, then 4, then 5; migration 6 makes a v2 ledger land on v6 in ONE upgrade.
-  assert(f.schema === 6 && f.integrity === "ok", `migrated to schema v6, integrity ok (got ${f.schema})`);
+  // Was `f.schema === 3`, then 4, 5 and 6; migration 7 makes a v2 ledger land on v7 in ONE upgrade.
+  assert(f.schema === 7 && f.integrity === "ok", `migrated to schema v7, integrity ok (got ${f.schema})`);
   // The audit table was created on the way, and starts empty — nothing is reconstructed.
   assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
   // Two Espressos at 2.50 and one at 2.50, all WHOLE pieces, so every quantity scaled by 1000.
@@ -357,8 +386,8 @@ if (PHASE === "seed-v2") {
   const backups = backupFiles();
   log("backups:", JSON.stringify(backups));
   // The name carries the real span, and that span widened with each migration: v2→v3, v2→v4, v2→v5, now v2→v6.
-  const pre = backups.find((b) => /^pre-migration-v2-to-v6-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, `a pre-migration backup was taken before v2→v6 (got ${JSON.stringify(backups)})`);
+  const pre = backups.find((b) => /^pre-migration-v2-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, `a pre-migration backup was taken before v2→v7 (got ${JSON.stringify(backups)})`);
   const copy = new Database(join(DEFAULT_PROFILE, "backups", pre), { readonly: true });
   const preSchema = Number(copy.prepare("SELECT max(version) AS n FROM schema_migrations").get().n);
   const preSales = Number(copy.prepare("SELECT count(*) AS n FROM sales").get().n);
@@ -429,8 +458,8 @@ if (PHASE === "seed-v2") {
   // 🔴 INVERTED by migration 4. This used to assert that NO pre-migration backup existed, because
   // v3→v3 migrated nothing. v3→v4 is a real migration, so the backup is now mandatory — and it must
   // hold the OLD schema, which is the only thing that makes the migration recoverable.
-  const pre3 = backupFiles().find((b) => /^pre-migration-v3-to-v6-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre3, `a pre-migration backup was taken before v3→v6 (got ${JSON.stringify(backupFiles())})`);
+  const pre3 = backupFiles().find((b) => /^pre-migration-v3-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre3, `a pre-migration backup was taken before v3→v7 (got ${JSON.stringify(backupFiles())})`);
   const copy3 = new Database(join(DEFAULT_PROFILE, "backups", pre3), { readonly: true });
   const preCols = copy3.prepare("PRAGMA table_info(sale_lines)").all().map((c) => c.name);
   const preSchema3 = Number(copy3.prepare("SELECT max(version) AS n FROM schema_migrations").get().n);
@@ -444,7 +473,7 @@ if (PHASE === "seed-v2") {
   // audits master data, not the sales ledger.
   const afterMigration = ledgerFacts();
   // Was 5 before migration 6.
-  assert(afterMigration.schema === 6, `migrated to schema v6 (got ${afterMigration.schema})`);
+  assert(afterMigration.schema === 7, `migrated to schema v7 (got ${afterMigration.schema})`);
   assert(afterMigration.audit === 0, `the durable audit trail exists and starts empty (got ${afterMigration.audit})`);
 
   ({ app, page } = await launch());
@@ -467,7 +496,7 @@ if (PHASE === "seed-v2") {
   const f = ledgerFacts();
   log("final ledger:", JSON.stringify(f));
   // Was `f.schema === 3`, then 4, then 5.
-  assert(f.schema === 6 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", `final ledger intact at v6 (got ${f.schema})`);
+  assert(f.schema === 7 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", `final ledger intact at v7 (got ${f.schema})`);
   // 🔴 And the export → re-import above is now AUDITED: exactly one CATALOG_IMPORTED summary and
   // ZERO product events, because the re-imported file is byte-identical and changed nothing. That
   // is the low-noise property the import audit model was chosen for, measured on the installed app.
@@ -540,12 +569,12 @@ if (PHASE === "seed-v2") {
   const f = ledgerFacts();
   log("ledger after the upgrade:", JSON.stringify(f));
   // Was 5 before migration 6.
-  assert(f.schema === 6 && f.integrity === "ok", `migrated to schema v6, integrity ok (got ${f.schema})`);
+  assert(f.schema === 7 && f.integrity === "ok", `migrated to schema v7, integrity ok (got ${f.schema})`);
   assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
   assert(f.quantities.every((q) => q % 1000 === 0), `migrated quantities are whole: ${JSON.stringify(f.quantities)}`);
   assert(f.unknownUnits === 2, `both pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
   assert(productUnit("SYN-ROPE") === "kg", `the product's unit survived as kg (got ${productUnit("SYN-ROPE")})`);
-  const pre = backupFiles().find((b) => /^pre-migration-v3-to-v6-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  const pre = backupFiles().find((b) => /^pre-migration-v3-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
   assert(pre, `a pre-migration backup exists (got ${JSON.stringify(backupFiles())})`);
 
   // 🔴 And the point of the whole migration: a FRACTIONAL sale of that same product now works.
@@ -644,9 +673,9 @@ if (PHASE === "seed-v2") {
   await app.close();
 
   const f = ledgerFacts();
-  log("ledger after the v4 -> v6 upgrade:", JSON.stringify(f));
-  // Was 5 before migration 6: a v4 ledger now lands on v6 in ONE upgrade.
-  assert(f.schema === 6 && f.integrity === "ok", `migrated to schema v6, integrity ok (got ${f.schema})`);
+  log("ledger after the v4 -> v7 upgrade:", JSON.stringify(f));
+  // Was 5 before migration 6 and 6 before migration 7: a v4 ledger now lands on v7 in ONE upgrade.
+  assert(f.schema === 7 && f.integrity === "ok", `migrated to schema v7, integrity ok (got ${f.schema})`);
   assert(f.sales === 2 && f.voids === 1, "sales and voids untouched by migrations 5 and 6");
   // 🔴 Migration 4's behaviour is unchanged: the fractional quantity is still exactly 2500.
   assert(JSON.stringify(f.quantities) === "[2500,1000]", `quantities untouched: ${JSON.stringify(f.quantities)}`);
@@ -654,8 +683,8 @@ if (PHASE === "seed-v2") {
   assert(productUnit("SYN-ROPE") === "kg", `the product's unit survived as kg (got ${productUnit("SYN-ROPE")})`);
   // 🔴 The trail starts EMPTY. No pre-v5 history is invented out of the rotating logfile.
   assert(f.audit === 0, `the audit trail exists and starts empty (got ${f.audit})`);
-  const pre = backupFiles().find((b) => /^pre-migration-v4-to-v6-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, `a verified pre-migration v4->v6 backup exists (got ${JSON.stringify(backupFiles())})`);
+  const pre = backupFiles().find((b) => /^pre-migration-v4-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, `a verified pre-migration v4->v7 backup exists (got ${JSON.stringify(backupFiles())})`);
 
   // ── A real product mutation on the new build must leave a durable audit row ────────────────────
   ({ app, page } = await launch());
@@ -723,7 +752,7 @@ if (PHASE === "seed-v2") {
   const f2 = ledgerFacts();
   log("final ledger:", JSON.stringify(f2));
   // Was 5 before migration 6.
-  assert(f2.integrity === "ok" && f2.schema === 6, "the ledger is sound and still at v6");
+  assert(f2.integrity === "ok" && f2.schema === 7, "the ledger is sound and still at v7");
   assert(JSON.stringify(f2.quantities) === "[2500,1000]", "no sale was disturbed by any of this");
 } else if (PHASE === "seed-v5") {
   // ── Scenario E, part 1 — the REAL legal v5 main build (69f1a22, schema v5: durable audit, and
@@ -787,12 +816,19 @@ if (PHASE === "seed-v2") {
 
   const m = ledgerFacts();
   log("after migration:", JSON.stringify(m));
-  assert(m.schema === 6, `the schema moved to v6 (got ${m.schema})`);
+  assert(m.schema === 7, `the schema moved to v7 (got ${m.schema})`);
   assert(m.integrity === "ok", "integrity_check is ok");
   assert(m.foreignKeys === "[]", `foreign_key_check is empty (got ${m.foreignKeys})`);
   // Old business data survived, byte for byte.
   assert(m.sales === 2 && m.voids === 1, "the two v5 sales and the void are untouched");
   assert(JSON.stringify(m.receipts) === "[1,2]", "the receipt sequence is unchanged");
+  // Migration 7 rebuilt `sales` under those two rows. They are still till sales, still settled in
+  // full, and still carry their own payment methods — nothing was blanked and nothing invented.
+  assert(m.posSales === 2, `both migrated sales are source_type='pos' (got ${m.posSales})`);
+  assert(m.invoiceSales === 0, `and no invoice-origin sale was synthesized (got ${m.invoiceSales})`);
+  assert(m.linkedSales === 0, "no migrated sale points at an invoice");
+  assert(m.unpaidSales === 0, `every migrated sale is 'paid' (got ${m.unpaidSales})`);
+  assert(m.methodlessSales === 0, `and not one lost its payment method (got ${m.methodlessSales})`);
   assert(m.catalog === 5, "the catalog is unchanged");
   assert(m.audit === beforeAudit, `migrating wrote no audit events (${beforeAudit} -> ${m.audit})`);
   // 🔴 NOTHING WAS SYNTHESIZED. A migrated ledger holds no invoice history, because that is the
@@ -925,10 +961,28 @@ if (PHASE === "seed-v2") {
     assert(recon.filter((r) => r.startsWith("PRICE_DIFFERENCE:PENDING")).length === 2, "both price differences wait for a person");
     assert(recon.filter((r) => r.startsWith("PRODUCT_NOT_FOUND:PENDING")).length === 1, "the unknown product waits for a person");
 
-    // 🔴 THE V1 BOUNDARY: issuing an invoice is not a sale and moves no stock.
-    assert(f.sales === 2, `still exactly the two v5 sales (got ${f.sales})`);
+    // 🔴 THE V1 BOUNDARY WAS REVERSED ON 2026-10-09, AND THE OLD VALUE WAS TWO. Until then this
+    // read `assert(f.sales === 2, "still exactly the two v5 sales")` under the comment "issuing an
+    // invoice is not a sale and moves no stock". Field use reversed the first half: a finalized
+    // invoice IS a sale for business reporting (migration 7). The SECOND half still holds and is
+    // still asserted below — a sale is not a stock movement, and there is still no stock table.
+    assert(f.sales === 3, `the two v5 sales plus the invoice's own sale (got ${f.sales})`);
+    assert(f.posSales === 2, `the two v5 till sales are still till sales (got ${f.posSales})`);
+    assert(f.invoiceSales === 1, `and exactly one invoice-origin sale exists (got ${f.invoiceSales})`);
+    assert(f.linkedSales === 1, "it is linked to the invoice it came from");
+    // 🔴 THIS INVOICE IS PARTIALLY PAID — 3.25 against 13.25, typed into sheet-paid above — so
+    // 'partial' is the correct status. The first version of this said "nothing was paid on it",
+    // which was simply false about its own fixture; `unpaidSales` counts "not paid" and so passed
+    // anyway. Naming the real status is the stronger assertion AND the honest comment.
+    assert(f.saleStatuses === "paid=2,partial=1", `two paid till sales and one partial invoice sale (got ${f.saleStatuses})`);
+    assert(f.unpaidSales === 1, `exactly one sale is not settled in full (got ${f.unpaidSales})`);
+    assert(f.methodlessSales === 1, `exactly one sale records no payment method (got ${f.methodlessSales})`);
     assert(f.voids === 1, "still exactly the one v5 void");
-    assert(JSON.stringify(f.quantities) === "[1000,1000]", "no sale line was disturbed");
+    // The two v5 till lines are untouched; the invoice's four lines are additional.
+    assert(
+      JSON.stringify(f.quantities).startsWith("[1000,1000"),
+      `the two v5 sale lines are undisturbed (got ${JSON.stringify(f.quantities)})`,
+    );
     assert(f.audit === beforeAudit, `finalizing wrote no catalog audit event (${beforeAudit} -> ${f.audit})`);
     const tables = invoiceRows("sqlite_master", "name").filter((r) => r.type === "table").map((r) => r.name);
     assert(!tables.some((t) => /stock|inventory|movement/i.test(t)), "and there is no stock table for it to have moved");
@@ -1127,7 +1181,7 @@ if (PHASE === "seed-v2") {
         voids: f.voids,
       }),
     );
-    assert(f.schema === 6 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v6");
+    assert(f.schema === 7 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v7");
     assert(f.invoices === 1 && f.invoiceLines === 4 && f.reconciliation === 4, "the invoice, its lines and its review rows persist");
     assert(f.invoiceNumber === 61, "the invoice number is unchanged after every restart");
     assert(
@@ -1137,7 +1191,10 @@ if (PHASE === "seed-v2") {
     );
     assert(Number(chips.selling_price_minor) === 250 && Number(chips.price_needs_review) === 0, "the product mutation persists");
     assert(recon.filter((r) => r.endsWith(":PENDING")).length === 0, "no item was left unresolved");
-    assert(f.sales === 2 && f.voids === 1, "and the v5 sales ledger is exactly as it was found");
+    // Was `f.sales === 2` — see the reversal note above. The two v5 till sales are still exactly
+    // the two v5 till sales; what is new is the invoice's own sale.
+    assert(f.posSales === 2 && f.voids === 1, "the v5 till sales and the void are exactly as they were found");
+    assert(f.invoiceSales === 1 && f.linkedSales === 1, "and the finalized invoice still has exactly one linked sale");
     // 🔴 TWO rows, not one, and naming both is the point: the reconciliation price update, and the
     // ordinary product edit this scenario makes AFTERWARDS on purpose to prove the finalized
     // invoice's snapshot does not follow it. The earlier assertion inside the reconciliation block
@@ -1155,9 +1212,202 @@ if (PHASE === "seed-v2") {
       `one came from reconciliation and one from the product screen (got ${JSON.stringify(origins)})`,
     );
   }
+} else if (PHASE === "seed-v6") {
+  // ── Scenario F, part 1 — the REAL released v6 main build (6e3984f, schema v6: manual invoices,
+  // and NO sale integration). This is the profile the shop is running TODAY, created by driving
+  // that build's own UI — including finalizing a real invoice through it, which is the part that
+  // matters: migration 7 must then face an invoice that already exists.
+  assert(!existsSync(LEDGER), "scenario starts with no ledger in the real profile");
+  const { app, page } = await launch();
+  const cat = writeCatalog();
+  await stub(app, "open", cat.file);
+  await tab(page, "Tools");
+  await page.getByRole("button", { name: "Import catalog" }).click();
+  await page.waitForSelector("text=Catalog imported");
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+
+  // Two till sales and a void, so the v7 rebuild has real ledger rows to preserve.
+  await tab(page, "Sell");
+  await sell(page, ["بيبسي 330 مل"], "Cash", 1);
+  await sell(page, ["مياه"], "Card", 2);
+  await voidCardSale(page);
+
+  // 🔴 AN INVOICE FINALIZED BY THE v6 BUILD. On v6 this creates NO sale, by that build's own
+  // decision — which is exactly the state migration 7 has to inherit without rewriting it.
+  await tab(page, "Invoices");
+  await page.waitForSelector('[data-testid="inv-tab-company"]');
+  await invTestid(page, "company-name-ar").fill("متجر اختباري للترقية من v6");
+  await invTestid(page, "company-save").click();
+  await page.waitForSelector('[data-testid="company-notice"]');
+  await page.waitForSelector('[data-testid="new-invoice"]');
+  await invTestid(page, "new-invoice").click();
+  await page.waitForSelector('[data-testid="add-row"]');
+  // The shared helper owns the add-row -> fill -> save cycle, so this phase cannot drift from the
+  // way every other phase enters a line.
+  await invoiceRow(page, { description: "صنف قديم", quantity: "2", unit: "حبة", price: "5.00" });
+  assert((await invTestid(page, "sheet-line").count()) === 1, "one row is on the v6 sheet");
+  await invTestid(page, "finalize").click();
+  await page.waitForSelector('[data-testid="finalize-confirm"]');
+  await invTestid(page, "finalize-confirm-yes").click();
+  await page.waitForSelector('[data-testid="finalized-notice"]');
+  await app.close();
+
+  const f = ledgerFacts();
+  log("v6 baseline ledger:", JSON.stringify(f));
+  assert(f.schema === 6, `the baseline really is schema v6 (got ${f.schema})`);
+  assert(f.sales === 2 && f.voids === 1, "two till sales and one void exist");
+  assert(f.invoices === 1 && f.invoiceLines === 1, "and one finalized invoice with one line");
+  assert(f.invoiceNumber > 0, "the invoice really carries a number");
+  // 🔴 THE COLUMN DOES NOT EXIST YET. `null`, not 0 — the honest answer for a v6 ledger, which
+  // cannot express the idea of an invoice-origin sale at all.
+  assert(f.invoiceSales === null, "a v6 ledger has no source_type column");
+  assert(f.posSales === null && f.linkedSales === null, "nor an invoice link, nor a payment status");
+  log(
+    "V6 BASELINE READY:",
+    JSON.stringify({ sales: f.sales, voids: f.voids, invoices: f.invoices, invoiceNumber: f.invoiceNumber, receipts: f.receipts }),
+  );
+} else if (PHASE === "verify-from-v6") {
+  // ── Scenario F, part 2 — the feature build installed OVER that real v6 profile ────────────────
+  assert(existsSync(LEDGER), "the v6 ledger is still there");
+  const before = ledgerFacts();
+  const beforeInvoiceNumber = before.invoiceNumber;
+
+  let { app, page } = await launch();
+  await assertBuildLine(page);
+  await app.close();
+
+  const m = ledgerFacts();
+  log("after migration:", JSON.stringify(m));
+  assert(m.schema === 7, `the schema moved to v7 (got ${m.schema})`);
+  assert(m.integrity === "ok", "integrity_check is ok");
+  assert(m.foreignKeys === "[]", `foreign_key_check is empty (got ${m.foreignKeys})`);
+
+  // Every pre-existing row survived the rebuild of sales, sale_lines AND voids.
+  assert(m.sales === 2 && m.voids === 1, "the two till sales and the void are untouched");
+  assert(JSON.stringify(m.receipts) === "[1,2]", "the receipt sequence is unchanged");
+  assert(JSON.stringify(m.quantities) === JSON.stringify(before.quantities), "every sale line quantity is unchanged");
+  assert(m.catalog === before.catalog, "the catalog is unchanged");
+  assert(m.audit === before.audit, `migrating wrote no audit events (${before.audit} -> ${m.audit})`);
+  assert(m.posSales === 2, `both existing sales are source_type='pos' (got ${m.posSales})`);
+  assert(m.unpaidSales === 0 && m.methodlessSales === 0, "both are 'paid' and both kept their payment method");
+
+  // The v6 invoice is still exactly one invoice, with the same number.
+  assert(m.invoices === 1 && m.invoiceLines === 1, "the v6 invoice and its line are untouched");
+  assert(m.invoiceNumber === beforeInvoiceNumber, `the invoice number is unchanged (got ${m.invoiceNumber})`);
+
+  // 🔴 NOTHING IS BACKFILLED. The invoice finalized by the v6 build gets NO sale retroactively —
+  // the same principle as migration 5's empty audit trail. Inventing a sale for it would be
+  // inventing a business event that never happened, dated to a day nobody recorded it.
+  assert(m.invoiceSales === 0, `no sale was synthesized for the pre-existing invoice (got ${m.invoiceSales})`);
+  assert(m.linkedSales === 0, "and nothing points at it");
+
+  // From here on, a NEW invoice does create its sale. That is the whole feature, proven on the
+  // upgraded profile rather than on a fresh one.
+  ({ app, page } = await launch());
+  await tab(page, "Invoices");
+  await page.waitForSelector('[data-testid="new-invoice"]');
+  await invTestid(page, "new-invoice").click();
+  await page.waitForSelector('[data-testid="add-row"]');
+
+  // FIELD FINDING 2, proved on the upgraded profile: the add-row affordance is reachable, a second
+  // row can be entered WITHOUT finalizing, and the first row survives it.
+  await invoiceRow(page, { description: "صنف جديد بعد الترقية", quantity: "3", unit: "حبة", price: "4.00" });
+  assert((await invTestid(page, "sheet-line").count()) === 1, "row 1 is committed into the draft");
+  assert(await invTestid(page, "add-row").isVisible(), "and the add-row control is still visible after saving row 1");
+  await invoiceRow(page, { description: "سطر ثانٍ", quantity: "1", unit: "حبة", price: "2.50" });
+  assert((await invTestid(page, "sheet-line").count()) === 2, "row 1 survived the creation of row 2");
+  const rowTotals = (await invTestid(page, "sheet-line-total").allInnerTexts()).map((x) => x.trim());
+  assert(rowTotals[0].includes("12.00"), `row 1 total 3 x 4.00 (got ${rowTotals[0]})`);
+  assert(rowTotals[1].includes("2.50"), `row 2 total 1 x 2.50 (got ${rowTotals[1]})`);
+  const fSub = await invText(page, "sheet-subtotal");
+  assert(fSub.includes("14.50"), `the draft total includes BOTH rows (got ${fSub})`);
+  // FIELD FINDING 1: the row actions live in their own column, which has a header of its own.
+  const actionCells = await page.locator('[data-testid="sheet-line"] td.row-actions').count();
+  assert(actionCells === 2, `each row has exactly one actions cell (got ${actionCells})`);
+  await page.screenshot({ path: SHOTS + "upgrade-f-two-rows.png" });
+
+  await invTestid(page, "finalize").click();
+  await page.waitForSelector('[data-testid="finalize-confirm"]');
+  await invTestid(page, "finalize-confirm-yes").click();
+  await page.waitForSelector('[data-testid="finalized-notice"]');
+
+  // 🔴 THE DIALOG MUST BE DISMISSED BEFORE LEAVING THE SCREEN. Round 3 timed out for 30s clicking
+  // the History tab, with Playwright reporting `<div class="overlay"> ... intercepts pointer
+  // events`: the finalized notice is a modal, and both its lines are free text, so it lands on the
+  // branch that offers "Review now" / "Later" rather than a bare OK. This phase does not want the
+  // review queue, so it takes the other exit.
+  await invTestid(page, "review-later").click();
+  await page.waitForSelector('[data-testid="finalized-notice"]', { state: "detached" });
+
+  // And it shows up in the ORDINARY sales history, with the document's number and the truth about
+  // payment — not a fabricated method.
+  await tab(page, "History");
+  await page.locator('[data-testid="history-row"][data-source="invoice"]').first().waitFor({ timeout: 20000 });
+  // 🔴 NOT NAMED `invoiceRow`. There is a module-level `async function invoiceRow(page, {...})`
+  // helper, and a top-level `const invoiceRow` shadows it for the WHOLE module scope — so the call
+  // to the helper EARLIER in this same branch died with "Cannot access 'invoiceRow' before
+  // initialization". Windows CI caught it; the v6 baseline had already been built correctly.
+  const historyRow = page.locator('[data-testid="history-row"][data-source="invoice"]').first();
+  const ref = await historyRow.locator('[data-testid="history-invoice-ref"]').innerText();
+  const payment = await historyRow.locator('[data-testid="history-payment"]').innerText();
+  const balance = await historyRow.locator('[data-testid="history-balance"]').innerText();
+  log("history row:", JSON.stringify({ ref, payment, balance }));
+  assert(/\d/.test(ref), `the history row names the invoice number (got ${ref})`);
+  assert(/Unpaid/i.test(payment), `the payment column says unpaid (got ${payment})`);
+  assert(/14\.50/.test(balance), `and the balance due is the invoice total (got ${balance})`);
+  // 🔴 NO FABRICATED METHOD anywhere in that row.
+  assert(!/cash|card|external/i.test(payment), `no payment method was invented (got ${payment})`);
+  // The till's void is refused for it, visibly.
+  assert(
+    (await historyRow.locator('[data-testid="history-void-blocked"]').count()) === 1,
+    "and the row says it cannot be voided",
+  );
+  assert((await historyRow.locator('[data-testid="history-void"]').count()) === 0, "with no void button offered");
+  await page.screenshot({ path: SHOTS + "upgrade-f-history.png" });
+  await app.close();
+
+  const g = ledgerFacts();
+  log("after the new invoice:", JSON.stringify(g));
+  assert(g.schema === 7 && g.integrity === "ok" && g.foreignKeys === "[]", "the ledger is sound at v7");
+  assert(g.invoices === 2, `two invoices now exist (got ${g.invoices})`);
+  assert(g.invoiceLines === 3, `one line from v6 plus two new ones (got ${g.invoiceLines})`);
+  // 🔴 EXACTLY ONE new sale: the new invoice's. The v6 one still has none.
+  assert(g.sales === 3, `the two till sales plus one invoice sale (got ${g.sales})`);
+  assert(g.invoiceSales === 1 && g.linkedSales === 1, "exactly one invoice-origin sale, linked");
+  assert(g.posSales === 2, "and the two till sales are still till sales");
+  // Nothing was paid on THIS one — no sheet-paid value is typed in this phase — so 'unpaid' is
+  // the correct status, and it is named rather than inferred from a "not paid" count.
+  assert(g.saleStatuses === "paid=2,unpaid=1", `two paid till sales and one unpaid invoice sale (got ${g.saleStatuses})`);
+  assert(g.methodlessSales === 1, "and it records no payment method");
+  assert(JSON.stringify(g.receipts) === "[1,2,3]", `the receipt sequence continued (got ${JSON.stringify(g.receipts)})`);
+  // A pre-migration backup of the v6 file was taken, named for the span it crossed.
+  const pre = backupFiles().find((b) => /^pre-migration-v6-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, `a pre-migration v6->v7 backup exists (got ${JSON.stringify(backupFiles())})`);
+  const snap = new Database(join(DEFAULT_PROFILE, "backups", pre), { readonly: true, fileMustExist: true });
+  try {
+    assert(Number(snap.prepare("SELECT max(version) AS n FROM schema_migrations").get().n) === 6, "the snapshot is at v6");
+    assert(
+      snap.prepare("PRAGMA table_info(sales)").all().every((c) => c.name !== "source_type"),
+      "and it really predates the rebuild",
+    );
+  } finally {
+    snap.close();
+  }
+  log(
+    "SCENARIO F FINAL:",
+    JSON.stringify({
+      schema: g.schema,
+      sales: g.sales,
+      posSales: g.posSales,
+      invoiceSales: g.invoiceSales,
+      invoices: g.invoices,
+      receipts: g.receipts,
+      backup: pre,
+    }),
+  );
 } else {
   console.error(
-    "usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main|seed-v4|verify-from-v4|seed-v5|verify-from-v5",
+    "usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main|seed-v4|verify-from-v4|seed-v5|verify-from-v5|seed-v6|verify-from-v6",
   );
   process.exit(2);
 }

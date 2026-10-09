@@ -272,6 +272,7 @@ export function InvoiceSheet({
         </label>
       </section>
 
+      <div className="inv-lines-scroll">
       <table className="inv-lines" data-testid="sheet-lines">
         <thead>
           <tr>
@@ -281,7 +282,9 @@ export function InvoiceSheet({
             <th>{t("inv.sheet.colUnit")}</th>
             <th>{t("inv.sheet.colUnitPrice")}</th>
             <th>{t("inv.sheet.colTotal")}</th>
-            <th />
+            {/* FIELD FINDING 1: the actions column was headerless, so the buttons read as part of
+                the money columns next to them. It is a named region now. */}
+            <th className="row-actions-col">{t("inv.sheet.colActions")}</th>
           </tr>
         </thead>
         <tbody>
@@ -361,7 +364,7 @@ export function InvoiceSheet({
               <td className="num total" data-testid="sheet-line-total">
                 <bdi dir="ltr">{fmt(l.lineTotal)}</bdi>
               </td>
-              <td className="actions">
+              <td className="row-actions">
                 {!readOnly && (
                   <>
                     <button className="btn ghost small" onClick={() => setPickerFor(l.id)}>
@@ -419,7 +422,7 @@ export function InvoiceSheet({
                 />
               </td>
               <td className="num muted">—</td>
-              <td className="actions">
+              <td className="row-actions">
                 <button className="btn primary small" onClick={addLine} disabled={busy} data-testid="new-line-save">
                   {t("action.save")}
                 </button>
@@ -433,13 +436,41 @@ export function InvoiceSheet({
             </tr>
           )}
         </tbody>
+        {/* FIELD FINDING 2: adding a second item was not discoverable. The affordance now sits in
+            the table itself, immediately under the last row, and it is ALWAYS rendered — the old
+            one disappeared while a row was being entered, which is exactly when an operator looks
+            for it. While a draft row is open it is disabled and says why, instead of vanishing. */}
+        {!readOnly && (
+          <tfoot>
+            <tr className="inv-add-row">
+              <td colSpan={7}>
+                <div className="inv-add-bar">
+                  <button
+                    className="btn primary"
+                    onClick={() => setDraftLine(EMPTY_LINE)}
+                    disabled={busy || draftLine !== null}
+                    data-testid="add-row"
+                  >
+                    + {t("inv.sheet.addRow")}
+                  </button>
+                  {draftLine !== null && (
+                    <span className="muted small" data-testid="add-row-hint">
+                      {t("inv.sheet.addRowWhileOpen")}
+                    </span>
+                  )}
+                  <span className="muted small" data-testid="sheet-rows-count">
+                    {t("inv.sheet.rowsCount")}: <bdi dir="ltr">{view.lines.length}</bdi>
+                  </span>
+                </div>
+              </td>
+            </tr>
+          </tfoot>
+        )}
       </table>
+      </div>
 
       {!readOnly && !draftLine && (
         <div className="inv-actions">
-          <button className="btn" onClick={() => setDraftLine(EMPTY_LINE)} data-testid="add-row">
-            + {t("inv.sheet.addRow")}
-          </button>
           <span className="muted small">{t("inv.sheet.pickHint")}</span>
         </div>
       )}
@@ -579,7 +610,7 @@ export function InvoiceSheet({
                   <button className="btn primary" onClick={onReviewNow} data-testid="review-now">
                     {t("inv.sheet.reviewNow")}
                   </button>
-                  <button className="btn ghost" onClick={() => setFinalized(null)}>
+                  <button className="btn ghost" onClick={() => setFinalized(null)} data-testid="review-later">
                     {t("inv.sheet.later")}
                   </button>
                 </div>
@@ -587,7 +618,7 @@ export function InvoiceSheet({
             ) : (
               <>
                 <p>{t("inv.history.reviewClear")}</p>
-                <button className="btn primary wide" onClick={() => setFinalized(null)}>
+                <button className="btn primary wide" onClick={() => setFinalized(null)} data-testid="review-clear-ok">
                   {t("action.ok")}
                 </button>
               </>

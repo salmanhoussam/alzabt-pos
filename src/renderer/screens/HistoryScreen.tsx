@@ -1,7 +1,20 @@
 import { useEffect, useState } from "react";
-import type { SaleWithVoidDto } from "../../shared/ipcContract";
+import type { SaleDto, SaleWithVoidDto } from "../../shared/ipcContract";
 import { call, errorText, fmt, pos } from "../api";
 import { Receipt } from "./Receipt";
+
+/**
+ * How a sale says it was paid, in words.
+ *
+ * 🔴 NEVER A FABRICATED METHOD. `paymentMethod` is null when nothing was recorded — which is the
+ * normal case for a manual invoice — and this says exactly that instead of printing "cash". The
+ * status is the fact that matters to the shop; the method is how money arrived, when it did.
+ */
+function paymentText(sale: SaleDto): string {
+  if (sale.paymentStatus === "unpaid") return "Unpaid";
+  const method = sale.paymentMethod ?? "method not recorded";
+  return sale.paymentStatus === "partial" ? `Partial — ${method}` : `Paid — ${method}`;
+}
 
 export function HistoryScreen() {
   const [rows, setRows] = useState<SaleWithVoidDto[] | null>(null);
@@ -61,29 +74,49 @@ export function HistoryScreen() {
               <th>#</th>
               <th>Time</th>
               <th>Cashier</th>
-              <th>Paid by</th>
+              <th>Payment</th>
               <th className="num">Total</th>
+              <th className="num">Balance due</th>
               <th>Status</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.sale.id} className={r.void ? "voided" : ""}>
-                <td>{r.sale.receiptNumber}</td>
+              <tr
+                key={r.sale.id}
+                className={r.void ? "voided" : ""}
+                data-testid="history-row"
+                data-source={r.sale.sourceType}
+                data-payment-status={r.sale.paymentStatus}
+              >
+                <td>
+                  {r.sale.receiptNumber}
+                  {/* The document's own number, so an invoice sale is identifiable without a
+                      second history page. Absent on a till sale, which has no invoice. */}
+                  {r.sale.sourceType === "invoice" && (
+                    <span className="src-badge" data-testid="history-invoice-ref">
+                      Invoice {r.sale.invoiceNumber ?? "—"}
+                    </span>
+                  )}
+                </td>
                 <td>{new Date(r.sale.completedAt).toLocaleString()}</td>
                 <td>{r.sale.cashierName}</td>
-                <td>{r.sale.paymentMethod}</td>
+                <td data-testid="history-payment">{paymentText(r.sale)}</td>
                 <td className="num">{fmt(r.sale.total)}</td>
+                <td className="num" data-testid="history-balance">
+                  {r.sale.balanceDue.minor === "0" ? "—" : fmt(r.sale.balanceDue)}
+                </td>
                 <td>{r.void ? "Voided" : "Completed"}</td>
                 <td>
                   <div className="actions">
                   <button className="btn" onClick={() => setOpen(r)}>
                     View
                   </button>
-                  {!r.void && (
+                  {!r.void && r.sale.sourceType === "pos" && (
                     <button
                       className="btn danger"
+                      data-testid="history-void"
                       onClick={() => {
                         setVoiding(r);
                         setReason("");
@@ -92,6 +125,15 @@ export function HistoryScreen() {
                     >
                       Void
                     </button>
+                  )}
+                  {/* 🔴 NOT HIDDEN SILENTLY. Voiding an invoice-origin sale would leave the
+                      immutable invoice looking valid while its sale was cancelled; the honest
+                      correction is a credit note, which is not built yet. The service refuses it
+                      too, so this is the explanation rather than the enforcement. */}
+                  {!r.void && r.sale.sourceType === "invoice" && (
+                    <span className="muted" data-testid="history-void-blocked" title="Invoice cancellation / credit-note workflow is not implemented yet">
+                      From invoice — no void
+                    </span>
                   )}
                   </div>
                 </td>
