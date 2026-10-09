@@ -131,7 +131,12 @@ await page.locator('[data-testid="pay-cash"]').click();
 await page.waitForSelector('[data-testid="receipt"]');
 const receipt = await page.locator(".receipt").innerText();
 assert(receipt.includes("4.00"), "the sale was rung at 4.00");
-await page.getByRole("button", { name: /^(حسناً|OK|Close|New sale)$/ }).first().click().catch(() => {});
+// 🔴 CLICK THE REAL CONTROL, AND DO NOT SWALLOW THE FAILURE. This matched the receipt's button by
+// a name alternation that never included «بيع جديد», so once the receipt was translated the click
+// missed — and `.catch(() => {})` hid it. The receipt stayed open and the NEXT wait timed out on
+// `.products-pane`, pointing the blame at the Sell screen instead of at this line.
+await page.locator('[data-testid="new-sale"]').click();
+await page.waitForSelector('[data-testid="receipt"]', { state: "detached" });
 
 // ── 4b · A FRACTIONAL sale of the kg product, on a fresh install ────────────────────────────────
 // سلك نحاس is priced 2.50 per kg, so 2.5 kg is exactly 6.25 — no rounding involved.
@@ -156,7 +161,12 @@ assert(
 );
 assert(fractionalReceipt.includes("6.25"), "the receipt total is 6.25");
 await page.screenshot({ path: SHOTS + "P7-fractional-sale.png" });
-await page.getByRole("button", { name: /^(حسناً|OK|Close|New sale)$/ }).first().click().catch(() => {});
+// 🔴 CLICK THE REAL CONTROL, AND DO NOT SWALLOW THE FAILURE. This matched the receipt's button by
+// a name alternation that never included «بيع جديد», so once the receipt was translated the click
+// missed — and `.catch(() => {})` hid it. The receipt stayed open and the NEXT wait timed out on
+// `.products-pane`, pointing the blame at the Sell screen instead of at this line.
+await page.locator('[data-testid="new-sale"]').click();
+await page.waitForSelector('[data-testid="receipt"]', { state: "detached" });
 
 // A fraction of a WHOLE-ONLY product is refused rather than rounded.
 await page.waitForSelector(".products-pane");
