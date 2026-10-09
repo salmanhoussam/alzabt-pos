@@ -103,11 +103,23 @@ async function lineValues(page) {
   return page.locator('[data-testid="sheet-line"] input').evaluateAll((els) => els.map((e) => e.value));
 }
 
+/**
+ * Types into a header field and blurs it, which is how these fields commit.
+ *
+ * 🔴 fill() DOES NOT BLUR, which is why the Tab is here. But pressing Tab is still only an
+ * ATTEMPT: nothing in this helper can see whether the commit reached the service, and a header
+ * field that was typed and never saved is exactly the defect this feature already shipped once.
+ * `reopenAndVerifyHeader` below is the part that actually checks, and it is called before
+ * finalizing — a helper that cannot observe its own effect must not be the only thing asserting it.
+ */
 async function commit(page, id, value) {
   const field = page.locator(`[data-testid="${id}"]`);
   await field.fill(value);
   await field.press("Tab");
+  // The DOM half, which is cheap and catches a fill that did not land at all.
+  await until(`${id} to hold ${value}`, async () => (await field.inputValue()) === value, 15000);
 }
+
 const testid = (page, id) => page.locator(`[data-testid="${id}"]`);
 const textOf = async (page, id) => (await testid(page, id).innerText()).trim();
 
@@ -276,8 +288,18 @@ await commit(page, "sheet-customer", "زبون اختباري");
 const phone = page.locator('.inv-customer input[dir="ltr"]').first();
 await phone.fill("70-000000");
 await phone.press("Tab");
+await until("the phone field to hold what was typed", async () => (await phone.inputValue()) === "70-000000", 15000);
 await commit(page, "sheet-date", "2026-10-08");
 await page.waitForSelector('[data-testid="add-row"]');
+
+// 🔴 WHY THERE IS NO "REOPEN THE DRAFT AND CHECK" HERE, and it is a real product gap rather than a
+// gap in this test. `InvoicesScreen` renders ONLY the sheet while an invoice is open — no tab bar —
+// and `InvoiceSheet` calls its `onClosed` callback from exactly ONE place: `discard()`, which
+// DELETES the draft. So there is no non-destructive way to leave an open draft and come back to it:
+// an operator must finalize it or discard it. A test cannot read the stored header back through the
+// UI without destroying the thing it is measuring, so the stored-row assertions stay where they
+// are, after the app closes. The `until` guards above are what this run can check: that each field
+// really holds what was typed before the next action moves on.
 
 // Row 1 — chosen from the existing catalog, then left exactly as prefilled (MATCHED).
 await testid(page, "add-row").click();
