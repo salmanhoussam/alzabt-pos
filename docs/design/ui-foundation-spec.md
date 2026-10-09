@@ -124,8 +124,9 @@ currently use full 48px buttons, which is what makes those rows ~90px tall.
 
 ## 5 · Colour and semantic status
 
-Keep all 9 existing tokens unchanged: `--bg --surface --text --muted --border --primary
---primary-text --danger --radius`.
+**Token rule.** Keep the existing token names and semantics. Existing values remain unless a
+**measured accessibility defect** requires a documented correction. Exactly one such correction
+exists so far, and it is recorded below: `--muted`.
 
 Add semantic status, four meanings only. **Colour must not lie about business state:**
 
@@ -160,7 +161,7 @@ makes the vocabulary real without rewriting a single reference.
   --bg: #f4f5f7;
   --surface: #ffffff;
   --text: #1c1f24;
-  --muted: #6b7280;
+  --muted: #656c79;        /* measured accessibility correction — was #6b7280, see below */
   --border: #d9dce1;
   --primary: #1f5eff;
   --primary-text: #ffffff;
@@ -191,9 +192,6 @@ makes the vocabulary real without rewriting a single reference.
   --status-danger:       #faeeee;            /* derived: #c62828 at 8% over --surface */
   --status-danger-text:  var(--danger);      /* #c62828 */
 
-  /* ── muted text on anything other than --surface ─────────────────── */
-  --muted-strong: #656c79;        /* --muted fails AA off white — see the contrast table */
-
   /* ── elevation ───────────────────────────────────────────────────── */
   --shadow-dialog: 0 12px 32px rgba(28, 31, 36, 0.18);   /* --text's hue, not pure black */
 }
@@ -212,26 +210,31 @@ are different objects, and collapsing them would invent a fifth status.
 | `--status-danger-text` on `--status-danger` (derived 8%) | **4.96** | ✅ |
 | `--status-neutral-text` on `--status-neutral` | **14.86** | ✅ |
 | `--text` on `--surface` | 16.52 | ✅ |
-| `--muted` on `--surface` | 4.83 | ✅ |
-| 🔴 `--muted` on `--bg` | **4.43** | ❌ below AA |
-| 🔴 `--muted` on `--surface-sunken` | **4.35** | ❌ below AA |
-| `--muted-strong` on `--surface-sunken` | **4.75** | ✅ |
+| `--muted` on `--surface` | **5.28** | ✅ |
+| `--muted` on `--bg` | **4.84** | ✅ |
+| `--muted` on `--surface-sunken` | **4.75** | ✅ |
+| `--muted` on `--status-warning` | **4.77** | ✅ |
 
 The 8% tint was chosen by measurement, not taste: at 10% the success pair falls to 4.49 — on the
 line — while 6% is barely a tint. 8% clears AA on both derived surfaces with headroom.
 
-🔴 **A real defect this check found, needing Salman's decision.** `--muted: #6b7280` passes AA only
-on white. Muted hints render on `--bg` today (the products search hint, the item count, empty
-states), where it measures **4.43:1 — below AA**. Two ways out:
+### `--muted` — a measured accessibility correction to an existing token
 
-| Option | Effect |
-|---|---|
-| **A — add `--muted-strong: #656c79`** (as written above) | Non-breaking; `--muted` keeps its shipped value; but it leaves a rule to remember — muted text on anything other than `--surface` must use `--muted-strong`. |
-| **B — change `--muted` itself to `#656c79`** | One value, no rule to remember, fixes every existing use at once, visually near-identical. **But it edits one of the 9 shipped tokens**, which the brief said to leave exactly as shipped. |
+**Not a palette redesign.** One value changes, for a measured reason, and the token keeps its name
+and its meaning.
 
-**Recommendation: B.** A rule that depends on knowing which ground you are standing on is exactly
-the kind that gets forgotten on the next screen — the failure this foundation exists to prevent.
-Flagged rather than taken, because it contradicts a stated constraint.
+The shipped `--muted: #6b7280` passes AA **only on white**. Muted text is rendered on `--bg` today
+— the products search hint, the item count, every empty state — where it measured **4.43:1**, and
+on the sunken grey at **4.35:1**. Both are below the 4.5:1 AA threshold for normal text.
+
+`#656c79` is the smallest darkening that clears AA on every ground the token is actually used on
+(5.28 / 4.84 / 4.75 / 4.77). The visual difference is near-invisible; the architectural difference
+is not.
+
+**Why the value moved instead of adding a second token** (Salman, 2026-10-09): a token called
+`muted` that is only valid on white, paired with a `muted-strong` that each screen must select by
+first knowing its own background, is exactly the kind of rule that breaks two months later. One
+corrected value removes the branching rule entirely and fixes every existing use at once.
 
 ---
 
