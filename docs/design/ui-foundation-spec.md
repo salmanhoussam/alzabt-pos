@@ -151,7 +151,7 @@ Mapping of the 14 combinations found in the renderer:
 | `btn danger ghost` | `ghost-danger` (already correct) |
 | `btn key` | keypad/stepper variant of `ghost`, at `--control-h-key` |
 | `btn primary small`, `btn small` | `--control-h-small` variants |
-| `btn selected` | state, not a role — keep, but move its `outline` to the focus token (§8) |
+| `btn selected` | state, not a role — keep, but move its `outline` to the focus token (§9) |
 
 **One primary per screen.** The invoice sheet currently has two blue primaries (`+ أضف سطراً` and
 `إصدار الفاتورة`); `+ أضف سطراً` becomes `default`.
