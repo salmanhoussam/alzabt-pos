@@ -149,7 +149,14 @@ export function ReconciliationQueue({ focusInvoiceId }: { readonly focusInvoiceI
                   )}
                 </td>
                 <td>
-                  <span className={item.status === "FAILED" ? "error" : "muted"}>{item.status}</span>
+                  {/* 🔴 NO RAW ENUM. This printed the ledger's own value, so an Arabic screen showed PENDING. */}
+                  <span className={`badge ${item.status === "FAILED" ? "bad" : item.status === "PENDING" ? "warn" : "ok"}`}>
+                    {item.status === "FAILED"
+                      ? t("review.statusFailed")
+                      : item.status === "PENDING"
+                        ? t("review.statusPending")
+                        : t("review.statusDone")}
+                  </span>
                   {item.resolutionActorName && <div className="muted small">{item.resolutionActorName}</div>}
                   {item.attemptCount > 0 && (
                     <div className="muted small" dir="ltr">

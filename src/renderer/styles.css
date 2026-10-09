@@ -1,19 +1,82 @@
 /* Functional, touch-friendly baseline. No theming or animation in this gate. */
 :root {
+  /* ── the 9 shipped tokens. Names and semantics unchanged. ───────────────────────────────────
+     ONE measured correction: --muted was #6b7280, which passes AA only on white. It measured
+     4.43:1 on --bg and 4.35:1 on the sunken grey, and muted hints are rendered on --bg today.
+     #656c79 is the smallest darkening that clears AA on every ground it is actually used on
+     (5.28 / 4.84 / 4.75 / 4.77). A second token (muted-strong) was rejected: a token valid only
+     on white, paired with one each screen must pick by knowing its own background, is a rule
+     that breaks in two months. */
   --bg: #f4f5f7;
   --surface: #ffffff;
   --text: #1c1f24;
-  --muted: #6b7280;
+  --muted: #656c79;
   --border: #d9dce1;
   --primary: #1f5eff;
   --primary-text: #ffffff;
   --danger: #c62828;
   --radius: 10px;
-  font-family: "Segoe UI", system-ui, sans-serif;
+
+  /* ── two real surfaces, lifted from literals this file already used as fallbacks ─────────── */
+  --surface-sunken: #f1f3f5;
+  --surface-highlight: #fffbe6;
+
+  /* ── the 5 phantom tokens: referenced everywhere, declared nowhere, so every use silently
+     fell back to a literal. var(--line) duplicated --border's value 11 times. ─────── */
+  --card: var(--surface);
+  --line: var(--border);
+  --ink: var(--text);
+  --thead: var(--surface-sunken);
+  --hl: var(--surface-highlight);
+
+  /* ── semantic status. Colour must not lie about business state: an unpaid balance is a
+     commercial fact (warning), never an error (danger). ───────────────────────────────────── */
+  --status-neutral: var(--surface-sunken);
+  --status-neutral-text: var(--text);
+  --status-success: #eef5ef;
+  --status-success-text: #2e7d32;
+  --status-warning: #fff3cd;
+  --status-warning-text: #8a5a00;
+  --status-danger: #faeeee;
+  --status-danger-text: var(--danger);
+
+  /* ── spacing · type · controls · focus · elevation ──────────────────────────────────────── */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 16px; --space-4: 24px;
+  --text-h: 24px;  --text-body: 15px; --text-small: 13px;
+  --leading-body: 1.50; --leading-ar: 1.62; --leading-tight: 1.25;
+  --control-h: 48px; --control-h-big: 64px; --control-h-key: 56px; --control-h-small: 36px;
+  --focus-ring: 2px solid var(--primary);
+  --focus-offset: 2px;
+  --shadow-dialog: 0 12px 32px rgba(28, 31, 36, 0.18);
+
+  /* 🔴 OFFLINE ONLY — never a web font. A Google Fonts link would be a blocked request and a
+     silent fallback. Tahoma is on every Windows install and carries sturdier Arabic metrics. */
+  font-family: "Segoe UI", Tahoma, system-ui, sans-serif;
   font-size: 16px;
+  line-height: var(--leading-body);
   color: var(--text);
   background: var(--bg);
 }
+
+/* 🔴 ARABIC LINE-HEIGHT APPLIES BY DECLARED LANGUAGE, not by a class someone remembers to add.
+   Direction alone is cosmetic; :lang() needs a real lang attribute on the root. */
+:lang(ar) { line-height: var(--leading-ar); }
+
+/* 🔴 ONE VISIBLE FOCUS RING ON EVERYTHING INTERACTIVE. There was no focus styling at all before
+   this: the ring seen on screen was Chromium's default, which disappears the moment anyone
+   writes `outline: none`. The cashier path is keyboard-heavy. */
+:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+
+/* 🔴 A NUMERIC KEYPAD IS A PHYSICAL LAYOUT, NOT TEXT. Under RTL the grid flows 3-2-1 and the
+   backspace glyph mirrors. Every phone, ATM and card terminal is 1-2-3 left to right, and that
+   layout lives in the operator's hand rather than in the language of the interface. */
+.numeric-layout { direction: ltr; }
+
+/* Amounts, counts and quantities line up in columns. */
+.tabular { font-variant-numeric: tabular-nums; }
 * { box-sizing: border-box; }
 body { margin: 0; user-select: none; }
 input { user-select: text; }
@@ -29,11 +92,15 @@ h1, h2 { margin: 0 0 12px; }
 }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn.primary { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+/* 🔴 FILLED DANGER IS FOR A CONFIRM DIALOG ONLY. In a row or a toolbar the destructive action
+   is ghost-danger, which is what stops two red blocks from dominating a lookup screen. */
 .btn.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+.btn.danger.ghost { background: transparent; color: var(--danger); border-color: var(--danger); }
 .btn.ghost { background: transparent; }
+.btn.small { min-height: var(--control-h-small); padding: 0 12px; font-size: var(--text-small); }
 .btn.big { min-height: 64px; font-size: 18px; }
 .btn.wide { width: 100%; margin-top: 12px; }
-.btn.selected { outline: 3px solid var(--primary); }
+.btn.selected { border-color: var(--primary); border-width: 2px; font-weight: 700; }
 .btn.key { min-width: 56px; min-height: 56px; font-size: 20px; }
 
 .app { display: flex; flex-direction: column; height: 100vh; }
@@ -44,7 +111,11 @@ h1, h2 { margin: 0 0 12px; }
 .tab.active { background: var(--bg); font-weight: 700; }
 .content { flex: 1; overflow: auto; padding: 16px; }
 
-.login { width: 380px; text-align: center; }
+.login { width: 400px; text-align: center; }
+.login .wordmark { font-size: 26px; font-weight: 700; line-height: var(--leading-tight); margin: 0; }
+.login .rule { border: 0; border-top: 1px solid var(--border); margin: var(--space-3) 0; }
+.login .prompt { font-weight: 600; margin: 0 0 var(--space-2); }
+.login .btn.ghost.small { margin-bottom: var(--space-2); }
 .cashiers { display: grid; gap: 8px; margin: 12px 0; }
 .pin { font-size: 32px; letter-spacing: 8px; min-height: 48px; margin: 8px 0; }
 .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -53,7 +124,21 @@ h1, h2 { margin: 0 0 12px; }
 .products-pane { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 .search { min-height: 48px; padding: 0 14px; font-size: 18px; border: 1px solid var(--border); border-radius: var(--radius); }
 .products { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; align-content: start; overflow: auto; flex: 1; min-height: 0; }
-.badge { margin-inline-start: 8px; padding: 1px 6px; border-radius: 6px; background: #fff3cd; color: #8a5a00; font-size: 12px; font-weight: 700; }
+/* 🔴 ONE .badge, THREE ROLES. This selector used to be declared twice with different shapes and
+   different colours, so which one applied depended on source order. Default stays amber so an
+   unclassed badge looks as it shipped; state/ok/warn/bad carry the semantic statuses.
+   Every badge carries a word or a title — no status is conveyed by colour alone. */
+.badge {
+  display: inline-block; margin-inline-start: 6px; padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; vertical-align: middle;
+  border: 1px solid transparent;
+  background: var(--status-warning); color: var(--status-warning-text);
+}
+.badge.state { background: var(--status-neutral); color: var(--status-neutral-text); }
+.badge.ok    { background: var(--status-success); color: var(--status-success-text); }
+.badge.warn  { background: var(--status-warning); color: var(--status-warning-text); }
+.badge.bad   { background: var(--status-danger);  color: var(--status-danger-text); }
+.badge.faint { opacity: 0.6; }
 .import-report ul { max-height: 240px; overflow: auto; }
 .product {
   display: flex; flex-direction: column; gap: 4px; min-height: 110px; padding: 14px; text-align: start;
@@ -119,17 +204,10 @@ h1, h2 { margin: 0 0 12px; }
   flex: 1 1 260px; min-width: 0; max-width: 420px; padding: 10px 12px; font-size: 16px;
   border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: inherit;
 }
-.small { font-size: 12px; }
+.small { font-size: var(--text-small); }
 .admin-table td, .admin-table th { vertical-align: top; }
 .admin-table .row-inactive { opacity: 0.55; }
 .admin-actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
-.badge {
-  display: inline-block; margin-inline-start: 6px; padding: 1px 6px; border-radius: 999px;
-  font-size: 11px; border: 1px solid var(--border); vertical-align: middle;
-}
-.badge.ok { border-color: #2e7d32; color: #2e7d32; }
-.badge.warn { border-color: #b54708; color: #b54708; }
-.badge.faint { opacity: 0.6; }
 .product-form { display: flex; flex-direction: column; gap: 10px; min-width: 340px; max-width: 460px; }
 .product-form .field { display: flex; flex-direction: column; gap: 4px; text-align: start; }
 .product-form .field > span { font-size: 13px; }
@@ -147,32 +225,32 @@ h1, h2 { margin: 0 0 12px; }
 .inv-screen { display: flex; flex-direction: column; gap: 12px; }
 .inv-nav { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .inv-filters { display: flex; flex-wrap: wrap; gap: 6px; }
-.inv-fieldset { border: 1px solid var(--line, #d9dce1); border-radius: 8px; padding: 12px; display: flex;
+.inv-fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: flex;
                 flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }
 .inv-fieldset h3 { flex: 1 0 100%; margin: 0; font-size: 1rem; }
 .inv-fieldset .field { flex: 1 1 220px; }
 .inv-fieldset .field.wide { flex: 1 1 100%; }
 .field.checkbox { flex: 1 0 100%; display: flex; flex-direction: row; align-items: center; gap: 8px; }
-.field.inline { flex-direction: row; align-items: center; gap: 6px; }
+.field.inline { display: flex; flex-direction: row; align-items: center; gap: 6px; }
 .inv-logo-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.inv-header-preview { flex: 1 0 100%; border: 1px dashed var(--line, #d9dce1); border-radius: 6px; padding: 10px; }
+.inv-header-preview { flex: 1 0 100%; border: 1px dashed var(--line); border-radius: 6px; padding: 10px; }
 .inv-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 /* The safe way out stays in view while the panel's own content scrolls past it. */
-.inv-actions.inv-keep { border-top: 1px solid var(--line, #d9dce1); padding-top: 10px; margin-top: 10px;
-                        position: sticky; bottom: 0; background: var(--card, #fff); }
+.inv-actions.inv-keep { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px;
+                        position: sticky; bottom: 0; background: var(--card); }
 
 .inv-sheet { display: flex; flex-direction: column; gap: 12px; }
 .inv-sheet-head { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: flex-start;
-                  border-bottom: 2px solid var(--line, #d9dce1); padding-bottom: 8px; }
+                  border-bottom: 2px solid var(--line); padding-bottom: 8px; }
 .inv-issuer { flex: 1 1 240px; }
 .inv-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
 .inv-customer { display: flex; flex-wrap: wrap; gap: 10px 16px; }
 .inv-customer .field { flex: 1 1 200px; }
 .inv-customer .field.wide { flex: 1 1 100%; }
 
-table.inv-lines { width: 100%; border-collapse: collapse; }
-table.inv-lines th, table.inv-lines td { border: 1px solid var(--line, #d9dce1); padding: 4px 6px; text-align: start; }
-table.inv-lines thead th { background: var(--thead, #f1f3f5); font-size: .85rem; }
+table.inv-lines { width: 100%; border-collapse: collapse; min-width: 44rem; }
+table.inv-lines th, table.inv-lines td { border: 1px solid var(--line); padding: 4px 6px; text-align: start; }
+table.inv-lines thead th { background: var(--thead); font-size: .85rem; }
 table.inv-lines td.num { text-align: end; width: 7rem; }
 table.inv-lines td.total { font-variant-numeric: tabular-nums; white-space: nowrap; }
 table.inv-lines input { width: 100%; box-sizing: border-box; }
@@ -185,23 +263,24 @@ table.inv-lines input { width: 100%; box-sizing: border-box; }
      3. a heavier start border, so the eye sees a boundary between data and actions.
    `white-space: nowrap` with `width: 1%` did the opposite: it forced the column as wide as its
    content and pushed the price inputs under it at small widths. */
-table.inv-lines th.row-actions-col,
-table.inv-lines td.row-actions {
+table.inv-lines th.row-actions-col {
   width: 7.5rem;
   min-width: 7.5rem;
-  border-inline-start: 2px solid var(--line, #d9dce1);
+  border-inline-start: 2px solid var(--line);
   vertical-align: top;
 }
+/* One declaration, not three. Buttons stack full-width inside the fixed column; logical
+   properties only, so the layout holds unchanged in RTL. */
 table.inv-lines td.row-actions {
   display: table-cell;
   padding: 4px;
-}
-/* A grid rather than a flex row: two compact columns that wrap predictably, so a third button
-   never extends the cell. Logical properties only — this layout must hold in RTL unchanged. */
-table.inv-lines td.row-actions > * { margin: 0; }
-table.inv-lines td.row-actions {
   text-align: start;
+  width: 7.5rem;
+  min-width: 7.5rem;
+  border-inline-start: 2px solid var(--line);
+  vertical-align: top;
 }
+table.inv-lines td.row-actions > * { margin: 0; }
 table.inv-lines td.row-actions .btn,
 table.inv-lines td.row-actions button {
   display: block;
@@ -214,21 +293,20 @@ table.inv-lines td.row-actions button:last-child { margin-block-end: 0; }
 /* The data columns keep their own space at every width: the table may scroll horizontally inside
    its own container, and never under the actions column. */
 .inv-lines-scroll { overflow-x: auto; }
-table.inv-lines { min-width: 44rem; }
 table.inv-lines td.description, table.inv-lines th.description { min-width: 10rem; }
 
-.inv-new-line { background: var(--hl, #fffbe6); }
+.inv-new-line { background: var(--hl); }
 
 /* FIELD FINDING 2 — the add-row affordance lives in the table, under the last row. */
-.inv-add-row td { background: var(--surface, #f8f9fa); }
+.inv-add-row td { background: var(--surface); }
 .inv-add-bar { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
 
 .inv-totals { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
 .inv-totals table { border-collapse: collapse; min-width: 16rem; }
 .inv-totals th { text-align: start; padding: 4px 10px; font-weight: 600; white-space: nowrap; }
 .inv-totals td { text-align: end; padding: 4px 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.inv-totals tr.grand th, .inv-totals tr.grand td { font-weight: 700; border-top: 2px solid var(--line, #d9dce1); }
-.inv-words { flex: 1 1 260px; border: 1px solid var(--line, #d9dce1); border-radius: 6px; padding: 8px 10px; min-height: 3rem; }
+.inv-totals tr.grand th, .inv-totals tr.grand td { font-weight: 700; border-top: 2px solid var(--line); }
+.inv-words { flex: 1 1 260px; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; min-height: 3rem; }
 
 .inv-confirm { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 10px 0; }
 .inv-confirm dt { font-weight: 600; }
@@ -238,26 +316,92 @@ table.inv-lines td.description, table.inv-lines th.description { min-width: 10re
 .inv-resolve-head { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; }
 .inv-resolve-head dt { font-weight: 600; }
 .inv-resolve-head dd { margin: 0; }
-.inv-resolve-actions { border-top: 1px solid var(--line, #d9dce1); padding-top: 10px; margin-top: 10px;
+.inv-resolve-actions { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px;
                        display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .inv-resolve-actions h3 { margin: 4px 0 0; font-size: .95rem; }
 table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .inv-candidates ul, .inv-picker { list-style: none; margin: 6px 0; padding: 0; max-height: 14rem; overflow-y: auto; }
 .inv-candidates li label { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
 .inv-picker li button { display: flex; justify-content: space-between; gap: 10px; width: 100%; }
-.badge.draft { background: #fde68a; color: #7c2d12; }
-.small { font-size: .85rem; }
-.notice { background: #eef6ff; border: 1px solid #bcd8f7; border-radius: 6px; padding: 8px 10px; }
+.badge.draft { background: var(--status-warning); color: var(--status-warning-text); }
+.notice { background: #eef6ff; border: 1px solid #bcd8f7; border-radius: var(--radius); padding: var(--space-2) var(--space-3); }
 
 /* The intent chooser: each mode states what it MEANS, not just its name, because the two kinds of
    invoice look alike on paper and mean opposite things. */
 .inv-modes { display: grid; gap: 6px; margin-block: 10px; }
 .inv-modes .btn.wide { width: 100%; }
 .inv-modes p { margin: 0 0 8px; }
-.badge.mode { background: var(--ink, #111); color: #fff; }
+.badge.mode { background: var(--ink); color: #fff; }
 
 /* Per-invoice tax: one row above the lines, so the decision is visible while the invoice is built. */
 .inv-tax { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
-           border: 1px solid var(--line, #d9dce1); padding: 8px 10px; }
-.field.inline { display: flex; flex-direction: row; gap: 6px; align-items: center; }
+           border: 1px solid var(--line); padding: 8px 10px; }
 .inv-tax .field input[inputmode="decimal"] { width: 6rem; }
+
+/* ── UI unification v1 ───────────────────────────────────────────────────────────────────────── */
+
+/* One screen header shape, so Today, History and Products do not each invent their own. */
+.screen-head { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); }
+.screen-head h1 { font-size: 21px; line-height: var(--leading-tight); margin: 0; }
+.screen-head .spacer { flex: 1; }
+.datechip {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 6px var(--space-3); font-variant-numeric: tabular-nums; font-weight: 600;
+}
+
+/* TODAY — the day card is centred so the whitespace reads composed rather than dumped below it. */
+.today-wrap { display: grid; place-items: center; min-height: calc(100% - 56px); }
+.card.today { width: 100%; max-width: 780px; }
+.today-hero {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3);
+  padding-bottom: var(--space-3); border-bottom: 1px solid var(--border);
+}
+.today-hero-label { font-size: 17px; font-weight: 600; }
+.today-hero-value { font-size: 40px; font-variant-numeric: tabular-nums; line-height: var(--leading-tight); }
+.today-breakdown { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-top: var(--space-3); }
+.today-cell { background: var(--surface-sunken); border-radius: var(--radius); padding: var(--space-3); }
+.today-cell-value { display: block; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+/* A void total is a fact about the day, not an error — warning, never danger. */
+.today-cell.minus .today-cell-value { color: var(--status-warning-text); }
+.today-counts {
+  display: flex; gap: var(--space-4); margin-top: var(--space-3); padding-top: var(--space-3);
+  border-top: 1px solid var(--border); color: var(--muted); font-size: var(--text-small);
+}
+.today-counts b { color: var(--text); font-size: var(--text-body); font-variant-numeric: tabular-nums; }
+.today-empty {
+  display: flex; flex-direction: column; gap: var(--space-1); text-align: center;
+  background: var(--surface-sunken); border-radius: var(--radius);
+  padding: var(--space-4); margin: var(--space-3) 0 0;
+}
+
+/* SELL — the search shortcut is a key, not placeholder prose. */
+.search-wrap { position: relative; display: flex; }
+.search-wrap .search { flex: 1; padding-inline-end: 46px; }
+.search-kbd {
+  position: absolute; inset-inline-end: 10px; top: 50%; transform: translateY(-50%);
+  background: var(--surface-sunken); border: 1px solid var(--border); border-bottom-width: 2px;
+  border-radius: 5px; padding: 0 7px; font: inherit; font-size: 12px; color: var(--muted);
+  line-height: 19px; pointer-events: none;
+}
+.cart-head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
+  padding-bottom: var(--space-2); border-bottom: 1px solid var(--border);
+}
+.cart-head h2 { margin: 0; font-size: 17px; line-height: var(--leading-tight); }
+/* Totals and the primary stay pinned to the bottom of the cart region, so the one number the
+   operator looks for is in the same place whether the sale has two lines or twenty. */
+.cart-foot { margin-top: auto; padding-top: var(--space-2); border-top: 1px solid var(--border); }
+.cart-count { text-align: start; }
+.line-remove { margin-inline-start: auto; color: var(--muted); border-color: transparent; }
+.line-remove:hover { color: var(--danger); border-color: var(--danger); }
+.clear-list { margin: 0; padding-inline-start: var(--space-4); max-height: 9rem; overflow: auto; }
+
+/* LOGIN — the language control sits before authentication, in the corner of the screen. */
+.login-screen { position: relative; }
+.lang-switch {
+  position: absolute; top: var(--space-3); inset-inline-end: var(--space-3);
+  display: flex; border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; background: var(--surface);
+}
+.lang-switch .btn { border: 0; border-radius: 0; min-height: var(--control-h-small); }
+.lang-switch .btn.selected { background: var(--text); color: var(--surface); border-width: 0; }

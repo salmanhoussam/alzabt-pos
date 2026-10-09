@@ -44,15 +44,15 @@ async function launch() {
     env,
   });
   const page = await app.firstWindow();
-  await page.waitForSelector("text=Select cashier", { timeout: 30000 });
+  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
   return { app, page };
 }
 
 async function login(page, name, pin) {
   await page.getByRole("button", { name }).click();
   for (const d of pin) await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.getByRole("button", { name: "Log in" }).click();
-  await page.waitForSelector("text=Current sale");
+  await page.locator('[data-testid="login-submit"]').click();
+  await page.waitForSelector('[data-testid="cart"]');
 }
 
 const product = (page, name) => page.locator("button.product", { hasText: name });
@@ -102,12 +102,12 @@ await page.screenshot({ path: SHOTS + "01-login.png" });
 // Wrong PIN first.
 await page.getByRole("button", { name: "Cashier One" }).click();
 for (const d of "9999") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-await page.getByRole("button", { name: "Log in" }).click();
+await page.locator('[data-testid="login-submit"]').click();
 await page.waitForSelector("text=Cashier or PIN is incorrect");
 log("PASS wrong PIN refused");
 for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-await page.getByRole("button", { name: "Log in" }).click();
-await page.waitForSelector("text=Current sale");
+await page.locator('[data-testid="login-submit"]').click();
+await page.waitForSelector('[data-testid="cart"]');
 
 // Cart editing.
 await product(page, "Espresso").click();
@@ -123,22 +123,22 @@ assert((await totalText(page)) === "14.80 USD", "after edits 2.50 + 3×4.10 = 14
 await page.screenshot({ path: SHOTS + "02-cart.png" });
 
 // Complete sale — cash.
-await page.getByRole("button", { name: "Complete sale" }).click();
+await page.locator('[data-testid="complete-sale"]').click();
 await page.screenshot({ path: SHOTS + "03-payment.png" });
-await page.getByRole("button", { name: "Cash" }).click();
+await page.locator('[data-testid="pay-cash"]').click();
 await page.waitForSelector("text=Sale completed");
 const receipt1 = await page.locator(".receipt").innerText();
 assert(receipt1.includes("Receipt #1") && receipt1.includes("14.80 USD") && receipt1.includes("cash"), "receipt #1 shows 14.80 USD paid by cash");
 await page.screenshot({ path: SHOTS + "04-receipt.png" });
-await page.getByRole("button", { name: "New sale" }).click();
+await page.locator('[data-testid="new-sale"]').click();
 
 // Second sale — card.
 for (let i = 0; i < 3; i++) await product(page, "Mint Tea").click();
 assert((await totalText(page)) === "5.97 USD", "3 × 1.99 = 5.97");
-await page.getByRole("button", { name: "Complete sale" }).click();
+await page.locator('[data-testid="complete-sale"]').click();
 await page.getByRole("button", { name: "Card (external terminal)" }).click();
 await page.waitForSelector("text=Receipt #2");
-await page.getByRole("button", { name: "New sale" }).click();
+await page.locator('[data-testid="new-sale"]').click();
 
 // Forged calls straight through window.pos (what a compromised renderer could try).
 const forged = await page.evaluate(async () => ({
@@ -160,10 +160,10 @@ await page.screenshot({ path: SHOTS + "05-today.png" });
 // Void receipt #2 from history.
 await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
-await page.locator("tr", { hasText: "card" }).getByRole("button", { name: "Void" }).click();
+await page.locator("tr", { hasText: "card" }).locator('[data-testid="history-void"]').click();
 await page.getByPlaceholder("e.g. wrong item rung up").fill("customer cancelled");
 await page.screenshot({ path: SHOTS + "06-void-dialog.png" });
-await page.getByRole("button", { name: "Confirm void" }).click();
+await page.locator('[data-testid="void-confirm"]').click();
 await page.waitForSelector("tr.voided");
 await page.screenshot({ path: SHOTS + "07-history.png" });
 
@@ -187,7 +187,7 @@ assert((await stat(page, "Completed sales")) === "2" && (await stat(page, "Net s
 // only: its helper processes are left alone, exactly as an application crash would leave them.
 await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Water 500ml").click();
-await page.getByRole("button", { name: "Complete sale" }).click();
+await page.locator('[data-testid="complete-sale"]').click();
 await page.getByRole("button", { name: "Other" }).click();
 await page.waitForSelector("text=Receipt #3");
 
@@ -237,10 +237,10 @@ await page.screenshot({ path: SHOTS + "08-today-after-kill.png" });
 await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Zaatar Manousheh").click();
 await product(page, "Zaatar Manousheh").click();
-await page.getByRole("button", { name: "Complete sale" }).click();
-await page.getByRole("button", { name: "Cash" }).click();
+await page.locator('[data-testid="complete-sale"]').click();
+await page.locator('[data-testid="pay-cash"]').click();
 await page.waitForSelector("text=Receipt #4");
-await page.getByRole("button", { name: "New sale" }).click();
+await page.locator('[data-testid="new-sale"]').click();
 await page.locator('[data-testid="tab-today"]').click();
 await page.waitForSelector(".stats");
 assert((await stat(page, "Completed sales")) === "4", "new sale #4 completed after recovery");

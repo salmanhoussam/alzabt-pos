@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { type CartLine, type PricedCart, addProduct, decrement, priceCart, removeProduct } from "../../domain/cart";
 import type { Catalog } from "../../domain/catalog";
 import { formatDecimal } from "../../domain/money";
@@ -9,16 +9,22 @@ import type { SaleDto } from "../../shared/ipcContract";
 import { call, errorText, newIdempotencyKey, pos } from "../api";
 import { LineMath } from "../components/LineMath";
 import { Receipt } from "./Receipt";
+import { useT } from "../i18n";
 
-const METHOD_LABEL: Record<PaymentMethod, string> = {
-  cash: "Cash",
-  card: "Card (external terminal)",
-  external: "External transfer",
-  other: "Other",
+/** The four real methods, in the order the till uses them. Cash first: it is most of the volume. */
+const METHOD_KEY: Record<PaymentMethod, string> = {
+  cash: "pay.cash",
+  card: "pay.card",
+  external: "pay.external",
+  other: "pay.other",
 };
 
 export function SellScreen() {
+  const { t } = useT();
   const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const cashRef = useRef<HTMLButtonElement | null>(null);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [paying, setPaying] = useState(false);
   // One idempotency key per checkout attempt: kept across retries, replaced when the cart changes.
@@ -74,6 +80,20 @@ export function SellScreen() {
     }
   };
 
+  /** Cash takes the initial focus and Esc returns to the cart; Enter is the browser's own. */
+  useEffect(() => {
+    if (!paying) return;
+    cashRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setPaying(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paying]);
+
   const edit = (next: CartLine[]) => {
     setCart(next);
     setAttemptKey(newIdempotencyKey());
@@ -105,22 +125,68 @@ export function SellScreen() {
   };
 
   if (completed) return <Receipt sale={completed} onNewSale={() => setCompleted(null)} />;
-  if (!catalog) return <div className="center muted">{error ?? "Loading catalog…"}</div>;
+  if (!catalog) return <div className="center muted">{error ?? t("common.loading")}</div>;
 
   return (
     <div className="sell">
       <section className="products-pane">
-        <input
-          className="search"
-          type="search"
-          dir="auto"
-          placeholder={`Search ${catalog.products.length} products…`}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+        <div className="search-wrap">
+          <input
+            ref={searchRef}
+            className="search"
+            type="search"
+            dir="auto"
+            placeholder={t("sell.search")}
+            value={query}
+            data-testid="product-search"
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              /* 🔴 ENTER NEVER GUESSES. It adds a product only when the search leaves exactly ONE
+                 candidate, or when the typed text IS a product's SKU or full name. With several
+                 matches the operator must choose — a till that silently rings up "the first fuzzy
+                 result" sells the wrong thing and nobody notices until the count is short. */
+              const q = query.trim().toLowerCase();
+              if (!q) return;
+              const exact = visible.find(
+                (p) => (p.sku ?? "").toLowerCase() === q || p.name.toLowerCase() === q,
+              );
+              const unique = visible.length === 1 ? visible[0] : undefined;
+              const chosen = exact ?? unique;
+              if (chosen) {
+                edit(addProduct(cart, chosen.id));
+                setQuery("");
+              }
+            }}
+          />
+          {/* A shortcut is a key, not placeholder prose. */}
+          <kbd className="search-kbd" aria-hidden="true">/</kbd>
+        </div>
         <div className="products">
-          {visible.map((p) => (
-            <button key={p.id} className="product" onClick={() => edit(addProduct(cart, p.id))}>
+          {visible.map((p, i) => (
+            /* 🔴 TAB REACHES THE GRID, NOT EVERY CARD. One roving tab stop: Tab moves between work
+               regions — search, grid, cart, primary — and arrows move inside the grid. Tabbing
+               through fifty products to reach the cart is not a keyboard path, it is a punishment. */
+            <button
+              key={p.id}
+              className="product"
+              tabIndex={i === 0 ? 0 : -1}
+              onKeyDown={(e) => {
+                const cards = Array.from(
+                  e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button.product") ?? [],
+                );
+                const here = cards.indexOf(e.currentTarget);
+                const step = e.key === "ArrowLeft" ? 1 : e.key === "ArrowRight" ? -1 : 0;
+                if (step === 0 && e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+                e.preventDefault();
+                const columns = 3;
+                const delta = step !== 0 ? step : e.key === "ArrowDown" ? columns : -columns;
+                const next = cards[Math.min(cards.length - 1, Math.max(0, here + delta))];
+                next?.focus();
+              }}
+              onClick={() => edit(addProduct(cart, p.id))}
+            >
               <span className="product-name" dir="auto">
                 {p.name}
               </span>
@@ -132,13 +198,23 @@ export function SellScreen() {
               </span>
             </button>
           ))}
-          {visible.length === 0 && <p className="muted">No product matches “{query}”.</p>}
+          {visible.length === 0 && <p className="muted">{t("sell.noMatch")}</p>}
         </div>
       </section>
 
-      <aside className="cart">
-        <h2>Current sale</h2>
-        {!priced && <p className="muted">Tap a product to add it.</p>}
+      <aside className="cart" data-testid="cart">
+        <div className="cart-head">
+          <h2>{t("sell.currentSale")}</h2>
+          {/* 🔴 CLEAR CART LIVES HERE, NOT UNDER THE PRIMARY. It used to be a full-width button
+              directly beneath "Complete sale" — a destructive action with the same footprint and
+              the same place the hand goes. Ghost-danger, in the header, behind a confirmation. */}
+          {cart.length > 0 && (
+            <button className="btn danger ghost small" data-testid="clear-cart" onClick={() => setClearing(true)}>
+              {t("sell.clearCart")}
+            </button>
+          )}
+        </div>
+        {!priced && <p className="muted">{t("sell.empty")}</p>}
         {priced && (
           <ul className="lines">
             {priced.lines.map((l) => (
@@ -150,14 +226,18 @@ export function SellScreen() {
                   </span>
                 </div>
                 <div className="qty">
-                  <button className="btn key" aria-label="Decrease" onClick={() => edit(decrement(cart, l.productId))}>
+                  <button
+                    className="btn key"
+                    aria-label={t("sell.decrease")}
+                    onClick={() => edit(decrement(cart, l.productId))}
+                  >
                     −
                   </button>
                   <input
                     className="qty-n qty-input"
                     type="text"
                     inputMode="decimal"
-                    aria-label={`Quantity in ${l.saleUnit}`}
+                    aria-label={t("sell.quantityOf")}
                     data-testid={`qty-${l.productId}`}
                     value={qtyDraft[l.productId] ?? formatQuantity(l.quantityMilli)}
                     onChange={(e) => setQtyDraft((d) => ({ ...d, [l.productId]: e.target.value }))}
@@ -166,10 +246,20 @@ export function SellScreen() {
                     }}
                     onBlur={() => commitQuantity(l.productId, l.saleUnit)}
                   />
-                  <button className="btn key" aria-label="Increase" onClick={() => edit(addProduct(cart, l.productId))}>
+                  <button
+                    className="btn key"
+                    aria-label={t("sell.increase")}
+                    onClick={() => edit(addProduct(cart, l.productId))}
+                  >
                     +
                   </button>
-                  <button className="btn ghost" aria-label="Remove" onClick={() => edit(removeProduct(cart, l.productId))}>
+                  {/* Demoted: removing a line must not look like adjusting one. */}
+                  <button
+                    className="btn ghost small line-remove"
+                    aria-label={t("sell.remove")}
+                    title={t("sell.remove")}
+                    onClick={() => edit(removeProduct(cart, l.productId))}
+                  >
                     ✕
                   </button>
                 </div>
@@ -178,40 +268,92 @@ export function SellScreen() {
             ))}
           </ul>
         )}
-        <div className="total">
-          <span>Total</span>
-          <strong>
-            {priced ? formatDecimal(priced.total) : "0.00"} {catalog.currency}
-          </strong>
-        </div>
-        <button className="btn primary big wide" disabled={!priced} onClick={() => setPaying(true)}>
-          Complete sale
-        </button>
-        {cart.length > 0 && (
-          <button className="btn ghost wide" onClick={() => edit([])}>
-            Clear cart
+        <div className="cart-foot">
+          {/* The count is PRODUCT LINES, not a sum of quantities — "2 صنف" with three of one of
+              them is two items on the bill, which is what the operator is checking. */}
+          <div className="cart-count muted small">
+            <bdi>{cart.length}</bdi> {t("sell.lineCount")}
+          </div>
+          <div className="total">
+            <span>{t("sell.total")}</span>
+            {/* One isolated run: amount and currency together, never split. */}
+            <strong data-testid="cart-total">
+              <bdi dir="ltr">{`${priced ? formatDecimal(priced.total) : "0.00"} ${catalog.currency}`}</bdi>
+            </strong>
+          </div>
+          <button className="btn primary big wide" disabled={!priced} data-testid="complete-sale" onClick={() => setPaying(true)}>
+            {t("sell.complete")}
           </button>
-        )}
+        </div>
         {error && !paying && <p className="error">{error}</p>}
       </aside>
+
+      {clearing && (
+        <div className="overlay">
+          <div className="card dialog" role="dialog" aria-modal="true">
+            <h2>{t("sell.clearConfirm")}</h2>
+            {/* Names what will be removed, rather than asking "are you sure" about nothing. */}
+            <p className="muted small">{t("sell.clearConfirmBody")}</p>
+            <ul className="clear-list">
+              {cart.map((l) => {
+                const product = catalog.products.find((p) => p.id === l.productId);
+                return (
+                  <li key={l.productId}>
+                    <span dir="auto">{product?.name ?? l.productId}</span>{" "}
+                    <span className="muted small">
+                      <bdi dir="ltr">{formatQuantity(l.quantityMilli)}</bdi>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="row">
+              <button className="btn" onClick={() => setClearing(false)} data-testid="clear-dismiss">
+                {t("void.dismiss")}
+              </button>
+              <button
+                className="btn danger"
+                data-testid="clear-confirm"
+                onClick={() => {
+                  edit([]);
+                  setClearing(false);
+                }}
+              >
+                {t("sell.clearConfirmYes")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {paying && priced && (
         <div className="overlay">
           <div className="card dialog">
             <h2>
-              Payment — {formatDecimal(priced.total)} {priced.currency}
+              {t("pay.title")} — <bdi dir="ltr">{`${formatDecimal(priced.total)} ${priced.currency}`}</bdi>
             </h2>
-            <p className="muted">Record how the customer paid. No payment is processed here.</p>
+            <p className="muted small">{t("pay.note")}</p>
             <div className="methods">
               {PAYMENT_METHODS.map((m) => (
-                <button key={m} className="btn big" disabled={busy} onClick={() => pay(m)}>
-                  {METHOD_LABEL[m]}
+                /* 🔴 CASH IS THE INITIAL FOCUS, NOT A FORCED CHOICE. Enter activates whatever the
+                   operator has focused; moving to Card and pressing Enter records a card sale.
+                   Cash leads because it is most of a shop's volume — a prototype to confirm in the
+                   field test, not a decided default. */
+                <button
+                  key={m}
+                  ref={m === "cash" ? cashRef : undefined}
+                  className={m === "cash" ? "btn primary big" : "btn big"}
+                  disabled={busy}
+                  data-testid={`pay-${m}`}
+                  onClick={() => pay(m)}
+                >
+                  {t(METHOD_KEY[m])}
                 </button>
               ))}
             </div>
             {error && <p className="error">{error}</p>}
             <button className="btn ghost wide" disabled={busy} onClick={() => setPaying(false)}>
-              Back to cart
+              {t("pay.back")}
             </button>
           </div>
         </div>
