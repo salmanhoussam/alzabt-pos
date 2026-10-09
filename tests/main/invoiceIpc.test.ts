@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CHANNELS, type ChannelName } from "../../src/shared/ipcContract";
+import { CHANNELS, type ChannelName, INVOICE_HEADER_PATCH_KEYS } from "../../src/shared/ipcContract";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import { type Harness, type TempDir, makeHarness, tempDir } from "../helpers/harness";
 
@@ -462,5 +462,50 @@ describe("the preload bridge exposes every channel, and nothing else", () => {
       expect(preload).toContain(field);
       expect(preload).toContain(`${method}:`);
     }
+  });
+});
+
+describe("🔴 the preload may not import a value from anywhere but electron", () => {
+  // WHY THIS GUARD EXISTS, in one sentence: the window runs with `sandbox: true`, a sandboxed
+  // preload cannot require an arbitrary relative file, and an import that looked harmless —
+  // typechecked, built, and passed the whole unit suite — made the PACKAGED app show nothing at
+  // all, because the preload threw before exposing `window.pos`. Caught only by the Windows gate,
+  // on the third round. This test is the cheap check that should have existed first.
+  const source = readFileSync(join(__dirname, "../../src/preload/preload.ts"), "utf8");
+
+  /** Every import statement, with whether it is type-only and where it comes from. */
+  const imports = () =>
+    [...source.matchAll(/^import\s+(type\s+)?([\s\S]*?)from\s+"([^"]+)";/gm)].map((m) => ({
+      typeOnly: Boolean(m[1]),
+      from: m[3]!,
+    }));
+
+  it("every value import is from electron; everything else is type-only", () => {
+    const found = imports();
+    expect(found.length, "no imports parsed — the probe is broken, not the file").toBeGreaterThan(0);
+    for (const imp of found) {
+      if (imp.typeOnly) continue;
+      expect(imp.from, `preload imports VALUES from ${imp.from}; a sandboxed preload cannot`).toBe("electron");
+    }
+  });
+
+  it("the POSITIVE CONTROL: the probe really does reject the import that broke the app", () => {
+    // The exact line that shipped a blank app, fed to the same matcher. If this does not fail the
+    // rule, the rule above is decoration.
+    const bad = 'import { INVOICE_HEADER_PATCH_KEYS } from "../shared/ipcContract";';
+    const parsed = [...bad.matchAll(/^import\s+(type\s+)?([\s\S]*?)from\s+"([^"]+)";/gm)].map((m) => ({
+      typeOnly: Boolean(m[1]),
+      from: m[3]!,
+    }));
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.typeOnly).toBe(false);
+    expect(parsed[0]!.from).not.toBe("electron"); // ⇒ the rule above would have failed on it
+  });
+
+  it("the keys the bridge forwards are a literal copy, and match the contract exactly", () => {
+    // The duplication is deliberate (see the preload's own comment). This is what keeps it honest.
+    const listed = /const HEADER_PATCH_KEYS = \[([\s\S]*?)\] as const/.exec(source)![1]!;
+    const names = [...listed.matchAll(/"(\w+)"/g)].map((m) => m[1]);
+    expect(names).toEqual([...INVOICE_HEADER_PATCH_KEYS]);
   });
 });

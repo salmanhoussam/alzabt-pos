@@ -8,13 +8,36 @@
  */
 import { contextBridge, ipcRenderer } from "electron";
 import type { CHANNELS, InvoiceHeaderPatch, InvoiceLineRequest, PosApi } from "../shared/ipcContract";
-import { INVOICE_HEADER_PATCH_KEYS } from "../shared/ipcContract";
+
+/**
+ * The header keys this bridge forwards, declared HERE as literals.
+ *
+ * 🔴 THIS FILE MAY NOT IMPORT A VALUE FROM ANYWHERE BUT "electron", AND THE REASON IS BRUTAL. The
+ * window runs with `sandbox: true` (main.ts), and a sandboxed preload cannot require an arbitrary
+ * relative file — only `electron` and a few polyfilled built-ins. Importing
+ * INVOICE_HEADER_PATCH_KEYS from ../shared/ipcContract looked harmless and typechecked and built
+ * and passed 602 unit tests, and it made the PACKAGED app show NOTHING AT ALL: the preload threw,
+ * `window.pos` was never exposed, the renderer's first call threw, and #root stayed empty. Only the
+ * Windows gate caught it, on the third round, after phase D was taught to report what it saw.
+ *
+ * That is why `CH` below is a literal copy of CHANNELS rather than an import of it, and why this
+ * list is a literal copy too. The duplication is deliberate: tests/main/invoiceIpc.test.ts pins
+ * both against the contract, so a drift fails by name instead of at a shop counter.
+ */
+const HEADER_PATCH_KEYS = [
+  "invoiceDate",
+  "customerName",
+  "customerAddress",
+  "customerPhone",
+  "notes",
+  "paid",
+] as const satisfies ReadonlyArray<keyof InvoiceHeaderPatch>;
 
 /** One invoice line, rebuilt key by key — the same allowlisting every payload here uses. */
 /** Only the header keys the caller set, each copied by value. Presence is the signal. */
 const headerPatch = (patch: InvoiceHeaderPatch): InvoiceHeaderPatch => {
   const out: Record<string, string | null> = {};
-  for (const key of INVOICE_HEADER_PATCH_KEYS) {
+  for (const key of HEADER_PATCH_KEYS) {
     if (key in patch) out[key] = patch[key] ?? null;
   }
   return out as InvoiceHeaderPatch;
