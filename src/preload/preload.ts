@@ -57,6 +57,7 @@ const CH = {
   createInvoiceDraft: "pos:createInvoiceDraft",
   getInvoice: "pos:getInvoice",
   updateInvoiceHeader: "pos:updateInvoiceHeader",
+  setInvoiceTax: "pos:setInvoiceTax",
   addInvoiceLine: "pos:addInvoiceLine",
   updateInvoiceLine: "pos:updateInvoiceLine",
   removeInvoiceLine: "pos:removeInvoiceLine",
@@ -136,6 +137,13 @@ const api: PosApi = {
     ipcRenderer.invoke(CH.updateInvoiceHeader, {
       invoiceId: req.invoiceId,
       patch: headerPatch(req.patch),
+    }),
+  setInvoiceTax: (req) =>
+    ipcRenderer.invoke(CH.setInvoiceTax, {
+      invoiceId: req.invoiceId,
+      enabled: req.enabled,
+      ratePercent: req.ratePercent,
+      label: req.label,
     }),
   addInvoiceLine: (req) => ipcRenderer.invoke(CH.addInvoiceLine, { invoiceId: req.invoiceId, line: line(req.line) }),
   updateInvoiceLine: (req) =>

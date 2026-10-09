@@ -63,6 +63,24 @@ import { type SaleRecord, paymentStatusFor } from "../domain/sale";
 import type { TerminalConfig } from "../fixtures/terminal";
 
 /** Where a reconciliation edit says it came from, in audit metadata. */
+/** 100% in basis points. A rate above this is refused, not clamped. */
+export const MAX_TAX_BASIS_POINTS = 10_000;
+
+/**
+ * A percentage typed as TEXT becomes exact basis points: "11" -> 1100, "11.5" -> 1150.
+ *
+ * 🔴 ONE PARSER, USED BY BOTH the shop setting and a single invoice's own rate, so the two can
+ * never disagree about what "11.5" means. No float is ever constructed from the typed text.
+ */
+export function parseTaxPercent(value: unknown): number {
+  const text = typeof value === "string" ? value.trim() : "";
+  const match = /^(\d{1,3})(?:\.(\d{1,2}))?$/.exec(text);
+  if (!match) throw new DomainError("INVALID_AMOUNT", "A tax rate must be a percentage like '11' or '11.5'");
+  const bp = Number(match[1]) * 100 + Number((match[2] ?? "").padEnd(2, "0") || "0");
+  if (bp > MAX_TAX_BASIS_POINTS) throw new DomainError("INVALID_AMOUNT", "A tax rate may not exceed 100 percent");
+  return bp;
+}
+
 export const RECONCILIATION_ORIGIN = "invoice_reconciliation";
 
 /**
@@ -247,15 +265,8 @@ export class InvoiceService {
 
     const taxEnabled = input.taxEnabled === true;
     let taxRateBp = 0;
-    if (taxEnabled) {
-      // A percentage typed as text becomes exact basis points — "11" -> 1100, "11.5" -> 1150. No
-      // float, and no rate is hard-coded anywhere in this build.
-      const text = typeof input.taxRatePercent === "string" ? input.taxRatePercent.trim() : "";
-      const match = /^(\d{1,3})(?:\.(\d{1,2}))?$/.exec(text);
-      if (!match) throw new DomainError("INVALID_AMOUNT", "A tax rate must be a percentage like '11' or '11.5'");
-      taxRateBp = Number(match[1]) * 100 + Number((match[2] ?? "").padEnd(2, "0") || "0");
-      if (taxRateBp > 10_000) throw new DomainError("INVALID_AMOUNT", "A tax rate may not exceed 100 percent");
-    }
+    // The SAME parser a single invoice's own rate uses — see parseTaxPercent.
+    if (taxEnabled) taxRateBp = parseTaxPercent(input.taxRatePercent);
 
     const profile: CompanyProfileInput = {
       nameAr: requireText(input.nameAr, "name_ar", MAX_PRODUCT_NAME),
@@ -320,6 +331,61 @@ export class InvoiceService {
       rateBasisPoints: Number(profile.tax_rate_bp),
       label: profile.tax_label,
     };
+  }
+
+  /**
+   * The tax that governs ONE invoice.
+   *
+   * 🔴 THE INVOICE'S OWN STATE WINS, and the shop setting is only the default a draft starts from.
+   * Tax used to be read from `company_profile` at finalize time, which meant issuing one taxed
+   * invoice required toggling a global switch on and off around it — and anything finalized in
+   * between silently inherited the wrong state. The invoice carries its own answer from the moment
+   * the operator sets it, so two consecutive invoices cannot leak tax into each other.
+   *
+   * A draft created before this existed has no tax state of its own; it falls back to the shop
+   * setting, which is exactly how it behaved yesterday.
+   */
+  private invoiceTax(invoice: InvoiceRow): TaxConfig {
+    if (invoice.tax_snapshot_json === null) return this.taxConfig(this.deps.company.find());
+    const parsed = JSON.parse(invoice.tax_snapshot_json) as {
+      enabled?: unknown;
+      rate_basis_points?: unknown;
+      label?: unknown;
+    };
+    if (parsed.enabled !== true) return TAX_DISABLED;
+    const bp = Number(parsed.rate_basis_points);
+    if (!Number.isSafeInteger(bp) || bp < 0 || bp > MAX_TAX_BASIS_POINTS) {
+      throw new DomainError("LEDGER_INTEGRITY", "This invoice carries an unusable tax rate");
+    }
+    return { enabled: true, rateBasisPoints: bp, label: typeof parsed.label === "string" ? parsed.label : null };
+  }
+
+  /**
+   * Sets whether THIS invoice is taxed, and at what rate. Draft only.
+   *
+   * The percentage arrives as TYPED TEXT and is converted to exact basis points by the same parser
+   * the company profile uses — never a float, and never a rate the renderer worked out.
+   */
+  setInvoiceTax(invoiceId: string, input: { readonly enabled: unknown; readonly ratePercent?: unknown; readonly label?: unknown }): InvoiceView {
+    this.requireCashier();
+    const instant = this.now();
+    return this.deps.transact(() => {
+      const invoice = this.requireDraft(invoiceId);
+      const enabled = input.enabled === true;
+      let snapshot: string | null;
+      if (!enabled) {
+        snapshot = JSON.stringify({ enabled: false, rate_basis_points: 0, label: null });
+      } else {
+        const rateBasisPoints = parseTaxPercent(input.ratePercent);
+        const label = cleanText(input.label ?? null, "tax_label", MAX_CUSTOMER_FIELD);
+        snapshot = JSON.stringify({ enabled: true, rate_basis_points: rateBasisPoints, label });
+      }
+      this.deps.invoices.setTaxSnapshot(invoiceId, snapshot, instant);
+      // Re-read, so the totals below are computed from what was actually stored.
+      const stored = this.deps.invoices.requireById(invoiceId);
+      const updated = this.rewriteTotals(stored, null, instant);
+      return { invoice: updated, lines: this.deps.invoices.listLines(invoiceId) };
+    });
   }
 
   // ── Drafts ──────────────────────────────────────────────────────────────────────────────────────
@@ -394,7 +460,8 @@ export class InvoiceService {
     const lineTotals = lines.map((l) => money(l.line_total_minor, currency));
 
     const paid = this.resolvePaid(invoice, header, currency);
-    const tax = this.taxConfig(this.deps.company.find());
+    // 🔴 THE INVOICE'S OWN TAX, not the shop's current switch — see invoiceTax().
+    const tax = this.invoiceTax(invoice);
 
     let totals;
     try {
@@ -626,8 +693,10 @@ export class InvoiceService {
         return recomputed;
       });
 
-      // 5 · totals, from the lines and the shop's own tax setting
-      const tax = this.taxConfig(profile);
+      // 5 · totals, from the lines and THIS INVOICE'S OWN tax — not the shop's current switch.
+      //     A draft that never set one falls back to the shop setting, which is how it behaved
+      //     before per-invoice tax existed.
+      const tax = this.invoiceTax(invoice);
       const totals = computeInvoiceTotals(
         lineTotals,
         invoice.currency,

@@ -87,15 +87,15 @@ assert(surface.require === "undefined" && surface.process === "undefined" && sur
 // The surface is asserted by NAME, not by count, so a new channel has to be added here deliberately.
 // It was 13 before offline product management; the six that added are createProduct, listProducts,
 // updateProduct, setProductActive, getSettings and setTerminalLanguage.
-// It went 19 -> 44 with manual invoices (migration 6): the twenty-five invoice channels below.
+// It went 19 -> 44 with manual invoices (migration 6), and 45 with per-invoice tax (setInvoiceTax).
 //
 // 🔴 This assertion did its job. It FAILED the first Windows gate for migration 6, because the
 // channels had been added to the contract, the handlers, the preload and the unit-level surface
 // test — and not here. That is exactly why it is written by name: the one place that is not
 // derived from the contract is the one place a human has to notice.
 assert(
-  JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","createInvoiceDraft","createProduct","createSale","currentCashier","discardInvoiceDraft","exportBackup","exportCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getInvoice","getSaleHistory","getSettings","getTodaySales","importCatalog","listCashiers","listInvoiceDrafts","listInvoices","listProducts","listReconciliation","listReconciliationQueue","login","logout","pickInvoiceLogo","printInvoice","removeInvoiceLine","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchInvoices","setNextInvoiceNumber","setProductActive","setTerminalLanguage","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
-  `window.pos exposes exactly the 44 business methods, and nothing else (got ${surface.posKeys.length})`,
+  JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","createInvoiceDraft","createProduct","createSale","currentCashier","discardInvoiceDraft","exportBackup","exportCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getInvoice","getSaleHistory","getSettings","getTodaySales","importCatalog","listCashiers","listInvoiceDrafts","listInvoices","listProducts","listReconciliation","listReconciliationQueue","login","logout","pickInvoiceLogo","printInvoice","removeInvoiceLine","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchInvoices","setInvoiceTax","setNextInvoiceNumber","setProductActive","setTerminalLanguage","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
+  `window.pos exposes exactly the 45 business methods, and nothing else (got ${surface.posKeys.length})`,
 );
 await page.screenshot({ path: SHOTS + "01-login.png" });
 

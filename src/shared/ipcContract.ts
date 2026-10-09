@@ -34,6 +34,7 @@ export const CHANNELS = {
   createInvoiceDraft: "pos:createInvoiceDraft",
   getInvoice: "pos:getInvoice",
   updateInvoiceHeader: "pos:updateInvoiceHeader",
+  setInvoiceTax: "pos:setInvoiceTax",
   addInvoiceLine: "pos:addInvoiceLine",
   updateInvoiceLine: "pos:updateInvoiceLine",
   removeInvoiceLine: "pos:removeInvoiceLine",
@@ -417,6 +418,20 @@ export const INVOICE_HEADER_PATCH_KEYS = [
 
 export type InvoiceHeaderPatchKey = (typeof INVOICE_HEADER_PATCH_KEYS)[number];
 
+/**
+ * Whether THIS invoice is taxed, and at what rate.
+ *
+ * 🔴 PER INVOICE, NOT A GLOBAL SWITCH. Issuing one taxed invoice used to mean toggling the shop
+ * setting on and off around it, and anything finalized in between inherited the wrong state.
+ */
+export interface InvoiceTaxRequest {
+  readonly invoiceId: string;
+  readonly enabled: boolean;
+  /** Typed text — "11", "11.5". Converted to exact basis points by the domain. Null when disabled. */
+  readonly ratePercent: string | null;
+  readonly label: string | null;
+}
+
 export interface InvoiceHeaderRequest {
   readonly invoiceId: string;
   /** Only the fields that actually changed. An empty patch is a no-op, not an erasure. */
@@ -625,6 +640,7 @@ export interface PosApi {
   createInvoiceDraft(): Promise<IpcResult<InvoiceViewDto>>;
   getInvoice(req: InvoiceIdRequest): Promise<IpcResult<InvoiceViewDto>>;
   updateInvoiceHeader(req: InvoiceHeaderRequest): Promise<IpcResult<InvoiceViewDto>>;
+  setInvoiceTax(req: InvoiceTaxRequest): Promise<IpcResult<InvoiceViewDto>>;
   addInvoiceLine(req: AddInvoiceLineRequest): Promise<IpcResult<InvoiceViewDto>>;
   updateInvoiceLine(req: UpdateInvoiceLineRequest): Promise<IpcResult<InvoiceViewDto>>;
   removeInvoiceLine(req: InvoiceLineRefRequest): Promise<IpcResult<InvoiceViewDto>>;

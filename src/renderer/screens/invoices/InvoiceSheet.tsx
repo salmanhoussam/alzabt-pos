@@ -55,6 +55,19 @@ function summarize(items: ReadonlyArray<ReconciliationDto>, t: (k: string) => st
   return [...counts.entries()].map(([classification, n]) => `${n} × ${label[classification] ?? classification}`);
 }
 
+/**
+ * Exact basis points as a percentage string: 1100 -> "11", 1150 -> "11.5".
+ *
+ * 🔴 INTEGER ARITHMETIC ONLY. Dividing by 100 in floating point would print 11.499999999999998 for
+ * a rate the database holds exactly, on a commercial document.
+ */
+function percentText(basisPoints: number): string {
+  const whole = Math.trunc(basisPoints / 100);
+  const frac = basisPoints % 100;
+  if (frac === 0) return String(whole);
+  return `${whole}.${String(frac).padStart(2, "0").replace(/0$/, "")}`;
+}
+
 export function InvoiceSheet({
   invoiceId,
   onReviewNow,
@@ -150,6 +163,25 @@ export function InvoiceSheet({
     setView(next);
     return next;
   };
+
+  const snapshot = view?.invoice.taxSnapshot ?? null;
+  const taxOn = snapshot?.enabled === true;
+  /** The frozen rate as a percentage string, from exact basis points — never a float. */
+  const taxRate = snapshot && snapshot.enabled ? percentText(snapshot.rateBasisPoints) : "";
+
+  const applyTax = (enabled: boolean, ratePercent: string) =>
+    run(() =>
+      call(
+        pos().setInvoiceTax({
+          invoiceId,
+          enabled,
+          // An empty rate with tax switched on means "11" has not been typed yet; the service
+          // refuses it and says so, rather than guessing a rate onto a commercial document.
+          ratePercent: enabled ? (ratePercent.trim() === "" ? "0" : ratePercent) : null,
+          label: snapshot?.label ?? null,
+        }),
+      ),
+    );
 
   const saveDraft = () =>
     run(async () => {
@@ -358,6 +390,36 @@ export function InvoiceSheet({
           />
         </label>
       </section>
+
+      {/* 🔴 PER-INVOICE TAX, not a global switch. Issuing one taxed invoice used to mean toggling
+          the shop setting on and off around it, and anything finalized in between inherited the
+          wrong state. The rate is frozen onto THIS document at finalization. */}
+      {!readOnly && (
+        <section className="inv-tax" data-testid="sheet-tax-controls">
+          <label className="field inline">
+            <input
+              type="checkbox"
+              checked={taxOn}
+              onChange={(e) => void applyTax(e.target.checked, taxRate)}
+              data-testid="tax-enabled"
+            />
+            <span>{t("inv.tax.apply")}</span>
+          </label>
+          {taxOn && (
+            <label className="field">
+              <span>{t("inv.tax.rate")}</span>
+              <input
+                dir="ltr"
+                inputMode="decimal"
+                defaultValue={taxRate}
+                onBlur={(e) => void applyTax(true, e.target.value)}
+                data-testid="tax-rate"
+              />
+            </label>
+          )}
+          <span className="muted small">{t("inv.tax.hint")}</span>
+        </section>
+      )}
 
       <div className="inv-lines-scroll">
       <table className="inv-lines" data-testid="sheet-lines">

@@ -157,6 +157,23 @@ export class InvoiceRepository {
    * customer name without the matching totals would be rejected by the table's own arithmetic
    * CHECK. Header and money therefore move together, by the schema's design.
    */
+  /**
+   * Writes a DRAFT's own tax intent.
+   *
+   * 🔴 NO MIGRATION WAS NEEDED FOR THIS, and that was measured rather than hoped: migration 6
+   * declares `tax_snapshot_json TEXT CHECK (… json_valid … json_type = 'object')` with no NOT NULL
+   * and no required keys, and the "what being FINAL means" CHECK lists issuer_snapshot_json but
+   * NOT tax_snapshot_json. So a draft may legitimately carry its tax state in the same column that
+   * freezes it at finalization — one column, one meaning, written twice in the document's life.
+   *
+   * The immutability trigger still refuses this once the invoice is final.
+   */
+  setTaxSnapshot(id: string, taxSnapshotJson: string | null, now: Date): void {
+    this.db
+      .prepare("UPDATE invoices SET tax_snapshot_json = @tax, updated_at = @now WHERE id = @id AND status = 'draft'")
+      .run({ id, tax: taxSnapshotJson, now: now.toISOString() });
+  }
+
   updateDraft(
     id: string,
     header: InvoiceHeaderEdit,

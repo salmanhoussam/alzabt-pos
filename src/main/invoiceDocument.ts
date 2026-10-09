@@ -40,6 +40,7 @@ const LABELS = {
   unit: ["الوحدة", "Unit"],
   unitPrice: ["سعر الوحدة", "Unit Price"],
   lineTotal: ["المجموع", "Total"],
+  taxColumn: ["الضريبة", "TAX"],
   subtotal: ["المجموع", "Subtotal"],
   total: ["الإجمالي", "Grand Total"],
   paid: ["المدفوع", "Paid"],
@@ -68,19 +69,36 @@ export function escape(value: string): string {
  * side of the number, and a reader sees a different amount than the one stored. The isolate pins
  * the run.
  */
+/** Exact basis points as a percentage string. Integer arithmetic only — never a float. */
+export function percentFromBasisPoints(basisPoints: number): string {
+  const whole = Math.trunc(basisPoints / 100);
+  const frac = basisPoints % 100;
+  if (frac === 0) return String(whole);
+  return `${whole}.${String(frac).padStart(2, "0").replace(/0$/, "")}`;
+}
+
 export function printMoney(m: MoneyDto, exponent = 2): string {
   const digits = m.minor.padStart(exponent + 1, "0");
   const decimal = exponent === 0 ? digits : `${digits.slice(0, -exponent)}.${digits.slice(-exponent)}`;
   return `<bdi dir="ltr">${escape(decimal)}&nbsp;${escape(m.currency)}</bdi>`;
 }
 
-function row(line: InvoiceLineDto, exponent: number): string {
+/**
+ * One printed line.
+ *
+ * 🔴 THE TAX CELL EXISTS ONLY WHEN THE INVOICE IS TAXED, and it shows the invoice's own frozen
+ * RATE, repeated per row. V1 tax is invoice-level: nothing per-line is configured or stored, so
+ * this is a display of one number, not a second source of truth. The DISCOUNT column the reference
+ * document carries is deliberately absent — there is no discount in this product, at any layer.
+ */
+function row(line: InvoiceLineDto, exponent: number, taxRate: string | null): string {
+  const taxCell = taxRate === null ? "" : `\n  <td class="n taxcell"><bdi dir="ltr">${escape(taxRate)}</bdi></td>`;
   return `<tr>
   <td class="n idx"><bdi dir="ltr">${line.lineNo}</bdi></td>
   <td class="desc">${escape(line.description ?? "")}</td>
   <td class="n"><bdi dir="ltr">${escape(line.quantityText)}</bdi></td>
   <td class="unit">${escape(line.unitLabel ?? "")}</td>
-  <td class="money">${printMoney(line.unitPrice, exponent)}</td>
+  <td class="money">${printMoney(line.unitPrice, exponent)}</td>${taxCell}
   <td class="money">${printMoney(line.lineTotal, exponent)}</td>
 </tr>`;
 }
@@ -112,6 +130,8 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   const exponent = inv.currency === "LBP" ? 0 : 2;
   const taxEnabled = inv.taxSnapshot?.enabled === true;
   const taxLabel = inv.taxSnapshot?.label ?? "ضريبة / Tax";
+  // Exact basis points to a percentage, by integer arithmetic. 1100 -> "11%", 1150 -> "11.5%".
+  const taxRateText = taxEnabled ? `${percentFromBasisPoints(inv.taxSnapshot!.rateBasisPoints)}%` : null;
 
   const logo =
     options.logoUrl && options.logoUrl.trim() !== ""
@@ -214,6 +234,8 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   td.idx { width: 9mm; color: #444; }
   td.unit { text-align: center; width: 22mm; }
   td.money { text-align: end; width: 28mm; white-space: nowrap; }
+  td.taxcell, table.lines thead th:nth-last-child(2) { }
+  td.taxcell { text-align: center; width: 18mm; }
   td.desc { text-align: start; }
   /* The closing block never splits: words on one side, money on the other, balanced across A4. */
   .tail { margin-top: 4mm; display: flex; gap: 6mm; align-items: stretch; page-break-inside: avoid; break-inside: avoid; }
@@ -284,10 +306,15 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
       <th>${escape(LABELS.qty[0])}<br /><bdi dir="ltr">${escape(LABELS.qty[1])}</bdi></th>
       <th>${escape(LABELS.unit[0])}<br /><bdi dir="ltr">${escape(LABELS.unit[1])}</bdi></th>
       <th>${escape(LABELS.unitPrice[0])}<br /><bdi dir="ltr">${escape(LABELS.unitPrice[1])}</bdi></th>
+      ${
+        taxEnabled
+          ? `<th>${escape(LABELS.taxColumn[0])}<br /><bdi dir="ltr">${escape(LABELS.taxColumn[1])}</bdi></th>`
+          : ""
+      }
       <th>${escape(LABELS.lineTotal[0])}<br /><bdi dir="ltr">${escape(LABELS.lineTotal[1])}</bdi></th>
     </tr></thead>
     <tbody>
-${view.lines.map((l) => row(l, exponent)).join("\n")}
+${view.lines.map((l) => row(l, exponent, taxRateText)).join("\n")}
     </tbody>
   </table>
 

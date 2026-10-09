@@ -478,6 +478,18 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       }
       return toInvoiceViewDto(invoices().updateDraftHeader(str(o.invoiceId, "invoiceId", 100), draft));
     }),
+    setInvoiceTax: wrap("setInvoiceTax", (p) => {
+      const o = exactObject(p, ["invoiceId", "enabled", "ratePercent", "label"]);
+      if (typeof o.enabled !== "boolean") invalid("'enabled' must be true or false");
+      return toInvoiceViewDto(
+        invoices().setInvoiceTax(str(o.invoiceId, "invoiceId", 100), {
+          enabled: o.enabled,
+          // Typed text. The domain turns it into exact basis points; this layer never does maths.
+          ratePercent: optionalStr(o.ratePercent, "ratePercent", 8),
+          label: optionalStr(o.label, "label", MAX_CUSTOMER_FIELD),
+        }),
+      );
+    }),
     addInvoiceLine: wrap("addInvoiceLine", (p) => {
       const o = exactObject(p, ["invoiceId", "line"]);
       return toInvoiceViewDto(invoices().addLine(str(o.invoiceId, "invoiceId", 100), invoiceLine(o.line)));
