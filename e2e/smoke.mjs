@@ -177,7 +177,7 @@ await page.screenshot({ path: SHOTS + "05-today.png" });
 await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
 await page.locator('tr[data-payment-method="card"]').locator('[data-testid="history-void"]').click();
-await page.getByPlaceholder("e.g. wrong item rung up").fill("customer cancelled");
+await page.locator('[data-testid="void-reason"]').fill("customer cancelled");
 await page.screenshot({ path: SHOTS + "06-void-dialog.png" });
 await page.locator('[data-testid="void-confirm"]').click();
 await page.waitForSelector("tr.voided");

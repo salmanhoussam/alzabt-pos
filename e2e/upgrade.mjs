@@ -109,7 +109,7 @@ async function voidCardSale(page) {
   await tab(page, "History");
   await page.waitForSelector(".history-table");
   await page.locator('tr[data-payment-method="card"]').locator('[data-testid="history-void"]').click();
-  await page.getByPlaceholder("e.g. wrong item rung up").fill("wrong item rung up");
+  await page.locator('[data-testid="void-reason"]').fill("wrong item rung up");
   await page.locator('[data-testid="void-confirm"]').click();
   await page.waitForSelector("tr.voided");
 }
