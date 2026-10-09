@@ -230,10 +230,14 @@ export function SellScreen() {
                   </span>
                 </div>
                 <div className="qty">
+                  {/* 🔴 NOT "qty-*": that prefix already belongs to the per-product quantity
+                      INPUT (`qty-${productId}`), and the suite selects it with
+                      [data-testid^="qty-"]. Naming these buttons qty-dec/qty-inc put three
+                      buttons inside that prefix and .first() started matching a button. */}
                   <button
                     className="btn key"
                     aria-label={t("sell.decrease")}
-                    data-testid="qty-dec"
+                    data-testid="line-dec"
                     onClick={() => edit(decrement(cart, l.productId))}
                   >
                     −
@@ -254,7 +258,7 @@ export function SellScreen() {
                   <button
                     className="btn key"
                     aria-label={t("sell.increase")}
-                    data-testid="qty-inc"
+                    data-testid="line-inc"
                     onClick={() => edit(addProduct(cart, l.productId))}
                   >
                     +
@@ -263,7 +267,7 @@ export function SellScreen() {
                   <button
                     className="btn ghost small line-remove"
                     aria-label={t("sell.remove")}
-                    data-testid="qty-remove"
+                    data-testid="line-remove-btn"
                     title={t("sell.remove")}
                     onClick={() => edit(removeProduct(cart, l.productId))}
                   >

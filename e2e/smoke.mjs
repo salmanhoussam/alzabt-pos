@@ -130,10 +130,10 @@ await product(page, "Espresso").click();
 await product(page, "Fresh Orange Juice").click();
 await product(page, "Butter Croissant").click();
 assert((await totalText(page)) === "11.35 USD", "cart total 2×2.50 + 4.10 + 2.25 = 11.35");
-await line(page, "Espresso").locator('[data-testid="qty-dec"]').click();
-await line(page, "Butter Croissant").locator('[data-testid="qty-remove"]').click();
-await line(page, "Fresh Orange Juice").locator('[data-testid="qty-inc"]').click();
-await line(page, "Fresh Orange Juice").locator('[data-testid="qty-inc"]').click();
+await line(page, "Espresso").locator('[data-testid="line-dec"]').click();
+await line(page, "Butter Croissant").locator('[data-testid="line-remove-btn"]').click();
+await line(page, "Fresh Orange Juice").locator('[data-testid="line-inc"]').click();
+await line(page, "Fresh Orange Juice").locator('[data-testid="line-inc"]').click();
 assert((await totalText(page)) === "14.80 USD", "after edits 2.50 + 3×4.10 = 14.80 (IEEE-754 float gives 14.799999999999999)");
 await page.screenshot({ path: SHOTS + "02-cart.png" });
 
