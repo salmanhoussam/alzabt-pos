@@ -70,11 +70,16 @@ const STAT_TESTID = {
   "Completed sales": "today-completed",
   "Voided sales": "today-voided",
   "Gross sales": "today-gross",
+  "Voids": "today-void-amount",
   "Net sales": "today-net",
 };
 async function stat(page, label) {
   const id = STAT_TESTID[label];
-  if (!id) throw new Error("no stat " + label);
+  // 🔴 A MISSING LABEL IS A BROKEN TEST, NOT A MISSING NUMBER. This map replaced a lookup by
+  // English label text, and the first version covered four of the screen's five figures — the
+  // void AMOUNT (distinct from the void COUNT) was left out and reported as "no stat Voids",
+  // which reads like the screen lost a figure rather than like the map being short.
+  if (!id) throw new Error(`no stat "${label}" — known: ${Object.keys(STAT_TESTID).join(", ")}`);
   return (await page.locator(`[data-testid="${id}"]`).innerText()).trim();
 }
 

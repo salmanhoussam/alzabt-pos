@@ -125,6 +125,7 @@ async function stats(page) {
     "Completed sales": await read("today-completed"),
     "Voided sales": await read("today-voided"),
     "Gross sales": await read("today-gross"),
+    "Voids": await read("today-void-amount"),
     "Net sales": await read("today-net"),
   };
 }
