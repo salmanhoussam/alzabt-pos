@@ -166,6 +166,21 @@ export function InvoiceSheet({
   };
 
   /**
+   * What the stored row would put INTO each input.
+   *
+   * 🔴 NOT `invoice[key]` BLINDLY. `paid` is a MoneyDto — an object — while its input holds a
+   * decimal string, so comparing the two directly made every draft look dirty and the exit dialog
+   * appeared even on a draft saved a second earlier. Each entry mirrors that field's own
+   * defaultValue, so "typed" and "stored" are the same kind of thing before they are compared.
+   */
+  const storedDisplay = (key: (typeof INVOICE_HEADER_PATCH_KEYS)[number]): string => {
+    const inv = view?.invoice;
+    if (!inv) return "";
+    if (key === "paid") return inv.paid.minor === "0" ? "" : paidText(inv.paid.minor);
+    return (inv as unknown as Record<string, string | null>)[key] ?? "";
+  };
+
+  /**
    * Is anything typed but not yet stored?
    *
    * 🔴 THE EXIT RULE NEEDS A REAL ANSWER, not an optimistic one. Comparing each bound input's
@@ -177,8 +192,7 @@ export function InvoiceSheet({
     if (!inv) return false;
     for (const key of INVOICE_HEADER_PATCH_KEYS) {
       if (!fieldRefs.current[key]) continue;
-      const stored = (inv as unknown as Record<string, string | null>)[key] ?? "";
-      if ((typed(key) ?? "") !== stored) return true;
+      if ((typed(key) ?? "") !== storedDisplay(key)) return true;
     }
     return false;
   };

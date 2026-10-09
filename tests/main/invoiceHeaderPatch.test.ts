@@ -271,6 +271,16 @@ describe("the renderer cannot reintroduce the stale full-header write", () => {
     // The dirty check compares what is TYPED against what is STORED. A boolean set by onChange
     // would nag about a field the operator restored to its original value.
     expect(sheet).toContain("const isDirty =");
+
+    // 🔴 AND IT COMPARES LIKE WITH LIKE. `paid` is a MoneyDto while its input holds a decimal
+    // string, so indexing the invoice generically made EVERY draft look dirty — the exit dialog
+    // appeared on a draft saved a second earlier, and the installed-app run caught it. The
+    // comparison goes through storedDisplay(), which mirrors each field's own defaultValue.
+    const dirty = sheet.slice(sheet.indexOf("const isDirty ="), sheet.indexOf("const snapshot ="));
+    expect(dirty, "isDirty must not index the invoice generically").not.toContain("Record<string, string | null>");
+    expect(dirty).toContain("storedDisplay(key)");
+    const stored = sheet.slice(sheet.indexOf("const storedDisplay ="), sheet.indexOf("const isDirty ="));
+    expect(stored, "paid is a MoneyDto and needs its own branch").toContain('key === "paid"');
     // Discard is separate, and reaches onClosed only after an explicit confirmation.
     expect(sheet).toContain('data-testid="discard-confirm-yes"');
     // 🔴 THE CALL, NOT THE WORD. The first version asserted `not.toContain("window.confirm")` and
