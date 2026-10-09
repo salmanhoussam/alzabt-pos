@@ -576,6 +576,13 @@ describe("the daily sales report counts an invoice sale exactly once", () => {
     });
     const id = finalize([{ unitPrice: "20.00" }]);
 
+    // 🔴 WHY THIS REPORT CAN BE BUILT AT ALL, and it is not luck. buildTodaySales REFUSES a
+    // business day holding more than one currency, and invoice sales now feed it. An invoice draft
+    // takes terminal.currency — the same single source a priced cart takes — so a second currency
+    // cannot enter the day through an invoice. Asserted here so the invariant stays visible.
+    const currencies = h.db.prepare("SELECT DISTINCT currency AS c FROM sales").all() as Array<{ c: string }>;
+    expect(currencies.map((r) => r.c)).toEqual([FIXTURE_TERMINAL.currency]);
+
     const report = h.service.getTodaySales();
     expect(report.completedSalesCount).toBe(2);
     expect(report.grossSales.minor).toBe(2_250n);
