@@ -231,7 +231,33 @@ for (const [name, action] of [
   const { env, diagFile } = newProfile("D-ledger");
   const app = await electron.launch({ executablePath: EXE, env });
   const page = await app.firstWindow();
-  await page.waitForSelector("text=Select cashier", { timeout: 30000 });
+
+  // 🔴 THIS WAIT USED TO BE MUTE, and that cost two CI rounds. When it timed out it reported only
+  // `waiting for locator('text=Select cashier')` — nothing about whether the app had started, whether
+  // the window was ready, or what the page actually contained. Phases A/B/C above wait for the
+  // app's OWN window-ready diagnostic; D did not, so a failure here could not be told apart from a
+  // renderer that never mounted. It now waits for the diagnostic FIRST and, on timeout, writes the
+  // DOM and a screenshot before failing. Nothing is weakened: the selector assertion still has to
+  // pass, and two new facts are recorded on the way to it.
+  const ready = await waitFor(
+    () => readDiag(diagFile).some((e) => e.event === "window-ready"),
+    30000,
+  );
+  try {
+    await page.waitForSelector("text=Select cashier", { timeout: 30000 });
+  } catch (err) {
+    const dom = await page.evaluate(() => document.getElementById("root")?.innerHTML?.slice(0, 2000) ?? "NO ROOT");
+    const url = page.url();
+    writeFileSync(join(OUT, "D-ledger-stuck.html"), dom, "utf8");
+    await page.screenshot({ path: join(OUT, "D-ledger-stuck.png") }).catch(() => {});
+    // This file logs with console.log — there is no log() helper here, and assuming one would have
+    // thrown a ReferenceError INSIDE the error path, hiding the very failure it exists to explain.
+    console.log(
+      "D-ledger STUCK:",
+      JSON.stringify({ windowReadyDiag: ready, url, rootLength: dom.length, diagEvents: readDiag(diagFile).map((e) => e.event) }),
+    );
+    throw err;
+  }
   await page.getByRole("button", { name: "Cashier One" }).click();
   for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
   await page.getByRole("button", { name: "Log in" }).click();

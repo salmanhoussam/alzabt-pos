@@ -248,3 +248,16 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .badge.draft { background: #fde68a; color: #7c2d12; }
 .small { font-size: .85rem; }
 .notice { background: #eef6ff; border: 1px solid #bcd8f7; border-radius: 6px; padding: 8px 10px; }
+
+/* The intent chooser: each mode states what it MEANS, not just its name, because the two kinds of
+   invoice look alike on paper and mean opposite things. */
+.inv-modes { display: grid; gap: 6px; margin-block: 10px; }
+.inv-modes .btn.wide { width: 100%; }
+.inv-modes p { margin: 0 0 8px; }
+.badge.mode { background: var(--ink, #111); color: #fff; }
+
+/* Per-invoice tax: one row above the lines, so the decision is visible while the invoice is built. */
+.inv-tax { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+           border: 1px solid var(--line, #d9dce1); padding: 8px 10px; }
+.field.inline { display: flex; flex-direction: row; gap: 6px; align-items: center; }
+.inv-tax .field input[inputmode="decimal"] { width: 6rem; }

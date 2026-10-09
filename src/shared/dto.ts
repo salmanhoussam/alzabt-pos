@@ -173,6 +173,9 @@ export function toIssuerDto(json: string | null): IssuerSnapshotDto | null {
     phone2: text("phone2"),
     email: text("email"),
     logoPath: text("logo_path"),
+    // Null on every invoice finalized before logo freezing existed — those keep resolving the live
+    // branding file, because a finalized invoice is immutable and cannot be backfilled.
+    logoAsset: text("logo_asset"),
     taxpayerNumber: text("taxpayer_number"),
     commercialRegister: text("commercial_register"),
     vatNumber: text("vat_number"),

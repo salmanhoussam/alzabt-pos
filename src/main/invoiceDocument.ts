@@ -24,6 +24,10 @@ export interface InvoiceDocumentOptions {
 
 const LABELS = {
   invoice: ["فاتورة", "INVOICE"],
+  // 🔴 THE DOCUMENT NAMES ITSELF. An outgoing sales invoice and an incoming intake document look
+  // alike on paper; only this cell distinguishes them, and the approved template carries it.
+  docType: ["فاتورة مبيعات", "Sales Invoice"],
+  currency: ["العملة", "Currency"],
   number: ["رقم الفاتورة", "Invoice No."],
   date: ["التاريخ", "Date"],
   customer: ["العميل", "Customer"],
@@ -36,6 +40,7 @@ const LABELS = {
   unit: ["الوحدة", "Unit"],
   unitPrice: ["سعر الوحدة", "Unit Price"],
   lineTotal: ["المجموع", "Total"],
+  taxColumn: ["الضريبة", "TAX"],
   subtotal: ["المجموع", "Subtotal"],
   total: ["الإجمالي", "Grand Total"],
   paid: ["المدفوع", "Paid"],
@@ -64,19 +69,36 @@ export function escape(value: string): string {
  * side of the number, and a reader sees a different amount than the one stored. The isolate pins
  * the run.
  */
+/** Exact basis points as a percentage string. Integer arithmetic only — never a float. */
+export function percentFromBasisPoints(basisPoints: number): string {
+  const whole = Math.trunc(basisPoints / 100);
+  const frac = basisPoints % 100;
+  if (frac === 0) return String(whole);
+  return `${whole}.${String(frac).padStart(2, "0").replace(/0$/, "")}`;
+}
+
 export function printMoney(m: MoneyDto, exponent = 2): string {
   const digits = m.minor.padStart(exponent + 1, "0");
   const decimal = exponent === 0 ? digits : `${digits.slice(0, -exponent)}.${digits.slice(-exponent)}`;
   return `<bdi dir="ltr">${escape(decimal)}&nbsp;${escape(m.currency)}</bdi>`;
 }
 
-function row(line: InvoiceLineDto, exponent: number): string {
+/**
+ * One printed line.
+ *
+ * 🔴 THE TAX CELL EXISTS ONLY WHEN THE INVOICE IS TAXED, and it shows the invoice's own frozen
+ * RATE, repeated per row. V1 tax is invoice-level: nothing per-line is configured or stored, so
+ * this is a display of one number, not a second source of truth. The DISCOUNT column the reference
+ * document carries is deliberately absent — there is no discount in this product, at any layer.
+ */
+function row(line: InvoiceLineDto, exponent: number, taxRate: string | null): string {
+  const taxCell = taxRate === null ? "" : `\n  <td class="n taxcell"><bdi dir="ltr">${escape(taxRate)}</bdi></td>`;
   return `<tr>
   <td class="n idx"><bdi dir="ltr">${line.lineNo}</bdi></td>
   <td class="desc">${escape(line.description ?? "")}</td>
   <td class="n"><bdi dir="ltr">${escape(line.quantityText)}</bdi></td>
   <td class="unit">${escape(line.unitLabel ?? "")}</td>
-  <td class="money">${printMoney(line.unitPrice, exponent)}</td>
+  <td class="money">${printMoney(line.unitPrice, exponent)}</td>${taxCell}
   <td class="money">${printMoney(line.lineTotal, exponent)}</td>
 </tr>`;
 }
@@ -108,6 +130,8 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   const exponent = inv.currency === "LBP" ? 0 : 2;
   const taxEnabled = inv.taxSnapshot?.enabled === true;
   const taxLabel = inv.taxSnapshot?.label ?? "ضريبة / Tax";
+  // Exact basis points to a percentage, by integer arithmetic. 1100 -> "11%", 1150 -> "11.5%".
+  const taxRateText = taxEnabled ? `${percentFromBasisPoints(inv.taxSnapshot!.rateBasisPoints)}%` : null;
 
   const logo =
     options.logoUrl && options.logoUrl.trim() !== ""
@@ -154,6 +178,13 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
      who issued it, what it is, what it costs. Nothing below is tied to any one shop: the colours
      are the document's, the names and numbers all come from the frozen snapshot. */
   :root { --ink: #111; --accent: #c1121f; --rule: #9aa0a6; --soft: #f3f4f6; }
+  /* 🔴 THE STRUCTURAL TABLES ARE LAID OUT LEFT TO RIGHT, and that is not an oversight about an
+     Arabic document. The approved template orders its columns No. · Description · QTY · Unit ·
+     Unit Price · Total from left to right, puts the customer LABELS on the left, and puts the
+     totals on the right. An RTL page mirrors all three, so every column appeared in the opposite
+     order from the paper the shop approved. The page stays dir="rtl" for prose, and each table
+     carries dir="ltr" for its own column order; cell text is then aligned per column below. This
+     was found by LOOKING at a render — no stylesheet assertion can see a mirrored table. */
   @page { size: A4; margin: 13mm 12mm; }
   * { box-sizing: border-box; }
   body {
@@ -166,28 +197,46 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   .sheet { width: 100%; }
   /* The accent rule above the header: the first thing on the page, and the shop's own colour band. */
   .accent-bar { height: 3mm; background: var(--accent); margin-bottom: 3mm; }
-  header { display: flex; align-items: flex-start; gap: 10mm; border-bottom: 3px solid var(--ink); padding-bottom: 4mm; }
-  .issuer { flex: 1 1 auto; }
+  /* 🔴 THE ISSUER BLOCK IS OPTICALLY CENTRED, as the approved template draws it, with the logo at
+     the LEFT. Three grid tracks and not two: the empty third track is the same width as the logo
+     track, so the centre column is centred on the PAGE rather than on the space the logo leaves
+     over. Without it the block drifts right by half the logo's width whenever a logo exists, and
+     by nothing when it does not — two different layouts for the same document.
+     The header carries dir="ltr" for its TRACK ORDER only; the Arabic inside it still reads right
+     to left, set on .issuer below. */
+  header {
+    display: grid; grid-template-columns: 44mm 1fr 44mm; align-items: center; gap: 0 6mm;
+    border-bottom: 3px solid var(--ink); padding-bottom: 4mm;
+  }
+  .issuer { grid-column: 2; direction: rtl; text-align: center; }
+  .logo-slot { grid-column: 1; }
   /* A stronger company header, as the field asked: the name leads the page. */
   .issuer h1 { margin: 0 0 1mm; font-size: 22pt; line-height: 1.1; letter-spacing: -.2px; }
   .issuer .legal { font-size: 10pt; color: #333; font-weight: 600; }
   .issuer .tagline { font-size: 9.5pt; color: var(--accent); font-weight: 600; }
-  .contact { margin-top: 2mm; font-size: 9pt; color: #444; display: flex; flex-wrap: wrap; gap: 0 4mm; }
-  .ids { margin-top: 1.5mm; font-size: 8.5pt; color: #555; display: flex; flex-wrap: wrap; gap: 0 4mm; }
+  .contact { margin-top: 2mm; font-size: 9pt; color: #444;
+             display: flex; flex-wrap: wrap; justify-content: center; gap: 0 4mm; }
+  .ids { margin-top: 1.5mm; font-size: 8.5pt; color: #555;
+         display: flex; flex-wrap: wrap; justify-content: center; gap: 0 4mm; }
   .logo { max-height: 24mm; max-width: 44mm; object-fit: contain; }
-  /* The black invoice bar. */
-  .doctitle {
-    margin: 4mm 0 3mm; padding: 2mm 4mm; background: var(--ink); color: #fff;
-    font-size: 15pt; font-weight: 700; letter-spacing: .6px;
-    display: flex; justify-content: space-between; align-items: baseline; gap: 6mm;
+  /* The black invoice bar: a four-column table, as the approved template draws it — the document
+     type, its number, its date and its currency, with bilingual labels on the black row. */
+  table.docbar { width: 100%; border-collapse: collapse; margin: 4mm 0 0; font-size: 10.5pt; }
+  table.docbar th {
+    background: var(--ink); color: #fff; padding: 2mm 3mm; font-size: 10pt; font-weight: 700;
+    text-align: center; border: 1px solid var(--ink);
   }
-  .doctitle .docnum { font-size: 12.5pt; font-weight: 600; }
+  table.docbar td {
+    padding: 2mm 3mm; text-align: center; border: 1px solid var(--rule); font-weight: 600;
+  }
+  table.docbar td:first-child { font-weight: 700; }
   .meta, .customer { width: 100%; border-collapse: collapse; font-size: 10.5pt; }
   .meta td, .customer td { padding: 1.4mm 2.5mm; }
   .meta th, .customer th { padding: 1.4mm 2.5mm; text-align: start; white-space: nowrap; color: #333; font-weight: 700; }
   /* The customer block: a boxed panel with a shaded label column, like the template's. */
-  .customer { margin-top: 0; border: 1px solid var(--ink); }
-  .customer th { background: var(--soft); width: 34mm; border-inline-end: 1px solid var(--rule); }
+  .customer { margin-top: 3mm; border: 1px solid var(--ink); }
+  .customer th { background: var(--soft); width: 40mm; border-right: 1px solid var(--rule); text-align: left; }
+  .customer td { text-align: right; direction: rtl; }
   .customer tr + tr th, .customer tr + tr td { border-top: 1px solid #dcdee1; }
   table.lines { width: 100%; border-collapse: collapse; margin-top: 4mm; font-size: 10.5pt; }
   table.lines th, table.lines td { border: 1px solid var(--rule); padding: 1.8mm 2mm; vertical-align: top; }
@@ -203,18 +252,21 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   table.lines thead { display: table-header-group; }
   table.lines tfoot { display: table-row-group; }
   td.n { text-align: center; width: 16mm; }
-  td.idx { width: 9mm; color: #444; }
-  td.unit { text-align: center; width: 22mm; }
-  td.money { text-align: end; width: 28mm; white-space: nowrap; }
-  td.desc { text-align: start; }
+  td.idx { width: 10mm; color: #444; }
+  td.unit { text-align: center; width: 26mm; }
+  td.money { text-align: right; width: 28mm; white-space: nowrap; }
+  td.taxcell { text-align: center; width: 18mm; }
+  /* The description is the widest column, and its Arabic sits at the right edge of its own cell —
+     the table reads left to right, the sentence inside it does not. */
+  td.desc { text-align: right; direction: rtl; min-width: 60mm; }
   /* The closing block never splits: words on one side, money on the other, balanced across A4. */
   .tail { margin-top: 4mm; display: flex; gap: 6mm; align-items: stretch; page-break-inside: avoid; break-inside: avoid; }
   .words { flex: 1 1 auto; border: 1px solid var(--rule); border-top: 3px solid var(--ink);
-           padding: 3mm; font-size: 10.5pt; min-height: 20mm; }
+           padding: 3mm; font-size: 10.5pt; min-height: 20mm; direction: rtl; text-align: right; }
   .words .words-label { font-size: 8.5pt; color: #666; font-weight: 700; display: block; margin-bottom: 1mm; }
   table.totals { border-collapse: collapse; min-width: 74mm; font-size: 10.5pt; }
-  table.totals th { text-align: start; padding: 1.6mm 3mm; color: #333; font-weight: 600; white-space: nowrap; }
-  table.totals td { text-align: end; padding: 1.6mm 3mm; white-space: nowrap; border-bottom: 1px solid #e3e5e8; }
+  table.totals th { text-align: left; padding: 1.6mm 3mm; color: #333; font-weight: 600; white-space: nowrap; }
+  table.totals td { text-align: right; padding: 1.6mm 3mm; white-space: nowrap; border-bottom: 1px solid #e3e5e8; }
   table.totals tr.grand th, table.totals tr.grand td {
     font-weight: 700; font-size: 12pt; background: var(--soft); border-top: 2px solid var(--ink);
     border-bottom: 1px solid var(--ink);
@@ -231,7 +283,8 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
 <body>
 <div class="sheet">
   <div class="accent-bar"></div>
-  <header>
+  <header dir="ltr">
+    <div class="logo-slot">${logo}</div>
     <div class="issuer">
       <h1>${escape(issuer?.nameAr ?? "")}</h1>
       ${issuer?.nameEn ? `<div class="legal"><bdi dir="ltr">${escape(issuer.nameEn)}</bdi></div>` : ""}
@@ -240,51 +293,54 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
       ${contact ? `<div class="contact">${contact}</div>` : ""}
       ${identifierRows(view)}
     </div>
-    ${logo}
   </header>
 
-  <div class="doctitle">
-    <span>${escape(LABELS.invoice[0])} &middot; <bdi dir="ltr">${escape(LABELS.invoice[1])}</bdi></span>
-    <span class="docnum">${
-      inv.invoiceNumber === null
-        ? `<span class="draft">${escape("مسودة / DRAFT")}</span>`
-        : `<bdi dir="ltr">#${inv.invoiceNumber}</bdi>`
-    }</span>
-  </div>
+  <table class="docbar" dir="ltr">
+    <thead><tr>
+      <th>${escape(LABELS.invoice[1])} / ${escape(LABELS.invoice[0])}</th>
+      <th>${escape(LABELS.number[1])} / ${escape(LABELS.number[0])}</th>
+      <th>${escape(LABELS.date[1])} / ${escape(LABELS.date[0])}</th>
+      <th>${escape(LABELS.currency[1])} / ${escape(LABELS.currency[0])}</th>
+    </tr></thead>
+    <tbody><tr>
+      <td>${escape(LABELS.docType[1])} &middot; ${escape(LABELS.docType[0])}</td>
+      <td>${
+        inv.invoiceNumber === null
+          ? `<span class="draft">${escape("مسودة / DRAFT")}</span>`
+          : `<bdi dir="ltr">#${inv.invoiceNumber}</bdi>`
+      }</td>
+      <td><bdi dir="ltr">${escape(inv.invoiceDate ?? "")}</bdi></td>
+      <td><bdi dir="ltr">${escape(inv.currency)}</bdi></td>
+    </tr></tbody>
+  </table>
 
-  <table class="meta"><tbody><tr>
-    <th>${escape(LABELS.number[0])} / ${escape(LABELS.number[1])}</th>
-    <td>${
-      inv.invoiceNumber === null
-        ? `<span class="draft">${escape("مسودة / DRAFT")}</span>`
-        : `<bdi dir="ltr">#${inv.invoiceNumber}</bdi>`
-    }</td>
-    <th>${escape(LABELS.date[0])} / ${escape(LABELS.date[1])}</th>
-    <td><bdi dir="ltr">${escape(inv.invoiceDate ?? "")}</bdi></td>
-  </tr></tbody></table>
-
-  <table class="customer"><tbody>
+  <table class="customer" dir="ltr"><tbody>
     <tr><th>${escape(LABELS.customer[0])} / ${escape(LABELS.customer[1])}</th><td>${escape(inv.customerName ?? "")}</td></tr>
     ${inv.customerAddress ? `<tr><th>${escape(LABELS.address[0])} / ${escape(LABELS.address[1])}</th><td>${escape(inv.customerAddress)}</td></tr>` : ""}
     ${inv.customerPhone ? `<tr><th>${escape(LABELS.phone[0])} / ${escape(LABELS.phone[1])}</th><td><bdi dir="ltr">${escape(inv.customerPhone)}</bdi></td></tr>` : ""}
     ${inv.notes ? `<tr><th>${escape(LABELS.notes[0])} / ${escape(LABELS.notes[1])}</th><td>${escape(inv.notes)}</td></tr>` : ""}
   </tbody></table>
 
-  <table class="lines">
+  <table class="lines" dir="ltr">
     <thead><tr>
       <th>${escape(LABELS.itemNo[0])}<br /><bdi dir="ltr">${escape(LABELS.itemNo[1])}</bdi></th>
       <th>${escape(LABELS.description[0])}<br /><bdi dir="ltr">${escape(LABELS.description[1])}</bdi></th>
       <th>${escape(LABELS.qty[0])}<br /><bdi dir="ltr">${escape(LABELS.qty[1])}</bdi></th>
       <th>${escape(LABELS.unit[0])}<br /><bdi dir="ltr">${escape(LABELS.unit[1])}</bdi></th>
       <th>${escape(LABELS.unitPrice[0])}<br /><bdi dir="ltr">${escape(LABELS.unitPrice[1])}</bdi></th>
+      ${
+        taxEnabled
+          ? `<th>${escape(LABELS.taxColumn[0])}<br /><bdi dir="ltr">${escape(LABELS.taxColumn[1])}</bdi></th>`
+          : ""
+      }
       <th>${escape(LABELS.lineTotal[0])}<br /><bdi dir="ltr">${escape(LABELS.lineTotal[1])}</bdi></th>
     </tr></thead>
     <tbody>
-${view.lines.map((l) => row(l, exponent)).join("\n")}
+${view.lines.map((l) => row(l, exponent, taxRateText)).join("\n")}
     </tbody>
   </table>
 
-  <div class="tail">
+  <div class="tail" dir="ltr">
     <div class="words">
       <span class="words-label">${escape("المبلغ كتابةً")} / <bdi dir="ltr">${escape("Amount in words")}</bdi></span>
       ${escape(inv.amountInWords ?? "")}

@@ -17,7 +17,8 @@
     "e2e": "npm run build && node e2e/smoke.mjs",
     "e2e:products": "npm run build && node e2e/product-management.mjs",
     "verify": "npm run typecheck && npm test && npm run build",
-    "build:info": "node scripts/write-build-info.mjs"
+    "build:info": "node scripts/write-build-info.mjs",
+    "pdf:samples": "tsx scripts/invoice-pdf-samples.ts invoice-pdf-samples"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3"

@@ -34,6 +34,7 @@ export const CHANNELS = {
   createInvoiceDraft: "pos:createInvoiceDraft",
   getInvoice: "pos:getInvoice",
   updateInvoiceHeader: "pos:updateInvoiceHeader",
+  setInvoiceTax: "pos:setInvoiceTax",
   addInvoiceLine: "pos:addInvoiceLine",
   updateInvoiceLine: "pos:updateInvoiceLine",
   removeInvoiceLine: "pos:removeInvoiceLine",
@@ -324,6 +325,8 @@ export interface IssuerSnapshotDto {
   readonly phone2: string | null;
   readonly email: string | null;
   readonly logoPath: string | null;
+  /** The immutable content-addressed copy frozen at finalization. Null on pre-freeze invoices. */
+  readonly logoAsset: string | null;
   readonly taxpayerNumber: string | null;
   readonly commercialRegister: string | null;
   readonly vatNumber: string | null;
@@ -381,15 +384,60 @@ export interface InvoiceViewDto {
   readonly lines: ReadonlyArray<InvoiceLineDto>;
 }
 
+/**
+ * The header fields an operator may change, as a PATCH.
+ *
+ * 🔴 PRESENCE IS THE SIGNAL, AND THAT IS THE WHOLE POINT. A key that appears is written; a key that
+ * is absent is left exactly as the database holds it. The previous shape required every field on
+ * every call, so the renderer filled the untouched ones from its own React state — and a response
+ * that had not landed yet meant it filled them with STALE values and silently overwrote whatever
+ * had just been saved. A commercial invoice lost its customer phone that way, intermittently,
+ * depending only on how fast the operator pressed Tab.
+ *
+ * Absence is expressed by OMITTING the key, never by `undefined`: an absent key and a key holding
+ * `undefined` are not reliably distinguishable once a payload has crossed a process boundary, and
+ * `Object.keys()` is checkable where `undefined` is not.
+ */
+export interface InvoiceHeaderPatch {
+  readonly invoiceDate?: string | null;
+  readonly customerName?: string | null;
+  readonly customerAddress?: string | null;
+  readonly customerPhone?: string | null;
+  readonly notes?: string | null;
+  /** A typed decimal ("100.00"), or null for nothing paid. NOT a computed balance. */
+  readonly paid?: string | null;
+}
+
+/** Every key a header patch may carry. The IPC boundary refuses anything else. */
+export const INVOICE_HEADER_PATCH_KEYS = [
+  "invoiceDate",
+  "customerName",
+  "customerAddress",
+  "customerPhone",
+  "notes",
+  "paid",
+] as const;
+
+export type InvoiceHeaderPatchKey = (typeof INVOICE_HEADER_PATCH_KEYS)[number];
+
+/**
+ * Whether THIS invoice is taxed, and at what rate.
+ *
+ * 🔴 PER INVOICE, NOT A GLOBAL SWITCH. Issuing one taxed invoice used to mean toggling the shop
+ * setting on and off around it, and anything finalized in between inherited the wrong state.
+ */
+export interface InvoiceTaxRequest {
+  readonly invoiceId: string;
+  readonly enabled: boolean;
+  /** Typed text — "11", "11.5". Converted to exact basis points by the domain. Null when disabled. */
+  readonly ratePercent: string | null;
+  readonly label: string | null;
+}
+
 export interface InvoiceHeaderRequest {
   readonly invoiceId: string;
-  readonly invoiceDate: string | null;
-  readonly customerName: string | null;
-  readonly customerAddress: string | null;
-  readonly customerPhone: string | null;
-  readonly notes: string | null;
-  /** A typed decimal ("100.00"), or null for nothing paid. NOT a computed balance. */
-  readonly paid: string | null;
+  /** Only the fields that actually changed. An empty patch is a no-op, not an erasure. */
+  readonly patch: InvoiceHeaderPatch;
 }
 
 /** One line as typed. Quantity and price are TEXT and are parsed by the domain, never numbers. */
@@ -594,6 +642,7 @@ export interface PosApi {
   createInvoiceDraft(): Promise<IpcResult<InvoiceViewDto>>;
   getInvoice(req: InvoiceIdRequest): Promise<IpcResult<InvoiceViewDto>>;
   updateInvoiceHeader(req: InvoiceHeaderRequest): Promise<IpcResult<InvoiceViewDto>>;
+  setInvoiceTax(req: InvoiceTaxRequest): Promise<IpcResult<InvoiceViewDto>>;
   addInvoiceLine(req: AddInvoiceLineRequest): Promise<IpcResult<InvoiceViewDto>>;
   updateInvoiceLine(req: UpdateInvoiceLineRequest): Promise<IpcResult<InvoiceViewDto>>;
   removeInvoiceLine(req: InvoiceLineRefRequest): Promise<IpcResult<InvoiceViewDto>>;

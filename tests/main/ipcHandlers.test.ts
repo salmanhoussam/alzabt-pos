@@ -81,6 +81,7 @@ describe("IPC surface", () => {
         "listInvoiceDrafts",
         "findInvoiceByNumber",
         "searchInvoices",
+        "setInvoiceTax",
         "listReconciliation",
         "listReconciliationQueue",
         "resolveKeepCatalog",
@@ -93,7 +94,7 @@ describe("IPC surface", () => {
         "saveInvoicePdf",
       ].sort(),
     );
-    expect(CHANNEL_NAMES).toHaveLength(44); // was 19 before manual invoices
+    expect(CHANNEL_NAMES).toHaveLength(45); // 19 -> 44 with manual invoices, 45 with per-invoice tax
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

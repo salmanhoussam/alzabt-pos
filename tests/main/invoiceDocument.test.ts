@@ -61,7 +61,7 @@ function finalized(
  * 15-line invoice. The instrument was wrong, not the renderer. It now anchors on the lines table.
  */
 const bodyRows = (html: string) => {
-  const table = /<table class="lines">([\s\S]*?)<\/table>/.exec(html);
+  const table = /<table class="lines" dir="ltr">([\s\S]*?)<\/table>/.exec(html);
   if (!table) throw new Error("no line-item table in the rendered document");
   const tbody = /<tbody>([\s\S]*?)<\/tbody>/.exec(table[1]!);
   if (!tbody) throw new Error("no tbody in the line-item table");
@@ -221,9 +221,17 @@ describe("totals, words and the official identifiers", () => {
     // The accent band above the header, and a single accent colour defined once.
     expect(html).toContain('<div class="accent-bar"></div>');
     expect(html).toMatch(/--accent: #c1121f/);
-    // The black invoice bar, carrying the number, with white labels on it.
-    expect(html).toMatch(/\.doctitle \{[^}]*background: var\(--ink\)[^}]*color: #fff/);
-    expect(html).toMatch(/<div class="doctitle">[\s\S]*?class="docnum"/);
+    // The black invoice bar. 🔴 WAS a single `.doctitle` strip carrying only the number; the
+    // approved template draws it as a FOUR-COLUMN table — document type · number · date · currency
+    // — with bilingual labels on the black row, so it is one now.
+    expect(html).toMatch(/table\.docbar th \{[\s\S]*?background: var\(--ink\);[\s\S]*?color: #fff/);
+    expect(html).toContain('<table class="docbar" dir="ltr">');
+    // The document NAMES ITSELF, which is what keeps an outgoing invoice from reading as intake.
+    expect(html).toContain("Sales Invoice");
+    expect(html).toContain("فاتورة مبيعات");
+    // And the currency is on the document, as the template has it.
+    expect(html).toMatch(/Currency \/ /);
+    expect(html).toMatch(/<bdi dir="ltr">USD<\/bdi>/);
     // The black item header with white labels.
     expect(html).toMatch(/table\.lines thead th \{[\s\S]*?background: var\(--ink\);[\s\S]*?color: #fff/);
     // The red Balance Due row — the one figure the customer acts on.
@@ -376,5 +384,143 @@ describe("a draft is never printed as though it were issued", () => {
     expect(html).toContain("مسودة / DRAFT");
     expect(html).not.toMatch(/<bdi dir="ltr">#\d+<\/bdi>/);
     // The IPC layer refuses to print this at all; the renderer is honest about it regardless.
+  });
+});
+
+describe("the conditional TAX column", () => {
+  // 🔴 ANCHORED ON THE LINES TABLE. The first <thead> in the document belongs to the black invoice
+  // BAR, which also has <th>s, so an unanchored regex counted four columns and said nothing about
+  // the item table — the same mistake as a /<tbody>/ that matched the meta table.
+  const linesHead = (html: string) => {
+    const table = /<table class="lines" dir="ltr">([\s\S]*?)<\/table>/.exec(html)![1]!;
+    return /<thead><tr>([\s\S]*?)<\/tr><\/thead>/.exec(table)![1]!;
+  };
+  const cols = (html: string) => (linesHead(html).match(/<th>/g) ?? []).length;
+
+  it("tax OFF prints NO tax column, and no tax row", () => {
+    const html = renderInvoiceDocument(finalized([{ description: "صنف", quantity: "2", unitPrice: "5.00" }]));
+    expect(cols(html)).toBe(6); // No · Description · QTY · Unit · Unit Price · Total
+    expect(html).not.toContain('class="n taxcell"');
+    const totals = /<table class="totals">([\s\S]*?)<\/table>/.exec(html)![1]!;
+    expect(totals).not.toMatch(/ضريبة|\bTax\b/);
+  });
+
+  it("🔴 tax ON prints a SEVENTH column showing the invoice's own frozen rate, per row", () => {
+    const view = finalized(
+      [
+        { description: "أول", quantity: "2", unitPrice: "5.00" },
+        { description: "ثاني", quantity: "1", unitPrice: "3.00" },
+      ],
+      { profile: { taxEnabled: true, taxRatePercent: "11", taxLabel: "ض.ق.م" } },
+    );
+    const html = renderInvoiceDocument(view);
+    expect(cols(html)).toBe(7);
+    expect(html).toContain("TAX");
+    // The SAME rate on every row: V1 tax is invoice-level, so this is a display of one number and
+    // not a second source of truth. Two lines, two identical cells.
+    expect((html.match(/<td class="n taxcell"><bdi dir="ltr">11%<\/bdi><\/td>/g) ?? []).length).toBe(2);
+  });
+
+  it("a fractional rate prints exactly, with no float anywhere", () => {
+    const html = renderInvoiceDocument(
+      finalized([{ description: "صنف", quantity: "1", unitPrice: "100.00" }], {
+        profile: { taxEnabled: true, taxRatePercent: "11.5", taxLabel: "ض.ق.م" },
+      }),
+    );
+    expect(html).toContain("11.5%");
+    expect(html).not.toMatch(/11\.4999|11\.5000000/);
+  });
+
+  it("🔴 there is NO discount column, at any tax setting", () => {
+    // The reference document carries one showing 0.00% on every row. It is not a requirement, and
+    // nothing in this product has a discount at any layer.
+    for (const profile of [undefined, { taxEnabled: true, taxRatePercent: "11", taxLabel: "ض.ق.م" }]) {
+      const html = renderInvoiceDocument(
+        finalized([{ description: "صنف", quantity: "1", unitPrice: "5.00" }], profile ? { profile } : undefined),
+      );
+      expect(html).not.toMatch(/DISCOUNT|discount|خصم/);
+      expect(html).not.toContain("0.00%");
+    }
+  });
+});
+
+describe("the printed document is laid out left to right, like the approved template", () => {
+  it("🔴 every structural table carries dir=ltr, so its columns are not mirrored", () => {
+    const html = renderInvoiceDocument(finalized([{ description: "صنف", quantity: "1", unitPrice: "5.00" }]));
+    // 🔴 FOUND BY LOOKING AT A RENDER, not by reading CSS. On an RTL page every table mirrors, so
+    // "No." appeared on the right and "Total" on the left — the opposite of the paper the shop
+    // approved. A stylesheet assertion cannot see a mirrored table; a screenshot can.
+    for (const table of ['class="docbar" dir="ltr"', 'class="customer" dir="ltr"', 'class="lines" dir="ltr"']) {
+      expect(html, table).toContain(table);
+    }
+    expect(html).toContain('class="tail" dir="ltr"');
+    // The page itself stays RTL for prose, and the Arabic inside a cell still reads right to left.
+    expect(html).toContain('<html lang="ar" dir="rtl">');
+    expect(html).toMatch(/td\.desc \{ text-align: right; direction: rtl;/);
+  });
+
+  it("the item columns appear in the template's order", () => {
+    const html = renderInvoiceDocument(finalized([{ description: "صنف", quantity: "1", unitPrice: "5.00" }]));
+    const table = /<table class="lines" dir="ltr">([\s\S]*?)<\/table>/.exec(html)![1]!;
+    const head = /<thead><tr>([\s\S]*?)<\/tr><\/thead>/.exec(table)![1]!;
+    const order = [...head.matchAll(/<bdi dir="ltr">([^<]+)<\/bdi>/g)].map((m) => m[1]);
+    expect(order).toEqual(["No.", "Description", "QTY", "Unit", "Unit Price", "Total"]);
+  });
+});
+
+describe("the company header is centred, like the approved template", () => {
+  const html = () =>
+    renderInvoiceDocument(finalized([{ description: "صنف", quantity: "1", unitPrice: "5.00" }]), {
+      logoUrl: "file:///tmp/sample-logo.svg",
+    });
+
+  it("🔴 three grid tracks, so the issuer is centred on the PAGE and not on what the logo leaves", () => {
+    const out = html();
+    // Two tracks would centre the block in the space beside the logo, which drifts right by half
+    // the logo's width when a logo exists and not at all when it does not — two layouts for one
+    // document. The empty third track is the same width as the logo track.
+    expect(out).toMatch(/header \{[\s\S]*?grid-template-columns: 44mm 1fr 44mm/);
+    expect(out).toMatch(/\.issuer \{ grid-column: 2;[\s\S]*?text-align: center/);
+    expect(out).toMatch(/\.logo-slot \{ grid-column: 1/);
+    // The contact and identifier rows centre too, or the block would look centred only at the top.
+    expect(out).toMatch(/\.contact \{[\s\S]*?justify-content: center/);
+    expect(out).toMatch(/\.ids \{[\s\S]*?justify-content: center/);
+  });
+
+  it("the POSITIVE CONTROL: the probe really can tell a centred header from the old one", () => {
+    // 🔴 THIS TEST EXISTS BECAUSE A PROBE THAT CANNOT FAIL PROVES NOTHING. Earlier today a renderer
+    // mount probe "found" a defect, and a positive control against origin/main showed the probe
+    // could not see anything at all. So: the assertions above are checked against the markup the
+    // renderer USED to emit, and must reject it.
+    const old = `header { display: flex; align-items: flex-start; gap: 10mm; }\n  .issuer { flex: 1 1 auto; }`;
+    expect(old).not.toMatch(/grid-template-columns: 44mm 1fr 44mm/);
+    expect(old).not.toMatch(/\.issuer \{ grid-column: 2;/);
+    // And the current output must satisfy what the old markup fails — otherwise both would pass
+    // for the same reason and neither would mean anything.
+    expect(html()).toMatch(/grid-template-columns: 44mm 1fr 44mm/);
+  });
+
+  it("the header carries dir=ltr for track ORDER while its Arabic still reads right to left", () => {
+    const out = html();
+    expect(out).toContain('<header dir="ltr">');
+    expect(out).toMatch(/\.issuer \{ grid-column: 2; direction: rtl;/);
+    // The logo occupies the left track, and the issuer never shares it.
+    expect(out).toMatch(/<div class="logo-slot">/);
+  });
+
+  it("every issuer field still prints: logo, both names, tagline, contact and identifiers", () => {
+    const out = html();
+    expect(out).toContain('class="logo"'); // the configured logo
+    expect(out).toContain("متجر اختباري"); // the fixture's Arabic company name
+    expect(out).toContain('class="legal"'); // the English / trade name line
+    expect(out).toContain("Taxpayer No."); // official identifiers survive the centring
+    expect(out).toContain("Comm. Register");
+  });
+
+  it("no logo configured still renders a valid header, with the slot empty", () => {
+    const out = renderInvoiceDocument(finalized([{ description: "صنف", quantity: "1", unitPrice: "5.00" }]));
+    expect(out).toContain('<div class="logo-slot"></div>');
+    expect(out).not.toContain('class="logo"');
+    expect(out).toMatch(/grid-template-columns: 44mm 1fr 44mm/);
   });
 });

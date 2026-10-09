@@ -7,9 +7,42 @@
  * `satisfies typeof CHANNELS` check makes the compiler fail if they ever drift from the contract.
  */
 import { contextBridge, ipcRenderer } from "electron";
-import type { CHANNELS, InvoiceLineRequest, PosApi } from "../shared/ipcContract";
+import type { CHANNELS, InvoiceHeaderPatch, InvoiceLineRequest, PosApi } from "../shared/ipcContract";
+
+/**
+ * The header keys this bridge forwards, declared HERE as literals.
+ *
+ * 🔴 THIS FILE MAY NOT IMPORT A VALUE FROM ANYWHERE BUT "electron", AND THE REASON IS BRUTAL. The
+ * window runs with `sandbox: true` (main.ts), and a sandboxed preload cannot require an arbitrary
+ * relative file — only `electron` and a few polyfilled built-ins. Importing
+ * INVOICE_HEADER_PATCH_KEYS from ../shared/ipcContract looked harmless and typechecked and built
+ * and passed 602 unit tests, and it made the PACKAGED app show NOTHING AT ALL: the preload threw,
+ * `window.pos` was never exposed, the renderer's first call threw, and #root stayed empty. Only the
+ * Windows gate caught it, on the third round, after phase D was taught to report what it saw.
+ *
+ * That is why `CH` below is a literal copy of CHANNELS rather than an import of it, and why this
+ * list is a literal copy too. The duplication is deliberate: tests/main/invoiceIpc.test.ts pins
+ * both against the contract, so a drift fails by name instead of at a shop counter.
+ */
+const HEADER_PATCH_KEYS = [
+  "invoiceDate",
+  "customerName",
+  "customerAddress",
+  "customerPhone",
+  "notes",
+  "paid",
+] as const satisfies ReadonlyArray<keyof InvoiceHeaderPatch>;
 
 /** One invoice line, rebuilt key by key — the same allowlisting every payload here uses. */
+/** Only the header keys the caller set, each copied by value. Presence is the signal. */
+const headerPatch = (patch: InvoiceHeaderPatch): InvoiceHeaderPatch => {
+  const out: Record<string, string | null> = {};
+  for (const key of HEADER_PATCH_KEYS) {
+    if (key in patch) out[key] = patch[key] ?? null;
+  }
+  return out as InvoiceHeaderPatch;
+};
+
 function line(l: InvoiceLineRequest): InvoiceLineRequest {
   return {
     description: l.description,
@@ -47,6 +80,7 @@ const CH = {
   createInvoiceDraft: "pos:createInvoiceDraft",
   getInvoice: "pos:getInvoice",
   updateInvoiceHeader: "pos:updateInvoiceHeader",
+  setInvoiceTax: "pos:setInvoiceTax",
   addInvoiceLine: "pos:addInvoiceLine",
   updateInvoiceLine: "pos:updateInvoiceLine",
   removeInvoiceLine: "pos:removeInvoiceLine",
@@ -119,14 +153,20 @@ const api: PosApi = {
   createInvoiceDraft: () => ipcRenderer.invoke(CH.createInvoiceDraft),
   getInvoice: (req) => ipcRenderer.invoke(CH.getInvoice, { invoiceId: req.invoiceId }),
   updateInvoiceHeader: (req) =>
+    // 🔴 REBUILT KEY BY KEY, AND ONLY THE KEYS THE CALLER ACTUALLY SET. Copying the whole object
+    // would forward a renderer-owned reference across the bridge; listing every key unconditionally
+    // would turn an untouched field into an explicit null, which is the bug this patch shape exists
+    // to remove. `in` is the test, so a key holding null is kept and a key never set is dropped.
     ipcRenderer.invoke(CH.updateInvoiceHeader, {
       invoiceId: req.invoiceId,
-      invoiceDate: req.invoiceDate,
-      customerName: req.customerName,
-      customerAddress: req.customerAddress,
-      customerPhone: req.customerPhone,
-      notes: req.notes,
-      paid: req.paid,
+      patch: headerPatch(req.patch),
+    }),
+  setInvoiceTax: (req) =>
+    ipcRenderer.invoke(CH.setInvoiceTax, {
+      invoiceId: req.invoiceId,
+      enabled: req.enabled,
+      ratePercent: req.ratePercent,
+      label: req.label,
     }),
   addInvoiceLine: (req) => ipcRenderer.invoke(CH.addInvoiceLine, { invoiceId: req.invoiceId, line: line(req.line) }),
   updateInvoiceLine: (req) =>
