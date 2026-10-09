@@ -17,3 +17,6 @@ e2e-output/
 # Field data: merchant catalogs, invoices and exports never enter this public repo.
 *.csv
 field-data/
+
+# Rendered invoice samples for visual review — produced by CI, never committed.
+invoice-pdf-samples/

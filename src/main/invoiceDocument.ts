@@ -178,6 +178,13 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
      who issued it, what it is, what it costs. Nothing below is tied to any one shop: the colours
      are the document's, the names and numbers all come from the frozen snapshot. */
   :root { --ink: #111; --accent: #c1121f; --rule: #9aa0a6; --soft: #f3f4f6; }
+  /* 🔴 THE STRUCTURAL TABLES ARE LAID OUT LEFT TO RIGHT, and that is not an oversight about an
+     Arabic document. The approved template orders its columns No. · Description · QTY · Unit ·
+     Unit Price · Total from left to right, puts the customer LABELS on the left, and puts the
+     totals on the right. An RTL page mirrors all three, so every column appeared in the opposite
+     order from the paper the shop approved. The page stays dir="rtl" for prose, and each table
+     carries dir="ltr" for its own column order; cell text is then aligned per column below. This
+     was found by LOOKING at a render — no stylesheet assertion can see a mirrored table. */
   @page { size: A4; margin: 13mm 12mm; }
   * { box-sizing: border-box; }
   body {
@@ -215,7 +222,8 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   .meta th, .customer th { padding: 1.4mm 2.5mm; text-align: start; white-space: nowrap; color: #333; font-weight: 700; }
   /* The customer block: a boxed panel with a shaded label column, like the template's. */
   .customer { margin-top: 3mm; border: 1px solid var(--ink); }
-  .customer th { background: var(--soft); width: 34mm; border-inline-end: 1px solid var(--rule); }
+  .customer th { background: var(--soft); width: 40mm; border-right: 1px solid var(--rule); text-align: left; }
+  .customer td { text-align: right; direction: rtl; }
   .customer tr + tr th, .customer tr + tr td { border-top: 1px solid #dcdee1; }
   table.lines { width: 100%; border-collapse: collapse; margin-top: 4mm; font-size: 10.5pt; }
   table.lines th, table.lines td { border: 1px solid var(--rule); padding: 1.8mm 2mm; vertical-align: top; }
@@ -231,20 +239,21 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   table.lines thead { display: table-header-group; }
   table.lines tfoot { display: table-row-group; }
   td.n { text-align: center; width: 16mm; }
-  td.idx { width: 9mm; color: #444; }
-  td.unit { text-align: center; width: 22mm; }
-  td.money { text-align: end; width: 28mm; white-space: nowrap; }
-  td.taxcell, table.lines thead th:nth-last-child(2) { }
+  td.idx { width: 10mm; color: #444; }
+  td.unit { text-align: center; width: 26mm; }
+  td.money { text-align: right; width: 28mm; white-space: nowrap; }
   td.taxcell { text-align: center; width: 18mm; }
-  td.desc { text-align: start; }
+  /* The description is the widest column, and its Arabic sits at the right edge of its own cell —
+     the table reads left to right, the sentence inside it does not. */
+  td.desc { text-align: right; direction: rtl; min-width: 60mm; }
   /* The closing block never splits: words on one side, money on the other, balanced across A4. */
   .tail { margin-top: 4mm; display: flex; gap: 6mm; align-items: stretch; page-break-inside: avoid; break-inside: avoid; }
   .words { flex: 1 1 auto; border: 1px solid var(--rule); border-top: 3px solid var(--ink);
-           padding: 3mm; font-size: 10.5pt; min-height: 20mm; }
+           padding: 3mm; font-size: 10.5pt; min-height: 20mm; direction: rtl; text-align: right; }
   .words .words-label { font-size: 8.5pt; color: #666; font-weight: 700; display: block; margin-bottom: 1mm; }
   table.totals { border-collapse: collapse; min-width: 74mm; font-size: 10.5pt; }
-  table.totals th { text-align: start; padding: 1.6mm 3mm; color: #333; font-weight: 600; white-space: nowrap; }
-  table.totals td { text-align: end; padding: 1.6mm 3mm; white-space: nowrap; border-bottom: 1px solid #e3e5e8; }
+  table.totals th { text-align: left; padding: 1.6mm 3mm; color: #333; font-weight: 600; white-space: nowrap; }
+  table.totals td { text-align: right; padding: 1.6mm 3mm; white-space: nowrap; border-bottom: 1px solid #e3e5e8; }
   table.totals tr.grand th, table.totals tr.grand td {
     font-weight: 700; font-size: 12pt; background: var(--soft); border-top: 2px solid var(--ink);
     border-bottom: 1px solid var(--ink);
@@ -273,7 +282,7 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
     ${logo}
   </header>
 
-  <table class="docbar">
+  <table class="docbar" dir="ltr">
     <thead><tr>
       <th>${escape(LABELS.invoice[1])} / ${escape(LABELS.invoice[0])}</th>
       <th>${escape(LABELS.number[1])} / ${escape(LABELS.number[0])}</th>
@@ -292,14 +301,14 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
     </tr></tbody>
   </table>
 
-  <table class="customer"><tbody>
+  <table class="customer" dir="ltr"><tbody>
     <tr><th>${escape(LABELS.customer[0])} / ${escape(LABELS.customer[1])}</th><td>${escape(inv.customerName ?? "")}</td></tr>
     ${inv.customerAddress ? `<tr><th>${escape(LABELS.address[0])} / ${escape(LABELS.address[1])}</th><td>${escape(inv.customerAddress)}</td></tr>` : ""}
     ${inv.customerPhone ? `<tr><th>${escape(LABELS.phone[0])} / ${escape(LABELS.phone[1])}</th><td><bdi dir="ltr">${escape(inv.customerPhone)}</bdi></td></tr>` : ""}
     ${inv.notes ? `<tr><th>${escape(LABELS.notes[0])} / ${escape(LABELS.notes[1])}</th><td>${escape(inv.notes)}</td></tr>` : ""}
   </tbody></table>
 
-  <table class="lines">
+  <table class="lines" dir="ltr">
     <thead><tr>
       <th>${escape(LABELS.itemNo[0])}<br /><bdi dir="ltr">${escape(LABELS.itemNo[1])}</bdi></th>
       <th>${escape(LABELS.description[0])}<br /><bdi dir="ltr">${escape(LABELS.description[1])}</bdi></th>
@@ -318,7 +327,7 @@ ${view.lines.map((l) => row(l, exponent, taxRateText)).join("\n")}
     </tbody>
   </table>
 
-  <div class="tail">
+  <div class="tail" dir="ltr">
     <div class="words">
       <span class="words-label">${escape("المبلغ كتابةً")} / <bdi dir="ltr">${escape("Amount in words")}</bdi></span>
       ${escape(inv.amountInWords ?? "")}

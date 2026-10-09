@@ -323,6 +323,25 @@ jobs:
           Write-Host "Profile after the migration-7 upgrade:"
           Get-ChildItem $posProfile -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
 
+      # 🔴 PICTURES, NOT CSS ASSERTIONS. A stylesheet test proves a rule is present; it cannot see
+      # that a one-line invoice looks empty, that a table is mirrored, or that the totals block
+      # collides with the footer. These renders exist so the visual result can be APPROVED before
+      # another build is installed in the shop. Synthetic data only.
+      - name: Render invoice PDF samples for visual review
+        run: |
+          npx tsx scripts/invoice-pdf-samples.ts invoice-pdf-samples
+          if ($LASTEXITCODE -ne 0) { throw "invoice PDF samples failed to render" }
+          Get-ChildItem invoice-pdf-samples | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Upload invoice PDF samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: invoice-pdf-samples
+          path: invoice-pdf-samples/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload E2E screenshots
         if: always()
         uses: actions/upload-artifact@v4
