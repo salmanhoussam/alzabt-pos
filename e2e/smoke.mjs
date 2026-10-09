@@ -138,7 +138,13 @@ await page.screenshot({ path: SHOTS + "03-payment.png" });
 await page.locator('[data-testid="pay-cash"]').click();
 await page.waitForSelector('[data-testid="receipt"]');
 const receipt1 = await page.locator(".receipt").innerText();
-assert(receipt1.includes("Receipt #1") && receipt1.includes("14.80 USD") && receipt1.includes("cash"), "receipt #1 shows 14.80 USD paid by cash");
+// 🔴 THE METHOD IS READ AS DATA, NOT AS PROSE. The receipt prints the method in the terminal
+// language, so asserting the English word "cash" tested the translation rather than the sale.
+const method1 = await page.locator('[data-testid="receipt-method"]').getAttribute("data-method");
+assert(
+  receipt1.includes("#1") && receipt1.includes("14.80 USD") && method1 === "cash",
+  `receipt #1 shows 14.80 USD paid by cash (method=${method1})`,
+);
 await page.screenshot({ path: SHOTS + "04-receipt.png" });
 await page.locator('[data-testid="new-sale"]').click();
 

@@ -194,7 +194,11 @@ export function SellScreen() {
               <span className="product-price">
                 {formatDecimal(p.price)}
                 {p.baseUnit !== "piece" && <span className="muted"> / {p.baseUnit}</span>}
-                {p.priceNeedsReview && <span className="badge" title="Placeholder price — set the real price">price?</span>}
+                {p.priceNeedsReview && (
+                  <span className="badge warn" data-testid="price-review" title={t("sell.placeholderPrice")}>
+                    {t("sell.priceUnknown")}
+                  </span>
+                )}
               </span>
             </button>
           ))}

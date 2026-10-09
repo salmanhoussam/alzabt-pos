@@ -48,7 +48,7 @@ export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => 
             so an Arabic till showed "cash" — the same leak as PENDING in the review queue. */}
         <div className="receipt-paid">
           <span className="muted small">{t("receipt.paidBy")}</span>
-          <strong data-testid="receipt-method">
+          <strong data-testid="receipt-method" data-method={sale.paymentMethod ?? "none"}>
             {sale.paymentMethod ? t(`method.${sale.paymentMethod}`) : t("history.payNoMethod")}
           </strong>
         </div>

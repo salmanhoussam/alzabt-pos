@@ -104,7 +104,10 @@ assert((await page.locator("button.product").count()) === 4, "grid shows exactly
 const names = await page.locator("button.product .product-name").allInnerTexts();
 log("rendered names:", JSON.stringify(names));
 assert(JSON.stringify(names) === JSON.stringify(["بيبسي 330 مل", "مياه", 'علبة بسكويت 2"', "شيبس"]), "Arabic names render exactly (SQLite → IPC → renderer)");
-assert((await product(page, "شيبس").innerText()).includes("price?"), "placeholder price is marked on the button");
+assert(
+  (await product(page, "شيبس").locator('[data-testid="price-review"]').count()) === 1,
+  "placeholder price is marked on the button",
+);
 assert((await product(page, "بسكويت").innerText()).includes("/ box"), "box unit is shown");
 await page.screenshot({ path: SHOTS + "catalog-01-imported.png" });
 
