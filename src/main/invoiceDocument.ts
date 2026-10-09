@@ -197,14 +197,27 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   .sheet { width: 100%; }
   /* The accent rule above the header: the first thing on the page, and the shop's own colour band. */
   .accent-bar { height: 3mm; background: var(--accent); margin-bottom: 3mm; }
-  header { display: flex; align-items: flex-start; gap: 10mm; border-bottom: 3px solid var(--ink); padding-bottom: 4mm; }
-  .issuer { flex: 1 1 auto; }
+  /* 🔴 THE ISSUER BLOCK IS OPTICALLY CENTRED, as the approved template draws it, with the logo at
+     the LEFT. Three grid tracks and not two: the empty third track is the same width as the logo
+     track, so the centre column is centred on the PAGE rather than on the space the logo leaves
+     over. Without it the block drifts right by half the logo's width whenever a logo exists, and
+     by nothing when it does not — two different layouts for the same document.
+     The header carries dir="ltr" for its TRACK ORDER only; the Arabic inside it still reads right
+     to left, set on .issuer below. */
+  header {
+    display: grid; grid-template-columns: 44mm 1fr 44mm; align-items: center; gap: 0 6mm;
+    border-bottom: 3px solid var(--ink); padding-bottom: 4mm;
+  }
+  .issuer { grid-column: 2; direction: rtl; text-align: center; }
+  .logo-slot { grid-column: 1; }
   /* A stronger company header, as the field asked: the name leads the page. */
   .issuer h1 { margin: 0 0 1mm; font-size: 22pt; line-height: 1.1; letter-spacing: -.2px; }
   .issuer .legal { font-size: 10pt; color: #333; font-weight: 600; }
   .issuer .tagline { font-size: 9.5pt; color: var(--accent); font-weight: 600; }
-  .contact { margin-top: 2mm; font-size: 9pt; color: #444; display: flex; flex-wrap: wrap; gap: 0 4mm; }
-  .ids { margin-top: 1.5mm; font-size: 8.5pt; color: #555; display: flex; flex-wrap: wrap; gap: 0 4mm; }
+  .contact { margin-top: 2mm; font-size: 9pt; color: #444;
+             display: flex; flex-wrap: wrap; justify-content: center; gap: 0 4mm; }
+  .ids { margin-top: 1.5mm; font-size: 8.5pt; color: #555;
+         display: flex; flex-wrap: wrap; justify-content: center; gap: 0 4mm; }
   .logo { max-height: 24mm; max-width: 44mm; object-fit: contain; }
   /* The black invoice bar: a four-column table, as the approved template draws it — the document
      type, its number, its date and its currency, with bilingual labels on the black row. */
@@ -270,7 +283,8 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
 <body>
 <div class="sheet">
   <div class="accent-bar"></div>
-  <header>
+  <header dir="ltr">
+    <div class="logo-slot">${logo}</div>
     <div class="issuer">
       <h1>${escape(issuer?.nameAr ?? "")}</h1>
       ${issuer?.nameEn ? `<div class="legal"><bdi dir="ltr">${escape(issuer.nameEn)}</bdi></div>` : ""}
@@ -279,7 +293,6 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
       ${contact ? `<div class="contact">${contact}</div>` : ""}
       ${identifierRows(view)}
     </div>
-    ${logo}
   </header>
 
   <table class="docbar" dir="ltr">

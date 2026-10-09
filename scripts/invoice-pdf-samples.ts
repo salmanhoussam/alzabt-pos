@@ -143,13 +143,33 @@ function chrome(): string {
 }
 
 mkdirSync(OUT, { recursive: true });
+
+/**
+ * A SYNTHETIC logo, drawn here in a few lines of SVG.
+ *
+ * 🔴 NOT A REAL SHOP'S MARK. The centred header must be proven WITH a logo present and WITHOUT one,
+ * because the two produce different layouts, and no real brand asset may enter this repository.
+ */
+const LOGO = join(OUT, "sample-logo.svg");
+writeFileSync(
+  LOGO,
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80">
+     <rect x="2" y="2" width="116" height="76" fill="#fff" stroke="#c1121f" stroke-width="4"/>
+     <rect x="18" y="20" width="26" height="40" fill="#111"/>
+     <rect x="50" y="34" width="52" height="12" fill="#c1121f"/>
+     <text x="60" y="70" font-family="sans-serif" font-size="11" text-anchor="middle" fill="#111">SAMPLE</text>
+   </svg>`,
+  "utf8",
+);
 const bin = chrome();
 // A4 at 96 dpi, so a screenshot is one page at the real printed proportions.
 const A4 = "794,1123";
 const flags = ["--headless=new", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--hide-scrollbars"];
 
 for (const { name, v } of SAMPLES) {
-  const html = renderInvoiceDocument(v, { logoUrl: null });
+  // A is rendered WITHOUT a logo on purpose; the rest carry the synthetic one, so both header
+  // layouts are in the artifact and can be compared side by side.
+  const html = renderInvoiceDocument(v, { logoUrl: name.startsWith("A-") ? null : `file://${LOGO}` });
   const htmlPath = join(OUT, `${name}.html`);
   writeFileSync(htmlPath, html, "utf8");
   const url = `file://${htmlPath}`;

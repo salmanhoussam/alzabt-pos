@@ -467,3 +467,60 @@ describe("the printed document is laid out left to right, like the approved temp
     expect(order).toEqual(["No.", "Description", "QTY", "Unit", "Unit Price", "Total"]);
   });
 });
+
+describe("the company header is centred, like the approved template", () => {
+  const html = () =>
+    renderInvoiceDocument(finalized([{ description: "صنف", quantity: "1", unitPrice: "5.00" }]), {
+      logoUrl: "file:///tmp/sample-logo.svg",
+    });
+
+  it("🔴 three grid tracks, so the issuer is centred on the PAGE and not on what the logo leaves", () => {
+    const out = html();
+    // Two tracks would centre the block in the space beside the logo, which drifts right by half
+    // the logo's width when a logo exists and not at all when it does not — two layouts for one
+    // document. The empty third track is the same width as the logo track.
+    expect(out).toMatch(/header \{[\s\S]*?grid-template-columns: 44mm 1fr 44mm/);
+    expect(out).toMatch(/\.issuer \{ grid-column: 2;[\s\S]*?text-align: center/);
+    expect(out).toMatch(/\.logo-slot \{ grid-column: 1/);
+    // The contact and identifier rows centre too, or the block would look centred only at the top.
+    expect(out).toMatch(/\.contact \{[\s\S]*?justify-content: center/);
+    expect(out).toMatch(/\.ids \{[\s\S]*?justify-content: center/);
+  });
+
+  it("the POSITIVE CONTROL: the probe really can tell a centred header from the old one", () => {
+    // 🔴 THIS TEST EXISTS BECAUSE A PROBE THAT CANNOT FAIL PROVES NOTHING. Earlier today a renderer
+    // mount probe "found" a defect, and a positive control against origin/main showed the probe
+    // could not see anything at all. So: the assertions above are checked against the markup the
+    // renderer USED to emit, and must reject it.
+    const old = `header { display: flex; align-items: flex-start; gap: 10mm; }\n  .issuer { flex: 1 1 auto; }`;
+    expect(old).not.toMatch(/grid-template-columns: 44mm 1fr 44mm/);
+    expect(old).not.toMatch(/\.issuer \{ grid-column: 2;/);
+    // And the current output must satisfy what the old markup fails — otherwise both would pass
+    // for the same reason and neither would mean anything.
+    expect(html()).toMatch(/grid-template-columns: 44mm 1fr 44mm/);
+  });
+
+  it("the header carries dir=ltr for track ORDER while its Arabic still reads right to left", () => {
+    const out = html();
+    expect(out).toContain('<header dir="ltr">');
+    expect(out).toMatch(/\.issuer \{ grid-column: 2; direction: rtl;/);
+    // The logo occupies the left track, and the issuer never shares it.
+    expect(out).toMatch(/<div class="logo-slot">/);
+  });
+
+  it("every issuer field still prints: logo, both names, tagline, contact and identifiers", () => {
+    const out = html();
+    expect(out).toContain('class="logo"'); // the configured logo
+    expect(out).toContain("متجر اختباري"); // the fixture's Arabic company name
+    expect(out).toContain('class="legal"'); // the English / trade name line
+    expect(out).toContain("Taxpayer No."); // official identifiers survive the centring
+    expect(out).toContain("Comm. Register");
+  });
+
+  it("no logo configured still renders a valid header, with the slot empty", () => {
+    const out = renderInvoiceDocument(finalized([{ description: "صنف", quantity: "1", unitPrice: "5.00" }]));
+    expect(out).toContain('<div class="logo-slot"></div>');
+    expect(out).not.toContain('class="logo"');
+    expect(out).toMatch(/grid-template-columns: 44mm 1fr 44mm/);
+  });
+});
