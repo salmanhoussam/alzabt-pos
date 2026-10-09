@@ -610,7 +610,7 @@ export function InvoiceSheet({
                   <button className="btn primary" onClick={onReviewNow} data-testid="review-now">
                     {t("inv.sheet.reviewNow")}
                   </button>
-                  <button className="btn ghost" onClick={() => setFinalized(null)}>
+                  <button className="btn ghost" onClick={() => setFinalized(null)} data-testid="review-later">
                     {t("inv.sheet.later")}
                   </button>
                 </div>
@@ -618,7 +618,7 @@ export function InvoiceSheet({
             ) : (
               <>
                 <p>{t("inv.history.reviewClear")}</p>
-                <button className="btn primary wide" onClick={() => setFinalized(null)}>
+                <button className="btn primary wide" onClick={() => setFinalized(null)} data-testid="review-clear-ok">
                   {t("action.ok")}
                 </button>
               </>

@@ -1331,6 +1331,14 @@ if (PHASE === "seed-v2") {
   await invTestid(page, "finalize-confirm-yes").click();
   await page.waitForSelector('[data-testid="finalized-notice"]');
 
+  // 🔴 THE DIALOG MUST BE DISMISSED BEFORE LEAVING THE SCREEN. Round 3 timed out for 30s clicking
+  // the History tab, with Playwright reporting `<div class="overlay"> ... intercepts pointer
+  // events`: the finalized notice is a modal, and both its lines are free text, so it lands on the
+  // branch that offers "Review now" / "Later" rather than a bare OK. This phase does not want the
+  // review queue, so it takes the other exit.
+  await invTestid(page, "review-later").click();
+  await page.waitForSelector('[data-testid="finalized-notice"]', { state: "detached" });
+
   // And it shows up in the ORDINARY sales history, with the document's number and the truth about
   // payment — not a fabricated method.
   await tab(page, "History");
