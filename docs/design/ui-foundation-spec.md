@@ -31,8 +31,11 @@ Designated scroll regions, and nothing else:
 | modal body | — to be defined per screen |
 
 `.app` is `height: 100vh` and `.content` owns the scroll, so the shell is already correct; the rule
-exists to stop new screens from growing the page instead of a region. **Acceptance:** at 1008×681
-every screen shows its primary action without scrolling to find it.
+exists to stop new screens from growing the page instead of a region.
+
+**Acceptance:** every screen keeps its primary action reachable without scrolling the page shell;
+long forms may scroll inside their designated content region while their action bar remains
+visible.
 
 ---
 
@@ -42,9 +45,29 @@ Current state: `font-family: "Segoe UI", system-ui, sans-serif` and **no `line-h
 so Arabic renders at the browser default (~1.2) — too tight for diacritics and descenders.
 
 ```
---font-ui      "Segoe UI", Tahoma, system-ui, sans-serif
---leading-ar   1.65     /* body text, both languages */
---leading-tight 1.25    /* headings and single-line numerics only */
+--font-ui        "Segoe UI", Tahoma, system-ui, sans-serif
+--leading-body   1.50     /* default UI body text */
+--leading-ar     1.62     /* Arabic text / Arabic container */
+--leading-tight  1.25     /* headings, single-line numerics */
+```
+
+Which applies where:
+
+| Context | Token |
+|---|---|
+| default UI body | `--leading-body` |
+| Arabic text or an Arabic container | `--leading-ar` |
+| headings, single-line numerics | `--leading-tight` |
+
+1.65 across all body text is too generous for a 681px-tall POS, so English body sits at 1.50 and
+only Arabic gets the extra room it actually needs.
+
+🔴 **This is only correct if the language is declared, not implied.** The root or container must
+carry **`lang="ar"` / `lang="en"` together with `dir`** — setting direction alone is cosmetic and
+leaves the browser guessing at font selection and line breaking. `--leading-ar` applies via
+`:lang(ar)`, not via a class someone remembers to add.
+
+```
 ```
 
 🔴 **Offline only — no web fonts, ever.** This is an offline-first POS; a Google Fonts link would
@@ -104,26 +127,111 @@ currently use full 48px buttons, which is what makes those rows ~90px tall.
 Keep all 9 existing tokens unchanged: `--bg --surface --text --muted --border --primary
 --primary-text --danger --radius`.
 
-Add semantic status, four meanings only, each with a surface and a text tone so a badge or a notice
-can be built from the pair:
+Add semantic status, four meanings only. **Colour must not lie about business state:**
 
-```
---status-neutral      / --status-neutral-text      informational, no judgement
---status-success      / --status-success-text      done, active, paid
---status-warning      / --status-warning-text      needs attention, pending, placeholder
---status-danger       / --status-danger-text       destructive, failed, unpaid   (reuses --danger)
+| Status | Means |
+|---|---|
+| `neutral` | informational · draft · ordinary state |
+| `success` | active · completed · paid |
+| `warning` | pending · needs attention · partial · **unpaid where payment is legitimately outstanding** |
+| `danger` | failed · destructive · voided · irreversible error |
+
+🔴 **`unpaid` is NOT danger.** On an invoice an unpaid balance is frequently a perfectly correct
+commercial state, not an error. Painting it red tells the operator something false.
+
+**Why this is needed now:** `.badge` is one hardcoded amber (`#fff3cd` / `#8a5a00`), which is why
+"manual", "Active", "0.001", "صادرة", "فاتورة" and `PENDING` all read as the same kind of thing.
+
+### The palette already exists — it is just anonymous
+
+Nothing below is invented. Every value is either already shipped in `styles.css` or derived from a
+shipped value by tinting it toward `--surface`. The stylesheet already contains **three** warning
+text colours (`#8a5a00`, `#b54708`, `#7c2d12`) and **three** warning surfaces (`#fff3cd`,
+`#fffbe6`, `#fde68a`); naming them is what collapses that.
+
+It also references **five tokens that are never declared** — `--card`, `--line`, `--ink`,
+`--thead`, `--hl` — so every use silently falls back to a hardcoded literal, and
+`var(--line, #d9dce1)` duplicates `--border`'s exact value **11 times**. Declaring them as aliases
+makes the vocabulary real without rewriting a single reference.
+
+```css
+:root {
+  /* ── the 9 shipped tokens, unchanged ─────────────────────────────── */
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --text: #1c1f24;
+  --muted: #6b7280;
+  --border: #d9dce1;
+  --primary: #1f5eff;
+  --primary-text: #ffffff;
+  --danger: #c62828;
+  --radius: 10px;
+
+  /* ── two real surfaces, lifted from existing fallback literals ───── */
+  --surface-sunken:    #f1f3f5;   /* was var(--thead, #f1f3f5) — table head, inset panel */
+  --surface-highlight: #fffbe6;   /* was var(--hl,    #fffbe6) — the row being entered */
+
+  /* ── the 5 phantom tokens, now declared as aliases ───────────────── */
+  --card:  var(--surface);        /* was var(--card, #fff) */
+  --line:  var(--border);         /* was var(--line, #d9dce1), 11 hardcoded copies */
+  --ink:   var(--text);           /* was var(--ink,  #111) */
+  --thead: var(--surface-sunken);
+  --hl:    var(--surface-highlight);
+
+  /* ── semantic status ─────────────────────────────────────────────── */
+  --status-neutral:      var(--surface-sunken);
+  --status-neutral-text: var(--text);        /* NOT --muted — see the contrast table */
+
+  --status-success:      #eef5ef;            /* derived: #2e7d32 at 8% over --surface */
+  --status-success-text: #2e7d32;            /* shipped today in .badge.ok */
+
+  --status-warning:      #fff3cd;            /* shipped today in .badge */
+  --status-warning-text: #8a5a00;            /* shipped today in .badge */
+
+  --status-danger:       #faeeee;            /* derived: #c62828 at 8% over --surface */
+  --status-danger-text:  var(--danger);      /* #c62828 */
+
+  /* ── muted text on anything other than --surface ─────────────────── */
+  --muted-strong: #656c79;        /* --muted fails AA off white — see the contrast table */
+
+  /* ── elevation ───────────────────────────────────────────────────── */
+  --shadow-dialog: 0 12px 32px rgba(28, 31, 36, 0.18);   /* --text's hue, not pure black */
+}
 ```
 
-Plus two support tokens:
+`.notice`'s existing blue pair (`#eef6ff` surface, `#bcd8f7` border) stays as its own **info
+banner** component. It is deliberately **not** folded into the badge statuses — a banner and a badge
+are different objects, and collapsing them would invent a fifth status.
 
-```
---surface-sunken   table header / inset panel ground
---shadow-dialog    the single elevation used by modals
-```
+### Contrast, measured (WCAG 2.1; normal text needs ≥ 4.5:1)
 
-**Why this is needed now:** `.badge` is currently one hardcoded amber (`#fff3cd` / `#8a5a00`), which
-is why "manual", "Active", "0.001", "صادرة", "فاتورة" and `PENDING` all read as the same kind of
-thing. Without named statuses, each new screen picks a colour by eye.
+| Pair | Ratio | |
+|---|---|---|
+| `--status-warning-text` on `--status-warning` (both shipped) | **5.35** | ✅ |
+| `--status-success-text` on `--status-success` (derived 8%) | **4.63** | ✅ |
+| `--status-danger-text` on `--status-danger` (derived 8%) | **4.96** | ✅ |
+| `--status-neutral-text` on `--status-neutral` | **14.86** | ✅ |
+| `--text` on `--surface` | 16.52 | ✅ |
+| `--muted` on `--surface` | 4.83 | ✅ |
+| 🔴 `--muted` on `--bg` | **4.43** | ❌ below AA |
+| 🔴 `--muted` on `--surface-sunken` | **4.35** | ❌ below AA |
+| `--muted-strong` on `--surface-sunken` | **4.75** | ✅ |
+
+The 8% tint was chosen by measurement, not taste: at 10% the success pair falls to 4.49 — on the
+line — while 6% is barely a tint. 8% clears AA on both derived surfaces with headroom.
+
+🔴 **A real defect this check found, needing Salman's decision.** `--muted: #6b7280` passes AA only
+on white. Muted hints render on `--bg` today (the products search hint, the item count, empty
+states), where it measures **4.43:1 — below AA**. Two ways out:
+
+| Option | Effect |
+|---|---|
+| **A — add `--muted-strong: #656c79`** (as written above) | Non-breaking; `--muted` keeps its shipped value; but it leaves a rule to remember — muted text on anything other than `--surface` must use `--muted-strong`. |
+| **B — change `--muted` itself to `#656c79`** | One value, no rule to remember, fixes every existing use at once, visually near-identical. **But it edits one of the 9 shipped tokens**, which the brief said to leave exactly as shipped. |
+
+**Recommendation: B.** A rule that depends on knowing which ground you are standing on is exactly
+the kind that gets forgotten on the next screen — the failure this foundation exists to prevent.
+Flagged rather than taken, because it contradicts a stated constraint.
 
 ---
 
@@ -153,8 +261,11 @@ Mapping of the 14 combinations found in the renderer:
 | `btn primary small`, `btn small` | `--control-h-small` variants |
 | `btn selected` | state, not a role — keep, but move its `outline` to the focus token (§9) |
 
-**One primary per screen.** The invoice sheet currently has two blue primaries (`+ أضف سطراً` and
-`إصدار الفاتورة`); `+ أضف سطراً` becomes `default`.
+**One dominant primary action per visible interaction context.** A screen has one; a modal opened
+over it has its own, independent of the screen behind it. The invoice sheet currently has two blue
+primaries in the same context (`+ أضف سطراً` and `إصدار الفاتورة`); `+ أضف سطراً` becomes `default`.
+
+**`ghost-danger` is a variant of `danger`, not a fifth role.** The system stays at 4 roles.
 
 ---
 
@@ -168,6 +279,9 @@ identity    solid — what KIND of document this is (صادرة / واردة onc
 
 Every badge carries a **label or a title**, never a bare value. `0.001` next to `kg` is the current
 counter-example: it is the fractional step with no indication of that.
+
+Per §5, **`partial` and `unpaid` are `warning`, never `danger`** — an outstanding balance is a
+commercial state, not a failure.
 
 ---
 
@@ -206,8 +320,27 @@ leaving a screen that has not changed. Branching on dirty state gives both.
 `الخروج بدون حفظ` is **ghost-danger, not filled** — per §6 it sits in an action row, not as the
 confirm of a destructive dialog, and it must not out-weigh `حفظ والخروج`.
 
-**Dialog mechanics:** max width 560px, body scrolls while the action row stays visible, `Esc` maps
-to the safe choice (cancel), and the title is a real `<h2>` so the dialog is announced.
+**Keyboard mechanics — not accessibility luxury.** The cashier path is keyboard-heavy, and a dialog
+that opens with the destructive button focused will eventually destroy something because the
+operator was still pressing Enter.
+
+```
+Destructive confirm
+  initial focus   = Cancel / the safe action
+  Enter           = must NOT trigger destruction merely because the dialog opened
+  Esc             = Cancel
+
+Unsaved changes
+  initial focus   = حفظ والخروج
+  Esc             = إلغاء
+
+Every modal
+  focus is TRAPPED inside the dialog while it is open
+  focus is RESTORED to the invoking control after it closes
+```
+
+**Dialog mechanics:** max width 560px, body scrolls while the action row stays visible, and the
+title is a real `<h2>` so the dialog is announced.
 
 ---
 
@@ -228,12 +361,22 @@ the cashier path is keyboard-heavy.
 `.btn.selected`'s `3px solid var(--primary)` outline is a **selection** state and must stop using
 `outline`, so selection and focus remain distinguishable.
 
+🔴 **Semantic controls, not styled divs.** Anything that behaves like a button, card or row must be
+keyboard-focusable using the correct semantic element wherever possible; focus styling must never be
+used to disguise a non-interactive `<div>` as an interactive control. A product card should be a
+`<button>` — not a `<div>` with `tabindex` — unless there is a real reason it cannot be.
+
 ---
 
 ## 10 · Bidi isolation — the rule
 
-> **Bidi isolation is mandatory for every number, date, code, SKU and currency. Use `<bdi>` for
+> **Bidi isolation is mandatory for every structured LTR run: number, amount, currency, date/time,
+> phone number, invoice number, SKU/barcode/code, percentage, and identifier. Use `<bdi>` for
 > rendered text; use `dir="ltr"` / appropriate bidi CSS for form controls and editable values.**
+
+**Isolate the whole run, not each fragment.** `#61` and `15.50 USD` are each one run and get wrapped
+once; wrapping the digits while leaving the `#` or the currency outside is what produced `61#` and
+`USD 0.00 −` in the first place.
 
 Stated this way because `<bdi>` cannot live inside an `<input>`, a `<select>` or any other control
 whose value is not a text node — a blanket "`<bdi>` everywhere" rule would be impossible to
@@ -304,9 +447,14 @@ Five selectors are defined twice in 263 lines:
 | `table.inv-lines` | two definitions; keep one |
 | `table.inv-lines td.row-actions` | two definitions; keep one, at `--control-h-small` |
 
-Mechanical check to keep it fixed:
+Developer sanity check:
 `grep -oE "^[.#a-zA-Z][^{]*\{" src/renderer/styles.css | sed 's/ *{$//;s/ *$//' | sort | uniq -d`
-must print nothing.
+
+🔴 **The grep is a developer check, not release evidence.** It is a regex, not a CSS parser: it will
+miss a multiline selector, a selector inside a media rule, and a duplicate differing only in
+whitespace. If duplicate-selector detection ever becomes a CI gate, implement it with a CSS
+parser/test **and a positive control proving the check detects a known duplicate** — this project
+has already shipped two blind probes that passed while measuring nothing.
 
 ---
 
@@ -316,7 +464,8 @@ must print nothing.
 - It does not touch the invoice **PDF** — stabilised and separately approved.
 - It does not add a component library, a CSS framework, or a build step.
 - It does not rename an existing token or shrink an existing control.
-- It changes no schema and no behaviour.
+- This specification changes no runtime code or schema by itself. Its eventual implementation is
+  limited to the explicitly approved presentation and interaction behaviour described here.
 
 ## Acceptance for this spec
 
@@ -326,3 +475,7 @@ must print nothing.
    horizontally at 1008×681.
 3. Acceptance is **visual/checklist based, not a pixel-perfect diff** — the design is changing on
    purpose.
+4. **Status/background/text combinations must meet readable contrast, and no status may rely on
+   colour alone** — every status carries a label or a title as well.
+5. **A keyboard review of the cashier path must prove visible focus and a logical tab order**,
+   including dialog initial focus, focus trap and focus restoration.
