@@ -366,6 +366,8 @@ const AR: Dict = {
   "review.statusPending": "بانتظار المراجعة",
   "review.statusFailed": "فشلت",
   "review.statusDone": "تمّت",
+  "inv.drafts.updated": "آخر تعديل",
+  "products.fractional": "يقبل الكسور",
 };
 
 const EN: Dict = {
@@ -681,6 +683,8 @@ const EN: Dict = {
   "review.statusPending": "Needs review",
   "review.statusFailed": "Failed",
   "review.statusDone": "Done",
+  "inv.drafts.updated": "Last modified",
+  "products.fractional": "fractions ok",
 };
 
 const DICTS: Readonly<Record<Language, Dict>> = Object.freeze({ ar: AR, en: EN });

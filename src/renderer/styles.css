@@ -198,8 +198,17 @@ h1, h2 { margin: 0 0 12px; }
  * rule needs an RTL twin. That is the point of the foundation — a new screen costs no RTL work.
  */
 .catalog-admin { display: flex; flex-direction: column; gap: 10px; padding: 16px; overflow: auto; }
-.admin-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.admin-head h2 { margin: 0; margin-inline-end: auto; }
+.admin-head {
+  /* 🔴 THE COUNT BELONGS TO THE HEADING. space-between stranded it at the opposite edge of the
+     screen, so the number and the thing it counts were as far apart as the layout allowed. */
+  display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+/* 🔴 NO `margin-inline-end: auto` HERE. It pushed everything after the heading to the opposite
+   edge of the screen: the review count ended up as far from the thing it counts as the layout
+   allowed, and the Products primary action landed in the last-read corner in RTL. */
+.admin-head h2 { margin: 0; }
+.admin-head .spacer { flex: 1; }
 .admin-search {
   flex: 1 1 260px; min-width: 0; max-width: 420px; padding: 10px 12px; font-size: 16px;
   border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: inherit;
@@ -405,3 +414,14 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 }
 .lang-switch .btn { border: 0; border-radius: 0; min-height: var(--control-h-small); }
 .lang-switch .btn.selected { background: var(--text); color: var(--surface); border-width: 0; }
+
+/* DRAFTS — a record row the operator can click anywhere on. */
+.drafts-table .row-clickable { cursor: pointer; }
+.drafts-table .row-clickable:hover { background: var(--surface-sunken); }
+.drafts-table td.num { text-align: end; font-variant-numeric: tabular-nums; }
+
+/* An empty list offers the action, rather than only naming it. */
+.empty-state {
+  display: grid; place-items: center; gap: var(--space-3);
+  padding: var(--space-4); text-align: center;
+}

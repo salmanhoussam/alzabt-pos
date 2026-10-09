@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { InvoiceDto, ReconciliationDto } from "../../../shared/ipcContract";
 import { call, errorText, fmt, pos } from "../../api";
 import { useT } from "../../i18n";
+import { stamp, stampDate } from "../../format";
 
 export function InvoiceHistory({ onOpen }: { readonly onOpen: (invoiceId: string) => void }) {
   const { t } = useT();
@@ -156,25 +157,41 @@ export function InvoiceDrafts({ onOpen }: { readonly onOpen: (invoiceId: string)
     );
 
   return (
-    <table className="admin-table" data-testid="drafts-table">
+    <table className="admin-table drafts-table" data-testid="drafts-table">
       <thead>
         <tr>
           <th>{t("inv.history.colDate")}</th>
           <th>{t("inv.history.colCustomer")}</th>
-          <th>{t("inv.history.colTotal")}</th>
+          <th className="num">{t("inv.history.colTotal")}</th>
+          <th>{t("inv.drafts.updated")}</th>
+          <th>{t("history.colStatus")}</th>
           <th />
         </tr>
       </thead>
       <tbody>
         {drafts.map((inv) => (
-          <tr key={inv.id} data-testid="draft-row">
-            <td dir="ltr">{inv.updatedAt.slice(0, 10)}</td>
+          /* 🔴 A RECORD ROW, NOT THREE STRINGS AND A DISTANT BUTTON. The whole row opens the
+             draft; the button stays for the keyboard and for anyone who looks for one. */
+          <tr
+            key={inv.id}
+            data-testid="draft-row"
+            className="row-clickable"
+            onClick={() => onOpen(inv.id)}
+          >
+            <td><bdi dir="ltr">{stampDate(inv.createdAt ?? inv.updatedAt)}</bdi></td>
             <td>{inv.customerName ?? "—"}</td>
-            <td dir="ltr">
-              <bdi>{fmt(inv.total)}</bdi>
-            </td>
+            <td className="num"><bdi dir="ltr">{fmt(inv.total)}</bdi></td>
+            <td><bdi dir="ltr">{stamp(inv.updatedAt)}</bdi></td>
+            <td><span className="badge warn">{t("inv.sheet.draft")}</span></td>
             <td className="actions">
-              <button className="btn small" onClick={() => onOpen(inv.id)} data-testid="draft-open">
+              <button
+                className="btn small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpen(inv.id);
+                }}
+                data-testid="draft-open"
+              >
                 {t("inv.drafts.open")}
               </button>
             </td>
