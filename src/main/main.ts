@@ -404,8 +404,11 @@ function startTill(): void {
   const settings = new SettingsStore(userData);
   log.info("settings", { ...settings.get() });
 
+  // Named rather than inlined, because the invoice stack below must share THIS object: one
+  // repository, one connection, one transaction (migration 7).
+  const saleStore = new SaleRepository(db);
   const service = new PosService({
-    repository: new SaleRepository(db),
+    repository: saleStore,
     pinStates: new PinStateRepository(db),
     catalog: start.catalog,
     catalogStore,
@@ -426,7 +429,7 @@ function startTill(): void {
     // record — audit_events is — and it rotates, so it must never be treated as one.
     audit: (row) => log.info("audit", { ...row }),
   });
-  // The manual-invoice stack (migration 6), on THIS connection and THIS transaction provider, with
+  // The manual-invoice stack (migrations 6 and 7), on THIS connection and THIS transaction provider, with
   // `service` as its only route to the catalog — so an invoice can never write a product except
   // through PosService and its migration-5 audit row.
   invoices = new InvoiceService({
@@ -435,6 +438,9 @@ function startTill(): void {
     company: new CompanyProfileRepository(db),
     catalogStore,
     products: service,
+    // The SAME repository object the till uses, on the same connection: a finalized invoice's sale
+    // goes through the one module that is allowed to write the ledger (migration 7).
+    sales: saleStore,
     transact: (fn) => {
       if (!db) throw new Error("ledger is not open");
       return db.transaction(fn).immediate();

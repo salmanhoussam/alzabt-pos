@@ -12,6 +12,7 @@ import { money } from "../../src/domain/money";
 import { InvoiceService } from "../../src/application/invoiceService";
 import { InvoiceRepository } from "../../src/persistence/invoiceRepository";
 import { ReconciliationRepository } from "../../src/persistence/reconciliationRepository";
+import { SaleRepository } from "../../src/persistence/saleRepository";
 import { CatalogRepository } from "../../src/persistence/catalogRepository";
 import { FIXTURE_TERMINAL } from "../../src/fixtures/terminal";
 import { type TempDir, makeHarness, tempDir } from "../helpers/harness";
@@ -397,9 +398,25 @@ describe("the invoice number", () => {
     expect(numbers).toEqual([61, 62, 63]);
     expect(nextNumber()).toBe(64);
 
-    // The sales ledger's own sequence has not moved — the two never meet.
+    // 🔴 THIS ASSERTION WAS FLIPPED ON 2026-10-09, AND THE OLD VALUE WAS ZERO. Until then
+    // finalizing an invoice wrote NO sale, by the V1 decision stated in migration 6, and this line
+    // read `expect(Number(receipts.c)).toBe(0)`. Field use reversed that decision: a finalized
+    // invoice IS a sale. What this test is really about — that the two NUMBER SEQUENCES never meet
+    // — is unchanged and is now asserted directly below, which is stronger than inferring it from
+    // an empty table.
     const receipts = h.db.prepare("SELECT count(*) AS c FROM sales").get() as { c: bigint };
-    expect(Number(receipts.c)).toBe(0);
+    expect(Number(receipts.c)).toBe(3);
+
+    // Receipt numbers start at 1 and know nothing about the invoice sequence starting at 61.
+    const pairs = (
+      h.db
+        .prepare("SELECT receipt_number, invoice_id FROM sales ORDER BY receipt_number")
+        .all() as Array<{ receipt_number: bigint; invoice_id: string }>
+    ).map((r) => Number(r.receipt_number));
+    expect(pairs).toEqual([1, 2, 3]);
+    // And every one of the three is linked to its invoice, exactly once.
+    const linked = h.db.prepare("SELECT count(DISTINCT invoice_id) AS c FROM sales").get() as { c: bigint };
+    expect(Number(linked.c)).toBe(3);
   });
 
   it("cannot be handed to two invoices, which the UNIQUE index enforces independently", () => {
@@ -447,6 +464,7 @@ describe("finalize rolls back as one act", () => {
       company: h.companyStore,
       catalogStore: new CatalogRepository(h.db),
       products: h.service,
+      sales: new SaleRepository(h.db),
       transact: (fn) => h.db.transaction(fn).immediate(),
       terminal: FIXTURE_TERMINAL,
       now: h.clock.now,

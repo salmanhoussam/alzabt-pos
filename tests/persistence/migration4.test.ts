@@ -77,6 +77,8 @@ describe("migration 4 — v3 to v4", () => {
     expect(MIGRATIONS[6]!.sql).toContain("line_total_minor = (quantity_milli * unit_price_minor + 500) / 1000");
     expect(MIGRATIONS[6]!.sql).toContain("unit_price_minor >= 0 AND unit_price_minor <= 922429446630");
     expect(MIGRATIONS[6]!.sql).toContain("quantity_milli > 0 AND quantity_milli <= 9999000");
+    // The fraction rule survives verbatim; migration 7 only exempts invoice-origin rows from it,
+    // and tests/persistence/migration7.test.ts proves a POS line still cannot carry 2.5 pieces.
     expect(MIGRATIONS[6]!.sql).toContain("sale_unit IS NULL OR sale_unit IN ('kg', 'meter') OR quantity_milli % 1000 = 0");
     // Nothing in migration 4's own SQL alters an earlier table's definition.
     for (const forbidden of [/ALTER TABLE sales\b/i, /DROP TABLE sales\b/i, /catalog_products/i, /cashier_pin_state/i]) {

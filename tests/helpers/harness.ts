@@ -100,6 +100,9 @@ export function makeHarness(
       company: companyStore,
       catalogStore: new CatalogRepository(db),
       products: service,
+      // The REAL ledger repository, like `products` above: a passing test then means a real row in
+      // `sales`, not that a method was called on a fake.
+      sales: repository,
       transact: (fn) => db.transaction(fn).immediate(),
       terminal: opts.terminal ?? FIXTURE_TERMINAL,
       now: clock.now,

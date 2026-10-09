@@ -668,9 +668,18 @@ CREATE TABLE sale_lines_v7 (
   -- ever disagree about money.
   line_total_minor  INTEGER NOT NULL
       CHECK (line_total_minor = (quantity_milli * unit_price_minor + 500) / 1000),
-  -- Unchanged from migration 4: fractions belong to the units named here and nowhere else. An
-  -- invoice line with no canonical unit takes the NULL branch, exactly as a pre-v4 row does.
-  CHECK (sale_unit IS NULL OR sale_unit IN ('kg', 'meter') OR quantity_milli % 1000 = 0),
+  -- Migration 4's rule, kept as a table CHECK (the strongest form) and exempting invoice-origin
+  -- rows by a column ON THE ROW, so a till line still faces it in full.
+  --
+  -- 🔴 WHY THE EXEMPTION EXISTS, and it is not a convenience. domain/invoice.ts's
+  -- assertInvoiceQuantity applies NO unit-based restriction, so a finalized invoice may legitimately
+  -- read "2.5 حبة" — 2.5 of something whose canonical unit is 'piece'. Without this exemption,
+  -- finalizing that invoice would ABORT on this CHECK, and the only ways out would be to drop the
+  -- canonical unit, round the quantity, or refuse a document the shop really received. All three
+  -- are the silent normalisation this whole feature exists to prevent. The invoice is historical
+  -- commercial truth; the fraction rule is a CATALOG rule about what a till may sell.
+  CHECK (invoice_line_id IS NOT NULL
+         OR sale_unit IS NULL OR sale_unit IN ('kg', 'meter') OR quantity_milli % 1000 = 0),
   UNIQUE (sale_id, line_no)
 ) STRICT;
 

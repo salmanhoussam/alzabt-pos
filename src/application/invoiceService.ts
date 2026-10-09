@@ -15,6 +15,7 @@
  * review queue. It changes no product, creates no product and clears no flag. Each of those is a
  * separate, explicit, named decision by a person.
  */
+import { createHash } from "node:crypto";
 import { businessDateOf } from "../domain/businessDay";
 import { DomainError } from "../domain/errors";
 import {
@@ -57,6 +58,8 @@ import type {
   InvoiceRow,
 } from "../persistence/invoiceRepository";
 import type { ReconciliationRepository, ReconciliationRow } from "../persistence/reconciliationRepository";
+import type { NewSaleLine, NewSaleHeader } from "../persistence/saleRepository";
+import { type SaleRecord, paymentStatusFor } from "../domain/sale";
 import type { TerminalConfig } from "../fixtures/terminal";
 
 /** Where a reconciliation edit says it came from, in audit metadata. */
@@ -81,6 +84,30 @@ export interface ProductWriter {
   ): AdminProductRow;
 }
 
+/**
+ * The narrow slice of `SaleRepository` this service may use, for the same reason `ProductWriter`
+ * exists: the dependency is visible and auditable, and the tests inject the REAL repository so a
+ * passing test means a real row in `sales`, not a method call on a fake.
+ */
+export interface SaleWriter {
+  commitSale(header: NewSaleHeader, lines: ReadonlyArray<NewSaleLine>): number;
+  findByIdempotencyKey(key: string): { sale: SaleRecord; fingerprint: string } | undefined;
+  findByInvoiceId(invoiceId: string): SaleRecord | undefined;
+}
+
+/**
+ * The deterministic idempotency key of an invoice's sale.
+ *
+ * 🔴 DETERMINISTIC ON PURPOSE, and it is the second of two independent defences against a duplicate
+ * sale. The first is `sales.invoice_id UNIQUE`, which makes a second sale for one invoice
+ * structurally impossible at the database level. This one makes a RETRY recognisable before it is
+ * attempted, so the service can answer "already done" instead of hitting a constraint. It fits the
+ * existing contract unchanged: /^[A-Za-z0-9-]{8,100}$/ accepts "inv-" plus a UUID.
+ */
+export function invoiceSaleIdempotencyKey(invoiceId: string): string {
+  return `inv-${invoiceId}`;
+}
+
 export interface InvoiceServiceDeps {
   readonly invoices: InvoiceRepository;
   readonly reconciliation: ReconciliationRepository;
@@ -88,6 +115,8 @@ export interface InvoiceServiceDeps {
   /** Read-only here. Every WRITE goes through `products`. */
   readonly catalogStore: CatalogRepository;
   readonly products: ProductWriter;
+  /** Where a finalized invoice becomes a real sale (migration 7). */
+  readonly sales: SaleWriter;
   /** `db.transaction(fn).immediate()` — the one connection, the one transaction. */
   readonly transact: <T>(fn: () => T) => T;
   readonly terminal: TerminalConfig;
@@ -654,11 +683,117 @@ export class InvoiceService {
         instant,
       );
 
-      // 10 · classify every line against the catalog AS IT IS NOW, and write the review queue
+      // 10 · THE SALE. A finalized invoice is a real sale for business reporting (migration 7).
+      this.createSaleForInvoice(finalized, lines, cashier, instant);
+
+      // 11 · classify every line against the catalog AS IT IS NOW, and write the review queue
       this.createReconciliation(finalized, lines, cashier, instant);
 
       return { invoice: finalized, lines: this.deps.invoices.listLines(invoiceId) };
     });
+  }
+
+  // ── The sale a finalized invoice is ─────────────────────────────────────────────────────────────
+
+  /**
+   * Writes the sale that a finalized invoice IS, inside the SAME transaction that finalized it.
+   *
+   * 🔴 BUILT FROM THE PERSISTED FINALIZED ROW, not from the values computed a moment earlier. The
+   * brief's own step order put sale creation before marking the invoice final; this does it after,
+   * deliberately, and the reason is the one step 4 above already gives for recomputing line totals:
+   * what the document actually STORED is the only thing worth copying. Reading the frozen row back
+   * means invoice and sale cannot disagree even if some future path changed what `finalize` writes.
+   * Atomicity is identical either way — both are inside the one transaction — so the ordering costs
+   * nothing and buys a stronger guarantee.
+   *
+   * 🔴 NO PAYMENT METHOD IS INVENTED. A manual invoice captures no method in this patch, so
+   * `payment_method` is NULL, which means NOT RECORDED. `payment_status` carries the truth that
+   * matters — paid, partial or unpaid — and the history screen says so in words.
+   */
+  private createSaleForInvoice(
+    invoice: InvoiceRow,
+    lines: ReadonlyArray<InvoiceLineRow>,
+    cashier: Cashier,
+    instant: Date,
+  ): void {
+    const key = invoiceSaleIdempotencyKey(invoice.id);
+
+    // Idempotency, checked twice over. Reaching either branch inside a finalize transaction should
+    // be impossible — the invoice was a draft a few statements ago — but a retry that got further
+    // than the UI realised must not produce a second sale, and `sales.invoice_id UNIQUE` would
+    // raise a constraint error rather than tell us why.
+    if (this.deps.sales.findByInvoiceId(invoice.id) || this.deps.sales.findByIdempotencyKey(key)) return;
+
+    const currency = invoice.currency;
+    const paid = money(invoice.paid_minor, currency);
+    const balanceDue = money(invoice.balance_due_minor, currency);
+
+    const saleLines: NewSaleLine[] = lines.map((line) => {
+      // The SKU is snapshotted from the catalog AS IT IS NOW, exactly as a till sale snapshots it,
+      // and only when the operator actually linked a product. An unlinked line keeps NULL — the
+      // honest statement that the catalog has no such product yet, pending reconciliation.
+      const product = line.product_id ? this.deps.catalogStore.findById(line.product_id) : undefined;
+      return {
+        id: this.newId(),
+        lineNo: Number(line.line_no),
+        invoiceLineId: line.id,
+        productId: line.product_id,
+        sku: product ? product.sku : null,
+        // assertLineFinalizable has already refused an empty description, so this is never blank.
+        productName: line.description ?? "",
+        saleUnit: line.canonical_unit,
+        // 🔴 THE PRINTED LABEL, VERBATIM. "كيس (50PCS)" stays "كيس (50PCS)" forever; a later
+        // reconciliation choosing 'pack' for the CATALOG must never reach back into this row.
+        unitLabel: line.unit_label,
+        quantityMilli: Number(line.quantity_milli),
+        unitPriceMinor: line.unit_price_minor,
+        lineTotalMinor: line.line_total_minor,
+      };
+    });
+
+    const header: NewSaleHeader = {
+      id: this.newId(),
+      idempotencyKey: key,
+      // Deterministic, over the frozen document: the same invoice always hashes the same, so a
+      // replay is recognised as the same request rather than a conflicting one.
+      requestFingerprint: createHash("sha256")
+        .update(
+          JSON.stringify({
+            invoiceId: invoice.id,
+            invoiceNumber: Number(invoice.invoice_number),
+            totalMinor: invoice.total_minor.toString(),
+            paidMinor: invoice.paid_minor.toString(),
+            lines: saleLines.map((l) => [l.lineNo, l.quantityMilli, l.unitPriceMinor.toString()]),
+          }),
+        )
+        .digest("hex"),
+      sourceType: "invoice",
+      invoiceId: invoice.id,
+      cashierId: cashier.id,
+      cashierName: cashier.name,
+      currency,
+      subtotalMinor: invoice.subtotal_minor,
+      taxMinor: invoice.tax_minor,
+      totalMinor: invoice.total_minor,
+      paidMinor: invoice.paid_minor,
+      balanceDueMinor: invoice.balance_due_minor,
+      paymentStatus: paymentStatusFor(paid.minor, balanceDue.minor),
+      paymentMethod: null,
+      // 🔴 THE BUSINESS DAY THIS WAS RECORDED, not the date printed on the document. An invoice may
+      // be back-dated; "Today's Sales" means what the shop recorded today, and changing that
+      // definition would silently alter a report every POS sale already feeds. The document keeps
+      // its own `invoice_date`, which is what the printed paper shows.
+      businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
+      completedAt: invoice.finalized_at ?? instant.toISOString(),
+      createdAt: instant.toISOString(),
+    };
+
+    this.deps.sales.commitSale(header, saleLines);
+  }
+
+  /** The sale a finalized invoice produced, if any. Read-only. */
+  saleForInvoice(invoiceId: string): SaleRecord | undefined {
+    return this.deps.sales.findByInvoiceId(invoiceId);
   }
 
   // ── Reconciliation ──────────────────────────────────────────────────────────────────────────────
