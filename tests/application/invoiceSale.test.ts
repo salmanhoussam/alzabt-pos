@@ -564,3 +564,53 @@ describe("the till contract is not one byte looser", () => {
     expect(bad("partial", 40, 50)).toThrow(/CHECK constraint failed/);
   });
 });
+
+describe("the daily sales report counts an invoice sale exactly once", () => {
+  it("gross sales include the invoice's total, and nothing counts it twice", () => {
+    // One till sale at 2.50, one invoice at 20.00, nothing paid on the invoice.
+    h.service.createSale({
+      idempotencyKey: "till-key-00000003",
+      lines: [{ productId: "prod-0001", quantityMilli: 1000 }],
+      paymentMethod: "cash",
+      expectedTotalMinor: 250n,
+    });
+    const id = finalize([{ unitPrice: "20.00" }]);
+
+    const report = h.service.getTodaySales();
+    expect(report.completedSalesCount).toBe(2);
+    expect(report.grossSales.minor).toBe(2_250n);
+    expect(report.netSales.minor).toBe(2_250n);
+    expect(report.voidedSalesCount).toBe(0);
+
+    // 🔴 THE INVOICE IS NOT COUNTED A SECOND TIME. The invoice table and the sales table both hold
+    // a row for it; only the sale feeds the report, which is the whole reason the sale exists.
+    expect(saleCount()).toBe(2);
+    expect(h.db.prepare("SELECT count(*) AS c FROM invoices").get()).toEqual({ c: 1n });
+
+    // And reprinting it, or resolving its catalog queue, moves no figure.
+    h.invoices.getInvoice(id);
+    const item = h.invoices.listReconciliation(id)[0]!;
+    h.invoices.keepInvoiceOnly(item.id);
+    const after = h.service.getTodaySales();
+    expect(after).toEqual(report);
+  });
+
+  it("🔴 the report has no collected-cash metric, so a balance cannot be counted as money received", () => {
+    // §14's guard, asserted as a FACT about the report rather than assumed. If a cash metric is
+    // ever added, this fails by name and whoever adds it has to decide what an unpaid invoice does
+    // to it — instead of silently inheriting gross sales.
+    finalize([{ unitPrice: "100.00" }]);
+    const report = h.service.getTodaySales();
+    expect(Object.keys(report).sort()).toEqual([
+      "completedSalesCount",
+      "currency",
+      "date",
+      "grossSales",
+      "netSales",
+      "voidTotal",
+      "voidedSalesCount",
+    ]);
+    // Gross sales is a SALES figure and legitimately includes the unpaid 100.00.
+    expect(report.grossSales.minor).toBe(10_000n);
+  });
+});
