@@ -176,8 +176,52 @@ table.inv-lines thead th { background: var(--thead, #f1f3f5); font-size: .85rem;
 table.inv-lines td.num { text-align: end; width: 7rem; }
 table.inv-lines td.total { font-variant-numeric: tabular-nums; white-space: nowrap; }
 table.inv-lines input { width: 100%; box-sizing: border-box; }
-table.inv-lines td.actions { white-space: nowrap; width: 1%; }
+
+/* FIELD FINDING 1 — the row actions are their own region, not a crowd at the end of the money
+   columns. What the shop reported: "Save" floated between data fields and the columns read as
+   confusing. Three things fix it, and none of them is cosmetic:
+     1. a FIXED width, so the column cannot grow into the data columns as buttons are added;
+     2. the buttons stack in a grid instead of one nowrap line, so they stay inside that width;
+     3. a heavier start border, so the eye sees a boundary between data and actions.
+   `white-space: nowrap` with `width: 1%` did the opposite: it forced the column as wide as its
+   content and pushed the price inputs under it at small widths. */
+table.inv-lines th.row-actions-col,
+table.inv-lines td.row-actions {
+  width: 7.5rem;
+  min-width: 7.5rem;
+  border-inline-start: 2px solid var(--line, #d9dce1);
+  vertical-align: top;
+}
+table.inv-lines td.row-actions {
+  display: table-cell;
+  padding: 4px;
+}
+/* A grid rather than a flex row: two compact columns that wrap predictably, so a third button
+   never extends the cell. Logical properties only — this layout must hold in RTL unchanged. */
+table.inv-lines td.row-actions > * { margin: 0; }
+table.inv-lines td.row-actions {
+  text-align: start;
+}
+table.inv-lines td.row-actions .btn,
+table.inv-lines td.row-actions button {
+  display: block;
+  width: 100%;
+  margin-block-end: 4px;
+}
+table.inv-lines td.row-actions .btn:last-child,
+table.inv-lines td.row-actions button:last-child { margin-block-end: 0; }
+
+/* The data columns keep their own space at every width: the table may scroll horizontally inside
+   its own container, and never under the actions column. */
+.inv-lines-scroll { overflow-x: auto; }
+table.inv-lines { min-width: 44rem; }
+table.inv-lines td.description, table.inv-lines th.description { min-width: 10rem; }
+
 .inv-new-line { background: var(--hl, #fffbe6); }
+
+/* FIELD FINDING 2 — the add-row affordance lives in the table, under the last row. */
+.inv-add-row td { background: var(--surface, #f8f9fa); }
+.inv-add-bar { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
 
 .inv-totals { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
 .inv-totals table { border-collapse: collapse; min-width: 16rem; }

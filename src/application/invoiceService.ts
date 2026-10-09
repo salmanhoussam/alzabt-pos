@@ -791,6 +791,12 @@ export class InvoiceService {
     this.deps.sales.commitSale(header, saleLines);
   }
 
+  /** The number printed on an invoice, for showing an invoice-origin sale's identity. Read-only. */
+  invoiceNumberOf(invoiceId: string): number | undefined {
+    const row = this.deps.invoices.findById(invoiceId);
+    return row?.invoice_number === null || row?.invoice_number === undefined ? undefined : Number(row.invoice_number);
+  }
+
   /** The sale a finalized invoice produced, if any. Read-only. */
   saleForInvoice(invoiceId: string): SaleRecord | undefined {
     return this.deps.sales.findByInvoiceId(invoiceId);

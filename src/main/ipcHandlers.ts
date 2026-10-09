@@ -17,6 +17,7 @@ import { MAX_PRODUCT_ID_LENGTH } from "../domain/catalog";
 import { DomainError } from "../domain/errors";
 import { MAX_QUANTITY_MILLI } from "../domain/quantity";
 import { assertPaymentMethod } from "../domain/sale";
+import type { SaleRecord } from "../domain/sale";
 import { isLanguage } from "../shared/i18n";
 import type { TerminalSettings } from "../shared/i18n";
 import { MAX_PRODUCT_NAME, MAX_SKU, type ProductDraft } from "../domain/productDraft";
@@ -273,7 +274,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           log.warn("after-sale-hook-failed", { error: err });
         }
       }
-      return { sale: toSaleDto(result.sale), duplicate: result.duplicate };
+      return { sale: toSaleDto(result.sale, invoiceNumberFor(result.sale)), duplicate: result.duplicate };
     }, (p) => saleFailureTruth(service, p)),
     voidSale: wrap("voidSale", (p) => {
       const o = exactObject(p, ["saleId", "reason"]);
@@ -288,7 +289,10 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       if (typeof o.limit !== "number" || !Number.isSafeInteger(o.limit) || o.limit < 1 || o.limit > 200) {
         invalid("'limit' must be an integer between 1 and 200");
       }
-      return service.getSaleHistory(o.limit).map((h) => ({ sale: toSaleDto(h.sale), void: h.void ? toVoidDto(h.void) : null }));
+      return service.getSaleHistory(o.limit).map((h) => ({
+        sale: toSaleDto(h.sale, invoiceNumberFor(h.sale)),
+        void: h.void ? toVoidDto(h.void) : null,
+      }));
     }),
     importCatalog: wrap("importCatalog", (p) => {
       noPayload(p);
@@ -597,6 +601,19 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   };
 
   // ── Shapes used by the invoice channels only ─────────────────────────────────────────────────
+
+  /**
+   * The invoice number behind an invoice-origin sale, or null.
+   *
+   * Looked up here rather than stored on the sale: `sales` carries the invoice id, and the number
+   * lives on the invoice, which is immutable once final — so there is nothing to keep in sync. On a
+   * terminal with no invoice service configured this is simply null; the sale is still correct.
+   */
+  function invoiceNumberFor(sale: SaleRecord): number | null {
+    if (sale.sourceType !== "invoice" || !sale.invoiceId || !options.invoices) return null;
+    const number = options.invoices.invoiceNumberOf(sale.invoiceId);
+    return number ?? null;
+  }
 
   function invoices(): InvoiceService {
     if (!options.invoices) {
