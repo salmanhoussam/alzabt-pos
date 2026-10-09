@@ -1335,10 +1335,14 @@ if (PHASE === "seed-v2") {
   // payment — not a fabricated method.
   await tab(page, "History");
   await page.locator('[data-testid="history-row"][data-source="invoice"]').first().waitFor({ timeout: 20000 });
-  const invoiceRow = page.locator('[data-testid="history-row"][data-source="invoice"]').first();
-  const ref = await invoiceRow.locator('[data-testid="history-invoice-ref"]').innerText();
-  const payment = await invoiceRow.locator('[data-testid="history-payment"]').innerText();
-  const balance = await invoiceRow.locator('[data-testid="history-balance"]').innerText();
+  // 🔴 NOT NAMED `invoiceRow`. There is a module-level `async function invoiceRow(page, {...})`
+  // helper, and a top-level `const invoiceRow` shadows it for the WHOLE module scope — so the call
+  // to the helper EARLIER in this same branch died with "Cannot access 'invoiceRow' before
+  // initialization". Windows CI caught it; the v6 baseline had already been built correctly.
+  const historyRow = page.locator('[data-testid="history-row"][data-source="invoice"]').first();
+  const ref = await historyRow.locator('[data-testid="history-invoice-ref"]').innerText();
+  const payment = await historyRow.locator('[data-testid="history-payment"]').innerText();
+  const balance = await historyRow.locator('[data-testid="history-balance"]').innerText();
   log("history row:", JSON.stringify({ ref, payment, balance }));
   assert(/\d/.test(ref), `the history row names the invoice number (got ${ref})`);
   assert(/Unpaid/i.test(payment), `the payment column says unpaid (got ${payment})`);
@@ -1347,10 +1351,10 @@ if (PHASE === "seed-v2") {
   assert(!/cash|card|external/i.test(payment), `no payment method was invented (got ${payment})`);
   // The till's void is refused for it, visibly.
   assert(
-    (await invoiceRow.locator('[data-testid="history-void-blocked"]').count()) === 1,
+    (await historyRow.locator('[data-testid="history-void-blocked"]').count()) === 1,
     "and the row says it cannot be voided",
   );
-  assert((await invoiceRow.locator('[data-testid="history-void"]').count()) === 0, "with no void button offered");
+  assert((await historyRow.locator('[data-testid="history-void"]').count()) === 0, "with no void button offered");
   await page.screenshot({ path: SHOTS + "upgrade-f-history.png" });
   await app.close();
 
