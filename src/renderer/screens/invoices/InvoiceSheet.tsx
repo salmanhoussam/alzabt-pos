@@ -11,14 +11,17 @@
  * editable afterwards, and editing them here changes the invoice only — never the catalog. What the
  * catalog should become is decided later, deliberately, in the review queue.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { matchesSearch } from "../../../domain/arabic";
 import type {
   AdminProductDto,
+  InvoiceHeaderPatch,
+  InvoiceHeaderPatchKey,
   InvoiceLineRequest,
   InvoiceViewDto,
   ReconciliationDto,
 } from "../../../shared/ipcContract";
+import { INVOICE_HEADER_PATCH_KEYS } from "../../../shared/ipcContract";
 import { call, errorText, fmt, pos } from "../../api";
 import { useT } from "../../i18n";
 
@@ -69,6 +72,8 @@ export function InvoiceSheet({
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [finalized, setFinalized] = useState<FinalizedNotice | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -98,23 +103,61 @@ export function InvoiceSheet({
     }
   };
 
-  const header = (patch: Partial<Record<"invoiceDate" | "customerName" | "customerAddress" | "customerPhone" | "notes" | "paid", string | null>>) => {
-    if (!view) return;
-    const inv = view.invoice;
-    void run(() =>
-      call(
-        pos().updateInvoiceHeader({
-          invoiceId,
-          invoiceDate: patch.invoiceDate !== undefined ? patch.invoiceDate : inv.invoiceDate,
-          customerName: patch.customerName !== undefined ? patch.customerName : inv.customerName,
-          customerAddress: patch.customerAddress !== undefined ? patch.customerAddress : inv.customerAddress,
-          customerPhone: patch.customerPhone !== undefined ? patch.customerPhone : inv.customerPhone,
-          notes: patch.notes !== undefined ? patch.notes : inv.notes,
-          paid: patch.paid !== undefined ? patch.paid : (inv.paid.minor === "0" ? null : paidText(inv.paid.minor)),
-        }),
-      ),
-    );
+  /**
+   * The live DOM value of every header input, so the CURRENT typed text can be read at any moment.
+   *
+   * 🔴 THE INPUTS STAY UNCONTROLLED ON PURPOSE. Controlling them would re-render on every service
+   * response and move the caret while the operator is still typing. Refs give the same read access
+   * without touching what they are doing.
+   */
+  const fieldRefs = useRef<Partial<Record<InvoiceHeaderPatchKey, HTMLInputElement | null>>>({});
+  const bind = (key: InvoiceHeaderPatchKey) => (el: HTMLInputElement | null) => {
+    fieldRefs.current[key] = el;
   };
+  /** "" means "not given" for every header field — the service reads null as cleared. */
+  const typed = (key: InvoiceHeaderPatchKey): string | null => {
+    const raw = fieldRefs.current[key]?.value;
+    if (raw === undefined) return null;
+    return raw.trim() === "" ? null : raw;
+  };
+
+  /**
+   * Sends ONLY the keys that changed.
+   *
+   * 🔴 THIS IS THE FIX FOR A REAL DEFECT, not a tidy-up. This helper used to fill every untouched
+   * field from `view.invoice` and send a FULL overwrite. `view` is React state, so when two blurs
+   * happened before the first response landed, the second request carried the FIRST field's stale
+   * value and silently overwrote what had just been saved — a customer phone lost on a commercial
+   * invoice, depending only on how fast the operator pressed Tab. Keys that are absent here are
+   * absent all the way to the service, which then reads them from the current database row.
+   */
+  const header = (patch: InvoiceHeaderPatch) => run(() => call(pos().updateInvoiceHeader({ invoiceId, patch })));
+
+  /**
+   * Writes EVERY header field as the operator has it typed right now, in one request.
+   *
+   * The durable save path the product rule demands: commercial header data must never depend only
+   * on blur timing. Save draft, leaving the screen and Finalize all go through this, so a value
+   * that was typed but never blurred is still persisted.
+   */
+  const flushHeader = async (): Promise<InvoiceViewDto | null> => {
+    const patch: Record<string, string | null> = {};
+    for (const key of INVOICE_HEADER_PATCH_KEYS) {
+      if (fieldRefs.current[key]) patch[key] = typed(key);
+    }
+    if (Object.keys(patch).length === 0) return view;
+    const next = await call(pos().updateInvoiceHeader({ invoiceId, patch: patch as InvoiceHeaderPatch }));
+    setView(next);
+    return next;
+  };
+
+  const saveDraft = () =>
+    run(async () => {
+      const next = await flushHeader();
+      if (!next) throw new Error("the draft could not be read back");
+      setSaved(true);
+      return next;
+    });
 
   const addLine = () => {
     if (!draftLine) return;
@@ -130,8 +173,16 @@ export function InvoiceSheet({
 
   const removeLine = (lineId: string) => run(() => call(pos().removeInvoiceLine({ invoiceId, lineId })));
 
+  /**
+   * Deletes the draft — AFTER an explicit in-app confirmation.
+   *
+   * 🔴 NOT window.confirm, which the rest of this screen already avoids: the finalize confirmation
+   * is an in-app overlay, a native dialog is not reachable by a data-testid, and in some embeddings
+   * window.confirm returns false immediately — which would make a destructive action silently do
+   * nothing. The overlay is both testable and consistent.
+   */
   const discard = async () => {
-    if (!window.confirm(t("inv.sheet.discardConfirm"))) return;
+    setDiscarding(false);
     try {
       await call(pos().discardInvoiceDraft({ invoiceId }));
       onClosed();
@@ -140,11 +191,37 @@ export function InvoiceSheet({
     }
   };
 
+  /**
+   * Leaves the draft WITHOUT destroying it — the safe exit this screen did not have.
+   *
+   * Until now `onClosed` was reachable only from discard(), so leaving an open draft meant deleting
+   * it: an operator had to finalize or lose the work. This flushes the typed header first, so
+   * navigating away cannot silently lose a value either.
+   */
+  const leave = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await flushHeader();
+      onClosed();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const finalize = async () => {
     setConfirming(false);
     setBusy(true);
     setError(null);
     try {
+      // 🔴 FLUSH FIRST, AND AWAIT IT. A field the operator typed but never blurred — the commonest
+      // case being the last field they touched before reaching for Finalize — would otherwise be
+      // absent from a document that is immutable the moment it commits. Finalizing is the one
+      // irreversible act in this screen, so it reads the inputs rather than trusting that a blur
+      // happened. If the flush is refused, finalization does not proceed.
+      await flushHeader();
       const next = await call(pos().finalizeInvoice({ invoiceId }));
       setView(next);
       const items = await call(pos().listReconciliation({ invoiceId }));
@@ -226,7 +303,8 @@ export function InvoiceSheet({
               dir="ltr"
               value={inv.invoiceDate ?? ""}
               disabled={readOnly}
-              onChange={(e) => header({ invoiceDate: e.target.value === "" ? null : e.target.value })}
+              ref={bind("invoiceDate")}
+              onChange={(e) => void header({ invoiceDate: e.target.value === "" ? null : e.target.value })}
               data-testid="sheet-date"
             />
           </label>
@@ -241,7 +319,8 @@ export function InvoiceSheet({
           <input
             defaultValue={inv.customerName ?? ""}
             disabled={readOnly}
-            onBlur={(e) => header({ customerName: e.target.value.trim() === "" ? null : e.target.value })}
+            ref={bind("customerName")}
+            onBlur={(e) => void header({ customerName: e.target.value.trim() === "" ? null : e.target.value })}
             data-testid="sheet-customer"
           />
         </label>
@@ -250,7 +329,8 @@ export function InvoiceSheet({
           <input
             defaultValue={inv.customerAddress ?? ""}
             disabled={readOnly}
-            onBlur={(e) => header({ customerAddress: e.target.value.trim() === "" ? null : e.target.value })}
+            ref={bind("customerAddress")}
+            onBlur={(e) => void header({ customerAddress: e.target.value.trim() === "" ? null : e.target.value })}
           />
         </label>
         <label className="field">
@@ -259,7 +339,8 @@ export function InvoiceSheet({
             dir="ltr"
             defaultValue={inv.customerPhone ?? ""}
             disabled={readOnly}
-            onBlur={(e) => header({ customerPhone: e.target.value.trim() === "" ? null : e.target.value })}
+            ref={bind("customerPhone")}
+            onBlur={(e) => void header({ customerPhone: e.target.value.trim() === "" ? null : e.target.value })}
           />
         </label>
         <label className="field wide">
@@ -267,7 +348,8 @@ export function InvoiceSheet({
           <input
             defaultValue={inv.notes ?? ""}
             disabled={readOnly}
-            onBlur={(e) => header({ notes: e.target.value.trim() === "" ? null : e.target.value })}
+            ref={bind("notes")}
+            onBlur={(e) => void header({ notes: e.target.value.trim() === "" ? null : e.target.value })}
           />
         </label>
       </section>
@@ -503,7 +585,8 @@ export function InvoiceSheet({
                     dir="ltr"
                     inputMode="decimal"
                     defaultValue={inv.paid.minor === "0" ? "" : paidText(inv.paid.minor)}
-                    onBlur={(e) => header({ paid: e.target.value.trim() === "" ? null : e.target.value })}
+                    ref={bind("paid")}
+                    onBlur={(e) => void header({ paid: e.target.value.trim() === "" ? null : e.target.value })}
                     data-testid="sheet-paid"
                   />
                 )}
@@ -534,7 +617,22 @@ export function InvoiceSheet({
             >
               {t("inv.sheet.finalize")}
             </button>
-            <button className="btn ghost" onClick={discard} data-testid="discard">
+            {/* 🔴 THE DURABLE SAVE PATH, as an action the operator can see and trust. The product
+                rule is that commercial header data must never depend only on blur timing; this
+                writes every field as it is typed right now. */}
+            <button className="btn" onClick={() => void saveDraft()} disabled={busy} data-testid="save-draft">
+              {t("inv.sheet.saveDraft")}
+            </button>
+            <button className="btn" onClick={() => void leave()} disabled={busy} data-testid="leave-draft">
+              {t("inv.sheet.leaveDraft")}
+            </button>
+            {saved && (
+              <span className="muted small" data-testid="draft-saved">
+                {t("inv.sheet.saved")}
+              </span>
+            )}
+            {/* Destructive, separate, and confirmed. Navigating away is NOT this. */}
+            <button className="btn danger ghost" onClick={() => setDiscarding(true)} data-testid="discard">
               {t("inv.sheet.discard")}
             </button>
           </>
@@ -579,6 +677,23 @@ export function InvoiceSheet({
               </button>
               <button className="btn ghost" onClick={() => setConfirming(false)}>
                 {t("action.cancel")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {discarding && (
+        <div className="overlay">
+          <div className="card dialog" data-testid="discard-confirm">
+            <h2>{t("inv.sheet.discardTitle")}</h2>
+            <p className="muted">{t("inv.sheet.discardConfirm")}</p>
+            <div className="inv-actions">
+              <button className="btn danger" onClick={() => void discard()} data-testid="discard-confirm-yes">
+                {t("inv.sheet.discardYes")}
+              </button>
+              <button className="btn ghost" onClick={() => setDiscarding(false)} data-testid="discard-confirm-no">
+                {t("inv.sheet.discardKeep")}
               </button>
             </div>
           </div>

@@ -37,7 +37,15 @@ import type { CatalogUpdateSelection, InvoiceLineDraft, InvoiceService } from ".
 import { MAX_CUSTOMER_FIELD, MAX_DESCRIPTION, MAX_NOTES } from "../domain/invoice";
 import { MAX_UNIT_LABEL } from "../domain/invoiceUnits";
 import type { ReconciliationRow } from "../persistence/reconciliationRepository";
-import { type AppInfoDto, CHANNELS, type ChannelName, type IpcError, type IpcResult } from "../shared/ipcContract";
+import {
+  type AppInfoDto,
+  CHANNELS,
+  type ChannelName,
+  INVOICE_HEADER_PATCH_KEYS,
+  type InvoiceHeaderPatchKey,
+  type IpcError,
+  type IpcResult,
+} from "../shared/ipcContract";
 import { type Logger, nullLogger } from "./logger";
 
 /**
@@ -109,6 +117,22 @@ function exactObject(payload: unknown, keys: readonly string[]): Record<string, 
   if (extra.length || missing.length) {
     invalid(`Unexpected fields [${extra.join(", ")}] / missing fields [${missing.join(", ")}]`);
   }
+  return payload as Record<string, unknown>;
+}
+
+/**
+ * A PATCH object: every key present must be one of `keys`, and a key may be absent.
+ *
+ * Deliberately NOT `exactObject`, which requires every listed key — that requirement is what forced
+ * the renderer to send a whole header built from stale state. Unknown keys are still refused, so a
+ * typo cannot silently do nothing.
+ */
+function patchObject(payload: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    invalid("Expected a patch object");
+  }
+  const extra = Object.keys(payload).filter((k) => !keys.includes(k));
+  if (extra.length) invalid(`Unexpected fields [${extra.join(", ")}]`);
   return payload as Record<string, unknown>;
 }
 
@@ -431,26 +455,28 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     }),
     getInvoice: wrap("getInvoice", (p) => toInvoiceViewDto(invoices().getInvoice(invoiceId(p)))),
     updateInvoiceHeader: wrap("updateInvoiceHeader", (p) => {
-      const o = exactObject(p, [
-        "invoiceId",
-        "invoiceDate",
-        "customerName",
-        "customerAddress",
-        "customerPhone",
-        "notes",
-        "paid",
-      ]);
-      return toInvoiceViewDto(
-        invoices().updateDraftHeader(str(o.invoiceId, "invoiceId", 100), {
-          invoiceDate: optionalStr(o.invoiceDate, "invoiceDate", 10),
-          customerName: optionalStr(o.customerName, "customerName", MAX_CUSTOMER_FIELD),
-          customerAddress: optionalStr(o.customerAddress, "customerAddress", MAX_NOTES),
-          customerPhone: optionalStr(o.customerPhone, "customerPhone", MAX_CUSTOMER_FIELD),
-          notes: optionalStr(o.notes, "notes", MAX_NOTES),
-          // A typed decimal, parsed by the domain. Never a balance the renderer worked out.
-          paid: optionalStr(o.paid, "paid", 32),
-        }),
-      );
+      const o = exactObject(p, ["invoiceId", "patch"]);
+      // 🔴 ONLY THE KEYS THE OPERATOR ACTUALLY CHANGED ARE BUILT INTO THE DRAFT. Every key left out
+      // of the patch is left out of the object handed to the service, so the service's
+      // `header.X !== undefined ? clean(X) : invoice.X` reads it from the CURRENT ROW. That logic
+      // was always written correctly and was unreachable, because the old payload demanded every
+      // field and `optionalStr` turned a missing one into an explicit null.
+      const draft: Record<string, string | null> = {};
+      const limits: Record<InvoiceHeaderPatchKey, number> = {
+        invoiceDate: 10,
+        customerName: MAX_CUSTOMER_FIELD,
+        customerAddress: MAX_NOTES,
+        customerPhone: MAX_CUSTOMER_FIELD,
+        notes: MAX_NOTES,
+        // A typed decimal, parsed by the domain. Never a balance the renderer worked out.
+        paid: 32,
+      };
+      const patch = patchObject(o.patch, INVOICE_HEADER_PATCH_KEYS);
+      for (const key of INVOICE_HEADER_PATCH_KEYS) {
+        if (!(key in patch)) continue;
+        draft[key] = optionalStr(patch[key], key, limits[key]);
+      }
+      return toInvoiceViewDto(invoices().updateDraftHeader(str(o.invoiceId, "invoiceId", 100), draft));
     }),
     addInvoiceLine: wrap("addInvoiceLine", (p) => {
       const o = exactObject(p, ["invoiceId", "line"]);

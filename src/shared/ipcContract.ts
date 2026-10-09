@@ -381,15 +381,46 @@ export interface InvoiceViewDto {
   readonly lines: ReadonlyArray<InvoiceLineDto>;
 }
 
+/**
+ * The header fields an operator may change, as a PATCH.
+ *
+ * 🔴 PRESENCE IS THE SIGNAL, AND THAT IS THE WHOLE POINT. A key that appears is written; a key that
+ * is absent is left exactly as the database holds it. The previous shape required every field on
+ * every call, so the renderer filled the untouched ones from its own React state — and a response
+ * that had not landed yet meant it filled them with STALE values and silently overwrote whatever
+ * had just been saved. A commercial invoice lost its customer phone that way, intermittently,
+ * depending only on how fast the operator pressed Tab.
+ *
+ * Absence is expressed by OMITTING the key, never by `undefined`: an absent key and a key holding
+ * `undefined` are not reliably distinguishable once a payload has crossed a process boundary, and
+ * `Object.keys()` is checkable where `undefined` is not.
+ */
+export interface InvoiceHeaderPatch {
+  readonly invoiceDate?: string | null;
+  readonly customerName?: string | null;
+  readonly customerAddress?: string | null;
+  readonly customerPhone?: string | null;
+  readonly notes?: string | null;
+  /** A typed decimal ("100.00"), or null for nothing paid. NOT a computed balance. */
+  readonly paid?: string | null;
+}
+
+/** Every key a header patch may carry. The IPC boundary refuses anything else. */
+export const INVOICE_HEADER_PATCH_KEYS = [
+  "invoiceDate",
+  "customerName",
+  "customerAddress",
+  "customerPhone",
+  "notes",
+  "paid",
+] as const;
+
+export type InvoiceHeaderPatchKey = (typeof INVOICE_HEADER_PATCH_KEYS)[number];
+
 export interface InvoiceHeaderRequest {
   readonly invoiceId: string;
-  readonly invoiceDate: string | null;
-  readonly customerName: string | null;
-  readonly customerAddress: string | null;
-  readonly customerPhone: string | null;
-  readonly notes: string | null;
-  /** A typed decimal ("100.00"), or null for nothing paid. NOT a computed balance. */
-  readonly paid: string | null;
+  /** Only the fields that actually changed. An empty patch is a no-op, not an erasure. */
+  readonly patch: InvoiceHeaderPatch;
 }
 
 /** One line as typed. Quantity and price are TEXT and are parsed by the domain, never numbers. */

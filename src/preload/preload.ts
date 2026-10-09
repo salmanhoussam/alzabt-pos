@@ -7,9 +7,19 @@
  * `satisfies typeof CHANNELS` check makes the compiler fail if they ever drift from the contract.
  */
 import { contextBridge, ipcRenderer } from "electron";
-import type { CHANNELS, InvoiceLineRequest, PosApi } from "../shared/ipcContract";
+import type { CHANNELS, InvoiceHeaderPatch, InvoiceLineRequest, PosApi } from "../shared/ipcContract";
+import { INVOICE_HEADER_PATCH_KEYS } from "../shared/ipcContract";
 
 /** One invoice line, rebuilt key by key — the same allowlisting every payload here uses. */
+/** Only the header keys the caller set, each copied by value. Presence is the signal. */
+const headerPatch = (patch: InvoiceHeaderPatch): InvoiceHeaderPatch => {
+  const out: Record<string, string | null> = {};
+  for (const key of INVOICE_HEADER_PATCH_KEYS) {
+    if (key in patch) out[key] = patch[key] ?? null;
+  }
+  return out as InvoiceHeaderPatch;
+};
+
 function line(l: InvoiceLineRequest): InvoiceLineRequest {
   return {
     description: l.description,
@@ -119,14 +129,13 @@ const api: PosApi = {
   createInvoiceDraft: () => ipcRenderer.invoke(CH.createInvoiceDraft),
   getInvoice: (req) => ipcRenderer.invoke(CH.getInvoice, { invoiceId: req.invoiceId }),
   updateInvoiceHeader: (req) =>
+    // 🔴 REBUILT KEY BY KEY, AND ONLY THE KEYS THE CALLER ACTUALLY SET. Copying the whole object
+    // would forward a renderer-owned reference across the bridge; listing every key unconditionally
+    // would turn an untouched field into an explicit null, which is the bug this patch shape exists
+    // to remove. `in` is the test, so a key holding null is kept and a key never set is dropped.
     ipcRenderer.invoke(CH.updateInvoiceHeader, {
       invoiceId: req.invoiceId,
-      invoiceDate: req.invoiceDate,
-      customerName: req.customerName,
-      customerAddress: req.customerAddress,
-      customerPhone: req.customerPhone,
-      notes: req.notes,
-      paid: req.paid,
+      patch: headerPatch(req.patch),
     }),
   addInvoiceLine: (req) => ipcRenderer.invoke(CH.addInvoiceLine, { invoiceId: req.invoiceId, line: line(req.line) }),
   updateInvoiceLine: (req) =>

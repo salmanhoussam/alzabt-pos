@@ -232,14 +232,10 @@ describe("precision across the boundary", () => {
     ok(ipc.saveCompanyProfile({ ...PROFILE, taxEnabled: true, taxRatePercent: "11" }));
     const id = ok<{ invoice: { id: string } }>(ipc.createInvoiceDraft(undefined)).invoice.id;
     ok(ipc.addInvoiceLine({ invoiceId: id, line: { ...LINE, quantity: "3", unitPrice: "2.50" } }));
+    // The channel now takes a PATCH: only the keys that changed. Absent keys are left as stored.
     ok(ipc.updateInvoiceHeader({
       invoiceId: id,
-      invoiceDate: "2026-10-08",
-      customerName: "زبون",
-      customerAddress: null,
-      customerPhone: null,
-      notes: null,
-      paid: "1.00",
+      patch: { invoiceDate: "2026-10-08", customerName: "زبون", paid: "1.00" },
     }));
     const view = ok<{
       invoice: Record<string, unknown>;
@@ -382,15 +378,7 @@ describe("history and the queue across the boundary", () => {
     const ids = ["1.00", "2.00"].map((price) => {
       const id = ok<{ invoice: { id: string } }>(ipc.createInvoiceDraft(undefined)).invoice.id;
       ok(ipc.addInvoiceLine({ invoiceId: id, line: { ...LINE, unitPrice: price } }));
-      ok(ipc.updateInvoiceHeader({
-        invoiceId: id,
-        invoiceDate: null,
-        customerName: `زبون ${price}`,
-        customerAddress: null,
-        customerPhone: null,
-        notes: null,
-        paid: null,
-      }));
+      ok(ipc.updateInvoiceHeader({ invoiceId: id, patch: { customerName: `زبون ${price}` } }));
       ok(ipc.finalizeInvoice({ invoiceId: id }));
       return id;
     });
@@ -461,7 +449,11 @@ describe("the preload bridge exposes every channel, and nothing else", () => {
     // extra key through the bridge even before `exactObject` refuses it in the handler.
     for (const [method, field] of [
       ["saveCompanyProfile", "taxpayerNumber: req.taxpayerNumber"],
-      ["updateInvoiceHeader", "paid: req.paid"],
+      // 🔴 WAS "paid: req.paid", when the bridge listed all six header fields unconditionally.
+      // That is exactly what had to go: naming every key turned an untouched field into an explicit
+      // null. The bridge now copies only the keys the caller set, and `headerPatch` is the function
+      // that does it — still key by key, still nothing forwarded whole.
+      ["updateInvoiceHeader", "patch: headerPatch(req.patch)"],
       ["resolveCreateProduct", "baseUnit: req.baseUnit"],
       ["resolveUpdateCatalog", "fields: [...req.fields]"],
       ["finalizeInvoice", "{ invoiceId: req.invoiceId }"],
