@@ -126,6 +126,20 @@ export function invoiceSaleIdempotencyKey(invoiceId: string): string {
   return `inv-${invoiceId}`;
 }
 
+/**
+ * Freezes the shop's current logo into an immutable, content-addressed asset and returns its name.
+ *
+ * 🔴 WHY A PORT RATHER THAN DOING IT HERE: this service holds no filesystem handle and must not
+ * start. The main process owns the profile directory, so it owns the copy; the service only records
+ * what it was given onto the document it is freezing.
+ *
+ * Returns null when there is no logo, or when the file has gone missing — a reprint then simply
+ * prints no logo, which is the honest outcome and what already happens today.
+ */
+export interface LogoVault {
+  freeze(storedName: string): string | null;
+}
+
 export interface InvoiceServiceDeps {
   readonly invoices: InvoiceRepository;
   readonly reconciliation: ReconciliationRepository;
@@ -135,6 +149,8 @@ export interface InvoiceServiceDeps {
   readonly products: ProductWriter;
   /** Where a finalized invoice becomes a real sale (migration 7). */
   readonly sales: SaleWriter;
+  /** Optional: absent on a terminal that cannot write files, where the logo stays a live path. */
+  readonly logoVault?: LogoVault;
   /** `db.transaction(fn).immediate()` — the one connection, the one transaction. */
   readonly transact: <T>(fn: () => T) => T;
   readonly terminal: TerminalConfig;
@@ -722,6 +738,12 @@ export class InvoiceService {
         phone2: profile.phone2,
         email: profile.email,
         logo_path: profile.logo_path,
+        // 🔴 THE ONE FIELD IN THIS "FROZEN" SNAPSHOT THAT WAS NOT FROZEN. logo_path is a FILENAME
+        // resolved against the live branding directory at render time, so replacing or deleting
+        // the shop's logo changed — or blanked — the logo on every invoice already issued. The
+        // bytes are copied to a content-addressed asset here, at the moment of finalization, and
+        // that name is what a reprint resolves. logo_path stays beside it as provenance.
+        logo_asset: profile.logo_path ? (this.deps.logoVault?.freeze(profile.logo_path) ?? null) : null,
         taxpayer_number: profile.taxpayer_number,
         commercial_register: profile.commercial_register,
         vat_number: profile.vat_number,

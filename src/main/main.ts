@@ -6,6 +6,7 @@
  * windows, every permission request denied, and every IPC call checked to come from our own
  * window's top frame.
  */
+import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -181,6 +182,66 @@ function pickInvoiceLogo(): string | null {
  * resolved — a profile row edited outside the application must not become a way to read an
  * arbitrary file into a printed document.
  */
+/** Where frozen, content-addressed logo copies live, beside the live branding file. */
+const FROZEN_DIR = "frozen";
+
+/**
+ * Copies the shop's current logo into an immutable, content-addressed asset and returns its name.
+ *
+ * 🔴 CONTENT-ADDRESSED ON PURPOSE. The name is the SHA-256 of the bytes, so re-finalizing with the
+ * same logo writes nothing new, and replacing the shop's logo cannot overwrite the copy an older
+ * invoice points at — two different images cannot collide on one name. Returns null when there is
+ * no logo or the file has gone, which prints no logo, exactly as today.
+ *
+ * Written temp-then-rename like every other write in this app, so a crash mid-copy can leave the
+ * old file or the new one, never a truncated image on a commercial document.
+ */
+function freezeLogo(storedName: string): string | null {
+  try {
+    const source = logoPathFor(storedName, BRANDING_DIR);
+    if (!source) return null;
+    const bytes = readFileSync(source);
+    const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 32);
+    const name = `${hash}${extname(storedName).toLowerCase()}`;
+    const dir = join(app.getPath("userData"), BRANDING_DIR, FROZEN_DIR);
+    mkdirSync(dir, { recursive: true });
+    const target = join(dir, name);
+    if (!existsSync(target)) {
+      writeFileSync(`${target}.partial`, bytes);
+      renameSync(`${target}.partial`, target);
+    }
+    return name;
+  } catch (err) {
+    log.warn("logo freeze failed", { error: String(err) });
+    return null;
+  }
+}
+
+/** Resolves a bare filename inside one directory under userData, refusing anything else. */
+function logoPathFor(stored: string | null, dir: string): string | null {
+  if (!stored || stored.includes("/") || stored.includes("\\") || stored.includes("..")) return null;
+  if (!LOGO_EXTENSIONS.includes(extname(stored).toLowerCase())) return null;
+  const base = join(app.getPath("userData"), dir);
+  const path = join(base, stored);
+  if (resolve(path) !== resolve(join(base, basename(stored)))) return null;
+  if (!existsSync(path)) return null;
+  return path;
+}
+
+/**
+ * The logo a FINALIZED invoice prints.
+ *
+ * Prefers the frozen asset, which cannot change after the document was issued. Falls back to the
+ * live branding file only for invoices finalized before freezing existed — those keep the old
+ * behaviour, because a finalized invoice is immutable and cannot be backfilled.
+ */
+function invoiceLogoUrl(issuer: { logoAsset: string | null; logoPath: string | null } | null): string | null {
+  if (!issuer) return null;
+  const frozen = issuer.logoAsset ? logoPathFor(issuer.logoAsset, join(BRANDING_DIR, FROZEN_DIR)) : null;
+  if (frozen) return pathToFileURL(frozen).toString();
+  return logoUrlFor(issuer.logoPath);
+}
+
 function logoUrlFor(stored: string | null): string | null {
   if (!stored || stored.includes("/") || stored.includes("\\") || stored.includes("..")) return null;
   if (!LOGO_EXTENSIONS.includes(extname(stored).toLowerCase())) return null;
@@ -200,7 +261,7 @@ function logoUrlFor(stored: string | null): string | null {
 async function renderInvoicePdf(invoiceId: string): Promise<Buffer> {
   if (!invoices) throw new DomainError("NOT_AVAILABLE", "Invoices are not available");
   const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
-  const html = renderInvoiceDocument(view, { logoUrl: logoUrlFor(view.invoice.issuer?.logoPath ?? null) });
+  const html = renderInvoiceDocument(view, { logoUrl: invoiceLogoUrl(view.invoice.issuer ?? null) });
   const win = new BrowserWindow({
     show: false,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
@@ -223,7 +284,7 @@ async function renderInvoicePdf(invoiceId: string): Promise<Buffer> {
 async function printInvoiceDocument(invoiceId: string): Promise<"printed" | "cancelled"> {
   if (!invoices) throw new DomainError("NOT_AVAILABLE", "Invoices are not available");
   const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
-  const html = renderInvoiceDocument(view, { logoUrl: logoUrlFor(view.invoice.issuer?.logoPath ?? null) });
+  const html = renderInvoiceDocument(view, { logoUrl: invoiceLogoUrl(view.invoice.issuer ?? null) });
   const win = new BrowserWindow({
     show: false,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
@@ -438,6 +499,7 @@ function startTill(): void {
     company: new CompanyProfileRepository(db),
     catalogStore,
     products: service,
+    logoVault: { freeze: freezeLogo },
     // The SAME repository object the till uses, on the same connection: a finalized invoice's sale
     // goes through the one module that is allowed to write the ledger (migration 7).
     sales: saleStore,

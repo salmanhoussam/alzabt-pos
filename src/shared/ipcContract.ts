@@ -325,6 +325,8 @@ export interface IssuerSnapshotDto {
   readonly phone2: string | null;
   readonly email: string | null;
   readonly logoPath: string | null;
+  /** The immutable content-addressed copy frozen at finalization. Null on pre-freeze invoices. */
+  readonly logoAsset: string | null;
   readonly taxpayerNumber: string | null;
   readonly commercialRegister: string | null;
   readonly vatNumber: string | null;
