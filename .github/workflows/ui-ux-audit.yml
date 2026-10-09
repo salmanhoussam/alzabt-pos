@@ -10,12 +10,19 @@
 # Default source run 37972553077 = the post-merge main gate for f090ad9, the audited build.
 name: UI/UX audit artifact
 
+# 🔴 PUSH, NOT ONLY workflow_dispatch. A workflow_dispatch workflow is only dispatchable once the
+# file sits on the DEFAULT branch, so publishing this way would have meant merging a docs change
+# into main first — and windows-delivery has no path filter, so that merge would have fired the
+# full Windows gate twice for a document. Triggering on this branch prefix costs nothing: the
+# delivery gate watches main and claude/** only, so it stays asleep.
 on:
+  push:
+    branches: ["docs/**"]
   workflow_dispatch:
     inputs:
       source_run_id:
         description: "Run ID whose alzabt-pos-windows-e2e-screenshots artifact holds the audited screenshots"
-        required: true
+        required: false
         default: "37972553077"
 
 permissions:
@@ -32,7 +39,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: alzabt-pos-windows-e2e-screenshots
-          run-id: ${{ inputs.source_run_id }}
+          run-id: ${{ inputs.source_run_id || '37972553077' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: downloaded
 
