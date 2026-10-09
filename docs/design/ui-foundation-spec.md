@@ -171,7 +171,47 @@ counter-example: it is the fractional step with no indication of that.
 
 ---
 
-## 8 · Focus
+## 8 · Dialogs
+
+The app deliberately uses in-app overlays, never `window.confirm` — a native dialog carries no
+`data-testid`, and in some embeddings `window.confirm` returns false immediately, which would make
+a destructive action silently do nothing. That decision stands and is not revisited here.
+
+**Confirm dialog** — one shape for every destructive confirmation:
+
+```
+title      names the OBJECT, not the verb alone   («حذف المسودّة» + which draft)
+body       states the CONSEQUENCE in one line     (what survives, what does not)
+actions    [ danger-filled confirm ]  [ default cancel ]     cancel is never danger
+reason     a required field where the ledger records one (void already does this)
+```
+
+`06-void-dialog.png` is the reference implementation: red filled confirm, neutral cancel, required
+reason, visible focus. It is the pattern to copy.
+
+**Unsaved-changes dialog** — decided by Salman, 2026-10-09, and standardised here because the
+invoice sheet is not the only screen that needs it (the product form will too):
+
+```
+no unsaved changes  →  exit immediately, no dialog, no pause
+unsaved changes     →  حفظ والخروج   (primary)
+                       الخروج بدون حفظ   (ghost-danger — it discards work)
+                       إلغاء          (default, returns to the screen)
+```
+
+🔴 **Never an always-silent save on exit.** A silent save is fast but it hides a decision the
+operator did not make; an unconditional prompt is honest but punishes the common case, which is
+leaving a screen that has not changed. Branching on dirty state gives both.
+
+`الخروج بدون حفظ` is **ghost-danger, not filled** — per §6 it sits in an action row, not as the
+confirm of a destructive dialog, and it must not out-weigh `حفظ والخروج`.
+
+**Dialog mechanics:** max width 560px, body scrolls while the action row stays visible, `Esc` maps
+to the safe choice (cancel), and the title is a real `<h2>` so the dialog is announced.
+
+---
+
+## 9 · Focus
 
 There is **no focus styling today**; the ring seen in the screenshots is Chromium's default and
 would disappear the moment anyone writes `outline: none`.
@@ -190,7 +230,7 @@ the cashier path is keyboard-heavy.
 
 ---
 
-## 9 · Bidi isolation — the rule
+## 10 · Bidi isolation — the rule
 
 > **Bidi isolation is mandatory for every number, date, code, SKU and currency. Use `<bdi>` for
 > rendered text; use `dir="ltr"` / appropriate bidi CSS for form controls and editable values.**
@@ -218,7 +258,7 @@ The pattern already exists in-repo: `invoiceDocument.ts` (23 `<bdi>`, 29 `dir="l
 
 ---
 
-## 10 · Strings to translate
+## 11 · Strings to translate
 
 Enumerated from the six files with zero `t()` calls. **60 user-visible literals**, collapsing to
 roughly 50 distinct keys since `Total`, `Loading…` and `Cancel` recur.
@@ -242,15 +282,17 @@ itself, so an untranslated key is loudly visible in review.
 
 Two naming decisions to settle while doing this:
 
-- **Brand:** the app is `Alzabt POS` on login and in the footer, `صندوق الزبط` in the title bar.
-  One of these is the name; the other is a translation of it. **Needs Salman's answer** — it is a
-  branding call, not a UI one.
+- **Brand — decided (Salman, 2026-10-09).** `Alzabt POS` is the **product/brand name** and stays
+  fixed in login, footer, About, the installer and every identity surface — it is not translated.
+  `صندوق الزبط` is the **Arabic label/translation inside the interface**. There are not two
+  competing identities. Practically: the brand string is a constant, NOT an i18n key; the in-app
+  Arabic label IS a key.
 - **`PENDING`** is a raw enum reaching the UI. It becomes a translated status badge; the enum value
   in the ledger does not change.
 
 ---
 
-## 11 · Duplicated selectors to resolve
+## 12 · Duplicated selectors to resolve
 
 Five selectors are defined twice in 263 lines:
 
@@ -268,7 +310,7 @@ must print nothing.
 
 ---
 
-## 12 · What this spec does NOT do
+## 13 · What this spec does NOT do
 
 - It does not redesign any screen. Layout decisions belong to the per-group specs.
 - It does not touch the invoice **PDF** — stabilised and separately approved.

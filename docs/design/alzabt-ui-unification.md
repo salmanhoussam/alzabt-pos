@@ -31,9 +31,11 @@ merged with field-test observations **before any redesign code is written.**
   hierarchy and buttons — not layout.
 - Invoice actions collapse to **4 roles**: primary `إصدار الفاتورة` · secondary `حفظ` ·
   secondary `خروج` · danger/overflow `حذف المسودّة`. `حفظ` saves only; no two near-identical save
-  buttons. **Open:** whether `خروج` saves silently or asks when there are unsaved changes — the one
-  behaviour deliberately left undecided, since "save silently" and "ask" are different products
-  for a cashier in a hurry.
+  buttons.
+- **`خروج` — decided (Salman, 2026-10-09): never an always-silent save.** No unsaved changes → exit
+  immediately. Unsaved changes → a small dialog with three choices: `حفظ والخروج` ·
+  `الخروج بدون حفظ` · `إلغاء`. Fast for a cashier, and no edit is lost in silence. Standardised as
+  a reusable pattern in the Foundation spec §8.
 - Invoice sheet gets a **sticky bottom action bar** and a **collapsible customer header**.
 - Product form keeps its modal spirit, becomes **3 sections**, «معلومات إضافية» collapsed.
 - Drafts list becomes a **real record row**, fully clickable: رقم/تاريخ — العميل — المبلغ —
@@ -43,6 +45,10 @@ merged with field-test observations **before any redesign code is written.**
   `السجل | المسودّات | المراجعة | + فاتورة جديدة`.
 - Top nav kept as-is.
 - Login gets light Arabic branding and a **language toggle before login** — no heavy splash.
+- **Brand — decided (Salman, 2026-10-09): `Alzabt POS` is the product/brand name**, fixed in login,
+  footer, About, the installer and every identity surface. `صندوق الزبط` is the **Arabic
+  label/translation inside the interface**, not an alternative brand. There are not two competing
+  identities.
 - **Deliverable form:** visual mockup + short spec, group by group.
 - **Foundation is its own spec, approved before the Sell screen is drawn.**
 
