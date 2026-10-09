@@ -1,0 +1,68 @@
+# Publishes the UI/UX audit as one browsable artifact: the audit document beside the exact
+# screenshots it cites.
+#
+# 🔴 IT RE-PUBLISHES, IT DOES NOT RE-SHOOT. The screenshots are the ones the delivery workflow
+# already produced against the INSTALLED application on a real Windows runner. Re-running the app
+# here would produce different pixels from a different build, and the audit's filenames would then
+# point at images nobody reviewed. So this job downloads the originals from the source run and only
+# renames the folder around them.
+#
+# Default source run 37972553077 = the post-merge main gate for f090ad9, the audited build.
+name: UI/UX audit artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Run ID whose alzabt-pos-windows-e2e-screenshots artifact holds the audited screenshots"
+        required: true
+        default: "37972553077"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the audited screenshots from the source run
+        uses: actions/download-artifact@v4
+        with:
+          name: alzabt-pos-windows-e2e-screenshots
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: downloaded
+
+      - name: Assemble ui-ux-audit-current/ beside the audit document
+        run: |
+          set -euo pipefail
+          mkdir -p out/ui-ux-audit-current
+          # PNGs only: crash-recovery.json is run evidence, not a screenshot, and the audit does
+          # not cite it.
+          cp downloaded/*.png out/ui-ux-audit-current/
+          cp docs/UI-UX-AUDIT.md out/UI-UX-AUDIT.md
+          count=$(ls out/ui-ux-audit-current/*.png | wc -l)
+          echo "screenshots: $count"
+          # 🔴 FAIL LOUDLY ON A SHORT SET. A partial upload would look like a successful publish and
+          # the audit would cite files that are not there.
+          if [ "$count" -ne 49 ]; then
+            echo "EXPECTED 49 screenshots, got $count — refusing to publish an incomplete audit set"
+            exit 1
+          fi
+          # Every file the audit names must exist, so a renamed screenshot cannot pass silently.
+          missing=0
+          for f in $(grep -oE '`[A-Za-z0-9._-]+\.png`' docs/UI-UX-AUDIT.md | tr -d '`' | sort -u); do
+            if [ ! -f "out/ui-ux-audit-current/$f" ]; then echo "AUDIT CITES A MISSING FILE: $f"; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          ls out/ui-ux-audit-current/
+
+      - name: Upload the audit artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alzabt-ui-ux-audit
+          path: out/
+          if-no-files-found: error
