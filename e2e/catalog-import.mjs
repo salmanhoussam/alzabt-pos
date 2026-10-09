@@ -134,8 +134,8 @@ await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
 assert((await page.locator(".history-table tbody tr").count()) === 1, "after restart the sale is in history");
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
-const stats = await page.locator(".stats").innerText();
+await page.waitForSelector('[data-testid="today-net"]');
+const stats = await page.locator(".card.today").innerText();
 assert(stats.includes("14.00 USD"), "today's sales show 14.00 USD after restart");
 
 // ── Export catalog → re-import: nothing changes ────────────────────────────────────────────────

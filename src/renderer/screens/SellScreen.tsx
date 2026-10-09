@@ -229,6 +229,7 @@ export function SellScreen() {
                   <button
                     className="btn key"
                     aria-label={t("sell.decrease")}
+                    data-testid="qty-dec"
                     onClick={() => edit(decrement(cart, l.productId))}
                   >
                     −
@@ -249,6 +250,7 @@ export function SellScreen() {
                   <button
                     className="btn key"
                     aria-label={t("sell.increase")}
+                    data-testid="qty-inc"
                     onClick={() => edit(addProduct(cart, l.productId))}
                   >
                     +
@@ -257,6 +259,7 @@ export function SellScreen() {
                   <button
                     className="btn ghost small line-remove"
                     aria-label={t("sell.remove")}
+                    data-testid="qty-remove"
                     title={t("sell.remove")}
                     onClick={() => edit(removeProduct(cart, l.productId))}
                   >

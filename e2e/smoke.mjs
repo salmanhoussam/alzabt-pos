@@ -125,10 +125,10 @@ await product(page, "Espresso").click();
 await product(page, "Fresh Orange Juice").click();
 await product(page, "Butter Croissant").click();
 assert((await totalText(page)) === "11.35 USD", "cart total 2×2.50 + 4.10 + 2.25 = 11.35");
-await line(page, "Espresso").getByRole("button", { name: "Decrease" }).click();
-await line(page, "Butter Croissant").getByRole("button", { name: "Remove" }).click();
-await line(page, "Fresh Orange Juice").getByRole("button", { name: "Increase" }).click();
-await line(page, "Fresh Orange Juice").getByRole("button", { name: "Increase" }).click();
+await line(page, "Espresso").locator('[data-testid="qty-dec"]').click();
+await line(page, "Butter Croissant").locator('[data-testid="qty-remove"]').click();
+await line(page, "Fresh Orange Juice").locator('[data-testid="qty-inc"]').click();
+await line(page, "Fresh Orange Juice").locator('[data-testid="qty-inc"]').click();
 assert((await totalText(page)) === "14.80 USD", "after edits 2.50 + 3×4.10 = 14.80 (IEEE-754 float gives 14.799999999999999)");
 await page.screenshot({ path: SHOTS + "02-cart.png" });
 
@@ -146,7 +146,7 @@ await page.locator('[data-testid="new-sale"]').click();
 for (let i = 0; i < 3; i++) await product(page, "Mint Tea").click();
 assert((await totalText(page)) === "5.97 USD", "3 × 1.99 = 5.97");
 await page.locator('[data-testid="complete-sale"]').click();
-await page.getByRole("button", { name: "Card (external terminal)" }).click();
+await page.locator('[data-testid="pay-card"]').click();
 await page.waitForSelector('[data-testid="receipt-number"]:has-text("#2")');
 await page.locator('[data-testid="new-sale"]').click();
 
@@ -161,7 +161,7 @@ assert(!forged.wrongTotal.ok && forged.wrongTotal.error.code === "TOTAL_MISMATCH
 
 // Today's sales.
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
+await page.waitForSelector('[data-testid="today-net"]');
 assert((await stat(page, "Completed sales")) === "2", "today: 2 completed sales");
 assert((await stat(page, "Gross sales")) === "20.77 USD", "today gross 14.80 + 5.97 = 20.77");
 assert((await stat(page, "Net sales")) === "20.77 USD", "today net 20.77 before void");
@@ -178,7 +178,7 @@ await page.waitForSelector("tr.voided");
 await page.screenshot({ path: SHOTS + "07-history.png" });
 
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
+await page.waitForSelector('[data-testid="today-net"]');
 assert((await stat(page, "Voided sales")) === "1", "today: 1 voided");
 assert((await stat(page, "Gross sales")) === "20.77 USD", "gross unchanged by the void");
 assert((await stat(page, "Voids")) === "− 5.97 USD", "void total 5.97");
@@ -190,7 +190,7 @@ log("app closed normally");
 ({ app, page } = await launch());
 await login(page, "Cashier Two", "2222");
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
+await page.waitForSelector('[data-testid="today-net"]');
 assert((await stat(page, "Completed sales")) === "2" && (await stat(page, "Net sales")) === "14.80 USD", "after restart: 2 sales, net 14.80 persisted");
 
 // A third sale, then HARD-KILL the Electron main process (no clean shutdown) — the main process
@@ -198,7 +198,7 @@ assert((await stat(page, "Completed sales")) === "2" && (await stat(page, "Net s
 await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Water 500ml").click();
 await page.locator('[data-testid="complete-sale"]').click();
-await page.getByRole("button", { name: "Other" }).click();
+await page.locator('[data-testid="pay-other"]').click();
 await page.waitForSelector('[data-testid="receipt-number"]:has-text("#3")');
 
 // The REAL Electron main PID, asked of the main process itself. NOT app.process().pid: on Windows
@@ -238,7 +238,7 @@ assert(leftovers.length === 0, `all ${beforeKill.length} process(es) of the kill
 ({ app, page } = await launch());
 await login(page, "Cashier One", "1111");
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
+await page.waitForSelector('[data-testid="today-net"]');
 assert((await stat(page, "Completed sales")) === "3", "after the hard kill: sale #3 (committed just before it) survived");
 assert((await stat(page, "Net sales")) === "15.55 USD", "net 14.80 + 0.75 = 15.55");
 await page.screenshot({ path: SHOTS + "08-today-after-kill.png" });
@@ -252,7 +252,7 @@ await page.locator('[data-testid="pay-cash"]').click();
 await page.waitForSelector('[data-testid="receipt-number"]:has-text("#4")');
 await page.locator('[data-testid="new-sale"]').click();
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
+await page.waitForSelector('[data-testid="today-net"]');
 assert((await stat(page, "Completed sales")) === "4", "new sale #4 completed after recovery");
 assert((await stat(page, "Net sales")) === "18.55 USD", "net 15.55 + 2×1.50 = 18.55");
 await page.locator('[data-testid="tab-history"]').click();
