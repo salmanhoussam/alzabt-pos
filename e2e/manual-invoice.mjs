@@ -303,14 +303,17 @@ await until("the phone field to hold what was typed", async () => (await phone.i
 await commit(page, "sheet-date", "2026-10-08");
 await page.waitForSelector('[data-testid="add-row"]');
 
-// 🔴 WHY THERE IS NO "REOPEN THE DRAFT AND CHECK" HERE, and it is a real product gap rather than a
-// gap in this test. `InvoicesScreen` renders ONLY the sheet while an invoice is open — no tab bar —
-// and `InvoiceSheet` calls its `onClosed` callback from exactly ONE place: `discard()`, which
-// DELETES the draft. So there is no non-destructive way to leave an open draft and come back to it:
-// an operator must finalize it or discard it. A test cannot read the stored header back through the
-// UI without destroying the thing it is measuring, so the stored-row assertions stay where they
-// are, after the app closes. The `until` guards above are what this run can check: that each field
-// really holds what was typed before the next action moves on.
+// 🔴 WHY THERE IS NO "REOPEN THE DRAFT AND CHECK" HERE — and the reason CHANGED, so the old one is
+// recorded rather than quietly replaced. It used to be a real product gap: `InvoiceSheet` called
+// `onClosed` from exactly ONE place, `discard()`, which DELETES the draft, so there was no
+// non-destructive way to leave an open draft and come back to it. The stability pass closed that
+// gap with Save draft and Save and leave, so the claim is no longer true.
+//
+// It is still not checked HERE, for a different and smaller reason: this script's subject is
+// finalizing, and reopening mid-flow would change what it is measuring. The safe exit has its own
+// script, `e2e/invoice-drafts.mjs`, which drives save -> leave -> reopen -> restart -> discard
+// against the installed app and asserts the stored row. The `until` guards above remain what THIS
+// run checks: that each field really holds what was typed before the next action moves on.
 
 // Row 1 — chosen from the existing catalog, then left exactly as prefilled (MATCHED).
 await testid(page, "add-row").click();

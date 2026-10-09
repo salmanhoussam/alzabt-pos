@@ -150,6 +150,11 @@ jobs:
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
           node e2e/manual-invoice.mjs
 
+      - name: Safe draft exit against the INSTALLED app (save -> leave -> reopen -> restart -> discard)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/invoice-drafts.mjs
+
       - name: Startup failure is visible and leaves the ledger untouched (INSTALLED app)
         run: |
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
