@@ -377,6 +377,25 @@ used to disguise a non-interactive `<div>` as an interactive control. A product 
 > phone number, invoice number, SKU/barcode/code, percentage, and identifier. Use `<bdi>` for
 > rendered text; use `dir="ltr"` / appropriate bidi CSS for form controls and editable values.**
 
+### Numeric / PIN / calculator CONTROL LAYOUTS stay LTR even in an Arabic UI
+
+🔴 **This rule is about physical control layout, not text.** Bidi isolation above governs runs of
+*content*; this governs the arrangement of *keys*.
+
+A numeric keypad, a PIN pad and a calculator pad are laid out **1-2-3 left-to-right, with backspace
+bottom-right**, in every language. The layout lives in the operator's hand, not in the language of
+the interface — it is the same on their phone, the ATM and the card terminal beside the till.
+
+Found while rendering the Login mockup: under `dir="rtl"` the keypad grid silently flowed **3-2-1**
+and the `⌫` glyph mirrored with it. Nothing warns you; it simply comes out backwards.
+
+```
+<div class="keypad" dir="ltr"> … </div>     ← dir="ltr" is load-bearing, and gets a comment saying so
+```
+
+Applies to: the Login PIN pad, any future quantity/calculator pad, and any numeric entry grid.
+Does **not** apply to text, labels or table column order, which stay RTL.
+
 **Isolate the whole run, not each fragment.** `#61` and `15.50 USD` are each one run and get wrapped
 once; wrapping the digits while leaving the `#` or the currency outside is what produced `61#` and
 `USD 0.00 −` in the first place.

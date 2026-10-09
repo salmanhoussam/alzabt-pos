@@ -52,6 +52,32 @@ merged with field-test observations **before any redesign code is written.**
 - **Deliverable form:** visual mockup + short spec, group by group.
 - **Foundation is its own spec, approved before the Sell screen is drawn.**
 
+## Login addendum — physical keyboard PIN parity (approved 2026-10-10)
+
+The PIN cannot be mouse/keypad-only. The physical keyboard must mirror the on-screen pad.
+
+```
+top-row digits 0-9        enter PIN digits
+Numpad digits 0-9         enter PIN digits
+Backspace                 removes the most recent digit
+on-screen ⌫               same action as Backspace
+on-screen «مسح»           clears, per the existing intended behaviour
+Enter                     submits ONLY when the PIN satisfies existing validation
+non-numeric printable     does not enter PIN data
+PIN stays visually masked
+```
+
+🔴 **One PIN state, never two paths.** Physical-keyboard entry and pointer entry update the *same*
+state. This is **input parity, not an authentication redesign**; authentication and security
+semantics are untouched.
+
+**Existing length rule, preserved — not invented.** `LoginScreen.tsx` accepts **4 to 8 digits**:
+entry is capped at 8 (`pin.length < 8`) and submit is disabled below 4 (`pin.length < 4`). There is
+no fixed PIN length in this product, and the design track does not introduce one.
+
+**Status:** physical-keyboard entry is a **NEW UI PROPOSAL** — `LoginScreen.tsx` has no `keydown`
+handler today, so this is added behaviour, to be validated in the field test.
+
 ## Findings that make this cheaper than it looks
 
 Verified read-only in `f090ad9`:
