@@ -120,24 +120,6 @@ async function commit(page, id, value) {
   await until(`${id} to hold ${value}`, async () => (await field.inputValue()) === value, 15000);
 }
 
-/**
- * Leaves the sheet, reopens the draft from the Drafts list, and returns what the fields hold.
- *
- * This is the only observation available here that proves a header value reached the DATABASE: the
- * reopened sheet is rendered from the service's own read of the stored row, not from anything the
- * previous screen kept in memory.
- */
-async function reopenDraft(page) {
-  await page.locator('[data-testid="inv-tab-drafts"]').click();
-  await page.waitForSelector('[data-testid="drafts-table"]');
-  await page.locator('[data-testid="draft-open"]').first().click();
-  await page.waitForSelector('[data-testid="add-row"]');
-  return {
-    customer: await page.locator('[data-testid="sheet-customer"]').inputValue(),
-    phone: await page.locator('.inv-customer input[dir="ltr"]').first().inputValue(),
-    date: await page.locator('[data-testid="sheet-date"]').inputValue(),
-  };
-}
 const testid = (page, id) => page.locator(`[data-testid="${id}"]`);
 const textOf = async (page, id) => (await testid(page, id).innerText()).trim();
 
@@ -310,19 +292,14 @@ await until("the phone field to hold what was typed", async () => (await phone.i
 await commit(page, "sheet-date", "2026-10-08");
 await page.waitForSelector('[data-testid="add-row"]');
 
-// 🔴 PROVE THE HEADER REACHED THE DATABASE BEFORE FINALIZING ANYTHING. The post-merge main gate
-// (run 37929929423) failed here with `and the phone (got null)` AFTER four green PR rounds: these
-// fields commit on blur, nothing was confirming that the blur's write actually landed, and a
-// missed one is invisible until the assertion on the stored row 90 lines later — by which point
-// the invoice is already final and immutable. Reopening the draft reads the STORED row back
-// through the app's own path, so a lost header fails here, by name, while it is still fixable.
-{
-  const reopened = await reopenDraft(page);
-  log("header read back from the stored draft:", JSON.stringify(reopened));
-  assert(reopened.customer === "زبون اختباري", `the customer name is stored (got ${reopened.customer})`);
-  assert(reopened.phone === "70-000000", `the phone is stored (got ${reopened.phone})`);
-  assert(reopened.date === "2026-10-08", `the date is stored (got ${reopened.date})`);
-}
+// 🔴 WHY THERE IS NO "REOPEN THE DRAFT AND CHECK" HERE, and it is a real product gap rather than a
+// gap in this test. `InvoicesScreen` renders ONLY the sheet while an invoice is open — no tab bar —
+// and `InvoiceSheet` calls its `onClosed` callback from exactly ONE place: `discard()`, which
+// DELETES the draft. So there is no non-destructive way to leave an open draft and come back to it:
+// an operator must finalize it or discard it. A test cannot read the stored header back through the
+// UI without destroying the thing it is measuring, so the stored-row assertions stay where they
+// are, after the app closes. The `until` guards above are what this run can check: that each field
+// really holds what was typed before the next action moves on.
 
 // Row 1 — chosen from the existing catalog, then left exactly as prefilled (MATCHED).
 await testid(page, "add-row").click();
