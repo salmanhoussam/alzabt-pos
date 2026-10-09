@@ -155,6 +155,7 @@ export function HistoryScreen() {
                 data-testid="history-row"
                 data-source={r.sale.sourceType}
                 data-payment-status={r.sale.paymentStatus}
+                data-payment-method={r.sale.paymentMethod ?? "none"}
               >
                 <td>
                   <bdi dir="ltr">#{r.sale.receiptNumber}</bdi>

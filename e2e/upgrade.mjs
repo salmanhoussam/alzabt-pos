@@ -101,14 +101,14 @@ async function sell(page, items, method, expectReceipt) {
   for (const name of items) await product(page, name).click();
   await page.locator('[data-testid="complete-sale"]').click();
   await page.getByRole("button", { name: method }).click();
-  await page.waitForSelector(`text=Receipt #${expectReceipt}`);
+  await page.waitForSelector(`[data-testid="receipt-number"]:has-text("#${expectReceipt}")`);
   await page.locator('[data-testid="new-sale"]').click();
 }
 
 async function voidCardSale(page) {
   await tab(page, "History");
   await page.waitForSelector(".history-table");
-  await page.locator("tr", { hasText: "card" }).locator('[data-testid="history-void"]').click();
+  await page.locator('tr[data-payment-method="card"]').locator('[data-testid="history-void"]').click();
   await page.getByPlaceholder("e.g. wrong item rung up").fill("wrong item rung up");
   await page.locator('[data-testid="void-confirm"]').click();
   await page.waitForSelector("tr.voided");
@@ -116,12 +116,17 @@ async function voidCardSale(page) {
 
 const totalText = async (page) => (await page.locator(".total strong").innerText()).trim();
 
+/** Today's figures by testid — the labels are translated and the <dl> is gone. */
 async function stats(page) {
   await tab(page, "Today's Sales");
-  await page.waitForSelector(".stats");
-  const dts = await page.locator(".stats dt").allInnerTexts();
-  const dds = await page.locator(".stats dd").allInnerTexts();
-  return Object.fromEntries(dts.map((k, i) => [k.trim(), dds[i].trim()]));
+  await page.waitForSelector('[data-testid="today-net"]');
+  const read = async (id) => (await page.locator(`[data-testid="${id}"]`).innerText()).trim();
+  return {
+    "Completed sales": await read("today-completed"),
+    "Voided sales": await read("today-voided"),
+    "Gross sales": await read("today-gross"),
+    "Net sales": await read("today-net"),
+  };
 }
 
 async function historyRows(page) {
@@ -589,7 +594,7 @@ if (PHASE === "seed-v2") {
   assert((await totalText(page)).startsWith("10.00"), `2.5 kg at 4.00 totals 10.00 (got ${await totalText(page)})`);
   await page.locator('[data-testid="complete-sale"]').click();
   await page.locator('[data-testid="pay-cash"]').click();
-  await page.waitForSelector("text=Receipt #3");
+  await page.waitForSelector('[data-testid="receipt-number"]:has-text("#3")');
   await page.screenshot({ path: SHOTS + "upgrade-c2-fractional.png" });
   await page.locator('[data-testid="new-sale"]').click();
   await app.close();
@@ -642,7 +647,7 @@ if (PHASE === "seed-v2") {
   await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("10.00"));
   await page.locator('[data-testid="complete-sale"]').click();
   await page.locator('[data-testid="pay-cash"]').click();
-  await page.waitForSelector("text=Receipt #1");
+  await page.waitForSelector('[data-testid="receipt-number"]:has-text("#1")');
   await page.locator('[data-testid="new-sale"]').click();
   await sell(page, ["مياه"], "Card", 2);
   await voidCardSale(page);
@@ -1366,7 +1371,10 @@ if (PHASE === "seed-v2") {
   const balance = await historyRow.locator('[data-testid="history-balance"]').innerText();
   log("history row:", JSON.stringify({ ref, payment, balance }));
   assert(/\d/.test(ref), `the history row names the invoice number (got ${ref})`);
-  assert(/Unpaid/i.test(payment), `the payment column says unpaid (got ${payment})`);
+  assert(
+    (await historyRow.getAttribute("data-payment-status")) === "unpaid",
+    `the row is unpaid (payment column reads ${payment})`,
+  );
   assert(/14\.50/.test(balance), `and the balance due is the invoice total (got ${balance})`);
   // 🔴 NO FABRICATED METHOD anywhere in that row.
   assert(!/cash|card|external/i.test(payment), `no payment method was invented (got ${payment})`);

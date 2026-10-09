@@ -53,13 +53,13 @@ export function TodayScreen() {
             <div className="today-breakdown">
               <div className="today-cell">
                 <span className="muted small">{t("today.gross")}</span>
-                <span className="today-cell-value"><bdi dir="ltr">{fmt(report.grossSales)}</bdi></span>
+                <span className="today-cell-value" data-testid="today-gross"><bdi dir="ltr">{fmt(report.grossSales)}</bdi></span>
               </div>
               <div className="today-cell minus">
                 <span className="muted small">{t("today.voidedAmount")}</span>
                 {/* 🔴 THE MINUS LEADS, INSIDE THE RUN. Written as a bare "− {amount}" in RTL the
                     sign drifted to the far end and printed "USD 0.00 −". */}
-                <span className="today-cell-value">
+                <span className="today-cell-value" data-testid="today-void-amount">
                   <bdi dir="ltr">{`− ${fmt(report.voidTotal)}`}</bdi>
                 </span>
               </div>
@@ -68,10 +68,10 @@ export function TodayScreen() {
 
           <div className="today-counts">
             <span>
-              {t("today.completedCount")} <b><bdi>{report.completedSalesCount}</bdi></b>
+              {t("today.completedCount")} <b data-testid="today-completed"><bdi>{report.completedSalesCount}</bdi></b>
             </span>
             <span>
-              {t("today.voidedCount")} <b><bdi>{report.voidedSalesCount}</bdi></b>
+              {t("today.voidedCount")} <b data-testid="today-voided"><bdi>{report.voidedSalesCount}</bdi></b>
             </span>
           </div>
         </div>

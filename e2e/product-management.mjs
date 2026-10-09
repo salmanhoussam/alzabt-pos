@@ -128,7 +128,7 @@ await page.locator("button.product", { hasText: "E2E-001" }).click();
 // Payment methods live behind "Complete sale" — the cart does not take a method directly.
 await page.locator('[data-testid="complete-sale"]').click();
 await page.locator('[data-testid="pay-cash"]').click();
-await page.waitForSelector("text=Sale completed");
+await page.waitForSelector('[data-testid="receipt"]');
 const receipt = await page.locator(".receipt").innerText();
 assert(receipt.includes("4.00"), "the sale was rung at 4.00");
 await page.getByRole("button", { name: /^(حسناً|OK|Close|New sale)$/ }).first().click().catch(() => {});
@@ -144,7 +144,7 @@ await page.waitForFunction(() => document.querySelector(".total strong")?.textCo
 assert(true, "2.5 kg at 2.50 totals 6.25 — a fraction priced exactly");
 await page.locator('[data-testid="complete-sale"]').click();
 await page.locator('[data-testid="pay-cash"]').click();
-await page.waitForSelector("text=Sale completed");
+await page.waitForSelector('[data-testid="receipt"]');
 const fractionalReceipt = await page.locator(".receipt").innerText();
 const receiptFlat = fractionalReceipt.replace(/\s+/g, " ").trim();
 // 🔴 The ORDER, not just the presence: on an RTL terminal this line used to render as

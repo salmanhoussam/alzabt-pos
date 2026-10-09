@@ -10,12 +10,12 @@ export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => 
   const { t } = useT();
   return (
     <div className="center">
-      <div className="card receipt">
+      <div className="card receipt" data-testid="receipt">
         <div className="receipt-ok">
           <span className="receipt-check" aria-hidden="true">✓</span>
           <h2>{t("receipt.done")}</h2>
         </div>
-        <p className="muted small receipt-meta">
+        <p className="muted small receipt-meta" data-testid="receipt-number">
           {t("receipt.number")} <bdi dir="ltr">#{sale.receiptNumber}</bdi>
           {" · "}
           <bdi dir="ltr">{stamp(sale.completedAt)}</bdi>

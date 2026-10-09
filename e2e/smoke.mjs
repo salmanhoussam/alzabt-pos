@@ -59,13 +59,23 @@ const product = (page, name) => page.locator("button.product", { hasText: name }
 const line = (page, name) => page.locator("li.line", { hasText: name });
 const totalText = async (page) => (await page.locator(".total strong").innerText()).trim();
 
+/**
+ * Reads one figure off Today's Sales.
+ *
+ * 🔴 BY TESTID, NOT BY LABEL TEXT. This used to walk `.stats dt` looking for "Net sales" — which
+ * depended on BOTH the English label and the <dl> markup. The screen is Arabic now and the layout
+ * is no longer a definition list, so either change alone would have broken it silently.
+ */
+const STAT_TESTID = {
+  "Completed sales": "today-completed",
+  "Voided sales": "today-voided",
+  "Gross sales": "today-gross",
+  "Net sales": "today-net",
+};
 async function stat(page, label) {
-  const dts = page.locator(".stats dt");
-  const n = await dts.count();
-  for (let i = 0; i < n; i++) {
-    if ((await dts.nth(i).innerText()).trim() === label) return (await page.locator(".stats dd").nth(i).innerText()).trim();
-  }
-  throw new Error("no stat " + label);
+  const id = STAT_TESTID[label];
+  if (!id) throw new Error("no stat " + label);
+  return (await page.locator(`[data-testid="${id}"]`).innerText()).trim();
 }
 
 // ── Run 1 ───────────────────────────────────────────────────────────────────────────────────────
@@ -126,7 +136,7 @@ await page.screenshot({ path: SHOTS + "02-cart.png" });
 await page.locator('[data-testid="complete-sale"]').click();
 await page.screenshot({ path: SHOTS + "03-payment.png" });
 await page.locator('[data-testid="pay-cash"]').click();
-await page.waitForSelector("text=Sale completed");
+await page.waitForSelector('[data-testid="receipt"]');
 const receipt1 = await page.locator(".receipt").innerText();
 assert(receipt1.includes("Receipt #1") && receipt1.includes("14.80 USD") && receipt1.includes("cash"), "receipt #1 shows 14.80 USD paid by cash");
 await page.screenshot({ path: SHOTS + "04-receipt.png" });
@@ -137,7 +147,7 @@ for (let i = 0; i < 3; i++) await product(page, "Mint Tea").click();
 assert((await totalText(page)) === "5.97 USD", "3 × 1.99 = 5.97");
 await page.locator('[data-testid="complete-sale"]').click();
 await page.getByRole("button", { name: "Card (external terminal)" }).click();
-await page.waitForSelector("text=Receipt #2");
+await page.waitForSelector('[data-testid="receipt-number"]:has-text("#2")');
 await page.locator('[data-testid="new-sale"]').click();
 
 // Forged calls straight through window.pos (what a compromised renderer could try).
@@ -160,7 +170,7 @@ await page.screenshot({ path: SHOTS + "05-today.png" });
 // Void receipt #2 from history.
 await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
-await page.locator("tr", { hasText: "card" }).locator('[data-testid="history-void"]').click();
+await page.locator('tr[data-payment-method="card"]').locator('[data-testid="history-void"]').click();
 await page.getByPlaceholder("e.g. wrong item rung up").fill("customer cancelled");
 await page.screenshot({ path: SHOTS + "06-void-dialog.png" });
 await page.locator('[data-testid="void-confirm"]').click();
@@ -189,7 +199,7 @@ await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Water 500ml").click();
 await page.locator('[data-testid="complete-sale"]').click();
 await page.getByRole("button", { name: "Other" }).click();
-await page.waitForSelector("text=Receipt #3");
+await page.waitForSelector('[data-testid="receipt-number"]:has-text("#3")');
 
 // The REAL Electron main PID, asked of the main process itself. NOT app.process().pid: on Windows
 // Playwright starts Electron through `cmd.exe /c` (shell: true), so app.process() is that wrapper —
@@ -239,7 +249,7 @@ await product(page, "Zaatar Manousheh").click();
 await product(page, "Zaatar Manousheh").click();
 await page.locator('[data-testid="complete-sale"]').click();
 await page.locator('[data-testid="pay-cash"]').click();
-await page.waitForSelector("text=Receipt #4");
+await page.waitForSelector('[data-testid="receipt-number"]:has-text("#4")');
 await page.locator('[data-testid="new-sale"]').click();
 await page.locator('[data-testid="tab-today"]').click();
 await page.waitForSelector(".stats");

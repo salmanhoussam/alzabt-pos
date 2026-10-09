@@ -265,7 +265,7 @@ for (const [name, action] of [
   await page.locator("button.product", { hasText: "Espresso" }).click();
   await page.locator('[data-testid="complete-sale"]').click();
   await page.locator('[data-testid="pay-cash"]').click();
-  await page.waitForSelector("text=Receipt #1");
+  await page.waitForSelector('[data-testid="receipt-number"]:has-text("#1")');
   const mainPid = await app.evaluate(() => process.pid);
   const launcherPid = app.process().pid; // read BEFORE the kill: the handle is disposed afterwards
   const before = listProcesses();

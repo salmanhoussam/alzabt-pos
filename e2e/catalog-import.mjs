@@ -119,7 +119,7 @@ const total = (await page.locator(".total strong").innerText()).trim();
 assert(total === "14.00 USD", "cart: 2×0.50 + 1.00 + 12.00 = 14.00 USD");
 await page.locator('[data-testid="complete-sale"]').click();
 await page.locator('[data-testid="pay-cash"]').click();
-await page.waitForSelector("text=Receipt #1");
+await page.waitForSelector('[data-testid="receipt-number"]:has-text("#1")');
 const receipt = await page.locator(".receipt-table").innerText();
 assert(receipt.includes("مياه") && receipt.includes("بيبسي 330 مل") && receipt.includes('علبة بسكويت 2"'), "receipt shows the Arabic names");
 await page.screenshot({ path: SHOTS + "catalog-02-receipt.png" });
