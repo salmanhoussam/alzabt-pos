@@ -200,6 +200,13 @@ function ledgerFacts() {
       unpaidSales: salesHasSource(db)
         ? n("SELECT count(*) AS n FROM sales WHERE payment_status <> 'paid'")
         : null,
+      saleStatuses: salesHasSource(db)
+        ? db
+            .prepare("SELECT payment_status AS p, count(*) AS n FROM sales GROUP BY payment_status ORDER BY p")
+            .all()
+            .map((r) => `${r.p}=${Number(r.n)}`)
+            .join(",")
+        : null,
       methodlessSales: salesHasSource(db)
         ? n("SELECT count(*) AS n FROM sales WHERE payment_method IS NULL")
         : null,
@@ -963,8 +970,12 @@ if (PHASE === "seed-v2") {
     assert(f.posSales === 2, `the two v5 till sales are still till sales (got ${f.posSales})`);
     assert(f.invoiceSales === 1, `and exactly one invoice-origin sale exists (got ${f.invoiceSales})`);
     assert(f.linkedSales === 1, "it is linked to the invoice it came from");
-    // Nothing was paid on it, and no payment method was invented to fill the column.
-    assert(f.unpaidSales === 1, `the invoice sale is not marked paid (got ${f.unpaidSales})`);
+    // 🔴 THIS INVOICE IS PARTIALLY PAID — 3.25 against 13.25, typed into sheet-paid above — so
+    // 'partial' is the correct status. The first version of this said "nothing was paid on it",
+    // which was simply false about its own fixture; `unpaidSales` counts "not paid" and so passed
+    // anyway. Naming the real status is the stronger assertion AND the honest comment.
+    assert(f.saleStatuses === "paid=2,partial=1", `two paid till sales and one partial invoice sale (got ${f.saleStatuses})`);
+    assert(f.unpaidSales === 1, `exactly one sale is not settled in full (got ${f.unpaidSales})`);
     assert(f.methodlessSales === 1, `exactly one sale records no payment method (got ${f.methodlessSales})`);
     assert(f.voids === 1, "still exactly the one v5 void");
     // The two v5 till lines are untouched; the invoice's four lines are additional.
@@ -1352,7 +1363,10 @@ if (PHASE === "seed-v2") {
   assert(g.sales === 3, `the two till sales plus one invoice sale (got ${g.sales})`);
   assert(g.invoiceSales === 1 && g.linkedSales === 1, "exactly one invoice-origin sale, linked");
   assert(g.posSales === 2, "and the two till sales are still till sales");
-  assert(g.unpaidSales === 1 && g.methodlessSales === 1, "it is unpaid and records no method");
+  // Nothing was paid on THIS one — no sheet-paid value is typed in this phase — so 'unpaid' is
+  // the correct status, and it is named rather than inferred from a "not paid" count.
+  assert(g.saleStatuses === "paid=2,unpaid=1", `two paid till sales and one unpaid invoice sale (got ${g.saleStatuses})`);
+  assert(g.methodlessSales === 1, "and it records no payment method");
   assert(JSON.stringify(g.receipts) === "[1,2,3]", `the receipt sequence continued (got ${JSON.stringify(g.receipts)})`);
   // A pre-migration backup of the v6 file was taken, named for the span it crossed.
   const pre = backupFiles().find((b) => /^pre-migration-v6-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));

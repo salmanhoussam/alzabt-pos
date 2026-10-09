@@ -142,6 +142,9 @@ function facts() {
       posSales: n("SELECT count(*) AS n FROM sales WHERE source_type = 'pos'"),
       linkedSales: n("SELECT count(*) AS n FROM sales WHERE invoice_id IS NOT NULL"),
       methodlessSales: n("SELECT count(*) AS n FROM sales WHERE payment_method IS NULL"),
+      salePaid: n("SELECT coalesce(sum(paid_minor), 0) AS n FROM sales"),
+      saleBalance: n("SELECT coalesce(sum(balance_due_minor), 0) AS n FROM sales"),
+      saleTotal: n("SELECT coalesce(sum(total_minor), 0) AS n FROM sales"),
       saleStatuses: db
         .prepare("SELECT payment_status AS p, count(*) AS n FROM sales GROUP BY payment_status ORDER BY p")
         .all()
@@ -375,9 +378,18 @@ await app.close();
   assert(f.invoiceSales === 1 && f.posSales === 0, "and it is an invoice-origin sale, not a till sale");
   assert(f.linkedSales === 1, "linked to the invoice it came from");
   assert(f.saleLines === f.invoiceLines, `one sale line per invoice line (${f.saleLines} vs ${f.invoiceLines})`);
-  // Nothing was paid, and no payment method was invented to fill the column.
-  assert(f.methodlessSales === 1, "it records NO payment method");
-  assert(f.saleStatuses === "unpaid=1", `and its status is unpaid (got ${f.saleStatuses})`);
+  // 🔴 THIS INVOICE IS PARTIALLY PAID — 96.15 against 496.15, typed through the UI a few steps
+  // above — so 'partial' is the correct status and the first version of this assertion ("unpaid")
+  // was wrong about the fixture, not about the code. Windows CI caught it. Asserting the real
+  // partial case is strictly better than asserting the unpaid one: it proves paid, balance and
+  // status agree on a sale where all three differ.
+  assert(f.saleStatuses === "partial=1", `its status is partial (got ${f.saleStatuses})`);
+  assert(f.salePaid === 9615, `the sale's paid amount is the invoice's 96.15 (got ${f.salePaid})`);
+  assert(f.saleBalance === 40000, `and its balance due is 400.00 (got ${f.saleBalance})`);
+  assert(f.salePaid + f.saleBalance === f.saleTotal, "paid + balance = total, on the sale itself");
+  // No payment method was invented, even though money really was received: the invoice records
+  // the AMOUNT, and never how it arrived.
+  assert(f.methodlessSales === 1, "and it records NO payment method");
   // 🔴 THE HALF OF THE OLD BOUNDARY THAT STILL HOLDS: a sale is not a stock movement.
   assert(f.voids === 0, "and no void");
   assert(f.voids === 0, "and no void");
