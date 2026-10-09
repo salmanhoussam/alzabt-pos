@@ -527,7 +527,7 @@ BEGIN SELECT RAISE(ABORT, 'invoice: a finalized invoice cannot take new lines');
     // invoice IS a sale for reporting. Migration 6's source is NOT edited — it is released and its
     // fingerprint must stay identical. The reversal lands here, additively.
     //
-    // WHY THIS REBUILDS TWO TABLES INSTEAD OF ADDING COLUMNS. Three things the invoice can express
+    // WHY THIS REBUILDS THREE TABLES INSTEAD OF ADDING COLUMNS. Three things the invoice can express
     // and the v6 ledger cannot, each measured against the real schema rather than assumed:
     //   1. Paid 0 / Balance 100. `sales` has no paid or balance column, and `payment_method` is
     //      NOT NULL over a closed four-value CHECK. SQLite cannot drop or replace either.
@@ -539,20 +539,30 @@ BEGIN SELECT RAISE(ABORT, 'invoice: a finalized invoice cannot take new lines');
     //      invoice line through that would mean either inventing a SKU or moving reconciliation
     //      BEFORE finalization. Both are refused: reconciliation stays after finalization.
     //
-    // 🔴 WHY THE ORDER BELOW IS WHAT IT IS — `sales` IS NOT A LEAF TABLE. Migration 4 could rebuild
+    // 🔴 WHY ALL THREE AND IN THIS ORDER — `sales` IS NOT A LEAF TABLE. Migration 4 could rebuild
     // `sale_lines` plainly because nothing references it. `sales` is referenced by `voids.sale_id`
     // AND by `sale_lines.sale_id`, and `PRAGMA foreign_keys` is ON (db.ts) while
     // `PRAGMA foreign_keys=OFF` is SILENTLY IGNORED inside a transaction — which the migration
     // runner always is. With foreign keys enforced, DROP TABLE performs an implicit DELETE of every
-    // row, so dropping `sales` while `voids` holds referencing rows is an immediate violation.
-    // `PRAGMA defer_foreign_keys = ON` *is* honoured inside a transaction and resets itself at
-    // COMMIT, so enforcement moves to COMMIT time, by which point the schema is whole again. That
-    // is not a trust-the-docs claim here: tests/persistence/migration7.test.ts upgrades a real v6
-    // ledger that holds sales, lines AND a void, and would fail loudly if it were wrong.
+    // row, so dropping `sales` while another table holds referencing rows is a violation.
     //
-    // `voids` is deliberately NOT rebuilt. Its shape does not change, and its reference text
-    // ("REFERENCES sales (id)") keeps resolving to whatever table carries that name — so after the
-    // rename it points at the new table with no edit. Touching it would be risk for nothing.
+    // 🔴 AND `PRAGMA defer_foreign_keys` DOES NOT SOLVE IT, which is the single most important
+    // thing to know before editing this migration. The first version of it leaned on exactly that:
+    // defer enforcement to COMMIT, by which point the schema is whole again. It is wrong, and it is
+    // wrong in a way an EMPTY ledger hides. The implicit DELETE inside DROP TABLE *counts* one
+    // deferred violation per referencing child row, and renaming the replacement table into place
+    // afterwards never clears that counter — so COMMIT fails with "FOREIGN KEY constraint failed".
+    // A fresh database passed every test; a real v3 ledger carrying one sale, its lines and a void
+    // failed instantly. Measured, not reasoned.
+    //
+    // What makes the swap below correct is ORDERING: both new child tables are created pointing at
+    // `sales_v7`, so when the three old tables are dropped nothing that survives references them.
+    // The pragma is kept because it costs nothing and keeps transient mid-transaction states from
+    // failing early, but it is NOT what makes this work. Do not reorder these statements.
+    //
+    // `voids` is therefore rebuilt too, and for ONE reason only: its foreign key must point at the
+    // new parent, and SQLite offers no way to repoint a foreign key in place. Every column, CHECK
+    // and constraint in it is copied from migration 1 verbatim — its shape does not change.
     //
     // DROP TABLE does not fire a BEFORE DELETE trigger, so the append-only rule does not block its
     // own replacement — the same fact migration 4 relied on.
