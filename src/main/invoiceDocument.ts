@@ -119,17 +119,27 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
     .map((v) => `<span><bdi>${escape(v)}</bdi></span>`)
     .join("");
 
-  const totals: string[] = [
-    `<tr><th>${escape(LABELS.subtotal[0])} / ${escape(LABELS.subtotal[1])}</th><td>${printMoney(inv.subtotal, exponent)}</td></tr>`,
-  ];
-  // Tax prints only when the shop configured one. No rate is hard-coded anywhere in this build.
+  // 🔴 NO REDUNDANT GRAND TOTAL. With no tax and no discount, "Subtotal" and "Grand Total" are the
+  // same number printed twice under two labels, which makes a reader look for the difference. When
+  // there is nothing to add up, ONE total line prints, and it is the emphasised one. The moment the
+  // shop configures a tax there genuinely are two numbers, and both print.
+  const totals: string[] = [];
   if (taxEnabled) {
-    totals.push(`<tr><th>${escape(taxLabel)}</th><td>${printMoney(inv.tax, exponent)}</td></tr>`);
+    totals.push(
+      `<tr><th>${escape(LABELS.subtotal[0])} / ${escape(LABELS.subtotal[1])}</th><td>${printMoney(inv.subtotal, exponent)}</td></tr>`,
+      // Tax prints only when the shop configured one. No rate is hard-coded anywhere in this build.
+      `<tr><th>${escape(taxLabel)}</th><td>${printMoney(inv.tax, exponent)}</td></tr>`,
+      `<tr class="grand"><th>${escape(LABELS.total[0])} / ${escape(LABELS.total[1])}</th><td>${printMoney(inv.total, exponent)}</td></tr>`,
+    );
+  } else {
+    totals.push(
+      `<tr class="grand"><th>${escape(LABELS.subtotal[0])} / ${escape(LABELS.subtotal[1])}</th><td>${printMoney(inv.total, exponent)}</td></tr>`,
+    );
   }
   totals.push(
-    `<tr class="grand"><th>${escape(LABELS.total[0])} / ${escape(LABELS.total[1])}</th><td>${printMoney(inv.total, exponent)}</td></tr>`,
-    `<tr><th>${escape(LABELS.paid[0])} / ${escape(LABELS.paid[1])}</th><td>${printMoney(inv.paid, exponent)}</td></tr>`,
-    `<tr><th>${escape(LABELS.balance[0])} / ${escape(LABELS.balance[1])}</th><td>${printMoney(inv.balanceDue, exponent)}</td></tr>`,
+    `<tr class="paid"><th>${escape(LABELS.paid[0])} / ${escape(LABELS.paid[1])}</th><td>${printMoney(inv.paid, exponent)}</td></tr>`,
+    // The one figure the customer acts on, so it is the one figure in red.
+    `<tr class="balance"><th>${escape(LABELS.balance[0])} / ${escape(LABELS.balance[1])}</th><td>${printMoney(inv.balanceDue, exponent)}</td></tr>`,
   );
 
   return `<!doctype html>
@@ -138,28 +148,56 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
 <meta charset="utf-8" />
 <title>${escape(LABELS.invoice[0])} ${inv.invoiceNumber ?? ""}</title>
 <style>
-  @page { size: A4; margin: 14mm 12mm; }
+  /* 🔴 EVERY COLOUR AND RULE HERE IS STRUCTURAL, NOT DECORATION. The template this follows uses a
+     single red accent to carry the eye from the company name to the one figure the customer must
+     act on (Balance Due), and black bars to separate the three regions a reader scans in order:
+     who issued it, what it is, what it costs. Nothing below is tied to any one shop: the colours
+     are the document's, the names and numbers all come from the frozen snapshot. */
+  :root { --ink: #111; --accent: #c1121f; --rule: #9aa0a6; --soft: #f3f4f6; }
+  @page { size: A4; margin: 13mm 12mm; }
   * { box-sizing: border-box; }
   body {
     margin: 0; font-family: "Segoe UI", "Tahoma", "Arial", sans-serif; font-size: 11pt;
-    color: #111; background: #fff;
+    color: var(--ink); background: #fff;
+    /* Print the backgrounds: a black bar with white labels is the design, and a viewer that
+       strips backgrounds would render white-on-white. */
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
   }
   .sheet { width: 100%; }
-  header { display: flex; align-items: flex-start; gap: 10mm; border-bottom: 2px solid #111; padding-bottom: 4mm; }
+  /* The accent rule above the header: the first thing on the page, and the shop's own colour band. */
+  .accent-bar { height: 3mm; background: var(--accent); margin-bottom: 3mm; }
+  header { display: flex; align-items: flex-start; gap: 10mm; border-bottom: 3px solid var(--ink); padding-bottom: 4mm; }
   .issuer { flex: 1 1 auto; }
-  .issuer h1 { margin: 0 0 1mm; font-size: 17pt; }
-  .issuer .legal, .issuer .tagline { font-size: 9.5pt; color: #444; }
-  .contact { margin-top: 1.5mm; font-size: 9pt; color: #444; display: flex; flex-wrap: wrap; gap: 0 4mm; }
+  /* A stronger company header, as the field asked: the name leads the page. */
+  .issuer h1 { margin: 0 0 1mm; font-size: 22pt; line-height: 1.1; letter-spacing: -.2px; }
+  .issuer .legal { font-size: 10pt; color: #333; font-weight: 600; }
+  .issuer .tagline { font-size: 9.5pt; color: var(--accent); font-weight: 600; }
+  .contact { margin-top: 2mm; font-size: 9pt; color: #444; display: flex; flex-wrap: wrap; gap: 0 4mm; }
   .ids { margin-top: 1.5mm; font-size: 8.5pt; color: #555; display: flex; flex-wrap: wrap; gap: 0 4mm; }
-  .logo { max-height: 22mm; max-width: 42mm; object-fit: contain; }
-  .doctitle { text-align: center; margin: 4mm 0 2mm; font-size: 14pt; font-weight: 700; letter-spacing: .5px; }
+  .logo { max-height: 24mm; max-width: 44mm; object-fit: contain; }
+  /* The black invoice bar. */
+  .doctitle {
+    margin: 4mm 0 3mm; padding: 2mm 4mm; background: var(--ink); color: #fff;
+    font-size: 15pt; font-weight: 700; letter-spacing: .6px;
+    display: flex; justify-content: space-between; align-items: baseline; gap: 6mm;
+  }
+  .doctitle .docnum { font-size: 12.5pt; font-weight: 600; }
   .meta, .customer { width: 100%; border-collapse: collapse; font-size: 10.5pt; }
-  .meta td, .customer td { padding: 1.2mm 2mm; }
-  .meta th, .customer th { padding: 1.2mm 2mm; text-align: start; white-space: nowrap; color: #444; font-weight: 600; }
-  .customer { margin-top: 3mm; border: 1px solid #bbb; }
+  .meta td, .customer td { padding: 1.4mm 2.5mm; }
+  .meta th, .customer th { padding: 1.4mm 2.5mm; text-align: start; white-space: nowrap; color: #333; font-weight: 700; }
+  /* The customer block: a boxed panel with a shaded label column, like the template's. */
+  .customer { margin-top: 0; border: 1px solid var(--ink); }
+  .customer th { background: var(--soft); width: 34mm; border-inline-end: 1px solid var(--rule); }
+  .customer tr + tr th, .customer tr + tr td { border-top: 1px solid #dcdee1; }
   table.lines { width: 100%; border-collapse: collapse; margin-top: 4mm; font-size: 10.5pt; }
-  table.lines th, table.lines td { border: 1px solid #999; padding: 1.6mm 2mm; vertical-align: top; }
-  table.lines thead th { background: #eee; font-size: 9.5pt; text-align: center; }
+  table.lines th, table.lines td { border: 1px solid var(--rule); padding: 1.8mm 2mm; vertical-align: top; }
+  /* The black item header with white labels. */
+  table.lines thead th {
+    background: var(--ink); color: #fff; font-size: 9.5pt; text-align: center;
+    border-color: var(--ink);
+  }
+  /* A banded body, so a 15-line invoice stays readable across a page break. */
+  table.lines tbody tr:nth-child(even) td { background: #fafafa; }
   /* A row is never split across a page break, and the header repeats on every page. */
   table.lines tr { page-break-inside: avoid; break-inside: avoid; }
   table.lines thead { display: table-header-group; }
@@ -169,19 +207,30 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   td.unit { text-align: center; width: 22mm; }
   td.money { text-align: end; width: 28mm; white-space: nowrap; }
   td.desc { text-align: start; }
-  .tail { margin-top: 4mm; display: flex; gap: 6mm; align-items: flex-start; page-break-inside: avoid; }
-  .words { flex: 1 1 auto; border: 1px solid #bbb; padding: 2.5mm 3mm; font-size: 10.5pt; min-height: 18mm; }
-  table.totals { border-collapse: collapse; min-width: 68mm; font-size: 10.5pt; }
-  table.totals th { text-align: start; padding: 1.4mm 3mm; color: #333; font-weight: 600; white-space: nowrap; }
-  table.totals td { text-align: end; padding: 1.4mm 3mm; white-space: nowrap; border-bottom: 1px solid #ddd; }
-  table.totals tr.grand th, table.totals tr.grand td { font-weight: 700; font-size: 11.5pt; border-top: 1.5px solid #111; }
-  footer { margin-top: 5mm; border-top: 1px solid #bbb; padding-top: 2mm; font-size: 8.5pt; color: #555;
-           display: flex; flex-wrap: wrap; gap: 0 4mm; }
-  .draft { color: #b00; font-weight: 700; }
+  /* The closing block never splits: words on one side, money on the other, balanced across A4. */
+  .tail { margin-top: 4mm; display: flex; gap: 6mm; align-items: stretch; page-break-inside: avoid; break-inside: avoid; }
+  .words { flex: 1 1 auto; border: 1px solid var(--rule); border-top: 3px solid var(--ink);
+           padding: 3mm; font-size: 10.5pt; min-height: 20mm; }
+  .words .words-label { font-size: 8.5pt; color: #666; font-weight: 700; display: block; margin-bottom: 1mm; }
+  table.totals { border-collapse: collapse; min-width: 74mm; font-size: 10.5pt; }
+  table.totals th { text-align: start; padding: 1.6mm 3mm; color: #333; font-weight: 600; white-space: nowrap; }
+  table.totals td { text-align: end; padding: 1.6mm 3mm; white-space: nowrap; border-bottom: 1px solid #e3e5e8; }
+  table.totals tr.grand th, table.totals tr.grand td {
+    font-weight: 700; font-size: 12pt; background: var(--soft); border-top: 2px solid var(--ink);
+    border-bottom: 1px solid var(--ink);
+  }
+  /* The red Balance Due row — the one number the customer acts on. */
+  table.totals tr.balance th, table.totals tr.balance td {
+    color: var(--accent); font-weight: 700; font-size: 12pt; border-bottom: 2px solid var(--accent);
+  }
+  footer { margin-top: 6mm; border-top: 3px solid var(--ink); padding-top: 2.5mm; font-size: 8.5pt; color: #555;
+           display: flex; flex-wrap: wrap; justify-content: center; gap: 0 5mm; text-align: center; }
+  .draft { color: var(--accent); font-weight: 700; }
 </style>
 </head>
 <body>
 <div class="sheet">
+  <div class="accent-bar"></div>
   <header>
     <div class="issuer">
       <h1>${escape(issuer?.nameAr ?? "")}</h1>
@@ -194,7 +243,14 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
     ${logo}
   </header>
 
-  <div class="doctitle">${escape(LABELS.invoice[0])} &middot; <bdi dir="ltr">${escape(LABELS.invoice[1])}</bdi></div>
+  <div class="doctitle">
+    <span>${escape(LABELS.invoice[0])} &middot; <bdi dir="ltr">${escape(LABELS.invoice[1])}</bdi></span>
+    <span class="docnum">${
+      inv.invoiceNumber === null
+        ? `<span class="draft">${escape("مسودة / DRAFT")}</span>`
+        : `<bdi dir="ltr">#${inv.invoiceNumber}</bdi>`
+    }</span>
+  </div>
 
   <table class="meta"><tbody><tr>
     <th>${escape(LABELS.number[0])} / ${escape(LABELS.number[1])}</th>
@@ -229,7 +285,10 @@ ${view.lines.map((l) => row(l, exponent)).join("\n")}
   </table>
 
   <div class="tail">
-    <div class="words">${escape(inv.amountInWords ?? "")}</div>
+    <div class="words">
+      <span class="words-label">${escape("المبلغ كتابةً")} / <bdi dir="ltr">${escape("Amount in words")}</bdi></span>
+      ${escape(inv.amountInWords ?? "")}
+    </div>
     <table class="totals"><tbody>
 ${totals.join("\n")}
     </tbody></table>
