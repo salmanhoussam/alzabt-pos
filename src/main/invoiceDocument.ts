@@ -24,6 +24,10 @@ export interface InvoiceDocumentOptions {
 
 const LABELS = {
   invoice: ["فاتورة", "INVOICE"],
+  // 🔴 THE DOCUMENT NAMES ITSELF. An outgoing sales invoice and an incoming intake document look
+  // alike on paper; only this cell distinguishes them, and the approved template carries it.
+  docType: ["فاتورة مبيعات", "Sales Invoice"],
+  currency: ["العملة", "Currency"],
   number: ["رقم الفاتورة", "Invoice No."],
   date: ["التاريخ", "Date"],
   customer: ["العميل", "Customer"],
@@ -175,18 +179,22 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   .contact { margin-top: 2mm; font-size: 9pt; color: #444; display: flex; flex-wrap: wrap; gap: 0 4mm; }
   .ids { margin-top: 1.5mm; font-size: 8.5pt; color: #555; display: flex; flex-wrap: wrap; gap: 0 4mm; }
   .logo { max-height: 24mm; max-width: 44mm; object-fit: contain; }
-  /* The black invoice bar. */
-  .doctitle {
-    margin: 4mm 0 3mm; padding: 2mm 4mm; background: var(--ink); color: #fff;
-    font-size: 15pt; font-weight: 700; letter-spacing: .6px;
-    display: flex; justify-content: space-between; align-items: baseline; gap: 6mm;
+  /* The black invoice bar: a four-column table, as the approved template draws it — the document
+     type, its number, its date and its currency, with bilingual labels on the black row. */
+  table.docbar { width: 100%; border-collapse: collapse; margin: 4mm 0 0; font-size: 10.5pt; }
+  table.docbar th {
+    background: var(--ink); color: #fff; padding: 2mm 3mm; font-size: 10pt; font-weight: 700;
+    text-align: center; border: 1px solid var(--ink);
   }
-  .doctitle .docnum { font-size: 12.5pt; font-weight: 600; }
+  table.docbar td {
+    padding: 2mm 3mm; text-align: center; border: 1px solid var(--rule); font-weight: 600;
+  }
+  table.docbar td:first-child { font-weight: 700; }
   .meta, .customer { width: 100%; border-collapse: collapse; font-size: 10.5pt; }
   .meta td, .customer td { padding: 1.4mm 2.5mm; }
   .meta th, .customer th { padding: 1.4mm 2.5mm; text-align: start; white-space: nowrap; color: #333; font-weight: 700; }
   /* The customer block: a boxed panel with a shaded label column, like the template's. */
-  .customer { margin-top: 0; border: 1px solid var(--ink); }
+  .customer { margin-top: 3mm; border: 1px solid var(--ink); }
   .customer th { background: var(--soft); width: 34mm; border-inline-end: 1px solid var(--rule); }
   .customer tr + tr th, .customer tr + tr td { border-top: 1px solid #dcdee1; }
   table.lines { width: 100%; border-collapse: collapse; margin-top: 4mm; font-size: 10.5pt; }
@@ -243,25 +251,24 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
     ${logo}
   </header>
 
-  <div class="doctitle">
-    <span>${escape(LABELS.invoice[0])} &middot; <bdi dir="ltr">${escape(LABELS.invoice[1])}</bdi></span>
-    <span class="docnum">${
-      inv.invoiceNumber === null
-        ? `<span class="draft">${escape("مسودة / DRAFT")}</span>`
-        : `<bdi dir="ltr">#${inv.invoiceNumber}</bdi>`
-    }</span>
-  </div>
-
-  <table class="meta"><tbody><tr>
-    <th>${escape(LABELS.number[0])} / ${escape(LABELS.number[1])}</th>
-    <td>${
-      inv.invoiceNumber === null
-        ? `<span class="draft">${escape("مسودة / DRAFT")}</span>`
-        : `<bdi dir="ltr">#${inv.invoiceNumber}</bdi>`
-    }</td>
-    <th>${escape(LABELS.date[0])} / ${escape(LABELS.date[1])}</th>
-    <td><bdi dir="ltr">${escape(inv.invoiceDate ?? "")}</bdi></td>
-  </tr></tbody></table>
+  <table class="docbar">
+    <thead><tr>
+      <th>${escape(LABELS.invoice[1])} / ${escape(LABELS.invoice[0])}</th>
+      <th>${escape(LABELS.number[1])} / ${escape(LABELS.number[0])}</th>
+      <th>${escape(LABELS.date[1])} / ${escape(LABELS.date[0])}</th>
+      <th>${escape(LABELS.currency[1])} / ${escape(LABELS.currency[0])}</th>
+    </tr></thead>
+    <tbody><tr>
+      <td>${escape(LABELS.docType[1])} &middot; ${escape(LABELS.docType[0])}</td>
+      <td>${
+        inv.invoiceNumber === null
+          ? `<span class="draft">${escape("مسودة / DRAFT")}</span>`
+          : `<bdi dir="ltr">#${inv.invoiceNumber}</bdi>`
+      }</td>
+      <td><bdi dir="ltr">${escape(inv.invoiceDate ?? "")}</bdi></td>
+      <td><bdi dir="ltr">${escape(inv.currency)}</bdi></td>
+    </tr></tbody>
+  </table>
 
   <table class="customer"><tbody>
     <tr><th>${escape(LABELS.customer[0])} / ${escape(LABELS.customer[1])}</th><td>${escape(inv.customerName ?? "")}</td></tr>

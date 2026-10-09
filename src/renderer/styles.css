@@ -248,3 +248,10 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .badge.draft { background: #fde68a; color: #7c2d12; }
 .small { font-size: .85rem; }
 .notice { background: #eef6ff; border: 1px solid #bcd8f7; border-radius: 6px; padding: 8px 10px; }
+
+/* The intent chooser: each mode states what it MEANS, not just its name, because the two kinds of
+   invoice look alike on paper and mean opposite things. */
+.inv-modes { display: grid; gap: 6px; margin-block: 10px; }
+.inv-modes .btn.wide { width: 100%; }
+.inv-modes p { margin: 0 0 8px; }
+.badge.mode { background: var(--ink, #111); color: #fff; }

@@ -221,9 +221,17 @@ describe("totals, words and the official identifiers", () => {
     // The accent band above the header, and a single accent colour defined once.
     expect(html).toContain('<div class="accent-bar"></div>');
     expect(html).toMatch(/--accent: #c1121f/);
-    // The black invoice bar, carrying the number, with white labels on it.
-    expect(html).toMatch(/\.doctitle \{[^}]*background: var\(--ink\)[^}]*color: #fff/);
-    expect(html).toMatch(/<div class="doctitle">[\s\S]*?class="docnum"/);
+    // The black invoice bar. 🔴 WAS a single `.doctitle` strip carrying only the number; the
+    // approved template draws it as a FOUR-COLUMN table — document type · number · date · currency
+    // — with bilingual labels on the black row, so it is one now.
+    expect(html).toMatch(/table\.docbar th \{[\s\S]*?background: var\(--ink\);[\s\S]*?color: #fff/);
+    expect(html).toContain('<table class="docbar">');
+    // The document NAMES ITSELF, which is what keeps an outgoing invoice from reading as intake.
+    expect(html).toContain("Sales Invoice");
+    expect(html).toContain("فاتورة مبيعات");
+    // And the currency is on the document, as the template has it.
+    expect(html).toMatch(/Currency \/ /);
+    expect(html).toMatch(/<bdi dir="ltr">USD<\/bdi>/);
     // The black item header with white labels.
     expect(html).toMatch(/table\.lines thead th \{[\s\S]*?background: var\(--ink\);[\s\S]*?color: #fff/);
     // The red Balance Due row — the one figure the customer acts on.

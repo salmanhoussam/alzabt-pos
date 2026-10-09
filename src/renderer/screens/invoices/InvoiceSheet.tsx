@@ -293,6 +293,11 @@ export function InvoiceSheet({
               {inv.invoiceNumber === null ? `— (${t("inv.sheet.numberAtFinalize")})` : `#${inv.invoiceNumber}`}
             </strong>
           </span>
+          {/* 🔴 THE DOCUMENT SAYS WHAT IT IS, on screen as well as on paper. An outgoing sales
+              invoice and an incoming intake document look alike; only a label distinguishes them. */}
+          <span className="badge mode" data-testid="sheet-mode">
+            {t("inv.mode.badge")}
+          </span>
           <span className={readOnly ? "badge" : "badge draft"} data-testid="sheet-status">
             {readOnly ? t("inv.sheet.title") : t("inv.sheet.draft")}
           </span>
