@@ -18,6 +18,13 @@ name: UI/UX audit artifact
 on:
   push:
     branches: ["docs/**"]
+    # 🔴 PATHS, NOT JUST BRANCHES. Without this, every push to any docs/** branch re-published the
+    # audit under a NEW artifact id — which happened once, so two artifacts named
+    # alzabt-ui-ux-audit existed with different ids while that id was being used as a reference.
+    # Re-publish only when the audit itself or this workflow changes.
+    paths:
+      - ".github/workflows/ui-ux-audit.yml"
+      - "docs/UI-UX-AUDIT.md"
   workflow_dispatch:
     inputs:
       source_run_id:
