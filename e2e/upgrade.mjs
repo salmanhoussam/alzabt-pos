@@ -602,7 +602,7 @@ if (PHASE === "seed-v2") {
 
   const f = ledgerFacts();
   log("ledger after upgrade + new sale:", JSON.stringify(f));
-  // Was `f.schema === 3`, then 4, 5 and 6; migration 7 made a v2 ledger land on v7 in ONE upgrade,
+  // Was `f.schema === 3`, then 4, 5 and 6; migration 7 made a v2 ledger land on v7, and migration 8 carries it to v8 in ONE upgrade,
   // and migration 8 (operator accounts) now carries it to v8 in that same single upgrade. The
   // version a build migrates TO is a transition, so each old value is named rather than replaced.
   assert(f.schema === 8 && f.integrity === "ok", `migrated to schema v8, integrity ok (got ${f.schema})`);
@@ -616,8 +616,8 @@ if (PHASE === "seed-v2") {
   const backups = backupFiles();
   log("backups:", JSON.stringify(backups));
   // The name carries the real span, and that span widened with each migration: v2→v3, v2→v4, v2→v5, now v2→v6.
-  const pre = backups.find((b) => /^pre-migration-v2-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, `a pre-migration backup was taken before v2→v7 (got ${JSON.stringify(backups)})`);
+  const pre = backups.find((b) => /^pre-migration-v2-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, `a pre-migration backup was taken before v2→v8 (got ${JSON.stringify(backups)})`);
   const copy = new Database(join(DEFAULT_PROFILE, "backups", pre), { readonly: true });
   const preSchema = Number(copy.prepare("SELECT max(version) AS n FROM schema_migrations").get().n);
   const preSales = Number(copy.prepare("SELECT count(*) AS n FROM sales").get().n);
@@ -688,8 +688,8 @@ if (PHASE === "seed-v2") {
   // 🔴 INVERTED by migration 4. This used to assert that NO pre-migration backup existed, because
   // v3→v3 migrated nothing. v3→v4 is a real migration, so the backup is now mandatory — and it must
   // hold the OLD schema, which is the only thing that makes the migration recoverable.
-  const pre3 = backupFiles().find((b) => /^pre-migration-v3-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre3, `a pre-migration backup was taken before v3→v7 (got ${JSON.stringify(backupFiles())})`);
+  const pre3 = backupFiles().find((b) => /^pre-migration-v3-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre3, `a pre-migration backup was taken before v3→v8 (got ${JSON.stringify(backupFiles())})`);
   const copy3 = new Database(join(DEFAULT_PROFILE, "backups", pre3), { readonly: true });
   const preCols = copy3.prepare("PRAGMA table_info(sale_lines)").all().map((c) => c.name);
   const preSchema3 = Number(copy3.prepare("SELECT max(version) AS n FROM schema_migrations").get().n);
@@ -806,7 +806,7 @@ if (PHASE === "seed-v2") {
   assert(f.quantities.every((q) => q % 1000 === 0), `migrated quantities are whole: ${JSON.stringify(f.quantities)}`);
   assert(f.unknownUnits === 2, `both pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
   assert(productUnit("SYN-ROPE") === "kg", `the product's unit survived as kg (got ${productUnit("SYN-ROPE")})`);
-  const pre = backupFiles().find((b) => /^pre-migration-v3-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  const pre = backupFiles().find((b) => /^pre-migration-v3-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
   assert(pre, `a pre-migration backup exists (got ${JSON.stringify(backupFiles())})`);
 
   // 🔴 And the point of the whole migration: a FRACTIONAL sale of that same product now works.
@@ -905,8 +905,9 @@ if (PHASE === "seed-v2") {
   await app.close();
 
   const f = ledgerFacts();
-  log("ledger after the v4 -> v7 upgrade:", JSON.stringify(f));
-  // Was 5 before migration 6 and 6 before migration 7: a v4 ledger now lands on v7 in ONE upgrade.
+  log("ledger after the v4 -> v8 upgrade:", JSON.stringify(f));
+  // Was 5 before migration 6, 6 before migration 7, and 7 before migration 8: a v4 ledger now
+  // lands on v8 in ONE upgrade.
   assert(f.schema === 8 && f.integrity === "ok", `migrated to schema v8, integrity ok (got ${f.schema})`);
   assert(f.sales === 2 && f.voids === 1, "sales and voids untouched by migrations 5 and 6");
   // 🔴 Migration 4's behaviour is unchanged: the fractional quantity is still exactly 2500.
@@ -916,8 +917,8 @@ if (PHASE === "seed-v2") {
   // 🔴 The trail starts EMPTY. No pre-v5 history is invented out of the rotating logfile.
   assert(f.auditBusiness === 0, `the BUSINESS audit trail starts empty (was \`audit === 0\`; got ${f.auditBusiness})`);
   assert(f.auditOperators === 1, `and exactly one account event, written by mandatory setup at first login (got ${f.auditOperators})`);
-  const pre = backupFiles().find((b) => /^pre-migration-v4-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, `a verified pre-migration v4->v7 backup exists (got ${JSON.stringify(backupFiles())})`);
+  const pre = backupFiles().find((b) => /^pre-migration-v4-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, `a verified pre-migration v4->v8 backup exists (got ${JSON.stringify(backupFiles())})`);
 
   // ── A real product mutation on the new build must leave a durable audit row ────────────────────
   ({ app, page } = await launch());
@@ -1664,8 +1665,8 @@ if (PHASE === "seed-v2") {
   assert(g.methodlessSales === 1, "and it records no payment method");
   assert(JSON.stringify(g.receipts) === "[1,2,3]", `the receipt sequence continued (got ${JSON.stringify(g.receipts)})`);
   // A pre-migration backup of the v6 file was taken, named for the span it crossed.
-  const pre = backupFiles().find((b) => /^pre-migration-v6-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, `a pre-migration v6->v7 backup exists (got ${JSON.stringify(backupFiles())})`);
+  const pre = backupFiles().find((b) => /^pre-migration-v6-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, `a pre-migration v6->v8 backup exists (got ${JSON.stringify(backupFiles())})`);
   const snap = new Database(join(DEFAULT_PROFILE, "backups", pre), { readonly: true, fileMustExist: true });
   try {
     assert(Number(snap.prepare("SELECT max(version) AS n FROM schema_migrations").get().n) === 6, "the snapshot is at v6");
