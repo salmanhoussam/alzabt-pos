@@ -138,7 +138,21 @@ async function addRow(page, { description, quantity, unit, price }) {
 
 /** Every value the line rows display — innerText NEVER includes an <input>'s value. */
 const lineValues = (page) =>
-  page.locator('[data-testid="sheet-line"] input').evaluateAll((els) => els.map((e) => e.value));
+  page
+    .locator('[data-testid="sheet-line"] input, [data-testid="sheet-line"] select')
+    .evaluateAll((els) => els.map((e) => e.value));
+
+/** Every saved line's unit cell, as the control DISPLAYS it — a select, no longer a text input. */
+const lineUnits = (page) =>
+  page.evaluate(() => {
+    const out = [];
+    for (const sel of document.querySelectorAll('[data-testid="sheet-line"] select[data-testid^="unit-select-"]')) {
+      const id = sel.getAttribute("data-testid").replace("unit-select-", "");
+      const custom = document.querySelector(`[data-testid="unit-custom-${id}"]`);
+      out.push({ base: sel.value, custom: custom ? custom.value : null });
+    }
+    return out;
+  });
 
 /** The app must be CLOSED: these read the installed application's own ledger file. */
 function query(sql, ...params) {
@@ -319,7 +333,25 @@ assert(
   values.some((v) => v === "صنف المسودّة الأول") && values.some((v) => v === "صنف المسودّة الثاني"),
   "both row descriptions persisted, read from the inputs rather than innerText",
 );
-assert(values.some((v) => v === "حبة") && values.some((v) => v === "علبة"), "both unit labels persisted verbatim");
+// 🔴 TRANSITION, NOT A WEAKENING. This asserted the strings «حبة» and «علبة» among the line
+// INPUTS, because the unit used to be a text input. It is a <select> now, so the displayed value is
+// the base-unit KEY the label belongs to — «حبة» is the Arabic label of `piece`, «علبة» of `box`.
+// The verbatim-label claim did not disappear: it moved to the ledger assertion further down, where
+// the app is closed and `unit_label` can be read as the bytes it actually is. Asserting it on a
+// select's value here would have been asserting the wrong surface, which is how a control change
+// quietly turns a real check into a passing one.
+{
+  const units = await lineUnits(page);
+  assert(units.length === 2, `both unit cells reopened (${JSON.stringify(units)})`);
+  assert(
+    units.some((u) => u.base === "piece") && units.some((u) => u.base === "box"),
+    `both units reopened as their own dropdown entry (${JSON.stringify(units)})`,
+  );
+  assert(
+    units.every((u) => u.custom === null),
+    "and neither needed the «Other» free-text field — both are units this build knows",
+  );
+}
 
 const subtotalAfter = await textOf(page, "sheet-subtotal");
 const totalAfter = await textOf(page, "sheet-total");
@@ -340,6 +372,23 @@ const draftsOnDisk = num("SELECT count(*) AS n FROM invoices WHERE status = 'dra
 const linesOnDisk = num("SELECT count(*) AS n FROM invoice_lines");
 assert(draftsOnDisk === 1, `the ledger holds the draft after the app closed (got ${draftsOnDisk})`);
 assert(linesOnDisk === 2, `and both of its lines (got ${linesOnDisk})`);
+// 🔴 THE VERBATIM UNIT CLAIM, read as bytes from the installed app's own ledger. This is where
+// "persisted verbatim" belongs: a control can display whatever it likes, but what the paper invoice
+// will print is this column.
+{
+  const units = query("SELECT unit_label AS l, canonical_unit AS c FROM invoice_lines ORDER BY line_no");
+  log("STORED UNITS:", JSON.stringify(units));
+  assert(units.length === 2, "two line units are on disk");
+  assert(
+    units.map((u) => u.l).join("|") === "حبة|علبة",
+    `🔴 both unit LABELS are stored byte for byte (${units.map((u) => u.l).join("|")})`,
+  );
+  assert(
+    units.map((u) => u.c).join("|") === "piece|box",
+    `and each records the catalog unit it belongs to (${units.map((u) => u.c).join("|")})`,
+  );
+}
+
 const stored = one("SELECT customer_name AS c, customer_phone AS p, notes AS n, invoice_date AS d FROM invoices");
 assert(stored.c === CUSTOMER, "the stored row carries the customer name");
 assert(stored.p === PHONE, "the stored row carries the phone");

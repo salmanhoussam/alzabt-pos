@@ -100,7 +100,12 @@ const tab = (page, name) => page.locator(`[data-testid="tab-${name}"]`).click();
  * all. Read the values.
  */
 async function lineValues(page) {
-  return page.locator('[data-testid="sheet-line"] input').evaluateAll((els) => els.map((e) => e.value));
+  // 🔴 SELECTS TOO, since 2026-10-10. The unit cell is a dropdown now, so an input-only reader
+  // silently stops seeing it — and a reader that stops seeing a field turns a real assertion into
+  // one that cannot fail. A custom unit («كيس (50PCS)») is still a text input and still appears.
+  return page
+    .locator('[data-testid="sheet-line"] input, [data-testid="sheet-line"] select')
+    .evaluateAll((els) => els.map((e) => e.value));
 }
 
 /**
