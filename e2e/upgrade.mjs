@@ -324,6 +324,25 @@ function ledgerFacts() {
       // Migration 8. `null` — never 0 — when the table is absent, which is the honest answer for
       // every ledger written before operator accounts existed.
       operators: tables.includes("operators") ? n("SELECT count(*) AS n FROM operators") : null,
+      /**
+       * 🔴 THE BUSINESS TRAIL, SEPARATED FROM THE ACCOUNT TRAIL — and this split is a transition,
+       * not a tidy-up. Every `verify-from-*` phase launches THIS build, and this build's first
+       * login goes through real mandatory setup, which writes one OPERATOR_PIN_RESET row. So
+       * `audit` — a plain count of the whole table — shifted by one in six phases at once, and
+       * assertions that read "the durable audit trail starts empty" became arithmetic about an
+       * account event they were never about.
+       *
+       * Rather than move twenty numbers by one and lose what each was claiming, the two trails are
+       * now counted separately. Each phase then says BOTH things exactly: how many business events
+       * its own actions wrote, and that signing in wrote exactly one account event. That is
+       * stricter than before, not looser — the old assertions could not see the difference at all.
+       */
+      auditBusiness: tables.includes("audit_events")
+        ? n("SELECT count(*) AS n FROM audit_events WHERE entity_type <> 'operator'")
+        : null,
+      auditOperators: tables.includes("audit_events")
+        ? n("SELECT count(*) AS n FROM audit_events WHERE entity_type = 'operator'")
+        : null,
       operatorRows: tables.includes("operators")
         ? db
             .prepare("SELECT id, role, must_reset_pin AS f, is_active AS a FROM operators ORDER BY id")
@@ -397,6 +416,16 @@ function auditRows() {
 }
 
 /** Proves the append-only triggers really are in the installed app's own ledger. */
+/**
+ * The BUSINESS audit rows — everything except the account trail.
+ *
+ * 🔴 Named, not hidden. Mandatory setup writes one OPERATOR_PIN_RESET row at this build's first
+ * login, so a phase indexing `auditRows()[0]` would now read that row instead of the product edit
+ * it means. Filtering by entity_type at the call site keeps each assertion saying what it said
+ * before, and the operator row is asserted separately rather than subtracted silently.
+ */
+const businessRows = () => auditRows().filter((r) => r.entity_type !== "operator");
+
 function auditIsAppendOnly() {
   const db = new Database(LEDGER, { fileMustExist: true });
   try {
@@ -578,7 +607,8 @@ if (PHASE === "seed-v2") {
   // version a build migrates TO is a transition, so each old value is named rather than replaced.
   assert(f.schema === 8 && f.integrity === "ok", `migrated to schema v8, integrity ok (got ${f.schema})`);
   // The audit table was created on the way, and starts empty — nothing is reconstructed.
-  assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
+  assert(f.auditBusiness === 0, `the durable BUSINESS audit trail starts empty (was \`audit === 0\`; got ${f.auditBusiness})`);
+  assert(f.auditOperators === 1, `and exactly one account event, written by mandatory setup at first login (got ${f.auditOperators})`);
   // Two Espressos at 2.50 and one at 2.50, all WHOLE pieces, so every quantity scaled by 1000.
   assert(f.quantities.every((q) => q % 1000 === 0), `every migrated quantity is a whole number of units: ${JSON.stringify(f.quantities)}`);
   assert(f.unknownUnits === 2, `the 2 pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
@@ -674,7 +704,8 @@ if (PHASE === "seed-v2") {
   const afterMigration = ledgerFacts();
   // Was 5 before migration 6.
   assert(afterMigration.schema === 8, `migrated to schema v8 (got ${afterMigration.schema})`);
-  assert(afterMigration.audit === 0, `the durable audit trail exists and starts empty (got ${afterMigration.audit})`);
+  assert(afterMigration.auditBusiness === 0, `the durable BUSINESS audit trail starts empty (was \`audit === 0\`; got ${afterMigration.auditBusiness})`);
+  assert(afterMigration.auditOperators === 1, `and exactly one account event, written by mandatory setup at first login (got ${afterMigration.auditOperators})`);
 
   ({ app, page } = await launch());
   const h2 = await historyRows(page);
@@ -700,9 +731,9 @@ if (PHASE === "seed-v2") {
   // 🔴 And the export → re-import above is now AUDITED: exactly one CATALOG_IMPORTED summary and
   // ZERO product events, because the re-imported file is byte-identical and changed nothing. That
   // is the low-noise property the import audit model was chosen for, measured on the installed app.
-  assert(f.audit === 1, `the re-import wrote exactly one audit row (got ${f.audit})`);
+  assert(f.auditBusiness === 1, `the re-import wrote exactly one BUSINESS audit row (was \`audit === 1\`; got ${f.auditBusiness})`);
   assert(
-    f.auditTypes === "CATALOG_IMPORTED=1",
+    f.auditTypes === "CATALOG_IMPORTED=1,OPERATOR_PIN_RESET=1",
     `and it is the summary alone, with no per-product events (got "${f.auditTypes}")`,
   );
   // TWO, not three: seed-v3's first sale is ONE line holding 2 x مياه (hence quantity_milli 2000),
@@ -770,7 +801,8 @@ if (PHASE === "seed-v2") {
   log("ledger after the upgrade:", JSON.stringify(f));
   // Was 5 before migration 6.
   assert(f.schema === 8 && f.integrity === "ok", `migrated to schema v8, integrity ok (got ${f.schema})`);
-  assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
+  assert(f.auditBusiness === 0, `the durable BUSINESS audit trail starts empty (was \`audit === 0\`; got ${f.auditBusiness})`);
+  assert(f.auditOperators === 1, `and exactly one account event, written by mandatory setup at first login (got ${f.auditOperators})`);
   assert(f.quantities.every((q) => q % 1000 === 0), `migrated quantities are whole: ${JSON.stringify(f.quantities)}`);
   assert(f.unknownUnits === 2, `both pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
   assert(productUnit("SYN-ROPE") === "kg", `the product's unit survived as kg (got ${productUnit("SYN-ROPE")})`);
@@ -806,7 +838,7 @@ if (PHASE === "seed-v2") {
   assert(JSON.stringify(f2.receipts) === "[1,2,3]" && f2.integrity === "ok", "receipt sequence continued and the ledger is sound");
   // 🔴 A SALE writes no audit event. Migration 5 audits master data, not the sales ledger, which has
   // its own immutable semantics — so three sales and a void leave the trail exactly as it was.
-  assert(f2.audit === 0, `selling does not write audit events (got ${f2.audit})`);
+  assert(f2.auditBusiness === 0, `selling writes no BUSINESS audit event (was \`audit === 0\`; got ${f2.auditBusiness})`);
 } else if (PHASE === "seed-v4") {
   // Scenario D — the canonical CURRENT MAIN build (68fdf03, schema v4: exact quantity + sale_unit,
   // and NO durable audit). This is the profile a shop would really be upgraded from.
@@ -882,7 +914,8 @@ if (PHASE === "seed-v2") {
   assert(f.unknownUnits === 0, "sale units untouched");
   assert(productUnit("SYN-ROPE") === "kg", `the product's unit survived as kg (got ${productUnit("SYN-ROPE")})`);
   // 🔴 The trail starts EMPTY. No pre-v5 history is invented out of the rotating logfile.
-  assert(f.audit === 0, `the audit trail exists and starts empty (got ${f.audit})`);
+  assert(f.auditBusiness === 0, `the BUSINESS audit trail starts empty (was \`audit === 0\`; got ${f.auditBusiness})`);
+  assert(f.auditOperators === 1, `and exactly one account event, written by mandatory setup at first login (got ${f.auditOperators})`);
   const pre = backupFiles().find((b) => /^pre-migration-v4-to-v7-\d{8}T\d{6}Z\.sqlite$/.test(b));
   assert(pre, `a verified pre-migration v4->v7 backup exists (got ${JSON.stringify(backupFiles())})`);
 
@@ -900,12 +933,25 @@ if (PHASE === "seed-v2") {
   await page.screenshot({ path: SHOTS + "upgrade-d2-audited-edit.png" });
   await app.close();
 
-  let audit = auditRows();
-  assert(audit.length === 1, `the edit left exactly one audit row (got ${audit.length})`);
+  // 🔴 TRANSITION. This read `auditRows()` and asserted `length === 1` with `seq === 1`. Both were
+  // true until migration 8 put mandatory setup before the till: the first row on a freshly migrated
+  // ledger is now the OPERATOR_PIN_RESET that signing in wrote, so the product edit is seq 2. The
+  // old values are named here; the claim itself is unchanged and is now stated about the trail it
+  // was always about.
+  let audit = businessRows();
+  assert(audit.length === 1, `the edit left exactly one BUSINESS audit row (got ${audit.length})`);
   assert(audit[0].event_type === "PRODUCT_UPDATED", `and it is a PRODUCT_UPDATED (got ${audit[0].event_type})`);
-  assert(Number(audit[0].seq) === 1, "its seq starts at 1 on a freshly migrated ledger");
+  assert(Number(audit[0].seq) === 2, "its seq is 2 — the setup row took 1 (was `=== 1` before migration 8)");
   assert(audit[0].actor_id === "cashier-01" && audit[0].actor_name === "Cashier One", "it names the operator");
-  assert(audit[0].actor_tier === "unspecified", "and records the tier as unknown rather than guessing");
+  // 🔴 AND THE TWO TRAILS DISAGREE ABOUT THE SAME PERSON, which is reported rather than smoothed:
+  // posService still writes CURRENT_ACTOR_TIER for a product event while operatorService writes the
+  // real role for an account event. Asserted as it IS, so settling it shows up here as a real edit.
+  assert(audit[0].actor_tier === "unspecified", "a product event still records the tier as unspecified");
+  {
+    const accounts = auditRows().filter((r) => r.entity_type === "operator");
+    assert(accounts.length === 1 && Number(accounts[0].seq) === 1, "the account trail holds exactly the setup row, at seq 1");
+    assert(accounts[0].actor_tier === "owner", `and THAT one knows the role (${accounts[0].actor_tier})`);
+  }
   const diff = JSON.parse(audit[0].changed_json);
   assert(
     diff.selling_price_minor?.before === "400" && diff.selling_price_minor?.after === "600",
@@ -918,8 +964,14 @@ if (PHASE === "seed-v2") {
   await tab(page, "Products");
   await page.waitForSelector('[data-testid="product-row"]');
   await app.close();
-  const afterRestart = auditRows();
+  // The SECOND login writes no setup row — must_reset_pin is already 0 — so the account trail
+  // stays at one and the business trail is what this restart is about.
+  const afterRestart = businessRows();
   assert(afterRestart.length === 1 && afterRestart[0].id === audit[0].id, "the audit row survived a restart");
+  assert(
+    auditRows().filter((r) => r.entity_type === "operator").length === 1,
+    "and signing in again added NO second setup row — setup runs once",
+  );
 
   // ── Append-only, in the installed app's real ledger ───────────────────────────────────────────
   const guard = auditIsAppendOnly();
@@ -944,7 +996,14 @@ if (PHASE === "seed-v2") {
   assert(meta.origin === "catalog_import" && /^[0-9a-f]{64}$/.test(meta.file_sha256), "its metadata names the file by digest");
   assert(typeof meta.row_count === "number" && meta.row_count > 0, `and the bounded counts (${JSON.stringify(meta)})`);
   // The identical file was imported again, so every catalogued row is unchanged: summary only.
-  const sinceImport = audit.filter((r) => Number(r.seq) > 1);
+  //
+  // 🔴 TRANSITION. This was `Number(r.seq) > 1`, which read "everything after the price edit"
+  // because that edit WAS seq 1 on a freshly migrated ledger. Mandatory setup now holds seq 1 and
+  // the edit is seq 2, so the literal quietly came to mean "everything after the setup row". It is
+  // now expressed against the EDIT'S OWN seq, which cannot drift again when another row is added
+  // ahead of it.
+  const editSeq = Number(audit.find((r) => r.event_type === "PRODUCT_UPDATED").seq);
+  const sinceImport = audit.filter((r) => Number(r.seq) > editSeq);
   assert(
     sinceImport.length === 1 && sinceImport[0].event_type === "CATALOG_IMPORTED",
     `an identical re-import writes the summary and no product events (got ${sinceImport.map((r) => r.event_type).join(",")})`,
@@ -1030,7 +1089,10 @@ if (PHASE === "seed-v2") {
   assert(m.unpaidSales === 0, `every migrated sale is 'paid' (got ${m.unpaidSales})`);
   assert(m.methodlessSales === 0, `and not one lost its payment method (got ${m.methodlessSales})`);
   assert(m.catalog === 5, "the catalog is unchanged");
-  assert(m.audit === beforeAudit, `migrating wrote no audit events (${beforeAudit} -> ${m.audit})`);
+  // `beforeAudit` was read BEFORE this build ran, so it cannot include the setup row; the
+  // business count is what migrating must leave alone.
+  assert(m.auditBusiness === beforeAudit, `migrating wrote no BUSINESS audit events (${beforeAudit} -> ${m.auditBusiness})`);
+  assert(m.auditOperators === 1, `and signing in wrote exactly one account event, written by mandatory setup at first login (got ${m.auditOperators})`);
   // 🔴 NOTHING WAS SYNTHESIZED. A migrated ledger holds no invoice history, because that is the
   // honest state of a shop that has not written one.
   assert(m.invoices === 0, `invoices is EMPTY, not absent (got ${m.invoices})`);
@@ -1187,7 +1249,7 @@ if (PHASE === "seed-v2") {
       JSON.stringify(f.quantities).startsWith("[1000,1000"),
       `the two v5 sale lines are undisturbed (got ${JSON.stringify(f.quantities)})`,
     );
-    assert(f.audit === beforeAudit, `finalizing wrote no catalog audit event (${beforeAudit} -> ${f.audit})`);
+    assert(f.auditBusiness === beforeAudit, `finalizing wrote no catalog audit event (${beforeAudit} -> ${f.auditBusiness})`);
     const tables = invoiceRows("sqlite_master", "name").filter((r) => r.type === "table").map((r) => r.name);
     assert(!tables.some((t) => /stock|inventory|movement/i.test(t)), "and there is no stock table for it to have moved");
   }
@@ -1223,7 +1285,11 @@ if (PHASE === "seed-v2") {
     const audits = auditRows();
     const updates = audits.filter((a) => a.event_type === "PRODUCT_UPDATED");
     assert(updates.length === 1, `exactly one PRODUCT_UPDATED was written (got ${updates.length})`);
-    assert(audits.length === beforeAudit + 1, `and exactly one new audit row in total (got ${audits.length - beforeAudit})`);
+    // `beforeAudit` predates this build, so the setup row is not in it; the business trail is.
+    assert(
+      audits.filter((a) => a.entity_type !== "operator").length === beforeAudit + 1,
+      `and exactly one new BUSINESS audit row in total (got ${audits.filter((a) => a.entity_type !== "operator").length - beforeAudit})`,
+    );
     const meta = JSON.parse(updates[0].metadata_json);
     assert(meta.origin === "invoice_reconciliation", `the audit says where it came from (${meta.origin})`);
     assert(typeof meta.invoice_id === "string" && meta.invoice_id.length > 0, "and which invoice");
@@ -1276,7 +1342,7 @@ if (PHASE === "seed-v2") {
       Number(pepsi.selling_price_minor) === Number(pepsiBefore.selling_price_minor),
       "Keep catalog unchanged mutated no product",
     );
-    assert(ledgerFacts().audit === auditAfterUpdate, "and wrote no product audit event");
+    assert(ledgerFacts().auditBusiness === auditAfterUpdate, "and wrote no product audit event");
     const settled = invoiceRows("invoice_reconciliation").filter((r) => r.status !== "PENDING" && r.status !== "FAILED");
     assert(settled.length === 4, `every item left the unresolved queue (${settled.length} of 4 settled)`);
     assert(settled.some((r) => r.status === "KEPT_CATALOG" && r.classification === "PRICE_DIFFERENCE"), "the keep decision is recorded");
@@ -1404,7 +1470,7 @@ if (PHASE === "seed-v2") {
     // invoice's snapshot does not follow it. The earlier assertion inside the reconciliation block
     // is the one that pins the update itself to exactly one row.
     assert(
-      f.audit === beforeAudit + 2,
+      f.auditBusiness === beforeAudit + 2,
       `the trail grew by exactly two rows — one reconciliation update, one deliberate catalog edit (${beforeAudit} -> ${f.audit})`,
     );
     const finalUpdates = auditRows().filter((a) => a.event_type === "PRODUCT_UPDATED");
@@ -1496,7 +1562,8 @@ if (PHASE === "seed-v2") {
   assert(JSON.stringify(m.receipts) === "[1,2]", "the receipt sequence is unchanged");
   assert(JSON.stringify(m.quantities) === JSON.stringify(before.quantities), "every sale line quantity is unchanged");
   assert(m.catalog === before.catalog, "the catalog is unchanged");
-  assert(m.audit === before.audit, `migrating wrote no audit events (${before.audit} -> ${m.audit})`);
+  assert(m.auditBusiness === before.audit, `migrating wrote no BUSINESS audit events (${before.audit} -> ${m.auditBusiness})`);
+  assert(m.auditOperators === 1, `and signing in wrote exactly one account event, written by mandatory setup at first login (got ${m.auditOperators})`);
   assert(m.posSales === 2, `both existing sales are source_type='pos' (got ${m.posSales})`);
   assert(m.unpaidSales === 0 && m.methodlessSales === 0, "both are 'paid' and both kept their payment method");
 

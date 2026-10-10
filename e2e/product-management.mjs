@@ -300,9 +300,31 @@ await app.close();
       rows.every((r) => r.actor_id === "cashier-01" && r.actor_name === "Cashier One"),
       "every row names the operator who did it",
     );
+    // 🔴 TRANSITION. This asserted `rows.every((r) => r.actor_tier === "unspecified")` with the
+    // reason "this build has no role model". Migration 8 gave it one, so the trail now holds BOTH
+    // tiers and the old blanket assertion could not survive — a baseline cannot assert the absence
+    // of a thing and outlive its creation.
+    //
+    // 🔴 AND THE TWO DISAGREE, WHICH IS WORTH ASSERTING RATHER THAN SMOOTHING OVER. An operator
+    // event records the real role (operatorService writes `actor.role`), while a product event
+    // still records 'unspecified' (posService writes CURRENT_ACTOR_TIER, whose comment claims this
+    // build "genuinely cannot know one" — no longer true now that requireLiveRole() exists). So two
+    // rows written seconds apart, by the same person, in the same database, disagree about who they
+    // were. That is reported to Salman as an audit-truth finding; this test pins the behaviour as it
+    // ACTUALLY is, so whichever way he settles it, the change shows up here as a deliberate edit.
+    const operatorRows = rows.filter((r) => r.entity_type === "operator");
+    const otherRows = rows.filter((r) => r.entity_type !== "operator");
     assert(
-      rows.every((r) => r.actor_tier === "unspecified"),
-      "the actor tier is recorded as unknown rather than guessed (this build has no role model)",
+      operatorRows.length === 1 && operatorRows[0].event_type === "OPERATOR_PIN_RESET",
+      `mandatory setup left exactly one operator row (${operatorRows.map((r) => r.event_type).join(",")})`,
+    );
+    assert(
+      operatorRows.every((r) => r.actor_tier === "owner"),
+      `an operator event records the REAL role, known since migration 8 (${operatorRows[0].actor_tier})`,
+    );
+    assert(
+      otherRows.length === 3 && otherRows.every((r) => r.actor_tier === "unspecified"),
+      `a product event still records 'unspecified' (${otherRows.map((r) => r.actor_tier).join(",")})`,
     );
 
     // The real price edit, with its real old value — 4.00 became 9.00 on screen.
