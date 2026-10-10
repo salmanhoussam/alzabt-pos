@@ -1308,7 +1308,10 @@ if (PHASE === "seed-v2") {
   }
 
   // ── A keep action: zero mutation, zero audit, out of the queue ─────────────────────────────────
-  const auditAfterUpdate = ledgerFacts().audit;
+  // 🔴 auditBusiness, not audit. This baseline is captured AFTER this build has already run,
+  // so a whole-table count would include the mandatory-setup row while the comparison below
+  // measures the business trail — the two sides would differ by exactly one, for ever.
+  const auditAfterUpdate = ledgerFacts().auditBusiness;
   const pepsiBefore = productByName("بيبسي 330 مل");
 
   ({ app, page } = await launch());
@@ -1477,7 +1480,7 @@ if (PHASE === "seed-v2") {
     // is the one that pins the update itself to exactly one row.
     assert(
       f.auditBusiness === beforeAudit + 2,
-      `the trail grew by exactly two rows — one reconciliation update, one deliberate catalog edit (${beforeAudit} -> ${f.audit})`,
+      `the trail grew by exactly two rows — one reconciliation update, one deliberate catalog edit (${beforeAudit} -> ${f.auditBusiness})`,
     );
     const finalUpdates = auditRows().filter((a) => a.event_type === "PRODUCT_UPDATED");
     assert(finalUpdates.length === 2, `both are PRODUCT_UPDATED (got ${finalUpdates.map((a) => a.event_type).join(",")})`);
