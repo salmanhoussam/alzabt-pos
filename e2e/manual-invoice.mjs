@@ -731,7 +731,10 @@ await page.waitForSelector('[data-testid="finalize-confirm"]');
 await testid(page, "finalize-confirm-yes").click();
 await page.waitForSelector('[data-testid="finalized-notice"]');
 
-await testid(page, "inv-tab-review").click();
+// 🔴 NOT `inv-tab-review`. While the finalized sheet is open it REPLACES the invoices view, so the
+// sub-tab nav does not exist — the way to the queue is the button inside the notice, which is what
+// section 4 above already does. Caught by the Windows gate, which is the only place this is real.
+await testid(page, "review-now").click();
 await page.waitForSelector('[data-testid="review-table"]');
 const ambiguous = page.locator('[data-classification="AMBIGUOUS_MATCH"]').first();
 await until("an AMBIGUOUS_MATCH item to be queued", async () => (await ambiguous.count()) > 0, 30000);
