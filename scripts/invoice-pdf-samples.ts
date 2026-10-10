@@ -61,6 +61,12 @@ for (const { name, v } of SAMPLES) {
   // A is rendered WITHOUT a logo on purpose; the rest carry the synthetic one, so both header
   // layouts are in the artifact and can be compared side by side.
   const html = renderInvoiceDocument(v, { logoUrl: name.startsWith("A-") ? null : `file://${LOGO}` });
+  // 🔴 THE HTML IS WRITTEN TO A FILE AND LOADED AS `file://`, and from 2026-10-10 the PRODUCT does
+  // the same (`stagePrintable` in src/main/main.ts). Until then the product loaded a `data:` URL
+  // instead, which has an opaque origin — so Chromium refused the `file://` logo and every shipped
+  // invoice printed without one, while THIS artifact showed the logo correctly. The two paths had
+  // diverged, and that divergence is exactly why the defect reached a shop. Do not change this
+  // scheme without changing the product's, or these samples stop being evidence about the product.
   const htmlPath = join(OUT, `${name}.html`);
   writeFileSync(htmlPath, html, "utf8");
   const url = `file://${htmlPath}`;

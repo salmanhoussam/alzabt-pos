@@ -7,7 +7,7 @@
  * window's top frame.
  */
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, dialog, ipcMain, session } from "electron";
@@ -251,6 +251,51 @@ function logoUrlFor(stored: string | null): string | null {
   return pathToFileURL(path).toString();
 }
 
+/** Where a document being printed is staged. One file, overwritten per render, removed after. */
+const PRINT_DIR = "print";
+
+/**
+ * Loads a printable document into an offscreen window AS A FILE, and returns how to clean up.
+ *
+ * 🔴 WHY NOT A `data:` URL, WHICH IS WHAT THIS DID UNTIL 2026-10-10. A `data:` document has an
+ * OPAQUE origin, and Chromium refuses to load a `file://` subresource into one. The invoice's logo
+ * is a `file://` image, so it never loaded — and because the `<img>` carries `alt=""`, nothing
+ * broken appeared either. Every finalized invoice printed from the installed build showed the
+ * issuer's names, phones, customer, items and totals, and NO LOGO. That is the field defect.
+ *
+ * MEASURED, not reasoned, with a positive control: the same HTML, the same image and the same
+ * Chromium render the logo when the document is loaded as `file://` (20,000 logo pixels) and not at
+ * all when it is loaded as `data:` (zero — a blank slot).
+ *
+ * This is also why CI never caught it. `scripts/invoice-pdf-samples.ts` writes its HTML to a real
+ * file and loads `file://` — so the sample artifact showed the logo correctly while the product did
+ * not. The two paths had quietly diverged; the samples now use this same function.
+ *
+ * Inlining the logo as a `data:` URI was the alternative and was REJECTED: it grows the top-level
+ * URL by the whole image, and that ceiling could only be measured at 64KB here, so a large logo
+ * could stop the entire document from loading. A file has no such ceiling.
+ *
+ * Written temp-then-rename like every other write in this app, and removed in a `finally`, so a
+ * crash mid-render can leave a stale document but never a truncated one.
+ */
+function stagePrintable(html: string, name: string): { readonly url: string; readonly cleanup: () => void } {
+  const dir = join(app.getPath("userData"), PRINT_DIR);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${name}.html`);
+  writeFileSync(`${path}.partial`, html, "utf8");
+  renameSync(`${path}.partial`, path);
+  return {
+    url: pathToFileURL(path).toString(),
+    cleanup: () => {
+      try {
+        rmSync(path, { force: true });
+      } catch (err) {
+        log.warn("printable cleanup failed", { error: String(err) });
+      }
+    },
+  };
+}
+
 /**
  * Renders a FINALIZED invoice to A4 PDF bytes in an offscreen window.
  *
@@ -266,8 +311,9 @@ async function renderInvoicePdf(invoiceId: string): Promise<Buffer> {
     show: false,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
   });
+  const staged = stagePrintable(html, "invoice-pdf");
   try {
-    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    await win.loadURL(staged.url);
     return await win.webContents.printToPDF({
       pageSize: "A4",
       printBackground: true,
@@ -278,6 +324,7 @@ async function renderInvoicePdf(invoiceId: string): Promise<Buffer> {
     });
   } finally {
     win.destroy();
+    staged.cleanup();
   }
 }
 
@@ -289,8 +336,9 @@ async function printInvoiceDocument(invoiceId: string): Promise<"printed" | "can
     show: false,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
   });
+  const staged = stagePrintable(html, "invoice-print");
   try {
-    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    await win.loadURL(staged.url);
     const printed = await new Promise<boolean>((done) => {
       win.webContents.print({ silent: false, printBackground: true }, (success) => done(success));
     });
@@ -298,6 +346,7 @@ async function printInvoiceDocument(invoiceId: string): Promise<"printed" | "can
     return printed ? "printed" : "cancelled";
   } finally {
     win.destroy();
+    staged.cleanup();
   }
 }
 
