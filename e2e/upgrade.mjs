@@ -111,6 +111,23 @@ const stub = (app, kind, path) =>
  * So every shared control is reached by: this build's testid if it is there, otherwise the old
  * build's English control.
  */
+/**
+ * Waits for whichever of two selectors appears first.
+ *
+ * 🔴 NOT A COMMA LIST. `'[data-testid="x"], text=Y'` looks like a CSS selector group but mixes two
+ * Playwright ENGINES — css and text — and matches nothing at all, which times out looking like the
+ * screen never rendered.
+ */
+async function waitForEither(page, a, b, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if ((await page.locator(a).count()) > 0) return;
+    if ((await page.locator(b).count()) > 0) return;
+    if (Date.now() > deadline) throw new Error(`TIMED OUT waiting for ${a} or ${b}`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
 async function clickEither(page, testid, fallback) {
   const byId = page.locator(`[data-testid="${testid}"]`);
   if ((await byId.count()) > 0) {
@@ -126,8 +143,10 @@ async function sell(page, items, method, expectReceipt) {
   // The payment method is still chosen by its English name on an old build; this build labels the
   // same four buttons pay-cash / pay-card / pay-external / pay-other.
   await clickEither(page, `pay-${method.toLowerCase()}`, page.getByRole("button", { name: method }));
-  await page.waitForSelector(
-    `[data-testid="receipt-number"]:has-text("#${expectReceipt}"), text=Receipt #${expectReceipt}`,
+  await waitForEither(
+    page,
+    `[data-testid="receipt-number"]:has-text("#${expectReceipt}")`,
+    `text=Receipt #${expectReceipt}`,
   );
   await clickEither(page, "new-sale", page.getByRole("button", { name: "New sale" }));
 }
@@ -681,7 +700,7 @@ if (PHASE === "seed-v2") {
   await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("10.00"));
   await clickEither(page, "complete-sale", page.getByRole("button", { name: "Complete sale" }));
   await clickEither(page, "pay-cash", page.getByRole("button", { name: "Cash" }));
-  await page.waitForSelector('[data-testid="receipt-number"]:has-text("#1"), text=Receipt #1');
+  await waitForEither(page, '[data-testid="receipt-number"]:has-text("#1")', "text=Receipt #1");
   await clickEither(page, "new-sale", page.getByRole("button", { name: "New sale" }));
   await sell(page, ["مياه"], "Card", 2);
   await voidCardSale(page);
