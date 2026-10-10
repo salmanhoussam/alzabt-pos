@@ -225,6 +225,62 @@ describe("every classification", () => {
     expect(JSON.parse(queue[0]!.candidates_json!)).toHaveLength(2);
   });
 
+  /**
+   * 🔴 FIELD FINDING 3 (2026-10-10, real installed `ce4dd28`). When reconciliation offered close
+   * name matches, the operator could compare and link — and had NO way to say "none of these, it is
+   * genuinely a new product". The create block rendered for PRODUCT_NOT_FOUND only, so the ONE
+   * classification that exists *because* names resemble each other was the one that could not
+   * create. The surface was the whole bug: the service never gated on classification, and these
+   * tests pin that down so a future "tidy-up" cannot quietly add the gate here instead.
+   */
+  it("🔴 creates a NEW product from an AMBIGUOUS_MATCH — similarity never forces a merge", () => {
+    const a = product("قفل", "5.00", { sku: "A" });
+    const b = product("قفل", "9.00", { sku: "B" });
+    const { queue } = finalize([{ description: "قفل", unitPrice: "5.00" }]);
+    expect(queue[0]!.classification).toBe("AMBIGUOUS_MATCH");
+
+    const resolved = h.invoices.createProductFromInvoice(queue[0]!.id, {
+      nameAr: "قفل",
+      nameEn: null,
+      sku: "C",
+      baseUnit: null,
+    });
+
+    expect(resolved.status).toBe("CREATED_PRODUCT");
+    // A THIRD product now exists, and it is neither of the two that were suggested.
+    expect(resolved.matched_product_id).not.toBe(a.id);
+    expect(resolved.matched_product_id).not.toBe(b.id);
+
+    // 🔴 Both suggestions are untouched — byte for byte. "Create new anyway" is not a merge, not a
+    // rename, and not a price update: the thing the operator declined must come out unchanged.
+    const all = h.service.listProducts();
+    const stillA = all.find((p) => p.id === a.id)!;
+    const stillB = all.find((p) => p.id === b.id)!;
+    expect(stillA.selling_price_minor).toBe(500n);
+    expect(stillB.selling_price_minor).toBe(900n);
+    expect(stillA.name_ar).toBe("قفل");
+    expect(stillB.name_ar).toBe("قفل");
+  });
+
+  it("creates the product ONCE — a second press on a settled item is REFUSED", () => {
+    product("قفل", "5.00", { sku: "A" });
+    product("قفل", "9.00", { sku: "B" });
+    const { queue } = finalize([{ description: "قفل", unitPrice: "5.00" }]);
+    const draft = { nameAr: "قفل", nameEn: null, sku: "C", baseUnit: null };
+
+    const first = h.invoices.createProductFromInvoice(queue[0]!.id, draft);
+    expect(first.status).toBe("CREATED_PRODUCT");
+
+    // A double-press — or a reopened panel — must not make a second product. It is refused
+    // OUTRIGHT rather than quietly re-recorded: the item is settled, and saying so is more useful
+    // to the operator than a silent no-op that looks like it did something.
+    expect(() => h.invoices.createProductFromInvoice(queue[0]!.id, draft)).toThrow(
+      /already settled as CREATED_PRODUCT/,
+    );
+
+    expect(h.service.listProducts().filter((p) => p.sku === "C")).toHaveLength(1);
+  });
+
   it("an explicitly chosen product that has vanished does not fall back to a weaker match", () => {
     product("مفك براغي", "5.00");
     const { queue } = finalize([{ description: "مفك براغي", unitPrice: "5.00", productId: "ghost-product" }]);

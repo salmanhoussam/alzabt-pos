@@ -327,6 +327,26 @@ function ResolutionPanel({
     </div>
   );
 
+  /** The new-product fields. Shared, because two classifications may create a product. */
+  const createFields = (
+    <>
+      <label className="field">
+        <span>{t("inv.review.nameArField")}</span>
+        <input value={newNameAr} onChange={(e) => setNewNameAr(e.target.value)} data-testid="resolve-name-ar" />
+      </label>
+      <label className="field">
+        <span>{t("inv.review.nameEnField")}</span>
+        <input dir="ltr" value={nameEn} onChange={(e) => setNameEn(e.target.value)} data-testid="resolve-name-en" />
+      </label>
+      <p className="muted small">{t("inv.review.nameEnTyped")}</p>
+      <label className="field">
+        <span>{t("products.colSku")}</span>
+        <input dir="ltr" value={newSku} onChange={(e) => setNewSku(e.target.value)} data-testid="resolve-sku" />
+      </label>
+      {unitChooser}
+    </>
+  );
+
   return (
     <div className="overlay">
       <div className="card dialog inv-resolve" data-testid="resolve-panel">
@@ -392,20 +412,7 @@ function ResolutionPanel({
         {item.classification === "PRODUCT_NOT_FOUND" && (
           <section className="inv-resolve-actions" data-testid="resolve-not-found">
             <h3>{t("inv.review.addToCatalog")}</h3>
-            <label className="field">
-              <span>{t("inv.review.nameArField")}</span>
-              <input value={newNameAr} onChange={(e) => setNewNameAr(e.target.value)} data-testid="resolve-name-ar" />
-            </label>
-            <label className="field">
-              <span>{t("inv.review.nameEnField")}</span>
-              <input dir="ltr" value={nameEn} onChange={(e) => setNameEn(e.target.value)} data-testid="resolve-name-en" />
-            </label>
-            <p className="muted small">{t("inv.review.nameEnTyped")}</p>
-            <label className="field">
-              <span>{t("products.colSku")}</span>
-              <input dir="ltr" value={newSku} onChange={(e) => setNewSku(e.target.value)} />
-            </label>
-            {unitChooser}
+            {createFields}
             <button className="btn primary" onClick={create} disabled={busy} data-testid="resolve-create">
               {t("inv.review.addToCatalog")}
             </button>
@@ -430,6 +437,22 @@ function ResolutionPanel({
                 {t("inv.review.searchAgain")}
               </button>
             </div>
+
+            {/* FIELD FINDING 3 (2026-10-10): the operator could compare and match, and had NO way
+                to say "none of these — create it anyway". The create block rendered for
+                PRODUCT_NOT_FOUND only, so the ONE classification that exists because names look
+                alike was the one classification that could not create. Similarity is ADVISORY:
+                nothing is ever merged because two names resemble each other, and the operator is
+                never forced to accept a suggestion. The service already allowed this — it guards
+                on "unresolved", not on classification — so only this surface was missing. */}
+            <h3>{t("inv.review.createAnyway")}</h3>
+            <p className="muted small" data-testid="resolve-create-anyway-note">
+              {t("inv.review.createAnywayNote")}
+            </p>
+            {createFields}
+            <button className="btn" onClick={create} disabled={busy} data-testid="resolve-create">
+              {t("inv.review.createAnyway")}
+            </button>
           </section>
         )}
 

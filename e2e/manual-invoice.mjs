@@ -689,5 +689,94 @@ await app.close();
   assert(resolved >= 2, `resolution states persisted (${resolved} settled)`);
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 11 · 🔴 AMBIGUOUS_MATCH offers "create as a new product ANYWAY"
+//
+// FIELD FINDING 3 (2026-10-10, real installed `ce4dd28`). When two catalog products had names close
+// enough that neither could be chosen, the operator could compare them and link one — and had NO
+// path to say "neither, it is genuinely a new product". The create block was rendered for
+// PRODUCT_NOT_FOUND only, so the ONE classification that exists *because* names resemble each other
+// was the one classification that could not create. The service never gated on classification; the
+// surface was the entire bug, which is why this assertion is here and not only in a unit test.
+//
+// This section runs LAST on purpose: the exact ledger counts asserted above are measured before it.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+({ app, page } = await launch());
+
+// Two products sharing one Arabic name, so nothing can be matched by name alone.
+await tab(page, "products");
+await page.waitForSelector('[data-testid="add-product"]');
+for (const sku of ["AMB-1", "AMB-2"]) {
+  await testid(page, "add-product").click();
+  await page.waitForSelector('[data-testid="field-nameAr"]');
+  await testid(page, "field-nameAr").fill("قفل اختباري");
+  // SKU carries no testid of its own — it is the third input in the form, which is how
+  // e2e/product-management.mjs already reaches it. Measured, not guessed.
+  await page.locator(".product-form input").nth(2).fill(sku);
+  await testid(page, "field-price").fill(sku === "AMB-1" ? "5.00" : "9.00");
+  await testid(page, "field-unit").selectOption("piece");
+  await testid(page, "save-product").click();
+  await page.getByRole("button", { name: /^(حسناً|OK)$/ }).click();
+}
+assert(true, "two products now share one name — an operator cannot tell them apart by name");
+
+await tab(page, "invoices");
+await testid(page, "new-invoice").click();
+await page.waitForSelector('[data-testid="invoice-mode-chooser"]');
+await testid(page, "mode-outgoing").click();
+await page.waitForSelector('[data-testid="add-row"]');
+await addRow(page, { description: "قفل اختباري", quantity: "1", unit: "حبة", price: "5.00" });
+await testid(page, "finalize").click();
+await page.waitForSelector('[data-testid="finalize-confirm"]');
+await testid(page, "finalize-confirm-yes").click();
+await page.waitForSelector('[data-testid="finalized-notice"]');
+
+await testid(page, "inv-tab-review").click();
+await page.waitForSelector('[data-testid="review-table"]');
+const ambiguous = page.locator('[data-classification="AMBIGUOUS_MATCH"]').first();
+await until("an AMBIGUOUS_MATCH item to be queued", async () => (await ambiguous.count()) > 0, 30000);
+await ambiguous.locator('[data-testid="review-resolve"]').click();
+await page.waitForSelector('[data-testid="resolve-ambiguous"]');
+
+// Both suggestions ARE offered — similarity is advisory, and the operator sees what it suggests.
+assert((await testid(page, "resolve-candidate").count()) >= 2, "the close-name suggestions are offered");
+assert(await testid(page, "resolve-link").isVisible(), "linking a suggestion is offered");
+// 🔴 THE REGRESSION ASSERTION. This control did not exist in the shipped build.
+assert(
+  await testid(page, "resolve-create").isVisible(),
+  "🔴 and so is CREATE AS NEW ANYWAY — the control the shipped `ce4dd28` build did not render here",
+);
+assert(
+  (await textOf(page, "resolve-create-anyway-note")).length > 10,
+  "with the screen saying in words that similarity is advisory and nothing is merged automatically",
+);
+await page.screenshot({ path: SHOTS + "I11-ambiguous-create-anyway.png" });
+
+await testid(page, "resolve-name-ar").fill("قفل اختباري");
+await testid(page, "resolve-sku").fill("AMB-3");
+await testid(page, "resolve-create").click();
+await page.waitForSelector('[data-testid="resolve-panel"]', { state: "detached" });
+await app.close();
+
+{
+  // A THIRD product exists, created ONCE, and the two it was offered instead are untouched.
+  const named = query("SELECT sku, selling_price_minor AS p FROM catalog_products WHERE name_ar = 'قفل اختباري' ORDER BY sku");
+  assert(named.length === 3, `exactly three products carry that name now (${named.map((r) => r.sku).join(", ")})`);
+  assert(named.filter((r) => r.sku === "AMB-3").length === 1, "the new product was created exactly once");
+  const a1 = named.find((r) => r.sku === "AMB-1");
+  const a2 = named.find((r) => r.sku === "AMB-2");
+  assert(String(a1.p) === "500" && String(a2.p) === "900", "🔴 both suggestions are untouched — no merge, no price rewrite");
+
+  // Durable audit evidence: who settled it, how, and onto which product.
+  const settled = one(
+    "SELECT status AS s, matched_product_id AS m, resolution_actor_name AS who, resolved_at AS at " +
+      "FROM invoice_reconciliation WHERE classification = 'AMBIGUOUS_MATCH' ORDER BY resolved_at DESC",
+  );
+  assert(settled.s === "CREATED_PRODUCT", `the review item records WHAT was done (${settled.s})`);
+  assert(settled.m !== null, "and which product it created");
+  assert(typeof settled.who === "string" && settled.who.length > 0, `and WHO did it (${settled.who})`);
+  assert(typeof settled.at === "string" && settled.at.length > 0, "and when");
+}
+
 log(`manual invoice E2E: ${passed} assertions passed`);
 log("screenshots in", SHOTS);
