@@ -36,6 +36,7 @@ export const CHANNELS = {
   updateInvoiceHeader: "pos:updateInvoiceHeader",
   setInvoiceTax: "pos:setInvoiceTax",
   addInvoiceLine: "pos:addInvoiceLine",
+  addInvoiceLines: "pos:addInvoiceLines",
   updateInvoiceLine: "pos:updateInvoiceLine",
   removeInvoiceLine: "pos:removeInvoiceLine",
   discardInvoiceDraft: "pos:discardInvoiceDraft",
@@ -455,6 +456,19 @@ export interface AddInvoiceLineRequest {
   readonly line: InvoiceLineRequest;
 }
 
+/**
+ * Several typed lines, added in ONE transaction.
+ *
+ * 🔴 WHY A BATCH EXISTS AT ALL. `addInvoiceLine` is one line, one transaction — correct for a
+ * single row, and wrong for a sheet the operator filled in before saving anything. Looping it N
+ * times is N transactions: a refusal on row 4 would leave rows 1-3 persisted and rows 4-N not,
+ * which is a half-written invoice. This adds all of them or none of them.
+ */
+export interface AddInvoiceLinesRequest {
+  readonly invoiceId: string;
+  readonly lines: ReadonlyArray<InvoiceLineRequest>;
+}
+
 export interface UpdateInvoiceLineRequest {
   readonly invoiceId: string;
   readonly lineId: string;
@@ -644,6 +658,7 @@ export interface PosApi {
   updateInvoiceHeader(req: InvoiceHeaderRequest): Promise<IpcResult<InvoiceViewDto>>;
   setInvoiceTax(req: InvoiceTaxRequest): Promise<IpcResult<InvoiceViewDto>>;
   addInvoiceLine(req: AddInvoiceLineRequest): Promise<IpcResult<InvoiceViewDto>>;
+  addInvoiceLines(req: AddInvoiceLinesRequest): Promise<IpcResult<InvoiceViewDto>>;
   updateInvoiceLine(req: UpdateInvoiceLineRequest): Promise<IpcResult<InvoiceViewDto>>;
   removeInvoiceLine(req: InvoiceLineRefRequest): Promise<IpcResult<InvoiceViewDto>>;
   discardInvoiceDraft(req: InvoiceIdRequest): Promise<IpcResult<null>>;

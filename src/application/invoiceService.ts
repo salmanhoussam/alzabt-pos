@@ -607,6 +607,37 @@ export class InvoiceService {
     });
   }
 
+  /**
+   * Adds SEVERAL typed lines in one transaction — all of them, or none.
+   *
+   * 🔴 THE FIELD DEFECT THIS EXISTS FOR (2026-10-10). The sheet let the operator hold exactly one
+   * unsaved row, so a second item could not be started until the first was saved. The row model is
+   * now a sheet the operator fills in, and a sheet is flushed as a unit: looping `addLine` would be
+   * one transaction per row, and a refusal on row 4 would commit rows 1-3 and lose 4 onward.
+   *
+   * Totals are rewritten ONCE at the end rather than per row — the same arithmetic, read by the
+   * database's own CHECK constraints, done once instead of N times.
+   */
+  addLines(invoiceId: string, drafts: ReadonlyArray<InvoiceLineDraft>): InvoiceView {
+    this.requireCashier();
+    const instant = this.now();
+    return this.deps.transact(() => {
+      const invoice = this.requireDraft(invoiceId);
+      const existing = this.deps.invoices.countLines(invoiceId);
+      if (existing + drafts.length > MAX_INVOICE_LINES) {
+        throw new DomainError("INVALID_INPUT", `An invoice may hold at most ${MAX_INVOICE_LINES} lines`);
+      }
+      // Every line is PARSED BEFORE ANY IS WRITTEN, so a bad row refuses the batch without having
+      // already inserted the rows before it.
+      const parsed = drafts.map((d) => this.parseLine(d, invoice.currency));
+      for (const input of parsed) {
+        this.deps.invoices.addLine(this.newId(), invoiceId, this.deps.invoices.nextLineNo(invoiceId), input, instant);
+      }
+      const updated = this.rewriteTotals(invoice, null, instant);
+      return { invoice: updated, lines: this.deps.invoices.listLines(invoiceId) };
+    });
+  }
+
   updateLine(invoiceId: string, lineId: string, draft: InvoiceLineDraft): InvoiceView {
     this.requireCashier();
     const instant = this.now();

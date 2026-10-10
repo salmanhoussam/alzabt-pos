@@ -34,6 +34,40 @@ const EMPTY_LINE: InvoiceLineRequest = {
   unitPrice: "",
 };
 
+/** One unsaved row: a stable identity plus what has been typed into it so far. */
+type DraftRow = {
+  readonly key: string;
+  readonly line: InvoiceLineRequest;
+};
+
+/**
+ * A row nobody typed into. Trailing blanks are IGNORED everywhere — never saved, never validated,
+ * never counted. Quantity is deliberately not consulted: it is prefilled with "1", so a row holding
+ * only that default is still blank.
+ */
+function rowBlank(l: InvoiceLineRequest): boolean {
+  return (
+    (l.description ?? "").trim() === "" &&
+    (l.unitLabel ?? "").trim() === "" &&
+    l.productId === null &&
+    l.unitPrice.trim() === ""
+  );
+}
+
+/**
+ * What is missing from a row somebody HAS typed into, or null when it is ready to save.
+ *
+ * Only PRESENCE is checked here. Whether "12.5.3" is a number, and whether a quantity is positive,
+ * is the domain's judgement — parsed by `parseLine` in one place, its refusal surfacing as the
+ * sheet's error. The renderer does not own a second, divergent idea of what a price is.
+ */
+function rowMissing(l: InvoiceLineRequest): "description" | "quantity" | "unitPrice" | null {
+  if ((l.description ?? "").trim() === "") return "description";
+  if (l.quantity.trim() === "") return "quantity";
+  if (l.unitPrice.trim() === "") return "unitPrice";
+  return null;
+}
+
 type FinalizedNotice = {
   readonly number: number;
   readonly items: ReadonlyArray<ReconciliationDto>;
@@ -80,8 +114,21 @@ export function InvoiceSheet({
   const { t } = useT();
   const [view, setView] = useState<InvoiceViewDto | null>(null);
   const [products, setProducts] = useState<AdminProductDto[]>([]);
-  const [draftLine, setDraftLine] = useState<InvoiceLineRequest | null>(null);
-  const [pickerFor, setPickerFor] = useState<"new" | string | null>(null);
+  /**
+   * The rows the operator is typing, NOT yet in the database.
+   *
+   * 🔴 FIELD DEFECT, 2026-10-10. This was `InvoiceLineRequest | null` — ONE row — and "+ Add Row"
+   * was `disabled={draftLine !== null}`, with a message telling the operator to save the current
+   * row first. Entering a five-item invoice therefore meant five save round-trips, and the sheet
+   * could not simply be filled in. Nothing below the renderer required that: the row model is a
+   * renderer concern, and the sheet is now flushed as a batch in ONE transaction.
+   *
+   * A key per row, because rows are added and removed and an array index is not an identity —
+   * React would otherwise carry a typed value from a removed row into the row that replaced it.
+   */
+  const [draftRows, setDraftRows] = useState<ReadonlyArray<DraftRow>>([]);
+  const nextRowKey = useRef(1);
+  const [pickerFor, setPickerFor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -218,19 +265,55 @@ export function InvoiceSheet({
 
   const saveDraft = () =>
     run(async () => {
+      // Rows first, then the header: the operator pressed one button and means "save what I see".
+      await flushRows();
       const next = await flushHeader();
       if (!next) throw new Error("the draft could not be read back");
       setSaved(true);
       return next;
     });
 
-  const addLine = () => {
-    if (!draftLine) return;
-    void run(async () => {
-      const next = await call(pos().addInvoiceLine({ invoiceId, line: draftLine }));
-      setDraftLine(null);
-      return next;
-    });
+  const setRow = (key: string, line: InvoiceLineRequest) =>
+    setDraftRows((rows) => rows.map((r) => (r.key === key ? { key, line } : r)));
+
+  const dropRow = (key: string) => setDraftRows((rows) => rows.filter((r) => r.key !== key));
+
+  /**
+   * Persists every row that is ready, in ONE transaction, and leaves the rest alone.
+   *
+   * Blank rows are ignored. A row still missing a field STAYS in the sheet with its inline
+   * validation rather than blocking the rows that are complete — an incomplete row must never be a
+   * reason the operator cannot carry on.
+   *
+   * Returns the view the service computed, so totals come from the database's arithmetic and never
+   * from this component's.
+   */
+  const flushRows = async (): Promise<InvoiceViewDto | null> => {
+    const ready = draftRows.filter((r) => !rowBlank(r.line) && rowMissing(r.line) === null);
+    if (ready.length === 0) return view;
+    const next = await call(pos().addInvoiceLines({ invoiceId, lines: ready.map((r) => r.line) }));
+    const persisted = new Set(ready.map((r) => r.key));
+    setDraftRows((rows) => rows.filter((r) => !persisted.has(r.key)));
+    setView(next);
+    return next;
+  };
+
+  /**
+   * Appends an editable row. ALWAYS available — this is the whole point of the fix.
+   *
+   * The row is appended FIRST and the flush happens after, so a service refusal on an earlier row
+   * can never be the reason a new row could not be started. Flushing here is what keeps the totals
+   * honest: a completed row becomes a real line, and the service recomputes subtotal, tax and total
+   * from the rows it actually holds.
+   */
+  const addRow = async () => {
+    const key = `r${nextRowKey.current++}`;
+    setDraftRows((rows) => [...rows, { key, line: EMPTY_LINE }]);
+    try {
+      await flushRows();
+    } catch (e) {
+      setError(errorText(e));
+    }
   };
 
   const editLine = (lineId: string, line: InvoiceLineRequest) =>
@@ -303,6 +386,15 @@ export function InvoiceSheet({
       // absent from a document that is immutable the moment it commits. Finalizing is the one
       // irreversible act in this screen, so it reads the inputs rather than trusting that a blur
       // happened. If the flush is refused, finalization does not proceed.
+      // Rows before the header, for the same reason the header is flushed at all: a row typed but
+      // never saved would otherwise be absent from a document that is immutable once it commits.
+      await flushRows();
+      // 🔴 An INCOMPLETE row refuses finalization rather than being silently dropped. Issuing an
+      // invoice is the one irreversible act here, and quietly discarding a half-typed item is how
+      // an operator ends up printing a document that is missing a line they entered.
+      if (draftRows.some((r) => !rowBlank(r.line) && rowMissing(r.line) !== null)) {
+        throw new Error(t("inv.sheet.finalizeIncomplete"));
+      }
       await flushHeader();
       const next = await call(pos().finalizeInvoice({ invoiceId }));
       setView(next);
@@ -352,7 +444,8 @@ export function InvoiceSheet({
 
   const pick = (p: AdminProductDto) => {
     const line = prefill(p);
-    if (pickerFor === "new") setDraftLine(line);
+    const draft = pickerFor?.startsWith("draft:") ? pickerFor.slice("draft:".length) : null;
+    if (draft) setRow(draft, line);
     else if (pickerFor) {
       const existing = view.lines.find((l) => l.id === pickerFor);
       if (existing) void editLine(existing.id, { ...line, quantity: String(existing.quantityMilli / 1000) });
@@ -577,63 +670,77 @@ export function InvoiceSheet({
               </td>
             </tr>
           ))}
-          {view.lines.length === 0 && !draftLine && (
+          {view.lines.length === 0 && draftRows.length === 0 && (
             <tr>
               <td colSpan={7} className="muted center">
                 {t("inv.sheet.noLines")}
               </td>
             </tr>
           )}
-          {draftLine && (
-            <tr className="inv-new-line">
-              <td className="num">+</td>
-              <td>
-                <input
-                  autoFocus
-                  value={draftLine.description ?? ""}
-                  onChange={(e) => setDraftLine({ ...draftLine, description: e.target.value || null })}
-                  data-testid="new-line-description"
-                />
-              </td>
-              <td className="num">
-                <input
-                  dir="ltr"
-                  inputMode="decimal"
-                  value={draftLine.quantity}
-                  onChange={(e) => setDraftLine({ ...draftLine, quantity: e.target.value })}
-                  data-testid="new-line-quantity"
-                />
-              </td>
-              <td>
-                <input
-                  value={draftLine.unitLabel ?? ""}
-                  onChange={(e) => setDraftLine({ ...draftLine, unitLabel: e.target.value || null, canonicalUnit: null })}
-                  data-testid="new-line-unit"
-                />
-              </td>
-              <td className="num">
-                <input
-                  dir="ltr"
-                  inputMode="decimal"
-                  value={draftLine.unitPrice}
-                  onChange={(e) => setDraftLine({ ...draftLine, unitPrice: e.target.value })}
-                  data-testid="new-line-price"
-                />
-              </td>
-              <td className="num muted">—</td>
-              <td className="row-actions">
-                <button className="btn primary small" onClick={addLine} disabled={busy} data-testid="new-line-save">
-                  {t("action.save")}
-                </button>
-                <button className="btn ghost small" onClick={() => setPickerFor("new")}>
-                  {t("inv.sheet.pick")}
-                </button>
-                <button className="btn ghost small" onClick={() => setDraftLine(null)}>
-                  {t("action.cancel")}
-                </button>
-              </td>
-            </tr>
-          )}
+          {/* Every unsaved row, in the order it was added. The LAST one autofocuses, so pressing
+              "+ Add Row" puts the caret where the operator is about to type. A row carries its own
+              inline validation and its own remove — one incomplete row never speaks for the rest. */}
+          {draftRows.map((r, i) => {
+            const missing = rowBlank(r.line) ? null : rowMissing(r.line);
+            return (
+              <tr className="inv-new-line" key={r.key} data-testid="sheet-draft-row" data-row-key={r.key}>
+                <td className="num">+</td>
+                <td>
+                  <input
+                    autoFocus={i === draftRows.length - 1}
+                    value={r.line.description ?? ""}
+                    onChange={(e) => setRow(r.key, { ...r.line, description: e.target.value || null })}
+                    data-testid="new-line-description"
+                  />
+                  {missing && (
+                    <span className="error small" data-testid="sheet-draft-row-missing">
+                      {t(`inv.sheet.missing.${missing}`)}
+                    </span>
+                  )}
+                </td>
+                <td className="num">
+                  <input
+                    dir="ltr"
+                    inputMode="decimal"
+                    value={r.line.quantity}
+                    onChange={(e) => setRow(r.key, { ...r.line, quantity: e.target.value })}
+                    data-testid="new-line-quantity"
+                  />
+                </td>
+                <td>
+                  <input
+                    value={r.line.unitLabel ?? ""}
+                    onChange={(e) =>
+                      setRow(r.key, { ...r.line, unitLabel: e.target.value || null, canonicalUnit: null })
+                    }
+                    data-testid="new-line-unit"
+                  />
+                </td>
+                <td className="num">
+                  <input
+                    dir="ltr"
+                    inputMode="decimal"
+                    value={r.line.unitPrice}
+                    onChange={(e) => setRow(r.key, { ...r.line, unitPrice: e.target.value })}
+                    data-testid="new-line-price"
+                  />
+                </td>
+                <td className="num muted">—</td>
+                <td className="row-actions">
+                  <button className="btn ghost small" onClick={() => setPickerFor(`draft:${r.key}`)}>
+                    {t("inv.sheet.pick")}
+                  </button>
+                  <button
+                    className="btn ghost small"
+                    onClick={() => dropRow(r.key)}
+                    data-testid="sheet-draft-row-remove"
+                  >
+                    {t("inv.sheet.remove")}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
         {/* FIELD FINDING 2: adding a second item was not discoverable. The affordance now sits in
             the table itself, immediately under the last row, and it is ALWAYS rendered — the old
@@ -644,22 +751,21 @@ export function InvoiceSheet({
             <tr className="inv-add-row">
               <td colSpan={7}>
                 <div className="inv-add-bar">
-                  <button
-                    className="btn primary"
-                    onClick={() => setDraftLine(EMPTY_LINE)}
-                    disabled={busy || draftLine !== null}
-                    data-testid="add-row"
-                  >
+                  {/* 🔴 NO `disabled` ON A FULL SHEET. It is disabled only while a call is in
+                      flight. The old condition — disabled whenever a row was open — is the field
+                      defect itself. */}
+                  <button className="btn primary" onClick={() => void addRow()} disabled={busy} data-testid="add-row">
                     + {t("inv.sheet.addRow")}
                   </button>
-                  {draftLine !== null && (
-                    <span className="muted small" data-testid="add-row-hint">
-                      {t("inv.sheet.addRowWhileOpen")}
-                    </span>
-                  )}
                   <span className="muted small" data-testid="sheet-rows-count">
                     {t("inv.sheet.rowsCount")}: <bdi dir="ltr">{view.lines.length}</bdi>
                   </span>
+                  {draftRows.some((r) => !rowBlank(r.line)) && (
+                    <span className="muted small" data-testid="sheet-unsaved-rows">
+                      {t("inv.sheet.unsavedRows")}:{" "}
+                      <bdi dir="ltr">{draftRows.filter((r) => !rowBlank(r.line)).length}</bdi>
+                    </span>
+                  )}
                 </div>
               </td>
             </tr>
@@ -668,7 +774,7 @@ export function InvoiceSheet({
       </table>
       </div>
 
-      {!readOnly && !draftLine && (
+      {!readOnly && draftRows.length === 0 && (
         <div className="inv-actions">
           <span className="muted small">{t("inv.sheet.pickHint")}</span>
         </div>
@@ -733,7 +839,9 @@ export function InvoiceSheet({
             <button
               className="btn primary"
               onClick={() => setConfirming(true)}
-              disabled={busy || view.lines.length === 0}
+              // An invoice whose only rows are still unsaved is finalizable: finalize flushes them
+              // first. What it refuses is an INCOMPLETE row, and it says so.
+              disabled={busy || (view.lines.length === 0 && !draftRows.some((r) => !rowBlank(r.line)))}
               data-testid="finalize"
             >
               {t("inv.sheet.finalize")}
@@ -769,7 +877,9 @@ export function InvoiceSheet({
             </button>
           </>
         )}
-        <button className="btn ghost" onClick={onClosed}>
+        {/* The way out of a sheet, in every state including read-only. It had no testid, so a
+            script could not leave an issued invoice without restarting the application. */}
+        <button className="btn ghost" onClick={onClosed} data-testid="sheet-close">
           {t("action.cancel")}
         </button>
       </div>

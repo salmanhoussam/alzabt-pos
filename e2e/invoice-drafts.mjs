@@ -109,8 +109,8 @@ async function addRow(page, { description, quantity, unit, price }) {
   await testid(page, "new-line-quantity").fill(quantity);
   await testid(page, "new-line-unit").fill(unit);
   await testid(page, "new-line-price").fill(price);
-  await testid(page, "new-line-save").click();
-  await page.waitForSelector('[data-testid="new-line-save"]', { state: "detached" });
+  await testid(page, "save-draft").click();
+  await page.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });
 }
 
 /** Every value the line rows display — innerText NEVER includes an <input>'s value. */
@@ -195,9 +195,54 @@ await commitCustomer(page, "phone", PHONE);
 await commitCustomer(page, "notes", NOTES);
 await commitTestid(page, "sheet-date", DATE);
 
-await addRow(page, { description: "صنف المسودّة الأول", quantity: "3", unit: "حبة", price: "2.50" });
-await addRow(page, { description: "صنف المسودّة الثاني", quantity: "2", unit: "علبة", price: "4.00" });
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// C-bis · 🔴 THE FIELD DEFECT (2026-10-10, real installed `ce4dd28`): a second row could not be
+//         started until the first was saved. "+ Add Row" was disabled while a row was open and told
+//         the operator to save first, so a multi-item invoice meant one round-trip per item.
+//
+//         This block is deliberately NOT written with the `addRow` helper: the helper saves, and
+//         what is being proven here is precisely that NO save is needed in between.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+await testid(page, "add-row").click();
+await page.waitForSelector('[data-testid="sheet-draft-row"]');
+await testid(page, "new-line-description").fill("صنف المسودّة الأول");
+await testid(page, "new-line-quantity").fill("3");
+await testid(page, "new-line-unit").fill("حبة");
+await testid(page, "new-line-price").fill("2.50");
+
+// The button must be LIVE while row 1 sits there unsaved. This one assertion is the whole defect.
+assert(await testid(page, "add-row").isEnabled(), "🔴 + Add Row is available while a row is unsaved");
+await testid(page, "add-row").click();
+await until("a second unsaved row to appear", async () => (await testid(page, "sheet-draft-row").count()) >= 1, 30000);
+
+// Row 1 survived being left alone — it is now a real line, and its values are the typed ones.
+await until("row 1 to have become a real line", async () => (await testid(page, "sheet-line").count()) === 1, 30000);
+const row1 = await lineValues(page);
+assert(JSON.stringify(row1).includes("صنف المسودّة الأول"), `row 1 kept its description (got ${JSON.stringify(row1)})`);
+
+// Row 2 is typed into the row that Add Row opened, with row 1 untouched beside it.
+await testid(page, "new-line-description").last().fill("صنف المسودّة الثاني");
+await testid(page, "new-line-quantity").last().fill("2");
+await testid(page, "new-line-unit").last().fill("علبة");
+await testid(page, "new-line-price").last().fill("4.00");
+assert((await testid(page, "sheet-unsaved-rows").count()) === 1, "the sheet says how many rows are unsaved");
+await page.screenshot({ path: SHOTS + "D0-two-rows-one-unsaved.png" });
+
+// A completely BLANK trailing row is ignored — never saved, never counted, never a validation error.
+await testid(page, "add-row").click();
+await until("the blank trailing row to be present", async () => (await testid(page, "sheet-draft-row").count()) >= 1, 30000);
+
+await testid(page, "save-draft").click();
+await until("every typed row to be persisted", async () => (await testid(page, "sheet-line").count()) === 2, 30000);
 assert((await testid(page, "sheet-line").count()) === 2, "two rows are on the sheet");
+assert(
+  (await testid(page, "sheet-unsaved-rows").count()) === 0,
+  "and nothing is left unsaved — the blank trailing row was ignored, not stored",
+);
+// The blank row is still ON SCREEN, which is correct — it is where the operator types next. It is
+// removed here only so the rest of this script's `addRow` helper starts from an empty sheet.
+await testid(page, "sheet-draft-row-remove").last().click();
+await page.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });
 
 const subtotalBefore = await textOf(page, "sheet-subtotal");
 const totalBefore = await textOf(page, "sheet-total");

@@ -494,6 +494,18 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       const o = exactObject(p, ["invoiceId", "line"]);
       return toInvoiceViewDto(invoices().addLine(str(o.invoiceId, "invoiceId", 100), invoiceLine(o.line)));
     }),
+    addInvoiceLines: wrap("addInvoiceLines", (p) => {
+      const o = exactObject(p, ["invoiceId", "lines"]);
+      if (!Array.isArray(o.lines) || o.lines.length === 0) {
+        invalid("'lines' must be a non-empty array");
+      }
+      return toInvoiceViewDto(
+        invoices().addLines(
+          str(o.invoiceId, "invoiceId", 100),
+          o.lines.map((l) => invoiceLine(l)),
+        ),
+      );
+    }),
     updateInvoiceLine: wrap("updateInvoiceLine", (p) => {
       const o = exactObject(p, ["invoiceId", "lineId", "line"]);
       return toInvoiceViewDto(

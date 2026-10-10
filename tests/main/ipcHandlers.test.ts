@@ -73,6 +73,10 @@ describe("IPC surface", () => {
         "getInvoice",
         "updateInvoiceHeader",
         "addInvoiceLine",
+        // Added 2026-10-10 with the multi-row invoice sheet: several typed rows in ONE
+        // transaction. The list stays EXHAUSTIVE on purpose — this assertion exists to catch a
+        // channel nobody meant to expose, so a new one is declared here deliberately.
+        "addInvoiceLines",
         "updateInvoiceLine",
         "removeInvoiceLine",
         "discardInvoiceDraft",
@@ -94,7 +98,7 @@ describe("IPC surface", () => {
         "saveInvoicePdf",
       ].sort(),
     );
-    expect(CHANNEL_NAMES).toHaveLength(45); // 19 -> 44 with manual invoices, 45 with per-invoice tax
+    expect(CHANNEL_NAMES).toHaveLength(46); // 19 -> 44 manual invoicing -> 45 -> 46 (addInvoiceLines, 2026-10-10)
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

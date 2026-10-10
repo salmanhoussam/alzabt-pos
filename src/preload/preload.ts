@@ -82,6 +82,7 @@ const CH = {
   updateInvoiceHeader: "pos:updateInvoiceHeader",
   setInvoiceTax: "pos:setInvoiceTax",
   addInvoiceLine: "pos:addInvoiceLine",
+  addInvoiceLines: "pos:addInvoiceLines",
   updateInvoiceLine: "pos:updateInvoiceLine",
   removeInvoiceLine: "pos:removeInvoiceLine",
   discardInvoiceDraft: "pos:discardInvoiceDraft",
@@ -169,6 +170,8 @@ const api: PosApi = {
       label: req.label,
     }),
   addInvoiceLine: (req) => ipcRenderer.invoke(CH.addInvoiceLine, { invoiceId: req.invoiceId, line: line(req.line) }),
+  addInvoiceLines: (req) =>
+    ipcRenderer.invoke(CH.addInvoiceLines, { invoiceId: req.invoiceId, lines: req.lines.map(line) }),
   updateInvoiceLine: (req) =>
     ipcRenderer.invoke(CH.updateInvoiceLine, { invoiceId: req.invoiceId, lineId: req.lineId, line: line(req.line) }),
   removeInvoiceLine: (req) =>
