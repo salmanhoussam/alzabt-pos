@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron } from "playwright-core";
+import { signIn } from "./_signin.mjs";
 
 const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
 const EXE = process.env.E2E_EXECUTABLE;
@@ -258,10 +259,7 @@ for (const [name, action] of [
     );
     throw err;
   }
-  await page.getByRole("button", { name: "Cashier One" }).click();
-  for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.locator('[data-testid="login-submit"]').click();
-  await page.waitForSelector('[data-testid="cart"]');
+  await signIn(page, "Cashier One", "1111");
   await page.locator("button.product", { hasText: "Espresso" }).click();
   await page.locator('[data-testid="complete-sale"]').click();
   await page.locator('[data-testid="pay-cash"]').click();

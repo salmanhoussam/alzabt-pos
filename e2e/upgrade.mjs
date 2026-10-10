@@ -65,7 +65,20 @@ async function launch() {
   await page.getByRole("button", { name: "Cashier One" }).click();
   for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
   await clickEither(page, "login-submit", page.getByRole("button", { name: "Log in" }));
-  await page.waitForSelector('[data-testid="cart"], .cart');
+  // 🔴 Migration 8 put MANDATORY SETUP behind the first login, so this build answers 1111 with a
+  // setup ticket rather than a session. The older builds this script also drives have no
+  // `operators` table and never show that screen, so the selector simply never matches for them —
+  // which is why both outcomes are awaited rather than branching on which phase we think we are in.
+  // The PIN is re-set to 1111 and the name is left alone: this script's subject is the UPGRADE, and
+  // the real setup flow is proven in operator-accounts.mjs with a genuinely new PIN.
+  await page.waitForSelector('[data-testid="cart"], .cart, [data-testid="setup-screen"]');
+  if (await page.locator('[data-testid="setup-screen"]').count()) {
+    await page.locator('[data-testid="setup-pin"]').fill("1111");
+    await page.locator('[data-testid="setup-confirm"]').fill("1111");
+    await page.locator('[data-testid="setup-submit"]').click();
+    await page.waitForSelector('[data-testid="cart"], .cart');
+    log("mandatory setup completed (schema v8 build)");
+  }
   return { app, page };
 }
 
@@ -463,8 +476,10 @@ if (PHASE === "seed-v2") {
 
   const f = ledgerFacts();
   log("ledger after upgrade + new sale:", JSON.stringify(f));
-  // Was `f.schema === 3`, then 4, 5 and 6; migration 7 makes a v2 ledger land on v7 in ONE upgrade.
-  assert(f.schema === 7 && f.integrity === "ok", `migrated to schema v7, integrity ok (got ${f.schema})`);
+  // Was `f.schema === 3`, then 4, 5 and 6; migration 7 made a v2 ledger land on v7 in ONE upgrade,
+  // and migration 8 (operator accounts) now carries it to v8 in that same single upgrade. The
+  // version a build migrates TO is a transition, so each old value is named rather than replaced.
+  assert(f.schema === 8 && f.integrity === "ok", `migrated to schema v8, integrity ok (got ${f.schema})`);
   // The audit table was created on the way, and starts empty — nothing is reconstructed.
   assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
   // Two Espressos at 2.50 and one at 2.50, all WHOLE pieces, so every quantity scaled by 1000.
@@ -561,7 +576,7 @@ if (PHASE === "seed-v2") {
   // audits master data, not the sales ledger.
   const afterMigration = ledgerFacts();
   // Was 5 before migration 6.
-  assert(afterMigration.schema === 7, `migrated to schema v7 (got ${afterMigration.schema})`);
+  assert(afterMigration.schema === 8, `migrated to schema v8 (got ${afterMigration.schema})`);
   assert(afterMigration.audit === 0, `the durable audit trail exists and starts empty (got ${afterMigration.audit})`);
 
   ({ app, page } = await launch());
@@ -584,7 +599,7 @@ if (PHASE === "seed-v2") {
   const f = ledgerFacts();
   log("final ledger:", JSON.stringify(f));
   // Was `f.schema === 3`, then 4, then 5.
-  assert(f.schema === 7 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", `final ledger intact at v7 (got ${f.schema})`);
+  assert(f.schema === 8 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", `final ledger intact at v8 (got ${f.schema})`);
   // 🔴 And the export → re-import above is now AUDITED: exactly one CATALOG_IMPORTED summary and
   // ZERO product events, because the re-imported file is byte-identical and changed nothing. That
   // is the low-noise property the import audit model was chosen for, measured on the installed app.
@@ -657,7 +672,7 @@ if (PHASE === "seed-v2") {
   const f = ledgerFacts();
   log("ledger after the upgrade:", JSON.stringify(f));
   // Was 5 before migration 6.
-  assert(f.schema === 7 && f.integrity === "ok", `migrated to schema v7, integrity ok (got ${f.schema})`);
+  assert(f.schema === 8 && f.integrity === "ok", `migrated to schema v8, integrity ok (got ${f.schema})`);
   assert(f.audit === 0, `the durable audit trail exists and starts empty (got ${f.audit})`);
   assert(f.quantities.every((q) => q % 1000 === 0), `migrated quantities are whole: ${JSON.stringify(f.quantities)}`);
   assert(f.unknownUnits === 2, `both pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
@@ -763,7 +778,7 @@ if (PHASE === "seed-v2") {
   const f = ledgerFacts();
   log("ledger after the v4 -> v7 upgrade:", JSON.stringify(f));
   // Was 5 before migration 6 and 6 before migration 7: a v4 ledger now lands on v7 in ONE upgrade.
-  assert(f.schema === 7 && f.integrity === "ok", `migrated to schema v7, integrity ok (got ${f.schema})`);
+  assert(f.schema === 8 && f.integrity === "ok", `migrated to schema v8, integrity ok (got ${f.schema})`);
   assert(f.sales === 2 && f.voids === 1, "sales and voids untouched by migrations 5 and 6");
   // 🔴 Migration 4's behaviour is unchanged: the fractional quantity is still exactly 2500.
   assert(JSON.stringify(f.quantities) === "[2500,1000]", `quantities untouched: ${JSON.stringify(f.quantities)}`);
@@ -840,7 +855,7 @@ if (PHASE === "seed-v2") {
   const f2 = ledgerFacts();
   log("final ledger:", JSON.stringify(f2));
   // Was 5 before migration 6.
-  assert(f2.integrity === "ok" && f2.schema === 7, "the ledger is sound and still at v7");
+  assert(f2.integrity === "ok" && f2.schema === 8, "the ledger is sound and still at v8");
   assert(JSON.stringify(f2.quantities) === "[2500,1000]", "no sale was disturbed by any of this");
 } else if (PHASE === "seed-v5") {
   // ── Scenario E, part 1 — the REAL legal v5 main build (69f1a22, schema v5: durable audit, and
@@ -904,7 +919,7 @@ if (PHASE === "seed-v2") {
 
   const m = ledgerFacts();
   log("after migration:", JSON.stringify(m));
-  assert(m.schema === 7, `the schema moved to v7 (got ${m.schema})`);
+  assert(m.schema === 8, `the schema moved to v8 (got ${m.schema})`);
   assert(m.integrity === "ok", "integrity_check is ok");
   assert(m.foreignKeys === "[]", `foreign_key_check is empty (got ${m.foreignKeys})`);
   // Old business data survived, byte for byte.
@@ -1273,7 +1288,7 @@ if (PHASE === "seed-v2") {
         voids: f.voids,
       }),
     );
-    assert(f.schema === 7 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v7");
+    assert(f.schema === 8 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v8");
     assert(f.invoices === 1 && f.invoiceLines === 4 && f.reconciliation === 4, "the invoice, its lines and its review rows persist");
     assert(f.invoiceNumber === 61, "the invoice number is unchanged after every restart");
     assert(
@@ -1375,7 +1390,7 @@ if (PHASE === "seed-v2") {
 
   const m = ledgerFacts();
   log("after migration:", JSON.stringify(m));
-  assert(m.schema === 7, `the schema moved to v7 (got ${m.schema})`);
+  assert(m.schema === 8, `the schema moved to v8 (got ${m.schema})`);
   assert(m.integrity === "ok", "integrity_check is ok");
   assert(m.foreignKeys === "[]", `foreign_key_check is empty (got ${m.foreignKeys})`);
 
@@ -1472,7 +1487,7 @@ if (PHASE === "seed-v2") {
 
   const g = ledgerFacts();
   log("after the new invoice:", JSON.stringify(g));
-  assert(g.schema === 7 && g.integrity === "ok" && g.foreignKeys === "[]", "the ledger is sound at v7");
+  assert(g.schema === 8 && g.integrity === "ok" && g.foreignKeys === "[]", "the ledger is sound at v8");
   assert(g.invoices === 2, `two invoices now exist (got ${g.invoices})`);
   assert(g.invoiceLines === 3, `one line from v6 plus two new ones (got ${g.invoiceLines})`);
   // 🔴 EXACTLY ONE new sale: the new invoice's. The v6 one still has none.

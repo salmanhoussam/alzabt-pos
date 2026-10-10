@@ -29,6 +29,7 @@
  *          ./node_modules/electron/dist/electron e2e/invoice-logo.mjs
  */
 import { _electron as electron } from "playwright-core";
+import { signIn } from "./_signin.mjs";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -126,11 +127,7 @@ log(`synthetic logos: one=${SHA_ONE} (${statSync(LOGO_ONE).size}B) two=${SHA_TWO
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page = await app.firstWindow();
-  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
-  await page.getByRole("button", { name: "Cashier One" }).click();
-  for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.locator('[data-testid="login-submit"]').click();
-  await page.waitForSelector('[data-testid="cart"]');
+  await signIn(page, "Cashier One", "1111");
   return { app, page };
 }
 

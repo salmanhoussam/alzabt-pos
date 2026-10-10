@@ -12,6 +12,7 @@
  *      Linux without a display: xvfb-run -a node e2e/product-management.mjs
  */
 import { _electron as electron } from "playwright-core";
+import { signIn } from "./_signin.mjs";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -42,11 +43,7 @@ const assert = (cond, msg) => {
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page = await app.firstWindow();
-  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
-  await page.getByRole("button", { name: "Cashier One" }).click();
-  for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.locator('[data-testid="login-submit"]').click();
-  await page.waitForSelector('[data-testid="cart"]');
+  await signIn(page, "Cashier One", "1111");
   return { app, page };
 }
 
@@ -275,9 +272,10 @@ await app.close();
   const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
   try {
     const n = (sql) => Number(db.prepare(sql).get().n);
-    // Was 5 before migration 6 (manual invoices). The version this build migrates a ledger TO is a
-    // transition, not an invariant, so the old value is named here the way upgrade.mjs names its own.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 7, "the installed app's ledger is at schema v7");
+    // Was 5 before migration 6 (manual invoices), then 7 after migration 7, now 8 after migration 8
+    // (operator accounts). The version this build migrates a ledger TO is a transition, not an
+    // invariant, so every old value is named here the way upgrade.mjs names its own.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 8, "the installed app's ledger is at schema v8");
 
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
     const types = rows.map((r) => r.event_type);
