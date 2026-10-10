@@ -17,6 +17,34 @@ type Tab = "sell" | "today" | "history" | "products" | "invoices" | "tools";
 type ExportNotice = { status: "exported"; what: "catalog" | "backup"; fileName: string; productCount?: number };
 type ErrorNotice = { status: "error"; title: string; message: string };
 
+/** Which of the shell's four screens is showing. */
+export type Screen = "loading" | "setup" | "login" | "app";
+
+/**
+ * The shell's screen decision, as a pure function — exported so its ORDER is testable.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 A LIVE SESSION WINS OVER AN OUTSTANDING SETUP TICKET, and getting that precedence wrong is
+ * exactly the defect this function was extracted to fix. The shell used to ask `if (setup !== null)`
+ * FIRST and never clear `setup`, so completing mandatory setup set the cashier and then re-rendered
+ * SetupScreen anyway — forever. On the first run of every installation and every upgrade, an
+ * operator would set their real PIN, press the button, and sit on the same screen; only restarting
+ * the app let them in, because `currentCashier()` then answered with the session they already had.
+ *
+ * All 717 unit tests passed through it: the bug lived in the ORDER of two early returns, which no
+ * service test can see and this repository has no DOM harness to mount. The installed-app E2E is
+ * what caught it, on the first Windows gate this branch ever ran.
+ *
+ * So the rule is stated here once, where it can be asserted: a ticket is not a session, and the
+ * moment a session exists the ticket is spent.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export function screenFor(cashier: CashierDto | null | undefined, setup: unknown): Screen {
+  if (cashier === undefined) return "loading";
+  if (cashier !== null) return "app";
+  return setup !== null && setup !== undefined ? "setup" : "login";
+}
+
 export function App() {
   const { t, lang, setLanguage } = useT();
   const [cashier, setCashier] = useState<CashierDto | null | undefined>(undefined);
@@ -33,15 +61,32 @@ export function App() {
       .catch(() => setCashier(null));
   }, []);
 
+  const screen = screenFor(cashier, setup);
+
+  // These three stay keyed on `cashier` itself so TypeScript narrows it for the till below;
+  // `screen` is the authority for the one decision that was wrong, and the unit test asserts the
+  // two cannot disagree.
   if (cashier === undefined) return <div className="center muted">Loading…</div>;
 
   // 🔴 MANDATORY SETUP COMES BEFORE THE APPLICATION, and it is not merely rendered first: there is
   // no session behind it, so every other channel refuses regardless of what this renderer shows.
-  if (setup !== null)
+  // The condition is `screenFor`'s, not an inline `setup !== null` — see that function for the
+  // defect this ordering exists to prevent.
+  if (screen === "setup" && setup !== null)
     return (
       <div className="app">
         <main className="content">
-          <SetupScreen ticket={setup.ticket} operatorName={setup.name} onReady={setCashier} />
+          <SetupScreen
+            ticket={setup.ticket}
+            operatorName={setup.name}
+            // The ticket is spent the moment a session exists. `screenFor` already refuses to show
+            // this screen once `cashier` is set, so clearing it is belt-and-braces rather than the
+            // fix — it keeps a used ticket from sitting in renderer memory.
+            onReady={(c) => {
+              setSetup(null);
+              setCashier(c);
+            }}
+          />
         </main>
         <BuildLine />
       </div>

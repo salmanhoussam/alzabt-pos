@@ -37,9 +37,15 @@ export type Access =
  * that redesign) and `currentCashier` (App.tsx asking "is anyone signed in?" at startup, which must
  * be answerable with "no").
  *
- * So the set is SIX, each one named with the reason it cannot wait for a session. It is a list of
- * individually justified exceptions, not a category called "pre-session" that future channels can
- * drift into — which is what was actually being guarded against.
+ * So the set is SEVEN, each one named with the reason it cannot wait for a session: the five above
+ * plus `login` itself and `logout`, which must work from a half-broken state and reveals nothing.
+ * It is a list of individually justified exceptions, not a category called "pre-session" that future
+ * channels can drift into — which is what was actually being guarded against.
+ *
+ * 🔴 This prose said SIX while PUBLIC_REASON held seven entries, and an independent review caught
+ * it. A wrong count matters more here than it normally would: this list IS the control for the
+ * category, so a reader who trusts the number would be auditing a set one smaller than the real one.
+ * Verified mechanically at the same time: 7 public, 22 session, 24 owner, 53 total.
  */
 export const PUBLIC_REASON: Readonly<Record<string, string>> = Object.freeze({
   listCashiers: "the login screen must offer who to sign in as; returns {id, name} and nothing else",

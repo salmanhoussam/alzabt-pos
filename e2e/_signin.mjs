@@ -55,7 +55,28 @@ export async function signIn(page, name, pin) {
   await page.locator('[data-testid="setup-pin"]').fill(pin);
   await page.locator('[data-testid="setup-confirm"]').fill(pin);
   await page.locator('[data-testid="setup-submit"]').click();
-  await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+  // 🔴 ON TIMEOUT, SAY WHY. The first Windows gate this helper ever ran failed exactly here, and
+  // the log said only "waiting for [data-testid=cart]" — true, useless, and worth a whole gate
+  // cycle to diagnose. The cause was a renderer defect (a live session losing to a spent setup
+  // ticket, see screenFor in App.tsx), and any of the three facts captured below would have named
+  // it immediately: the visible error, the screen still mounted, and the DOM.
+  try {
+    await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+  } catch (err) {
+    const diag = await page
+      .evaluate(() => ({
+        stillOnSetup: !!document.querySelector('[data-testid="setup-screen"]'),
+        error: document.querySelector('[data-testid="setup-error"]')?.textContent ?? null,
+        mismatch: !!document.querySelector('[data-testid="setup-mismatch"]'),
+        pinInvalid: !!document.querySelector('[data-testid="setup-pin-invalid"]'),
+        submitDisabled: document.querySelector('[data-testid="setup-submit"]')?.disabled ?? null,
+        root: document.getElementById("root")?.innerHTML?.slice(0, 1500) ?? "NO ROOT",
+      }))
+      .catch((e) => ({ evaluateFailed: String(e) }));
+    console.log("SETUP STUCK:", JSON.stringify(diag));
+    await page.screenshot({ path: "e2e-output/setup-stuck.png" }).catch(() => {});
+    throw err;
+  }
   settled.add(name);
   return "setup";
 }
