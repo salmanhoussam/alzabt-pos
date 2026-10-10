@@ -222,6 +222,11 @@ await testid(page, "finalize").click();
 await page.waitForSelector('[data-testid="finalize-confirm"]');
 await testid(page, "finalize-confirm-yes").click();
 await page.waitForSelector('[data-testid="finalized-notice"]');
+// 🔴 DISMISS IT. The notice is an overlay, and an overlay intercepts pointer events — the gate
+// caught `save-pdf` below being clicked through it for 30s. "Review later" closes it and leaves
+// the finalized sheet open, which is exactly the state this script needs next.
+await testid(page, "review-later").click();
+await page.waitForSelector('[data-testid="finalized-notice"]', { state: "detached" });
 assert(true, "the invoice was issued while logo ONE was configured");
 
 // 🔴 The freeze, read out of the application's own snapshot — not inferred from the UI.
@@ -339,6 +344,8 @@ delete bareEnv.ELECTRON_RUN_AS_NODE;
   await p.waitForSelector('[data-testid="finalize-confirm"]');
   await p.locator('[data-testid="finalize-confirm-yes"]').click();
   await p.waitForSelector('[data-testid="finalized-notice"]');
+  await p.locator('[data-testid="review-later"]').click();
+  await p.waitForSelector('[data-testid="finalized-notice"]', { state: "detached" });
 
   const bareDb = new Database(join(bare, "userData", "alzabt-pos-ledger.sqlite"), {
     readonly: true,

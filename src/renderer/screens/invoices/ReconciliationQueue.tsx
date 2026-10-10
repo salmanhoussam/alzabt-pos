@@ -524,7 +524,7 @@ function ResolutionPanel({
           <button className="btn" onClick={keepInvoiceOnly} disabled={busy} data-testid="resolve-keep-invoice">
             {t("inv.review.keepInvoiceOnly")}
           </button>
-          <button className="btn ghost" onClick={onCancel} disabled={busy}>
+          <button className="btn ghost" onClick={onCancel} disabled={busy} data-testid="resolve-cancel">
             {t("action.cancel")}
           </button>
         </div>

@@ -753,6 +753,19 @@ assert(
   (await textOf(page, "resolve-create-anyway-note")).length > 10,
   "with the screen saying in words that similarity is advisory and nothing is merged automatically",
 );
+// 🔴 ALL FOUR decisions are reachable on this one modal, which is the agreed contract for an
+// ambiguous line: match an existing product, create a new one anyway, leave it unresolved / in the
+// invoice only, or cancel. The shipped build offered three of the four.
+assert(await testid(page, "resolve-keep-invoice").isVisible(), "leaving it in the invoice only is offered");
+assert(await testid(page, "resolve-keep-catalog").isVisible(), "keeping the catalog unchanged is offered");
+assert(await testid(page, "resolve-cancel").isVisible(), "and cancel");
+// The create fields are prefilled from the INVOICE LINE — never from a suggestion. Copying a
+// candidate's data would be the auto-merge this whole path exists to avoid.
+assert(
+  (await testid(page, "resolve-name-ar").inputValue()) === "قفل اختباري",
+  "the new product's name is prefilled from the invoice line",
+);
+assert((await testid(page, "resolve-sku").inputValue()) === "", "and nothing is copied from either suggestion");
 await page.screenshot({ path: SHOTS + "I11-ambiguous-create-anyway.png" });
 
 await testid(page, "resolve-name-ar").fill("قفل اختباري");
