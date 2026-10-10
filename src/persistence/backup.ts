@@ -50,6 +50,10 @@ export const COUNTED_TABLES = [
   "catalog_products",
   "catalog_imports",
   "cashier_pin_state",
+  // Migration 8. A real durable table: without it here a snapshot carrying ZERO operators would
+  // still verify as OK, and the shop would restore a database nobody can log into. The backup
+  // contract test is what caught this, which is exactly what it is for.
+  "operators",
   "audit_events",
   "company_profile",
   "invoices",

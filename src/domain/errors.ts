@@ -45,7 +45,19 @@ export type DomainErrorCode =
   | "INVOICE_NUMBERING_LOCKED"
   | "RECONCILIATION_NOT_FOUND"
   | "RECONCILIATION_ALREADY_RESOLVED"
-  | "RESOLUTION_INCOMPLETE";
+  | "RESOLUTION_INCOMPLETE"
+  // migration 8 — operator accounts and role-based authorization
+  | "INVALID_PIN"
+  | "OPERATOR_NOT_FOUND"
+  | "OPERATOR_INACTIVE"
+  | "DUPLICATE_OPERATOR_NAME"
+  | "SETUP_REQUIRED"
+  | "SETUP_NOT_REQUIRED"
+  // The authorization refusal. Deliberately ONE code for every restricted channel: the operator
+  // learns that this action needs an owner, and not which channels exist to probe.
+  | "NOT_AUTHORIZED"
+  | "LAST_OWNER_PROTECTED"
+  | "SELF_ROLE_CHANGE";
 
 export class DomainError extends Error {
   constructor(
