@@ -171,12 +171,34 @@ function embedsImage(pdfPath) {
   return /\/Subtype\s*\/Image/.test(bytes);
 }
 
+/**
+ * Chooses a unit the way an operator now does: the dropdown if this build knows the unit, else
+ * «Other» plus the free-text field.
+ *
+ * 🔴 NO HARDCODED UNIT LIST HERE. The options are READ OFF THE SELECT, by value and by visible
+ * label, so this works in either UI language and a unit added to BASE_UNITS needs no edit here.
+ * Nothing is swallowed in a try/catch — an unknown unit takes the Other path deliberately.
+ */
+async function chooseUnit(scope, value) {
+  const select = scope.locator('[data-testid^="unit-select-"]').first();
+  const options = await select.evaluate((el) =>
+    Array.from(el.options).map((o) => ({ value: o.value, label: (o.textContent || "").trim() })),
+  );
+  const hit = options.find((o) => o.value === value || o.label === value);
+  if (hit && hit.value !== "other") {
+    await select.selectOption(hit.value);
+    return;
+  }
+  await select.selectOption("other");
+  await scope.locator('[data-testid^="unit-custom-"]').first().fill(value);
+}
+
 /** Adds one row to the open sheet and flushes it through the durable save path. */
 async function addRow(page, { description, quantity, unit, price }) {
   await testid(page, "add-row").click();
   await testid(page, "new-line-description").fill(description);
   await testid(page, "new-line-quantity").fill(quantity);
-  await testid(page, "new-line-unit").fill(unit);
+  await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), unit);
   await testid(page, "new-line-price").fill(price);
   await testid(page, "save-draft").click();
   await page.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });
@@ -340,7 +362,7 @@ delete bareEnv.ELECTRON_RUN_AS_NODE;
   await p.locator('[data-testid="add-row"]').click();
   await p.locator('[data-testid="new-line-description"]').fill("صنف بلا شعار");
   await p.locator('[data-testid="new-line-quantity"]').fill("1");
-  await p.locator('[data-testid="new-line-unit"]').fill("حبة");
+  await chooseUnit(p.locator('[data-testid="sheet-draft-row"]').last(), "حبة");
   await p.locator('[data-testid="new-line-price"]').fill("1.00");
   await p.locator('[data-testid="save-draft"]').click();
   await p.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });

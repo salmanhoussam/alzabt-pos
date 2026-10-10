@@ -103,11 +103,34 @@ async function commitCustomer(page, which, value) {
 const customerValue = (page, which) => page.locator(".inv-customer input").nth(CUSTOMER_FIELD[which]).inputValue();
 
 /** Adds one line through the sheet exactly as an operator would. */
+
+/**
+ * Chooses a unit the way an operator now does: the dropdown if this build knows the unit, else
+ * «Other» plus the free-text field.
+ *
+ * 🔴 NO HARDCODED UNIT LIST HERE. The options are READ OFF THE SELECT, by value and by visible
+ * label, so this works in either UI language and a unit added to BASE_UNITS needs no edit here.
+ * Nothing is swallowed in a try/catch — an unknown unit takes the Other path deliberately.
+ */
+async function chooseUnit(scope, value) {
+  const select = scope.locator('[data-testid^="unit-select-"]').first();
+  const options = await select.evaluate((el) =>
+    Array.from(el.options).map((o) => ({ value: o.value, label: (o.textContent || "").trim() })),
+  );
+  const hit = options.find((o) => o.value === value || o.label === value);
+  if (hit && hit.value !== "other") {
+    await select.selectOption(hit.value);
+    return;
+  }
+  await select.selectOption("other");
+  await scope.locator('[data-testid^="unit-custom-"]').first().fill(value);
+}
+
 async function addRow(page, { description, quantity, unit, price }) {
   await testid(page, "add-row").click();
   await testid(page, "new-line-description").fill(description);
   await testid(page, "new-line-quantity").fill(quantity);
-  await testid(page, "new-line-unit").fill(unit);
+  await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), unit);
   await testid(page, "new-line-price").fill(price);
   await testid(page, "save-draft").click();
   await page.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });
@@ -115,7 +138,21 @@ async function addRow(page, { description, quantity, unit, price }) {
 
 /** Every value the line rows display — innerText NEVER includes an <input>'s value. */
 const lineValues = (page) =>
-  page.locator('[data-testid="sheet-line"] input').evaluateAll((els) => els.map((e) => e.value));
+  page
+    .locator('[data-testid="sheet-line"] input, [data-testid="sheet-line"] select')
+    .evaluateAll((els) => els.map((e) => e.value));
+
+/** Every saved line's unit cell, as the control DISPLAYS it — a select, no longer a text input. */
+const lineUnits = (page) =>
+  page.evaluate(() => {
+    const out = [];
+    for (const sel of document.querySelectorAll('[data-testid="sheet-line"] select[data-testid^="unit-select-"]')) {
+      const id = sel.getAttribute("data-testid").replace("unit-select-", "");
+      const custom = document.querySelector(`[data-testid="unit-custom-${id}"]`);
+      out.push({ base: sel.value, custom: custom ? custom.value : null });
+    }
+    return out;
+  });
 
 /** The app must be CLOSED: these read the installed application's own ledger file. */
 function query(sql, ...params) {
@@ -207,7 +244,7 @@ await testid(page, "add-row").click();
 await page.waitForSelector('[data-testid="sheet-draft-row"]');
 await testid(page, "new-line-description").fill("صنف المسودّة الأول");
 await testid(page, "new-line-quantity").fill("3");
-await testid(page, "new-line-unit").fill("حبة");
+await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), "حبة");
 await testid(page, "new-line-price").fill("2.50");
 
 // The button must be LIVE while row 1 sits there unsaved. This one assertion is the whole defect.
@@ -223,7 +260,7 @@ assert(JSON.stringify(row1).includes("صنف المسودّة الأول"), `row
 // Row 2 is typed into the row that Add Row opened, with row 1 untouched beside it.
 await testid(page, "new-line-description").last().fill("صنف المسودّة الثاني");
 await testid(page, "new-line-quantity").last().fill("2");
-await testid(page, "new-line-unit").last().fill("علبة");
+await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), "علبة");
 await testid(page, "new-line-price").last().fill("4.00");
 assert((await testid(page, "sheet-unsaved-rows").count()) === 1, "the sheet says how many rows are unsaved");
 await page.screenshot({ path: SHOTS + "D0-two-rows-one-unsaved.png" });
@@ -296,7 +333,25 @@ assert(
   values.some((v) => v === "صنف المسودّة الأول") && values.some((v) => v === "صنف المسودّة الثاني"),
   "both row descriptions persisted, read from the inputs rather than innerText",
 );
-assert(values.some((v) => v === "حبة") && values.some((v) => v === "علبة"), "both unit labels persisted verbatim");
+// 🔴 TRANSITION, NOT A WEAKENING. This asserted the strings «حبة» and «علبة» among the line
+// INPUTS, because the unit used to be a text input. It is a <select> now, so the displayed value is
+// the base-unit KEY the label belongs to — «حبة» is the Arabic label of `piece`, «علبة» of `box`.
+// The verbatim-label claim did not disappear: it moved to the ledger assertion further down, where
+// the app is closed and `unit_label` can be read as the bytes it actually is. Asserting it on a
+// select's value here would have been asserting the wrong surface, which is how a control change
+// quietly turns a real check into a passing one.
+{
+  const units = await lineUnits(page);
+  assert(units.length === 2, `both unit cells reopened (${JSON.stringify(units)})`);
+  assert(
+    units.some((u) => u.base === "piece") && units.some((u) => u.base === "box"),
+    `both units reopened as their own dropdown entry (${JSON.stringify(units)})`,
+  );
+  assert(
+    units.every((u) => u.custom === null),
+    "and neither needed the «Other» free-text field — both are units this build knows",
+  );
+}
 
 const subtotalAfter = await textOf(page, "sheet-subtotal");
 const totalAfter = await textOf(page, "sheet-total");
@@ -317,6 +372,23 @@ const draftsOnDisk = num("SELECT count(*) AS n FROM invoices WHERE status = 'dra
 const linesOnDisk = num("SELECT count(*) AS n FROM invoice_lines");
 assert(draftsOnDisk === 1, `the ledger holds the draft after the app closed (got ${draftsOnDisk})`);
 assert(linesOnDisk === 2, `and both of its lines (got ${linesOnDisk})`);
+// 🔴 THE VERBATIM UNIT CLAIM, read as bytes from the installed app's own ledger. This is where
+// "persisted verbatim" belongs: a control can display whatever it likes, but what the paper invoice
+// will print is this column.
+{
+  const units = query("SELECT unit_label AS l, canonical_unit AS c FROM invoice_lines ORDER BY line_no");
+  log("STORED UNITS:", JSON.stringify(units));
+  assert(units.length === 2, "two line units are on disk");
+  assert(
+    units.map((u) => u.l).join("|") === "حبة|علبة",
+    `🔴 both unit LABELS are stored byte for byte (${units.map((u) => u.l).join("|")})`,
+  );
+  assert(
+    units.map((u) => u.c).join("|") === "piece|box",
+    `and each records the catalog unit it belongs to (${units.map((u) => u.c).join("|")})`,
+  );
+}
+
 const stored = one("SELECT customer_name AS c, customer_phone AS p, notes AS n, invoice_date AS d FROM invoices");
 assert(stored.c === CUSTOMER, "the stored row carries the customer name");
 assert(stored.p === PHONE, "the stored row carries the phone");

@@ -100,7 +100,12 @@ const tab = (page, name) => page.locator(`[data-testid="tab-${name}"]`).click();
  * all. Read the values.
  */
 async function lineValues(page) {
-  return page.locator('[data-testid="sheet-line"] input').evaluateAll((els) => els.map((e) => e.value));
+  // 🔴 SELECTS TOO, since 2026-10-10. The unit cell is a dropdown now, so an input-only reader
+  // silently stops seeing it — and a reader that stops seeing a field turns a real assertion into
+  // one that cannot fail. A custom unit («كيس (50PCS)») is still a text input and still appears.
+  return page
+    .locator('[data-testid="sheet-line"] input, [data-testid="sheet-line"] select')
+    .evaluateAll((els) => els.map((e) => e.value));
 }
 
 /**
@@ -182,11 +187,33 @@ function facts() {
 }
 
 /** Adds one line through the sheet exactly as an operator would. */
+/**
+ * Chooses a unit the way an operator now does: the dropdown if this build knows the unit, else
+ * «Other» plus the free-text field.
+ *
+ * 🔴 NO HARDCODED UNIT LIST HERE. The options are READ OFF THE SELECT, by value and by visible
+ * label, so this works in either UI language and a unit added to BASE_UNITS needs no edit here.
+ * Nothing is swallowed in a try/catch — an unknown unit takes the Other path deliberately.
+ */
+async function chooseUnit(scope, value) {
+  const select = scope.locator('[data-testid^="unit-select-"]').first();
+  const options = await select.evaluate((el) =>
+    Array.from(el.options).map((o) => ({ value: o.value, label: (o.textContent || "").trim() })),
+  );
+  const hit = options.find((o) => o.value === value || o.label === value);
+  if (hit && hit.value !== "other") {
+    await select.selectOption(hit.value);
+    return;
+  }
+  await select.selectOption("other");
+  await scope.locator('[data-testid^="unit-custom-"]').first().fill(value);
+}
+
 async function addRow(page, { description, quantity, unit, price }) {
   await testid(page, "add-row").click();
   await testid(page, "new-line-description").fill(description);
   await testid(page, "new-line-quantity").fill(quantity);
-  await testid(page, "new-line-unit").fill(unit);
+  await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), unit);
   await testid(page, "new-line-price").fill(price);
   // The row model changed 2026-10-10: there is no per-row save. The sheet holds the rows the
   // operator typed and flushes them together, so this commits through the durable save path.

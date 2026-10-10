@@ -24,6 +24,7 @@ import type {
 import { INVOICE_HEADER_PATCH_KEYS } from "../../../shared/ipcContract";
 import { call, errorText, fmt, pos } from "../../api";
 import { useT } from "../../i18n";
+import { DEFAULT_UNIT, UnitCell } from "../../components/UnitCell";
 
 const EMPTY_LINE: InvoiceLineRequest = {
   description: null,
@@ -38,6 +39,12 @@ const EMPTY_LINE: InvoiceLineRequest = {
 type DraftRow = {
   readonly key: string;
   readonly line: InvoiceLineRequest;
+  /**
+   * «Other» is selected and no unit has been typed. Held separately because the line itself cannot
+   * express it — an un-typed Other and a row with no unit at all are both `unitLabel: null`, and
+   * only one of them is an error.
+   */
+  readonly unitIncomplete: boolean;
 };
 
 /**
@@ -46,12 +53,11 @@ type DraftRow = {
  * only that default is still blank.
  */
 function rowBlank(l: InvoiceLineRequest): boolean {
-  return (
-    (l.description ?? "").trim() === "" &&
-    (l.unitLabel ?? "").trim() === "" &&
-    l.productId === null &&
-    l.unitPrice.trim() === ""
-  );
+  // 🔴 THE UNIT IS NOT CONSULTED, and it used to be. A new row now opens with a unit already
+  // selected from the dropdown, so a unit can no longer tell a blank row from a filled one — a
+  // trailing row the operator never touched would otherwise look populated and demand validation.
+  // A row is blank when nothing IDENTIFYING was entered.
+  return (l.description ?? "").trim() === "" && l.productId === null && l.unitPrice.trim() === "";
 }
 
 /**
@@ -66,6 +72,16 @@ function rowMissing(l: InvoiceLineRequest): "description" | "quantity" | "unitPr
   if (l.quantity.trim() === "") return "quantity";
   if (l.unitPrice.trim() === "") return "unitPrice";
   return null;
+}
+
+/** A populated row with nothing missing — the only kind that is ever written. */
+function rowReady(r: DraftRow): boolean {
+  return !rowBlank(r.line) && rowMissing(r.line) === null && !r.unitIncomplete;
+}
+
+/** A row the operator started and has not finished. Blocks saving ITSELF, never another row. */
+function rowUnfinished(r: DraftRow): boolean {
+  return !rowBlank(r.line) && !rowReady(r);
 }
 
 type FinalizedNotice = {
@@ -111,7 +127,7 @@ export function InvoiceSheet({
   readonly onReviewNow: () => void;
   readonly onClosed: () => void;
 }) {
-  const { t } = useT();
+  const { t, unit } = useT();
   const [view, setView] = useState<InvoiceViewDto | null>(null);
   const [products, setProducts] = useState<AdminProductDto[]>([]);
   /**
@@ -273,8 +289,18 @@ export function InvoiceSheet({
       return next;
     });
 
-  const setRow = (key: string, line: InvoiceLineRequest) =>
-    setDraftRows((rows) => rows.map((r) => (r.key === key ? { key, line } : r)));
+  /**
+   * Writes a row's line, PRESERVING whatever the unit cell is mid-deciding.
+   *
+   * Typing a description cannot change whether the unit is finished, and recomputing the flag here
+   * from the line alone would clear it — an un-typed «Other» and a row with no unit are the same
+   * `unitLabel: null`, so the line cannot answer the question. Only the unit cell sets this flag,
+   * and only the catalog picker (which always supplies a real base unit) clears it.
+   */
+  const setRow = (key: string, line: InvoiceLineRequest, unitResolved = false) =>
+    setDraftRows((rows) =>
+      rows.map((r) => (r.key === key ? { key, line, unitIncomplete: unitResolved ? false : r.unitIncomplete } : r)),
+    );
 
   const dropRow = (key: string) => setDraftRows((rows) => rows.filter((r) => r.key !== key));
 
@@ -289,7 +315,7 @@ export function InvoiceSheet({
    * from this component's.
    */
   const flushRows = async (): Promise<InvoiceViewDto | null> => {
-    const ready = draftRows.filter((r) => !rowBlank(r.line) && rowMissing(r.line) === null);
+    const ready = draftRows.filter(rowReady);
     if (ready.length === 0) return view;
     const next = await call(pos().addInvoiceLines({ invoiceId, lines: ready.map((r) => r.line) }));
     const persisted = new Set(ready.map((r) => r.key));
@@ -308,7 +334,10 @@ export function InvoiceSheet({
    */
   const addRow = async () => {
     const key = `r${nextRowKey.current++}`;
-    setDraftRows((rows) => [...rows, { key, line: EMPTY_LINE }]);
+    // The dropdown's default is `piece`, exactly as the Add/Edit Product form defaults, so a known
+    // unit is valid immediately and the operator has one less field to visit.
+    const line: InvoiceLineRequest = { ...EMPTY_LINE, unitLabel: unit(DEFAULT_UNIT), canonicalUnit: DEFAULT_UNIT };
+    setDraftRows((rows) => [...rows, { key, line, unitIncomplete: false }]);
     try {
       await flushRows();
     } catch (e) {
@@ -392,7 +421,7 @@ export function InvoiceSheet({
       // 🔴 An INCOMPLETE row refuses finalization rather than being silently dropped. Issuing an
       // invoice is the one irreversible act here, and quietly discarding a half-typed item is how
       // an operator ends up printing a document that is missing a line they entered.
-      if (draftRows.some((r) => !rowBlank(r.line) && rowMissing(r.line) !== null)) {
+      if (draftRows.some(rowUnfinished)) {
         throw new Error(t("inv.sheet.finalizeIncomplete"));
       }
       await flushHeader();
@@ -445,7 +474,7 @@ export function InvoiceSheet({
   const pick = (p: AdminProductDto) => {
     const line = prefill(p);
     const draft = pickerFor?.startsWith("draft:") ? pickerFor.slice("draft:".length) : null;
-    if (draft) setRow(draft, line);
+    if (draft) setRow(draft, line, true);
     else if (pickerFor) {
       const existing = view.lines.find((l) => l.id === pickerFor);
       if (existing) void editLine(existing.id, { ...line, quantity: String(existing.quantityMilli / 1000) });
@@ -618,20 +647,27 @@ export function InvoiceSheet({
                 />
               </td>
               <td>
-                {/* Free text, kept verbatim — the printed label is historical truth. */}
-                <input
-                  defaultValue={l.unitLabel ?? ""}
+                {/* The SAME unit list the product form uses. A label this build cannot match —
+                    "كيس (50PCS)" on a real invoice — renders as Other with the label prefilled and
+                    is never rewritten, which is what makes an older draft reopen unharmed. */}
+                <UnitCell
+                  unitLabel={l.unitLabel}
+                  canonicalUnit={l.canonicalUnit}
                   disabled={readOnly}
-                  onBlur={(e) =>
-                    editLine(l.id, {
+                  idSuffix={l.id}
+                  onChange={(choice) => {
+                    // 🔴 An empty «Other» writes NOTHING. The cell shows its own inline validation;
+                    // persisting null here would erase a unit the line already had.
+                    if (choice.incomplete) return;
+                    void editLine(l.id, {
                       description: l.description,
-                      unitLabel: e.target.value.trim() === "" ? null : e.target.value,
-                      canonicalUnit: null,
+                      unitLabel: choice.unitLabel,
+                      canonicalUnit: choice.canonicalUnit,
                       productId: l.productId,
                       quantity: String(l.quantityMilli / 1000),
                       unitPrice: priceText(l.unitPrice.minor),
-                    })
-                  }
+                    });
+                  }}
                 />
               </td>
               <td className="num">
@@ -708,12 +744,27 @@ export function InvoiceSheet({
                   />
                 </td>
                 <td>
-                  <input
-                    value={r.line.unitLabel ?? ""}
-                    onChange={(e) =>
-                      setRow(r.key, { ...r.line, unitLabel: e.target.value || null, canonicalUnit: null })
+                  <UnitCell
+                    unitLabel={r.line.unitLabel}
+                    canonicalUnit={r.line.canonicalUnit}
+                    idSuffix={r.key}
+                    onChange={(choice) =>
+                      setDraftRows((rows) =>
+                        rows.map((x) =>
+                          x.key === r.key
+                            ? {
+                                key: x.key,
+                                unitIncomplete: choice.incomplete,
+                                line: {
+                                  ...x.line,
+                                  unitLabel: choice.unitLabel,
+                                  canonicalUnit: choice.canonicalUnit,
+                                },
+                              }
+                            : x,
+                        ),
+                      )
                     }
-                    data-testid="new-line-unit"
                   />
                 </td>
                 <td className="num">

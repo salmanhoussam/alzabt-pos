@@ -155,6 +155,11 @@ jobs:
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
           node e2e/invoice-drafts.mjs
 
+      - name: Invoice line UNIT control against the INSTALLED app (dropdown + Other, survives finalize)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/invoice-units.mjs
+
       - name: Invoice LOGO frozen and embedded in the PDF (INSTALLED app)
         run: |
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
