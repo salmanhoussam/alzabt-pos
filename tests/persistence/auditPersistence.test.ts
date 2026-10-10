@@ -147,10 +147,23 @@ describe("🔴 no secret is ever persisted", () => {
         if (r.metadata_json) walk(JSON.parse(r.metadata_json), `${r.id}.metadata_json`);
       }
 
-      // And the raw text of the whole table, as a last resort check.
-      const raw = JSON.stringify(rows).replace(/"file_sha256":"[0-9a-f]{64}"/g, '"file_sha256":""');
+      // And the raw text of the PAYLOAD COLUMNS, as a last resort check.
+      //
+      // 🔴 NOT the whole table. This scanned JSON.stringify(rows) for bare substrings including
+      // "PIN", and it passes today only because makeHarness clears must_reset_pin through the
+      // repository, so no OPERATOR_PIN_RESET row ever reaches this trail. The first test here that
+      // exercises a real operator event would fail on its own event type — which is not a leak,
+      // because that event type IS the fact the trail must record. The identical trap has now been
+      // sprung three times in the E2E suite; this is the fourth instance, disarmed before it fires.
+      //
+      // The keys are already checked properly by walk() above. What this adds is a scan for a
+      // secret hiding in a VALUE, so it looks only where values live.
+      const payloads = rows
+        .map((r) => `${r.changed_json ?? ""}|${r.metadata_json ?? ""}`)
+        .join("|")
+        .replace(/"file_sha256":"[0-9a-f]{64}"/g, '"file_sha256":""');
       for (const needle of ["pin", "Pin", "PIN", "hash", "token", "secret", "1111", "2222"]) {
-        expect(raw, `the stored trail must not contain '${needle}'`).not.toContain(needle);
+        expect(payloads, `no audit payload may contain '${needle}'`).not.toContain(needle);
       }
     } finally {
       h.db.close();

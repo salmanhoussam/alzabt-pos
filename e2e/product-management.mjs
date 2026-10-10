@@ -345,9 +345,45 @@ await app.close();
     );
 
     // No PIN, no hash, no token anywhere in the stored trail.
-    const raw = JSON.stringify(rows);
-    for (const needle of ["pin", "Pin", "PIN", "hash", "token", "secret", "1111"]) {
-      assert(!raw.includes(needle), `the stored audit trail contains no '${needle}'`);
+    //
+    // 🔴 TRANSITION, AND THE THIRD TIME THIS EXACT TRAP HAS BEEN SPRUNG IN THIS REPOSITORY. This
+    // scanned the serialised rows for the bare substrings ["pin","Pin","PIN","hash","token",
+    // "secret","1111"], which was airtight while the trail held only product events. Migration 8
+    // added OPERATOR_PIN_RESET — so 'PIN' now matches an EVENT TYPE, which is not a leak: that
+    // event type IS the fact the trail is required to record. The same mistake was corrected once
+    // in the unit tests and once in operator-accounts.mjs before this one.
+    //
+    // The lesson, written where the next person will hit it: a credential check must name WHERE it
+    // is looking. A blanket substring scan over a growing trail eventually matches the trail's own
+    // vocabulary, and the failure looks like a leak while the leak it was built to catch could be
+    // sitting in a key it never inspects.
+    //
+    // So: event types are excluded by construction, every PAYLOAD key is checked against the audit
+    // domain's own secret pattern, and the values that must never appear are checked as values.
+    const SECRET_KEY = /pin|password|passwd|token|secret|credential|api[_-]?key|hash/i;
+    for (const row of rows) {
+      for (const field of ["changed_json", "metadata_json"]) {
+        if (row[field] === null || row[field] === undefined) continue;
+        const parsed = JSON.parse(row[field]);
+        for (const key of Object.keys(parsed)) {
+          assert(!SECRET_KEY.test(key), `no audited field name is a credential (${row.event_type}.${field} -> ${key})`);
+        }
+        assert(
+          !/1111|2222/.test(row[field]),
+          `no bootstrap PIN value in ${row.event_type}.${field} (${row[field].slice(0, 120)})`,
+        );
+      }
+      // actor_name is a person's name and actor_id an operator id; neither may carry a credential.
+      assert(!SECRET_KEY.test(row.actor_id) && !SECRET_KEY.test(row.actor_name), "no credential in the actor columns");
+    }
+    // And the real stored credentials, read back out of the operators table, appear nowhere at all.
+    {
+      const creds = db.prepare("SELECT pin_salt_hex AS s, pin_hash_hex AS h FROM operators").all();
+      assert(creds.length > 0, "(there are credentials to look for)");
+      const raw = JSON.stringify(rows);
+      for (const c of creds) {
+        assert(!raw.includes(c.s) && !raw.includes(c.h), "no stored salt or hash appears in the audit trail");
+      }
     }
   } finally {
     db.close();
