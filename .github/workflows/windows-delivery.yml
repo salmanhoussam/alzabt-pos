@@ -135,6 +135,13 @@ jobs:
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
           node e2e/smoke.mjs
 
+      # Operator accounts (migration 8). Placed immediately after the smoke test because it is about
+      # the DOOR: mandatory setup, the two roles, and a cashier reaching window.pos directly.
+      - name: Operator accounts against the INSTALLED app (setup, two roles, direct-bridge refusals)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/operator-accounts.mjs
+
       - name: Local catalog import (synthetic Arabic CSV) against the INSTALLED app
         run: |
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE

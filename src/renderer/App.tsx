@@ -130,7 +130,7 @@ export function App() {
         >
           {t("lang.toggle")}
         </button>
-        <button className="btn ghost" onClick={logout}>
+        <button className="btn ghost" onClick={logout} data-testid="logout">
           {t("action.logout")}
         </button>
       </header>
