@@ -129,14 +129,22 @@ export class OperatorService {
   }
 
   /**
-   * The operator's name as it is RIGHT NOW, or null when there is no such row.
+   * The operator's DURABLE row as it is right now: name, role and whether they are still active.
    *
-   * Used by every ledger and audit write, so a snapshot records the name that was true at the
-   * moment of the act rather than the one cached in the session at login. Returns null rather than
-   * throwing: a missing row must not be what stops a sale from being recorded.
+   * 🔴 THIS IS LIVE AUTHORIZATION. Every authenticated business action re-reads this, so the
+   * CURRENT role decides — a promotion or a demotion takes effect on the next action with no
+   * logout and no restart — and the CURRENT name is what a new ledger snapshot records.
+   *
+   * Returns null when there is no such row, and the caller FAILS CLOSED on it. An earlier version
+   * of this returned just the name and fell back to the session's copy so that a missing row could
+   * not stop a sale being recorded. That was the wrong trade: a session whose account has been
+   * deleted or deactivated must stop working, and "the sale is refused" is the correct answer to a
+   * torn database, not a regrettable one.
    */
-  currentNameOf(id: string): string | null {
-    return this.deps.operators.findById(id)?.name ?? null;
+  liveRow(id: string): { readonly id: string; readonly name: string; readonly role: OperatorRole; readonly isActive: boolean } | null {
+    const row = this.deps.operators.findById(id);
+    if (!row) return null;
+    return { id: row.id, name: row.name, role: row.role, isActive: row.is_active === 1 };
   }
 
   /** Everyone, for the owner's management list. */

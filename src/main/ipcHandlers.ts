@@ -230,11 +230,13 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   function authorize(channel: ChannelName): void {
     const access = accessFor(channel);
     if (access === "public") return;
-    const role = service.currentRole();
-    if (!service.currentCashier()) {
-      throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
-    }
+    // 🔴 LIVE. `requireLiveRole` re-reads the durable operator row and fails closed on a missing or
+    // deactivated account, so a promotion or demotion takes effect on the NEXT action with no
+    // logout and no restart, and a deactivated operator's session stops working immediately.
+    const role = service.requireLiveRole();
     if (access === "owner" && role !== "owner") {
+      // 'admin' exists in the schema CHECK as a reserved value and is never assignable, so it can
+      // only arrive from a hand-edited database. It is NOT an owner, and lands here.
       throw new DomainError("NOT_AUTHORIZED", "Only the shop owner can do that");
     }
   }

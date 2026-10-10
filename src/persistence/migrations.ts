@@ -835,10 +835,16 @@ BEGIN SELECT RAISE(ABORT, 'ledger: voids cannot be deleted'); END;
     // not have known would be a permanent lie on an append-only trail. Real tiers begin
     // PROSPECTIVELY. History will contain a visible boundary and that is the truthful outcome.
     //
-    // THE ROLE CHECK ADMITS 'admin' AND v1 NEVER WRITES IT. A CHECK cannot be widened later
-    // without rebuilding this table, so reserving the value now is the difference between a future
-    // config change and a future migration. `actor_tier` made exactly this choice in migration 6
-    // and is the reason the audit half of this work needed no new vocabulary.
+    // 🔴 TWO ROLES IN THE PRODUCT: OWNER IS THE ADMINISTRATOR, CASHIER IS THE EMPLOYEE. Confirmed
+    // 2026-10-10. There is no separate Admin account type.
+    //
+    // The CHECK admits 'admin' as a RESERVED, UNUSED value, and it stays only because it is already
+    // here: a CHECK cannot be widened without rebuilding this table, and rebuilding it merely to
+    // remove a value nothing writes would add risk for no gain. The application refuses it at the
+    // IPC boundary AND in the service, bootstrap never assigns it, and no v1 path writes
+    // actor_tier='admin'. A hand-edited 'admin' row is not an owner — the guard asks whether the
+    // role IS owner, never whether it is cashier — so it fails closed rather than falling into a
+    // gap. Asserted in tests/main/channelPolicy.test.ts.
     //
     // 🔴 ROLLBACK CHANGES MEANING WITH THIS MIGRATION, and it is the first time in this product's
     // history. Every installer up to b18b5b4 is schema v7, so rolling back meant reinstalling an

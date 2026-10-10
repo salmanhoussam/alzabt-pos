@@ -244,3 +244,109 @@ describe("a CASHIER session is refused every owner-only channel", () => {
     }
   });
 });
+
+/**
+ * 🔴 THE ROLE MODEL IS LIVE. Approved 2026-10-10: every authenticated business action re-reads the
+ * durable operator row, so the CURRENT role decides. A promotion or a demotion applies on the next
+ * action with no logout and no restart, and a deactivated account stops working immediately.
+ *
+ * There are exactly TWO roles in the product: OWNER is the administrator, CASHIER is the employee.
+ * `admin` survives in the schema CHECK as a reserved value only and is unreachable from the
+ * application — asserted below rather than assumed.
+ */
+describe("live role changes take effect on the next action", () => {
+  const withApp = (fn: (ctx: { h: ReturnType<typeof makeHarness>; ipc: ReturnType<typeof syncHandlers> }) => void) => {
+    const t = tempDir();
+    const h = makeHarness(t.dbPath, { login: false });
+    try {
+      fn({ h, ipc: syncHandlers(createIpcHandlers(h.service)) });
+    } finally {
+      h.db.close();
+      t.cleanup();
+    }
+  };
+
+  const OWNER = { id: "cashier-01", name: "Cashier One", role: "owner" as const };
+  const code = (r: unknown) => (r as { ok: boolean; error?: { code: string } }).error?.code;
+  const ok = (r: unknown) => (r as { ok: boolean }).ok;
+
+  it("🔴 CASHIER -> OWNER applies immediately, with the cashier still signed in", () => {
+    withApp(({ h, ipc }) => {
+      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      // As a cashier: refused.
+      expect(code(ipc.listOperators(undefined))).toBe("NOT_AUTHORIZED");
+
+      // Promoted by the owner from another surface — the cashier's session is never touched.
+      h.operators.setRole(OWNER, "cashier-02", "owner");
+
+      // The very next call succeeds. No logout, no restart.
+      expect(ok(ipc.listOperators(undefined))).toBe(true);
+    });
+  });
+
+  it("🔴 OWNER -> CASHIER applies immediately when another active owner remains", () => {
+    withApp(({ h, ipc }) => {
+      // A second owner, so the last-owner rule is not what decides this test.
+      h.service.login("cashier-01", "1111");
+      h.operators.setRole(OWNER, "cashier-02", "owner");
+      h.service.logout();
+
+      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      expect(ok(ipc.listOperators(undefined))).toBe(true);
+
+      // Demoted by the OTHER owner — not by themselves, which is separately refused.
+      h.operators.setRole({ id: "cashier-01", name: "Cashier One", role: "owner" }, "cashier-02", "cashier");
+
+      expect(code(ipc.listOperators(undefined))).toBe("NOT_AUTHORIZED");
+      // ...and they can still do the cashier's job.
+      expect(ok(ipc.getTodaySales(undefined))).toBe(true);
+    });
+  });
+
+  it("🔴 the LAST ACTIVE OWNER cannot be demoted or deactivated, through the real channels", () => {
+    withApp(({ ipc }) => {
+      ipc.login({ cashierId: "cashier-01", pin: "1111" });
+      expect(code(ipc.setOperatorRole({ operatorId: "cashier-01", role: "cashier" }))).toBe("SELF_ROLE_CHANGE");
+      expect(code(ipc.setOperatorActive({ operatorId: "cashier-01", isActive: false }))).toBe(
+        "LAST_OWNER_PROTECTED",
+      );
+      // Still an owner, still active, still able to act.
+      expect(ok(ipc.listOperators(undefined))).toBe(true);
+    });
+  });
+
+  it("🔴 a deactivated operator's OPEN SESSION stops working at once", () => {
+    withApp(({ h, ipc }) => {
+      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      expect(ok(ipc.getTodaySales(undefined))).toBe(true);
+      h.operators.setActive(OWNER, "cashier-02", false);
+      expect(code(ipc.getTodaySales(undefined))).toBe("OPERATOR_INACTIVE");
+    });
+  });
+
+  it("🔴 'admin' is UNREACHABLE from the application — two roles, not three", () => {
+    withApp(({ ipc }) => {
+      ipc.login({ cashierId: "cashier-01", pin: "1111" });
+      // Not creatable...
+      expect(code(ipc.createOperator({ name: "x", role: "admin", pin: "1234" }))).toBe("INVALID_INPUT");
+      // ...and nobody can be changed into one.
+      expect(code(ipc.setOperatorRole({ operatorId: "cashier-02", role: "admin" }))).toBe("INVALID_INPUT");
+      // Bootstrap assigned owner and cashier only.
+      const roles = (
+        ipc.listOperators(undefined) as { ok: true; data: Array<{ role: string }> }
+      ).data.map((o) => o.role);
+      expect(roles.sort()).toEqual(["cashier", "owner"]);
+    });
+  });
+
+  it("a hand-edited 'admin' row is NOT an owner — it lands in the refusal, not in a gap", () => {
+    withApp(({ h, ipc }) => {
+      // The only way to reach this value is editing the database directly. It must not be a
+      // privilege escalation: the guard asks "is the role owner", not "is it cashier".
+      h.db.prepare("UPDATE operators SET role = 'admin' WHERE id = 'cashier-02'").run();
+      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      expect(code(ipc.listOperators(undefined))).toBe("NOT_AUTHORIZED");
+      expect(code(ipc.exportBackup(undefined))).toBe("NOT_AUTHORIZED");
+    });
+  });
+});

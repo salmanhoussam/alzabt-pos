@@ -112,14 +112,30 @@ describe("a sale snapshots the operator who made it", () => {
     expect(saleRow(late).name).toBe("جعفر صالح");
   });
 
-  it("falls back to the session name when the operator row has gone", () => {
-    // An operator is never deleted by the application, so this is a torn-database case rather than
-    // a reachable one. A missing name must not be what stops a sale from being recorded — the
-    // column is NOT NULL with a non-empty CHECK.
+  it("🔴 FAILS CLOSED when the operator row has gone — reversed on 2026-10-10", () => {
+    // This test previously asserted the OPPOSITE: that the sale still recorded, falling back to the
+    // session's cached name, on the grounds that a torn database must not stop a sale. Salman's
+    // live-authorization rule reverses it, and the reversal is right — a session whose account no
+    // longer exists must stop working, and "the sale is refused" is the correct answer here rather
+    // than a regrettable one. The old expectation was
+    // `{ id: "cashier-02", name: "Cashier Two" }`.
     h.service.login("cashier-02", "2222");
     h.db.prepare("DELETE FROM operators WHERE id = 'cashier-02'").run();
-    const saleId = sell();
-    expect(saleRow(saleId)).toEqual({ id: "cashier-02", name: "Cashier Two" });
+    expect(() => sell()).toThrow(/no longer exists/);
+    expect(h.db.prepare("SELECT count(*) AS n FROM sales").get()).toEqual({ n: 0n });
+  });
+
+  it("🔴 FAILS CLOSED the moment the operator is deactivated — no logout needed", () => {
+    h.service.login("cashier-02", "2222");
+    const before = sell();
+    expect(saleRow(before).id).toBe("cashier-02");
+
+    // The owner deactivates them from another surface while their session is still open.
+    h.operators.setActive(OWNER, "cashier-02", false);
+
+    // Their very next action is refused, without waiting for a logout or a restart.
+    expect(() => sell()).toThrow(/deactivated/);
+    expect(h.db.prepare("SELECT count(*) AS n FROM sales").get()).toEqual({ n: 1n });
   });
 });
 

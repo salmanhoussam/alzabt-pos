@@ -305,9 +305,18 @@ export class PosService {
     return this.cashier;
   }
 
-  /** The signed-in operator's role, or null when nobody is signed in. Read by the channel guard. */
+  /**
+   * The live role, or null when nobody is signed in or the account is no longer usable.
+   *
+   * Non-throwing, for the places that only want to LABEL a session (the login DTO). The channel
+   * guard uses `requireLiveRole`, which fails closed with a reason.
+   */
   currentRole(): OperatorRole | null {
-    return this.role;
+    try {
+      return this.liveSession().role;
+    } catch {
+      return null;
+    }
   }
 
   /** The operator service, for the management channels. Null on a terminal without accounts. */
@@ -317,9 +326,7 @@ export class PosService {
 
   /** The session the management methods need — identity plus the role they act under. */
   requireOperatorSession(): { id: string; name: string; role: OperatorRole } {
-    const cashier = this.requireCashier();
-    if (!this.role) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
-    return { id: cashier.id, name: cashier.name, role: this.role };
+    return { ...this.liveSession() };
   }
 
   /**
@@ -356,10 +363,45 @@ export class PosService {
    * when the row has gone — never to an empty string, because `actor_name` is NOT NULL with a
    * non-empty CHECK and a missing name must not be what stops a sale from being recorded.
    */
-  private requireCashier(): Cashier {
+  /**
+   * The live operator behind the session. FAILS CLOSED.
+   *
+   * 🔴 RE-READ ON EVERY AUTHENTICATED ACTION, which is what makes the role model live:
+   *   - no session            -> NOT_LOGGED_IN
+   *   - row gone              -> OPERATOR_NOT_FOUND. A session whose account no longer exists must
+   *                              stop working. An earlier version fell back to the session's cached
+   *                              name so a torn database could not stop a sale; that was the wrong
+   *                              trade and this reverses it.
+   *   - row deactivated       -> OPERATOR_INACTIVE, immediately, without waiting for a logout.
+   *   - role                  -> whatever the ROW says now, so a promotion or demotion applies on
+   *                              the next action.
+   *   - name                  -> whatever the ROW says now, which is what a new ledger or audit
+   *                              snapshot records.
+   *
+   * On a terminal with no operator accounts wired — tests, and a database predating migration 8 —
+   * there is no durable row to re-read, so the session is used as it was. That path cannot occur in
+   * production: migration 8 always creates the table and both rows.
+   */
+  private liveSession(): { readonly id: string; readonly name: string; readonly role: OperatorRole } {
     if (!this.cashier) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
-    const current = this.deps.operators?.currentNameOf(this.cashier.id);
-    return current ? { id: this.cashier.id, name: current } : this.cashier;
+    const ops = this.deps.operators;
+    if (!ops) return { id: this.cashier.id, name: this.cashier.name, role: this.role ?? "cashier" };
+    const row = ops.liveRow(this.cashier.id);
+    if (!row) throw new DomainError("OPERATOR_NOT_FOUND", "This account no longer exists — sign in again");
+    if (!row.isActive) {
+      throw new DomainError("OPERATOR_INACTIVE", "This account has been deactivated — sign in again");
+    }
+    return { id: row.id, name: row.name, role: row.role };
+  }
+
+  /** The live role, for the channel guard. Throws exactly as `liveSession` does. */
+  requireLiveRole(): OperatorRole {
+    return this.liveSession().role;
+  }
+
+  private requireCashier(): Cashier {
+    const live = this.liveSession();
+    return { id: live.id, name: live.name };
   }
 
   // ── Catalog ─────────────────────────────────────────────────────────────────────────────────────
