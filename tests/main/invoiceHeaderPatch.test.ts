@@ -246,10 +246,41 @@ describe("the renderer cannot reintroduce the stale full-header write", () => {
     expect(flushAt, "the flush happens AFTER the invoice is committed").toBeLessThan(finalizeAt);
   });
 
-  it("leaving the draft flushes too, and is not the same action as discarding", () => {
-    const leave = sheet.slice(sheet.indexOf("const leave = async"), sheet.indexOf("const finalize = async"));
-    expect(leave).toContain("await flushHeader()");
-    expect(leave).toContain("onClosed()");
+  it("leaving the draft NEVER saves silently, and is not the same action as discarding", () => {
+    // 🔴 THE RULE CHANGED ON PURPOSE, so the old assertion is replaced rather than relaxed.
+    // It used to require `leave` to call `await flushHeader()` — an unconditional silent save on
+    // exit. Salman's approved rule (2026-10-09): a CLEAN draft exits immediately, a DIRTY one
+    // asks, with three choices. A silent save hides a decision the operator did not make; an
+    // unconditional prompt punishes leaving a screen that has not changed.
+    const leave = sheet.slice(sheet.indexOf("const leave = ()"), sheet.indexOf("const saveAndLeave"));
+    expect(leave, "leave must not write anything by itself").not.toContain("flushHeader");
+    expect(leave, "a dirty draft opens the exit dialog").toContain("setExiting(true)");
+    expect(leave, "a clean draft closes at once").toContain("onClosed()");
+
+    // Saving on exit is its own named path, and that one DOES flush.
+    const saveAndLeave = sheet.slice(sheet.indexOf("const saveAndLeave"), sheet.indexOf("const print ="));
+    expect(saveAndLeave).toContain("await flushHeader()");
+    expect(saveAndLeave).toContain("onClosed()");
+
+    // The dirty exit offers exactly three choices, and leaving without saving is ghost-danger —
+    // it discards work, but it must not out-weigh "save and leave" in an action row.
+    for (const id of ["exit-save", "exit-discard", "exit-cancel"]) {
+      expect(sheet, `the exit dialog offers ${id}`).toContain(`data-testid="${id}"`);
+    }
+
+    // The dirty check compares what is TYPED against what is STORED. A boolean set by onChange
+    // would nag about a field the operator restored to its original value.
+    expect(sheet).toContain("const isDirty =");
+
+    // 🔴 AND IT COMPARES LIKE WITH LIKE. `paid` is a MoneyDto while its input holds a decimal
+    // string, so indexing the invoice generically made EVERY draft look dirty — the exit dialog
+    // appeared on a draft saved a second earlier, and the installed-app run caught it. The
+    // comparison goes through storedDisplay(), which mirrors each field's own defaultValue.
+    const dirty = sheet.slice(sheet.indexOf("const isDirty ="), sheet.indexOf("const snapshot ="));
+    expect(dirty, "isDirty must not index the invoice generically").not.toContain("Record<string, string | null>");
+    expect(dirty).toContain("storedDisplay(key)");
+    const stored = sheet.slice(sheet.indexOf("const storedDisplay ="), sheet.indexOf("const isDirty ="));
+    expect(stored, "paid is a MoneyDto and needs its own branch").toContain('key === "paid"');
     // Discard is separate, and reaches onClosed only after an explicit confirmation.
     expect(sheet).toContain('data-testid="discard-confirm-yes"');
     // 🔴 THE CALL, NOT THE WORD. The first version asserted `not.toContain("window.confirm")` and

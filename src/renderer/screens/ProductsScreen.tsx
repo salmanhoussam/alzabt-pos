@@ -52,7 +52,7 @@ export function ProductsScreen() {
     return products.filter((p) => matchesSearch([p.nameAr, p.nameEn, p.sku], query));
   }, [products, query]);
 
-  if (products === null) return <div className="center muted">…</div>;
+  if (products === null) return <div className="center muted">{t("common.loading")}</div>;
 
   return (
     <div className="catalog-admin">
@@ -74,11 +74,21 @@ export function ProductsScreen() {
 
       <p className="muted small">{t("products.searchHint")}</p>
       <p className="muted small" data-testid="product-count">
-        {products.length} {t("products.count")} · {shown.length} {t("products.countShown")}
+        {/* 🔴 EACH NUMBER ISOLATED. Interpolated bare into RTL text, "0 … · 0 …" reordered until
+            the two digits sat together and the separator was unreadable. */}
+        <bdi>{products.length}</bdi> {t("products.count")} · <bdi>{shown.length}</bdi>{" "}
+        {t("products.countShown")}
       </p>
 
       {products.length === 0 ? (
-        <p className="center muted">{t("products.empty")}</p>
+        /* Telling the operator to add the first product while the button sits in the opposite
+           corner is an instruction, not an affordance. */
+        <div className="empty-state" data-testid="products-empty">
+          <p className="muted">{t("products.empty")}</p>
+          <button className="btn primary" onClick={() => setEditing({ mode: "add" })}>
+            {t("action.add")}
+          </button>
+        </div>
       ) : shown.length === 0 ? (
         <p className="center muted" data-testid="no-match">
           {t("products.noMatch")}
@@ -112,30 +122,33 @@ export function ProductsScreen() {
                     {t(p.source === "manual" ? "products.source.manual" : "products.source.import")}
                   </span>
                 </td>
-                <td dir="auto">{p.sku ?? "—"}</td>
+                <td>{p.sku ? <bdi dir="ltr">{p.sku}</bdi> : "—"}</td>
                 <td className="num">
-                  {p.priceDecimal} {p.price.currency}
+                  {/* One isolated run: amount and currency together, never split. */}
+                  <bdi dir="ltr">{`${p.priceDecimal} ${p.price.currency}`}</bdi>
                   {p.priceNeedsReview && <span className="badge warn">{t("products.priceNeedsReview")}</span>}
                 </td>
                 <td>
                   {unit(p.baseUnit)}
+                  {/* A bare "0.001" said nothing. Every badge carries a word, never a value. */}
                   {FRACTIONAL_SALE_UNITS.includes(p.baseUnit) && (
-                    <span className="badge faint" title={t("products.fractionsAllowed")}>
-                      0.001
+                    <span className="badge state" title={t("products.fractionsAllowed")}>
+                      {t("products.fractional")}
                     </span>
                   )}
                 </td>
                 <td>
-                  <span className={p.isActive ? "badge ok" : "badge"}>
+                  <span className={p.isActive ? "badge ok" : "badge state"}>
                     {t(p.isActive ? "products.active" : "products.inactive")}
                   </span>
                 </td>
                 <td className="admin-actions">
-                  <button className="btn ghost" onClick={() => setEditing({ mode: "edit", product: p })}>
+                  <button className="btn small" onClick={() => setEditing({ mode: "edit", product: p })}>
                     {t("action.edit")}
                   </button>
+                  {/* Deactivating hides a product from sale: ghost-danger, not a twin of Edit. */}
                   <button
-                    className="btn ghost"
+                    className={p.isActive ? "btn danger ghost small" : "btn small"}
                     onClick={async () => {
                       try {
                         await call(pos().setProductActive({ id: p.id, isActive: !p.isActive }));

@@ -48,11 +48,11 @@ writeFileSync(BAD, [HEADER, "1,مياه,,$1.00,USD,piece,0"].join("\n") + "\n", 
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page = await app.firstWindow();
-  await page.waitForSelector("text=Select cashier", { timeout: 30000 });
+  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
   await page.getByRole("button", { name: "Cashier One" }).click();
   for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.getByRole("button", { name: "Log in" }).click();
-  await page.waitForSelector("text=Current sale");
+  await page.locator('[data-testid="login-submit"]').click();
+  await page.waitForSelector('[data-testid="cart"]');
   return { app, page };
 }
 
@@ -80,7 +80,7 @@ assert(buildLine === `Alzabt POS ${EXPECTED.version} · Build ${EXPECTED.build}`
 
 await pickFile(app, BAD);
 await tools(page);
-await page.getByRole("button", { name: "Import catalog" }).click();
+await page.locator('[data-testid="import-catalog"]').click();
 await page.waitForSelector("text=Catalog NOT imported");
 assert(await page.locator(".import-report").getByText("Line 2").isVisible(), "a malformed price is rejected with its line number");
 await page.getByRole("button", { name: "OK" }).click();
@@ -90,7 +90,7 @@ assert((await page.locator("button.product").count()) === 8, "rejected import ch
 
 await pickFile(app, GOOD);
 await tools(page);
-await page.getByRole("button", { name: "Import catalog" }).click();
+await page.locator('[data-testid="import-catalog"]').click();
 await page.waitForSelector("text=Catalog imported");
 const report = await page.locator(".import-report").innerText();
 log("import report:", report.replace(/\s+/g, " "));
@@ -104,8 +104,14 @@ assert((await page.locator("button.product").count()) === 4, "grid shows exactly
 const names = await page.locator("button.product .product-name").allInnerTexts();
 log("rendered names:", JSON.stringify(names));
 assert(JSON.stringify(names) === JSON.stringify(["بيبسي 330 مل", "مياه", 'علبة بسكويت 2"', "شيبس"]), "Arabic names render exactly (SQLite → IPC → renderer)");
-assert((await product(page, "شيبس").innerText()).includes("price?"), "placeholder price is marked on the button");
-assert((await product(page, "بسكويت").innerText()).includes("/ box"), "box unit is shown");
+assert(
+  (await product(page, "شيبس").locator('[data-testid="price-review"]').count()) === 1,
+  "placeholder price is marked on the button",
+);
+// 🔴 EITHER LANGUAGE. The card's unit word is translated now — an Arabic terminal shows «علبة» —
+// so pinning "box" would assert the translation rather than the fact the unit is shown at all.
+const boxCard = (await product(page, "بسكويت").innerText()).replace(/\s+/g, " ");
+assert(/\/\s*(box|علبة)/.test(boxCard), `box unit is shown ("${boxCard}")`);
 await page.screenshot({ path: SHOTS + "catalog-01-imported.png" });
 
 await page.locator("input.search").fill("مياه");
@@ -117,13 +123,13 @@ await product(page, "بيبسي").click();
 await product(page, "بسكويت").click();
 const total = (await page.locator(".total strong").innerText()).trim();
 assert(total === "14.00 USD", "cart: 2×0.50 + 1.00 + 12.00 = 14.00 USD");
-await page.getByRole("button", { name: "Complete sale" }).click();
-await page.getByRole("button", { name: "Cash" }).click();
-await page.waitForSelector("text=Receipt #1");
+await page.locator('[data-testid="complete-sale"]').click();
+await page.locator('[data-testid="pay-cash"]').click();
+await page.waitForSelector('[data-testid="receipt-number"]:has-text("#1")');
 const receipt = await page.locator(".receipt-table").innerText();
 assert(receipt.includes("مياه") && receipt.includes("بيبسي 330 مل") && receipt.includes('علبة بسكويت 2"'), "receipt shows the Arabic names");
 await page.screenshot({ path: SHOTS + "catalog-02-receipt.png" });
-await page.getByRole("button", { name: "New sale" }).click();
+await page.locator('[data-testid="new-sale"]').click();
 await app.close();
 
 // ── Run 2: restart ──────────────────────────────────────────────────────────────────────────────
@@ -134,21 +140,21 @@ await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
 assert((await page.locator(".history-table tbody tr").count()) === 1, "after restart the sale is in history");
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
-const stats = await page.locator(".stats").innerText();
+await page.waitForSelector('[data-testid="today-net"]');
+const stats = await page.locator(".card.today").innerText();
 assert(stats.includes("14.00 USD"), "today's sales show 14.00 USD after restart");
 
 // ── Export catalog → re-import: nothing changes ────────────────────────────────────────────────
 const EXPORT = join(home, "exported-catalog.csv");
 await saveTo(app, EXPORT);
 await tools(page);
-await page.getByRole("button", { name: "Export catalog" }).click();
+await page.locator('[data-testid="export-catalog"]').click();
 await page.waitForSelector("text=Catalog exported");
 await page.getByRole("button", { name: "OK" }).click();
 const exported = readFileSync(EXPORT, "utf8");
 assert(exported.startsWith("\uFEFF") && exported.includes("بيبسي 330 مل") && exported.includes("4,شيبس,,0.01,USD,piece,1"), "exported CSV has a BOM and the Arabic names exactly");
 await pickFile(app, EXPORT);
-await page.getByRole("button", { name: "Import catalog" }).click();
+await page.locator('[data-testid="import-catalog"]').click();
 await page.waitForSelector("text=Catalog imported");
 const reimport = await page.locator(".import-report").innerText();
 assert(/0 new, 0 updated, 4 unchanged/.test(reimport), "re-importing the exported file changes nothing");
@@ -158,7 +164,7 @@ await page.getByRole("button", { name: "OK" }).click();
 const BACKUP = join(home, "exported-backup.sqlite");
 await saveTo(app, BACKUP);
 await tools(page);
-await page.getByRole("button", { name: "Export backup" }).click();
+await page.locator('[data-testid="export-backup"]').click();
 await page.waitForSelector("text=Backup exported");
 await page.getByRole("button", { name: "OK" }).click();
 await app.close();

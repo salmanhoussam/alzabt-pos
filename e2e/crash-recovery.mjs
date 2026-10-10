@@ -244,7 +244,7 @@ for (const [name, action] of [
     30000,
   );
   try {
-    await page.waitForSelector("text=Select cashier", { timeout: 30000 });
+    await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
   } catch (err) {
     const dom = await page.evaluate(() => document.getElementById("root")?.innerHTML?.slice(0, 2000) ?? "NO ROOT");
     const url = page.url();
@@ -260,12 +260,12 @@ for (const [name, action] of [
   }
   await page.getByRole("button", { name: "Cashier One" }).click();
   for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.getByRole("button", { name: "Log in" }).click();
-  await page.waitForSelector("text=Current sale");
+  await page.locator('[data-testid="login-submit"]').click();
+  await page.waitForSelector('[data-testid="cart"]');
   await page.locator("button.product", { hasText: "Espresso" }).click();
-  await page.getByRole("button", { name: "Complete sale" }).click();
-  await page.getByRole("button", { name: "Cash" }).click();
-  await page.waitForSelector("text=Receipt #1");
+  await page.locator('[data-testid="complete-sale"]').click();
+  await page.locator('[data-testid="pay-cash"]').click();
+  await page.waitForSelector('[data-testid="receipt-number"]:has-text("#1")');
   const mainPid = await app.evaluate(() => process.pid);
   const launcherPid = app.process().pid; // read BEFORE the kill: the handle is disposed afterwards
   const before = listProcesses();

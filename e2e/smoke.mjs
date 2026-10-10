@@ -44,28 +44,43 @@ async function launch() {
     env,
   });
   const page = await app.firstWindow();
-  await page.waitForSelector("text=Select cashier", { timeout: 30000 });
+  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
   return { app, page };
 }
 
 async function login(page, name, pin) {
   await page.getByRole("button", { name }).click();
   for (const d of pin) await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.getByRole("button", { name: "Log in" }).click();
-  await page.waitForSelector("text=Current sale");
+  await page.locator('[data-testid="login-submit"]').click();
+  await page.waitForSelector('[data-testid="cart"]');
 }
 
 const product = (page, name) => page.locator("button.product", { hasText: name });
 const line = (page, name) => page.locator("li.line", { hasText: name });
 const totalText = async (page) => (await page.locator(".total strong").innerText()).trim();
 
+/**
+ * Reads one figure off Today's Sales.
+ *
+ * 🔴 BY TESTID, NOT BY LABEL TEXT. This used to walk `.stats dt` looking for "Net sales" — which
+ * depended on BOTH the English label and the <dl> markup. The screen is Arabic now and the layout
+ * is no longer a definition list, so either change alone would have broken it silently.
+ */
+const STAT_TESTID = {
+  "Completed sales": "today-completed",
+  "Voided sales": "today-voided",
+  "Gross sales": "today-gross",
+  "Voids": "today-void-amount",
+  "Net sales": "today-net",
+};
 async function stat(page, label) {
-  const dts = page.locator(".stats dt");
-  const n = await dts.count();
-  for (let i = 0; i < n; i++) {
-    if ((await dts.nth(i).innerText()).trim() === label) return (await page.locator(".stats dd").nth(i).innerText()).trim();
-  }
-  throw new Error("no stat " + label);
+  const id = STAT_TESTID[label];
+  // 🔴 A MISSING LABEL IS A BROKEN TEST, NOT A MISSING NUMBER. This map replaced a lookup by
+  // English label text, and the first version covered four of the screen's five figures — the
+  // void AMOUNT (distinct from the void COUNT) was left out and reported as "no stat Voids",
+  // which reads like the screen lost a figure rather than like the map being short.
+  if (!id) throw new Error(`no stat "${label}" — known: ${Object.keys(STAT_TESTID).join(", ")}`);
+  return (await page.locator(`[data-testid="${id}"]`).innerText()).trim();
 }
 
 // ── Run 1 ───────────────────────────────────────────────────────────────────────────────────────
@@ -102,12 +117,12 @@ await page.screenshot({ path: SHOTS + "01-login.png" });
 // Wrong PIN first.
 await page.getByRole("button", { name: "Cashier One" }).click();
 for (const d of "9999") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-await page.getByRole("button", { name: "Log in" }).click();
+await page.locator('[data-testid="login-submit"]').click();
 await page.waitForSelector("text=Cashier or PIN is incorrect");
 log("PASS wrong PIN refused");
 for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-await page.getByRole("button", { name: "Log in" }).click();
-await page.waitForSelector("text=Current sale");
+await page.locator('[data-testid="login-submit"]').click();
+await page.waitForSelector('[data-testid="cart"]');
 
 // Cart editing.
 await product(page, "Espresso").click();
@@ -115,30 +130,36 @@ await product(page, "Espresso").click();
 await product(page, "Fresh Orange Juice").click();
 await product(page, "Butter Croissant").click();
 assert((await totalText(page)) === "11.35 USD", "cart total 2×2.50 + 4.10 + 2.25 = 11.35");
-await line(page, "Espresso").getByRole("button", { name: "Decrease" }).click();
-await line(page, "Butter Croissant").getByRole("button", { name: "Remove" }).click();
-await line(page, "Fresh Orange Juice").getByRole("button", { name: "Increase" }).click();
-await line(page, "Fresh Orange Juice").getByRole("button", { name: "Increase" }).click();
+await line(page, "Espresso").locator('[data-testid="line-dec"]').click();
+await line(page, "Butter Croissant").locator('[data-testid="line-remove-btn"]').click();
+await line(page, "Fresh Orange Juice").locator('[data-testid="line-inc"]').click();
+await line(page, "Fresh Orange Juice").locator('[data-testid="line-inc"]').click();
 assert((await totalText(page)) === "14.80 USD", "after edits 2.50 + 3×4.10 = 14.80 (IEEE-754 float gives 14.799999999999999)");
 await page.screenshot({ path: SHOTS + "02-cart.png" });
 
 // Complete sale — cash.
-await page.getByRole("button", { name: "Complete sale" }).click();
+await page.locator('[data-testid="complete-sale"]').click();
 await page.screenshot({ path: SHOTS + "03-payment.png" });
-await page.getByRole("button", { name: "Cash" }).click();
-await page.waitForSelector("text=Sale completed");
+await page.locator('[data-testid="pay-cash"]').click();
+await page.waitForSelector('[data-testid="receipt"]');
 const receipt1 = await page.locator(".receipt").innerText();
-assert(receipt1.includes("Receipt #1") && receipt1.includes("14.80 USD") && receipt1.includes("cash"), "receipt #1 shows 14.80 USD paid by cash");
+// 🔴 THE METHOD IS READ AS DATA, NOT AS PROSE. The receipt prints the method in the terminal
+// language, so asserting the English word "cash" tested the translation rather than the sale.
+const method1 = await page.locator('[data-testid="receipt-method"]').getAttribute("data-method");
+assert(
+  receipt1.includes("#1") && receipt1.includes("14.80 USD") && method1 === "cash",
+  `receipt #1 shows 14.80 USD paid by cash (method=${method1})`,
+);
 await page.screenshot({ path: SHOTS + "04-receipt.png" });
-await page.getByRole("button", { name: "New sale" }).click();
+await page.locator('[data-testid="new-sale"]').click();
 
 // Second sale — card.
 for (let i = 0; i < 3; i++) await product(page, "Mint Tea").click();
 assert((await totalText(page)) === "5.97 USD", "3 × 1.99 = 5.97");
-await page.getByRole("button", { name: "Complete sale" }).click();
-await page.getByRole("button", { name: "Card (external terminal)" }).click();
-await page.waitForSelector("text=Receipt #2");
-await page.getByRole("button", { name: "New sale" }).click();
+await page.locator('[data-testid="complete-sale"]').click();
+await page.locator('[data-testid="pay-card"]').click();
+await page.waitForSelector('[data-testid="receipt-number"]:has-text("#2")');
+await page.locator('[data-testid="new-sale"]').click();
 
 // Forged calls straight through window.pos (what a compromised renderer could try).
 const forged = await page.evaluate(async () => ({
@@ -151,7 +172,7 @@ assert(!forged.wrongTotal.ok && forged.wrongTotal.error.code === "TOTAL_MISMATCH
 
 // Today's sales.
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
+await page.waitForSelector('[data-testid="today-net"]');
 assert((await stat(page, "Completed sales")) === "2", "today: 2 completed sales");
 assert((await stat(page, "Gross sales")) === "20.77 USD", "today gross 14.80 + 5.97 = 20.77");
 assert((await stat(page, "Net sales")) === "20.77 USD", "today net 20.77 before void");
@@ -160,15 +181,15 @@ await page.screenshot({ path: SHOTS + "05-today.png" });
 // Void receipt #2 from history.
 await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
-await page.locator("tr", { hasText: "card" }).getByRole("button", { name: "Void" }).click();
-await page.getByPlaceholder("e.g. wrong item rung up").fill("customer cancelled");
+await page.locator('tr[data-payment-method="card"]').locator('[data-testid="history-void"]').click();
+await page.locator('[data-testid="void-reason"]').fill("customer cancelled");
 await page.screenshot({ path: SHOTS + "06-void-dialog.png" });
-await page.getByRole("button", { name: "Confirm void" }).click();
+await page.locator('[data-testid="void-confirm"]').click();
 await page.waitForSelector("tr.voided");
 await page.screenshot({ path: SHOTS + "07-history.png" });
 
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
+await page.waitForSelector('[data-testid="today-net"]');
 assert((await stat(page, "Voided sales")) === "1", "today: 1 voided");
 assert((await stat(page, "Gross sales")) === "20.77 USD", "gross unchanged by the void");
 assert((await stat(page, "Voids")) === "− 5.97 USD", "void total 5.97");
@@ -180,16 +201,16 @@ log("app closed normally");
 ({ app, page } = await launch());
 await login(page, "Cashier Two", "2222");
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
+await page.waitForSelector('[data-testid="today-net"]');
 assert((await stat(page, "Completed sales")) === "2" && (await stat(page, "Net sales")) === "14.80 USD", "after restart: 2 sales, net 14.80 persisted");
 
 // A third sale, then HARD-KILL the Electron main process (no clean shutdown) — the main process
 // only: its helper processes are left alone, exactly as an application crash would leave them.
 await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Water 500ml").click();
-await page.getByRole("button", { name: "Complete sale" }).click();
-await page.getByRole("button", { name: "Other" }).click();
-await page.waitForSelector("text=Receipt #3");
+await page.locator('[data-testid="complete-sale"]').click();
+await page.locator('[data-testid="pay-other"]').click();
+await page.waitForSelector('[data-testid="receipt-number"]:has-text("#3")');
 
 // The REAL Electron main PID, asked of the main process itself. NOT app.process().pid: on Windows
 // Playwright starts Electron through `cmd.exe /c` (shell: true), so app.process() is that wrapper —
@@ -228,7 +249,7 @@ assert(leftovers.length === 0, `all ${beforeKill.length} process(es) of the kill
 ({ app, page } = await launch());
 await login(page, "Cashier One", "1111");
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
+await page.waitForSelector('[data-testid="today-net"]');
 assert((await stat(page, "Completed sales")) === "3", "after the hard kill: sale #3 (committed just before it) survived");
 assert((await stat(page, "Net sales")) === "15.55 USD", "net 14.80 + 0.75 = 15.55");
 await page.screenshot({ path: SHOTS + "08-today-after-kill.png" });
@@ -237,12 +258,12 @@ await page.screenshot({ path: SHOTS + "08-today-after-kill.png" });
 await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Zaatar Manousheh").click();
 await product(page, "Zaatar Manousheh").click();
-await page.getByRole("button", { name: "Complete sale" }).click();
-await page.getByRole("button", { name: "Cash" }).click();
-await page.waitForSelector("text=Receipt #4");
-await page.getByRole("button", { name: "New sale" }).click();
+await page.locator('[data-testid="complete-sale"]').click();
+await page.locator('[data-testid="pay-cash"]').click();
+await page.waitForSelector('[data-testid="receipt-number"]:has-text("#4")');
+await page.locator('[data-testid="new-sale"]').click();
 await page.locator('[data-testid="tab-today"]').click();
-await page.waitForSelector(".stats");
+await page.waitForSelector('[data-testid="today-net"]');
 assert((await stat(page, "Completed sales")) === "4", "new sale #4 completed after recovery");
 assert((await stat(page, "Net sales")) === "18.55 USD", "net 15.55 + 2×1.50 = 18.55");
 await page.locator('[data-testid="tab-history"]').click();

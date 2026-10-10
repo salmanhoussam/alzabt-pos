@@ -86,6 +86,7 @@ export function InvoiceSheet({
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [discarding, setDiscarding] = useState(false);
+  const [exiting, setExiting] = useState(false);
   const [saved, setSaved] = useState(false);
   const [finalized, setFinalized] = useState<FinalizedNotice | null>(null);
   const [busy, setBusy] = useState(false);
@@ -164,6 +165,38 @@ export function InvoiceSheet({
     return next;
   };
 
+  /**
+   * What the stored row would put INTO each input.
+   *
+   * 🔴 NOT `invoice[key]` BLINDLY. `paid` is a MoneyDto — an object — while its input holds a
+   * decimal string, so comparing the two directly made every draft look dirty and the exit dialog
+   * appeared even on a draft saved a second earlier. Each entry mirrors that field's own
+   * defaultValue, so "typed" and "stored" are the same kind of thing before they are compared.
+   */
+  const storedDisplay = (key: (typeof INVOICE_HEADER_PATCH_KEYS)[number]): string => {
+    const inv = view?.invoice;
+    if (!inv) return "";
+    if (key === "paid") return inv.paid.minor === "0" ? "" : paidText(inv.paid.minor);
+    return (inv as unknown as Record<string, string | null>)[key] ?? "";
+  };
+
+  /**
+   * Is anything typed but not yet stored?
+   *
+   * 🔴 THE EXIT RULE NEEDS A REAL ANSWER, not an optimistic one. Comparing each bound input's
+   * CURRENT value against the value on the stored row is the only way to know; a flag set by
+   * onChange would miss a field restored to its original value and would nag for nothing.
+   */
+  const isDirty = (): boolean => {
+    const inv = view?.invoice;
+    if (!inv) return false;
+    for (const key of INVOICE_HEADER_PATCH_KEYS) {
+      if (!fieldRefs.current[key]) continue;
+      if ((typed(key) ?? "") !== storedDisplay(key)) return true;
+    }
+    return false;
+  };
+
   const snapshot = view?.invoice.taxSnapshot ?? null;
   const taxOn = snapshot?.enabled === true;
   /** The frozen rate as a percentage string, from exact basis points — never a float. */
@@ -230,14 +263,31 @@ export function InvoiceSheet({
    * it: an operator had to finalize or lose the work. This flushes the typed header first, so
    * navigating away cannot silently lose a value either.
    */
-  const leave = async () => {
+  /**
+   * Leaving the draft.
+   *
+   * 🔴 NEVER AN ALWAYS-SILENT SAVE. A clean draft exits immediately — no dialog, no pause, which
+   * is the common case. A dirty one asks, because a silent save hides a decision the operator did
+   * not make, and an unconditional prompt punishes leaving a screen that has not changed.
+   */
+  const leave = () => {
+    if (isDirty()) {
+      setExiting(true);
+      return;
+    }
+    onClosed();
+  };
+
+  const saveAndLeave = async () => {
     setBusy(true);
     setError(null);
     try {
       await flushHeader();
+      setExiting(false);
       onClosed();
     } catch (e) {
       setError(errorText(e));
+      setExiting(false);
     } finally {
       setBusy(false);
     }
@@ -673,7 +723,11 @@ export function InvoiceSheet({
 
       {error && <p className="error" data-testid="sheet-error">{error}</p>}
 
-      <div className="inv-actions">
+      {/* 🔴 inv-keep: the action bar stays in view while the sheet scrolls past it. The class
+          already existed and was used by one screen only; the sheet it was written for did not
+          have it. Reused because this sheet scrolls inside the same .content scrollport, not
+          because the class happened to exist — verified in the installed-app screenshots. */}
+      <div className="inv-actions inv-keep">
         {!readOnly ? (
           <>
             <button
@@ -687,11 +741,13 @@ export function InvoiceSheet({
             {/* 🔴 THE DURABLE SAVE PATH, as an action the operator can see and trust. The product
                 rule is that commercial header data must never depend only on blur timing; this
                 writes every field as it is typed right now. */}
+            {/* One save, one exit. Two buttons reading "حفظ المسودّة" and "حفظ وخروج" sat side by
+                side and differed only in whether the screen closed. */}
             <button className="btn" onClick={() => void saveDraft()} disabled={busy} data-testid="save-draft">
-              {t("inv.sheet.saveDraft")}
+              {t("inv.sheet.save")}
             </button>
-            <button className="btn" onClick={() => void leave()} disabled={busy} data-testid="leave-draft">
-              {t("inv.sheet.leaveDraft")}
+            <button className="btn" onClick={leave} disabled={busy} data-testid="leave-draft">
+              {t("inv.sheet.leave")}
             </button>
             {saved && (
               <span className="muted small" data-testid="draft-saved">
@@ -743,6 +799,41 @@ export function InvoiceSheet({
                 {t("inv.sheet.finalize")}
               </button>
               <button className="btn ghost" onClick={() => setConfirming(false)}>
+                {t("action.cancel")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {exiting && (
+        <div className="overlay">
+          <div className="card dialog" role="dialog" aria-modal="true" data-testid="exit-confirm">
+            <h2>{t("inv.exit.title")}</h2>
+            <p className="muted small">{t("inv.exit.body")}</p>
+            <div className="inv-actions">
+              <button
+                className="btn primary"
+                disabled={busy}
+                onClick={() => void saveAndLeave()}
+                data-testid="exit-save"
+              >
+                {t("inv.exit.saveAndLeave")}
+              </button>
+              {/* Ghost-danger: it discards work, but it is an action row, not the confirm of a
+                  destructive dialog, so it must not out-weigh "save and leave". */}
+              <button
+                className="btn danger ghost"
+                disabled={busy}
+                onClick={() => {
+                  setExiting(false);
+                  onClosed();
+                }}
+                data-testid="exit-discard"
+              >
+                {t("inv.exit.leaveWithout")}
+              </button>
+              <button className="btn" disabled={busy} onClick={() => setExiting(false)} data-testid="exit-cancel">
                 {t("action.cancel")}
               </button>
             </div>

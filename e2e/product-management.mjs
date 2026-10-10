@@ -42,11 +42,11 @@ const assert = (cond, msg) => {
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page = await app.firstWindow();
-  await page.waitForSelector("text=Select cashier", { timeout: 30000 });
+  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
   await page.getByRole("button", { name: "Cashier One" }).click();
   for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.getByRole("button", { name: "Log in" }).click();
-  await page.waitForSelector("text=Current sale");
+  await page.locator('[data-testid="login-submit"]').click();
+  await page.waitForSelector('[data-testid="cart"]');
   return { app, page };
 }
 
@@ -126,12 +126,17 @@ await tab(page, "sell");
 // SKU is both language-neutral and indifferent to that rule, which is this file's own standard.
 await page.locator("button.product", { hasText: "E2E-001" }).click();
 // Payment methods live behind "Complete sale" — the cart does not take a method directly.
-await page.getByRole("button", { name: "Complete sale" }).click();
-await page.getByRole("button", { name: "Cash" }).click();
-await page.waitForSelector("text=Sale completed");
+await page.locator('[data-testid="complete-sale"]').click();
+await page.locator('[data-testid="pay-cash"]').click();
+await page.waitForSelector('[data-testid="receipt"]');
 const receipt = await page.locator(".receipt").innerText();
 assert(receipt.includes("4.00"), "the sale was rung at 4.00");
-await page.getByRole("button", { name: /^(حسناً|OK|Close|New sale)$/ }).first().click().catch(() => {});
+// 🔴 CLICK THE REAL CONTROL, AND DO NOT SWALLOW THE FAILURE. This matched the receipt's button by
+// a name alternation that never included «بيع جديد», so once the receipt was translated the click
+// missed — and `.catch(() => {})` hid it. The receipt stayed open and the NEXT wait timed out on
+// `.products-pane`, pointing the blame at the Sell screen instead of at this line.
+await page.locator('[data-testid="new-sale"]').click();
+await page.waitForSelector('[data-testid="receipt"]', { state: "detached" });
 
 // ── 4b · A FRACTIONAL sale of the kg product, on a fresh install ────────────────────────────────
 // سلك نحاس is priced 2.50 per kg, so 2.5 kg is exactly 6.25 — no rounding involved.
@@ -142,21 +147,52 @@ await qtyBox.fill("2.5");
 await qtyBox.press("Enter");
 await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("6.25"));
 assert(true, "2.5 kg at 2.50 totals 6.25 — a fraction priced exactly");
-await page.getByRole("button", { name: "Complete sale" }).click();
-await page.getByRole("button", { name: "Cash" }).click();
-await page.waitForSelector("text=Sale completed");
+await page.locator('[data-testid="complete-sale"]').click();
+await page.locator('[data-testid="pay-cash"]').click();
+await page.waitForSelector('[data-testid="receipt"]');
 const fractionalReceipt = await page.locator(".receipt").innerText();
 const receiptFlat = fractionalReceipt.replace(/\s+/g, " ").trim();
 // 🔴 The ORDER, not just the presence: on an RTL terminal this line used to render as
 // "2.5 USD 2.50 × kg". The quantity, its unit, the ×, the price and the currency must read in that
 // sequence, which is what the bdi isolation in components/LineMath.tsx pins.
+// 🔴 THE ORDER, NOT THE LANGUAGE. The unit word is now translated — this receipt is Arabic, so it
+// reads «كيلو» — and pinning the English "kg" would assert the translation rather than the bidi
+// order this test exists to protect. The shape is what matters: quantity, unit, ×, price, currency.
 assert(
-  receiptFlat.includes("2.5 kg × 2.50 USD"),
+  /2\.5\s+\S+\s+×\s+2\.50\s+USD/.test(receiptFlat),
   `the receipt reads quantity -> unit -> × -> price -> currency ("${receiptFlat.slice(0, 140)}")`,
 );
+
+// 🔴 WHERE THE PARTS ACTUALLY ARE, NOT WHAT THE DOM SAYS. innerText returns DOM order, so a line
+// the operator reads backwards still satisfies the assertion above — which is exactly what
+// happened when the unit word was localized: the receipt printed "1 2.50 × USD حبة" while every
+// text assertion passed. This measures the rendered positions instead.
+{
+  const math = page.locator('[data-testid="line-math"]').first();
+  const at = async (cls) => {
+    const box = await math.locator(cls).boundingBox();
+    if (!box) throw new Error(`no box for ${cls}`);
+    return box.x;
+  };
+  const [qx, ux, px, cx] = [
+    await at(".line-math-qty"),
+    await at(".line-math-unit"),
+    await at(".line-math-price"),
+    await at(".line-math-currency"),
+  ];
+  assert(
+    qx < ux && ux < px && px < cx,
+    `the line reads left-to-right as quantity, unit, price, currency (x: ${qx} ${ux} ${px} ${cx})`,
+  );
+}
 assert(fractionalReceipt.includes("6.25"), "the receipt total is 6.25");
 await page.screenshot({ path: SHOTS + "P7-fractional-sale.png" });
-await page.getByRole("button", { name: /^(حسناً|OK|Close|New sale)$/ }).first().click().catch(() => {});
+// 🔴 CLICK THE REAL CONTROL, AND DO NOT SWALLOW THE FAILURE. This matched the receipt's button by
+// a name alternation that never included «بيع جديد», so once the receipt was translated the click
+// missed — and `.catch(() => {})` hid it. The receipt stayed open and the NEXT wait timed out on
+// `.products-pane`, pointing the blame at the Sell screen instead of at this line.
+await page.locator('[data-testid="new-sale"]').click();
+await page.waitForSelector('[data-testid="receipt"]', { state: "detached" });
 
 // A fraction of a WHOLE-ONLY product is refused rather than rounded.
 await page.waitForSelector(".products-pane");
