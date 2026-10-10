@@ -322,9 +322,18 @@ await app.close();
       operatorRows.every((r) => r.actor_tier === "owner"),
       `an operator event records the REAL role, known since migration 8 (${operatorRows[0].actor_tier})`,
     );
+    // 🔴 The composition, not a hand-counted total. My first version said `length === 3` and the
+    // gate answered "unspecified,unspecified,unspecified,unspecified" — four, because this script
+    // creates two products, edits one and deactivates one. Naming the events instead of counting
+    // them means the number comes from the actions above rather than from my arithmetic.
+    const businessTypes = otherRows.map((r) => r.event_type).sort().join(",");
     assert(
-      otherRows.length === 3 && otherRows.every((r) => r.actor_tier === "unspecified"),
-      `a product event still records 'unspecified' (${otherRows.map((r) => r.actor_tier).join(",")})`,
+      businessTypes === "PRODUCT_CREATED,PRODUCT_CREATED,PRODUCT_DEACTIVATED,PRODUCT_UPDATED",
+      `the business trail is exactly the four actions this script performed (${businessTypes})`,
+    );
+    assert(
+      otherRows.every((r) => r.actor_tier === "unspecified"),
+      `and a product event still records 'unspecified' (${otherRows.map((r) => r.actor_tier).join(",")})`,
     );
 
     // The real price edit, with its real old value — 4.00 became 9.00 on screen.
