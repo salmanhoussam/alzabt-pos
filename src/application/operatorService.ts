@@ -128,6 +128,17 @@ export class OperatorService {
     };
   }
 
+  /**
+   * The operator's name as it is RIGHT NOW, or null when there is no such row.
+   *
+   * Used by every ledger and audit write, so a snapshot records the name that was true at the
+   * moment of the act rather than the one cached in the session at login. Returns null rather than
+   * throwing: a missing row must not be what stops a sale from being recorded.
+   */
+  currentNameOf(id: string): string | null {
+    return this.deps.operators.findById(id)?.name ?? null;
+  }
+
   /** Everyone, for the owner's management list. */
   listAll(): OperatorView[] {
     return this.deps.operators.listAll().map(toOperatorView);

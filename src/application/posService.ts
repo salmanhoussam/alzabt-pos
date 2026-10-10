@@ -341,9 +341,25 @@ export class PosService {
       : null;
   }
 
+  /**
+   * The signed-in operator, with their name read AS OF NOW rather than as of login.
+   *
+   * 🔴 WHY IT RE-READS. Every ledger and audit row stores a NAME SNAPSHOT, and the snapshot must be
+   * true at the moment of the act — not at the moment of the login, which may have been hours and
+   * one rename earlier. The session's own name is only a cache of what was true then.
+   *
+   * This is ONE primary-key read per act, on the hottest path, and it is worth it: the alternative
+   * is a receipt that names someone who had already been renamed, with no way to tell afterwards
+   * whether the name was stale or the rename was later.
+   *
+   * It falls back to the session's name when accounts are not wired (a fixture-only terminal) or
+   * when the row has gone — never to an empty string, because `actor_name` is NOT NULL with a
+   * non-empty CHECK and a missing name must not be what stops a sale from being recorded.
+   */
   private requireCashier(): Cashier {
     if (!this.cashier) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
-    return this.cashier;
+    const current = this.deps.operators?.currentNameOf(this.cashier.id);
+    return current ? { id: this.cashier.id, name: current } : this.cashier;
   }
 
   // ── Catalog ─────────────────────────────────────────────────────────────────────────────────────
