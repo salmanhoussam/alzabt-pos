@@ -108,7 +108,10 @@ assert(
   (await product(page, "شيبس").locator('[data-testid="price-review"]').count()) === 1,
   "placeholder price is marked on the button",
 );
-assert((await product(page, "بسكويت").innerText()).includes("/ box"), "box unit is shown");
+// 🔴 EITHER LANGUAGE. The card's unit word is translated now — an Arabic terminal shows «علبة» —
+// so pinning "box" would assert the translation rather than the fact the unit is shown at all.
+const boxCard = (await product(page, "بسكويت").innerText()).replace(/\s+/g, " ");
+assert(/\/\s*(box|علبة)/.test(boxCard), `box unit is shown ("${boxCard}")`);
 await page.screenshot({ path: SHOTS + "catalog-01-imported.png" });
 
 await page.locator("input.search").fill("مياه");
