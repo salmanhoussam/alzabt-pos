@@ -56,14 +56,16 @@ const assert = (cond, msg) => {
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page = await app.firstWindow();
-  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+  // `.login` is the one anchor both builds share: the old release has no testid, and this build's
+  // prompt text is Arabic.
+  await page.waitForSelector(".login", { timeout: 30000 });
   const userData = await app.evaluate(({ app }) => app.getPath("userData"));
   log("profile used by the app:", userData);
   assert(userData === DEFAULT_PROFILE, `the app uses the real default profile (${DEFAULT_PROFILE})`);
   await page.getByRole("button", { name: "Cashier One" }).click();
   for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.locator('[data-testid="login-submit"]').click();
-  await page.waitForSelector('[data-testid="cart"]');
+  await clickEither(page, "login-submit", page.getByRole("button", { name: "Log in" }));
+  await page.waitForSelector('[data-testid="cart"], .cart');
   return { app, page };
 }
 
@@ -97,20 +99,51 @@ const stub = (app, kind, path) =>
     [kind, path],
   );
 
+/**
+ * 🔴 THIS FILE DRIVES TWO DIFFERENT BUILDS, AND THAT IS THE POINT OF IT.
+ *
+ * A `seed-*` phase installs and drives a REAL OLD RELEASE — Gate 2.1, the field pilot, v5, v6 —
+ * whose UI predates both the data-testids and the Arabic translation. A `verify-*` phase drives
+ * THIS build. A selector that exists in only one of them makes the seed phase fail for a reason
+ * that has nothing to do with the upgrade being tested, which is exactly what happened when the
+ * testid sweep rewrote these shared helpers.
+ *
+ * So every shared control is reached by: this build's testid if it is there, otherwise the old
+ * build's English control.
+ */
+async function clickEither(page, testid, fallback) {
+  const byId = page.locator(`[data-testid="${testid}"]`);
+  if ((await byId.count()) > 0) {
+    await byId.first().click();
+    return;
+  }
+  await fallback.click();
+}
+
 async function sell(page, items, method, expectReceipt) {
   for (const name of items) await product(page, name).click();
-  await page.locator('[data-testid="complete-sale"]').click();
-  await page.getByRole("button", { name: method }).click();
-  await page.waitForSelector(`[data-testid="receipt-number"]:has-text("#${expectReceipt}")`);
-  await page.locator('[data-testid="new-sale"]').click();
+  await clickEither(page, "complete-sale", page.getByRole("button", { name: "Complete sale" }));
+  // The payment method is still chosen by its English name on an old build; this build labels the
+  // same four buttons pay-cash / pay-card / pay-external / pay-other.
+  await clickEither(page, `pay-${method.toLowerCase()}`, page.getByRole("button", { name: method }));
+  await page.waitForSelector(
+    `[data-testid="receipt-number"]:has-text("#${expectReceipt}"), text=Receipt #${expectReceipt}`,
+  );
+  await clickEither(page, "new-sale", page.getByRole("button", { name: "New sale" }));
 }
 
 async function voidCardSale(page) {
   await tab(page, "History");
   await page.waitForSelector(".history-table");
-  await page.locator('tr[data-payment-method="card"]').locator('[data-testid="history-void"]').click();
-  await page.locator('[data-testid="void-reason"]').fill("wrong item rung up");
-  await page.locator('[data-testid="void-confirm"]').click();
+  const cardRow = (await page.locator('tr[data-payment-method="card"]').count())
+    ? page.locator('tr[data-payment-method="card"]')
+    : page.locator("tr", { hasText: "card" });
+  await clickEither(page, "history-void", cardRow.getByRole("button", { name: "Void" }));
+  const reason = (await page.locator('[data-testid="void-reason"]').count())
+    ? page.locator('[data-testid="void-reason"]')
+    : page.getByPlaceholder("e.g. wrong item rung up");
+  await reason.fill("wrong item rung up");
+  await clickEither(page, "void-confirm", page.getByRole("button", { name: "Confirm void" }));
   await page.waitForSelector("tr.voided");
 }
 
@@ -409,7 +442,7 @@ if (PHASE === "seed-v2") {
   const cat = writeCatalog();
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
-  await page.locator('[data-testid="import-catalog"]').click();
+  await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
   await page.waitForSelector("text=Catalog imported");
   await page.getByRole("button", { name: "OK" }).click();
   await page.waitForSelector("button.product");
@@ -438,7 +471,7 @@ if (PHASE === "seed-v2") {
   const { app, page } = await launch();
   const cat = writeCatalog();
   await stub(app, "open", cat.file);
-  await page.locator('[data-testid="import-catalog"]').click(); // the field-pilot build's header button
+  await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" })); // the field-pilot build's header button
   await page.waitForSelector("text=Catalog imported");
   await page.getByRole("button", { name: "OK" }).click();
   await page.waitForSelector("button.product");
@@ -493,7 +526,7 @@ if (PHASE === "seed-v2") {
   await page.waitForSelector("text=Catalog exported");
   await page.getByRole("button", { name: "OK" }).click();
   await stub(app, "open", exportFile);
-  await page.locator('[data-testid="import-catalog"]').click();
+  await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
   await page.waitForSelector("text=Catalog imported");
   assert(/0 new, 0 updated, 4 unchanged/.test(await page.locator(".import-report").innerText()), "export → re-import changes nothing");
   await page.getByRole("button", { name: "OK" }).click();
@@ -523,7 +556,7 @@ if (PHASE === "seed-v2") {
   const cat = writeCatalog();
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
-  await page.locator('[data-testid="import-catalog"]').click();
+  await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
   await page.waitForSelector("text=Catalog imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 
@@ -621,7 +654,7 @@ if (PHASE === "seed-v2") {
   const cat = writeCatalog();
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
-  await page.locator('[data-testid="import-catalog"]').click();
+  await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
   await page.waitForSelector("text=Catalog imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 
@@ -646,10 +679,10 @@ if (PHASE === "seed-v2") {
   await qty.fill("2.5");
   await qty.press("Enter");
   await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("10.00"));
-  await page.locator('[data-testid="complete-sale"]').click();
-  await page.locator('[data-testid="pay-cash"]').click();
-  await page.waitForSelector('[data-testid="receipt-number"]:has-text("#1")');
-  await page.locator('[data-testid="new-sale"]').click();
+  await clickEither(page, "complete-sale", page.getByRole("button", { name: "Complete sale" }));
+  await clickEither(page, "pay-cash", page.getByRole("button", { name: "Cash" }));
+  await page.waitForSelector('[data-testid="receipt-number"]:has-text("#1"), text=Receipt #1');
+  await clickEither(page, "new-sale", page.getByRole("button", { name: "New sale" }));
   await sell(page, ["مياه"], "Card", 2);
   await voidCardSale(page);
   await page.screenshot({ path: SHOTS + "upgrade-d1-old-v4.png" });
@@ -738,7 +771,7 @@ if (PHASE === "seed-v2") {
   const cat2 = writeCatalog();
   await stub(app, "open", cat2.file);
   await tab(page, "Tools");
-  await page.locator('[data-testid="import-catalog"]').click();
+  await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
   await page.waitForSelector("text=Catalog imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
   await app.close();
@@ -769,7 +802,7 @@ if (PHASE === "seed-v2") {
   const cat = writeCatalog();
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
-  await page.locator('[data-testid="import-catalog"]').click();
+  await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
   await page.waitForSelector("text=Catalog imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 
@@ -1232,7 +1265,7 @@ if (PHASE === "seed-v2") {
   const cat = writeCatalog();
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
-  await page.locator('[data-testid="import-catalog"]').click();
+  await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
   await page.waitForSelector("text=Catalog imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 
