@@ -210,10 +210,11 @@ jobs:
       - name: Build previous releases for the upgrade test
         run: |
           # 69f1a22 is the REAL legal v5 main (migration 5 merged); 6e3984f is the REAL released v6
-          # main (migration 6, manual invoices) and is the build the shop is running TODAY. Scenarios
-          # E and F upgrade from builds a shop would actually be running, not from databases written
-          # to look like v5 or v6.
-          foreach ($ref in @("7c7edcc3ac5c5df3c3f7fea14f27b532196413d4", "24bdc22560e6f72e8cadc361c8a23151dc6a9681", "6699f97c163008d44d4644be4ef2954d1a9634c4", "68fdf039a7ab29b0c44a76c6bfce6aca42cb58fc", "69f1a22c91ddf041ba247b733995ffb38d82d718", "6e3984fbd39cdc0cf2bded8caac90bf1b375c2c5")) {
+          # main (migration 6, manual invoices). b18b5b4 is the REAL released v7 main — the unit
+          # picker merge — and is the build the shop is running TODAY, which is why scenario G
+          # upgrades from it. Scenarios E, F and G all upgrade from builds a shop would actually be
+          # running, not from databases written to look like v5, v6 or v7.
+          foreach ($ref in @("7c7edcc3ac5c5df3c3f7fea14f27b532196413d4", "24bdc22560e6f72e8cadc361c8a23151dc6a9681", "6699f97c163008d44d4644be4ef2954d1a9634c4", "68fdf039a7ab29b0c44a76c6bfce6aca42cb58fc", "69f1a22c91ddf041ba247b733995ffb38d82d718", "6e3984fbd39cdc0cf2bded8caac90bf1b375c2c5", "b18b5b4aaf0d8004f7267fb7091c7a87d87eba25")) {
             $dir = "..\old-$($ref.Substring(0,7))"
             git worktree add --detach $dir $ref
             Push-Location $dir
@@ -347,9 +348,9 @@ jobs:
         run: |
           $posProfile = Join-Path $env:APPDATA "Alzabt POS"
           if (Test-Path $posProfile) { Remove-Item $posProfile -Recurse -Force }
-          # 🔴 THE BUILD THE SHOP IS RUNNING TODAY. This is the only upgrade path a real field
-          # installation will actually take for this feature, and it is the one that carries an
-          # invoice finalized BEFORE migration 7 existed.
+          # 🔴 The build the shop ran until b18b5b4 shipped. Kept because it is the one that carries
+          # an invoice finalized BEFORE migration 7 existed — a state no later baseline can produce.
+          # The CURRENT field upgrade path is scenario G below.
           $old = Get-ChildItem ..\old-6e3984f\release -Filter "*Setup*.exe" | Select-Object -First 1
           Write-Host "Upgrading FROM: $($old.Name)"
           $p = Start-Process -FilePath $old.FullName -ArgumentList "/S" -Wait -PassThru
@@ -364,6 +365,30 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "verify-from-v6 failed" }
           Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host "Profile after the migration-7 upgrade:"
+          Get-ChildItem $posProfile -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: "Upgrade G: real released v7 main (b18b5b4, schema v7) -> this build · OPERATOR ACCOUNTS"
+        run: |
+          $posProfile = Join-Path $env:APPDATA "Alzabt POS"
+          if (Test-Path $posProfile) { Remove-Item $posProfile -Recurse -Force }
+          # 🔴 THE BUILD THE SHOP IS RUNNING TODAY (b18b5b4), so v7 -> v8 is the ONLY upgrade path a
+          # real field installation will take for operator accounts. The baseline is created by
+          # driving that build's own UI — two operators, real sales, a void and real audit history —
+          # never by writing a database that merely looks like v7.
+          $old = Get-ChildItem ..\old-b18b5b4\release -Filter "*Setup*.exe" | Select-Object -First 1
+          Write-Host "Upgrading FROM: $($old.Name)"
+          $p = Start-Process -FilePath $old.FullName -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "v7 installer exit $($p.ExitCode)" }
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/upgrade.mjs seed-v7
+          if ($LASTEXITCODE -ne 0) { throw "seed-v7 failed" }
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          $p = Start-Process -FilePath "${{ steps.installer.outputs.path }}" -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "new installer (over v7) exit $($p.ExitCode)" }
+          node e2e/upgrade.mjs verify-from-v7
+          if ($LASTEXITCODE -ne 0) { throw "verify-from-v7 failed" }
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host "Profile after the migration-8 upgrade:"
           Get-ChildItem $posProfile -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
 
       - name: Upload E2E screenshots

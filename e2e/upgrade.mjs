@@ -241,6 +241,23 @@ function ledgerFacts() {
         .all()
         .map((r) => Number(r.q)),
       unknownUnits: lineHasSaleUnit(db) ? n("SELECT count(*) AS n FROM sale_lines WHERE sale_unit IS NULL") : null,
+      // Migration 8. `null` — never 0 — when the table is absent, which is the honest answer for
+      // every ledger written before operator accounts existed.
+      operators: tables.includes("operators") ? n("SELECT count(*) AS n FROM operators") : null,
+      operatorRows: tables.includes("operators")
+        ? db
+            .prepare("SELECT id, role, must_reset_pin AS f, is_active AS a FROM operators ORDER BY id")
+            .all()
+            .map((r) => `${r.id}:${r.role}:reset=${Number(r.f)}:active=${Number(r.a)}`)
+            .join(",")
+        : null,
+      // Who the LEDGER says rang each sale. A snapshot, with no foreign key — so a migration that
+      // "tidied" these into a join would show up right here.
+      cashierSnapshots: db
+        .prepare("SELECT cashier_id AS i, cashier_name AS n FROM sales ORDER BY receipt_number")
+        .all()
+        .map((r) => `${r.i}=${r.n}`)
+        .join(","),
       // Migration 5. `null` means the table does not exist yet, which is the honest answer for any
       // ledger a pre-v5 build wrote — never 0, which would claim an empty trail that is not there.
       audit: tables.includes("audit_events") ? n("SELECT count(*) AS n FROM audit_events") : null,
@@ -1367,7 +1384,7 @@ if (PHASE === "seed-v2") {
   const f = ledgerFacts();
   log("v6 baseline ledger:", JSON.stringify(f));
   assert(f.schema === 6, `the baseline really is schema v6 (got ${f.schema})`);
-  assert(f.sales === 2 && f.voids === 1, "two till sales and one void exist");
+  assert(f.sales === 3 && f.voids === 1, "three till sales and one void exist");
   assert(f.invoices === 1 && f.invoiceLines === 1, "and one finalized invoice with one line");
   assert(f.invoiceNumber > 0, "the invoice really carries a number");
   // 🔴 THE COLUMN DOES NOT EXIST YET. `null`, not 0 — the honest answer for a v6 ledger, which
@@ -1524,9 +1541,218 @@ if (PHASE === "seed-v2") {
       backup: pre,
     }),
   );
+} else if (PHASE === "seed-v7") {
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // Scenario G, part 1 — the REAL released v7 main build (b18b5b4, schema v7).
+  //
+  // 🔴 THIS IS THE BUILD THE SHOP IS RUNNING TODAY, and v7 -> v8 is therefore the ONLY upgrade path
+  // a real field installation will take for operator accounts. It is seeded by driving that build's
+  // own UI, not by writing a database that looks like v7.
+  //
+  // 🔴 AND IT HAS NO MANDATORY SETUP, which is the whole asymmetry migration 8 creates. The v7
+  // build has no `operators` table, so 1111 opens a session directly and `launch()`'s
+  // setup-aware branch never fires here. It fires in part 2, against the same profile.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  assert(!existsSync(LEDGER), "scenario starts with no ledger in the real profile");
+  const { app, page } = await launch();
+  const cat = writeCatalog();
+  await stub(app, "open", cat.file);
+  await tab(page, "Tools");
+  await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
+  await page.waitForSelector("text=Catalog imported");
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+
+  // Real till rows for migration 8 to inherit: two sales and a void.
+  await tab(page, "Sell");
+  await sell(page, ["بيبسي 330 مل"], "Cash", 1);
+  await sell(page, ["مياه"], "Card", 2);
+  await voidCardSale(page);
+
+  // 🔴 REAL AUDIT HISTORY, written by the v7 build. Migration 8 REBUILDS audit_events to widen
+  // three CHECKs, and a rebuild that silently drops rows is the exact trap migration 7 set for
+  // itself — it passed on an empty ledger and failed on a real one. So this phase refuses to hand
+  // part 2 an empty trail.
+  await tab(page, "Products");
+  await clickEither(page, "add-product", page.getByRole("button", { name: "Add product" }));
+  await page.waitForSelector('[data-testid="field-nameAr"]');
+  await page.locator('[data-testid="field-nameAr"]').fill("صنف قبل الترقية");
+  await page.locator('[data-testid="field-price"]').fill("3.00");
+  await page.locator('[data-testid="field-unit"]').selectOption("piece");
+  await clickEither(page, "save-product", page.getByRole("button", { name: "Save" }));
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
+  await page.waitForSelector('[data-testid="product-row"]');
+
+  // 🔴 A SALE BY THE SECOND OPERATOR, so the pre-upgrade ledger genuinely references BOTH fixture
+  // ids. Migration 8 keeps cashier-01 and cashier-02 precisely so every historical
+  // sales.cashier_id stays resolvable, and a baseline that only ever used one of them would leave
+  // half of that claim untested. The v7 build has no logout testid — it predates the attribute —
+  // so clickEither falls back to the label, which is what that helper exists for.
+  await clickEither(page, "logout", page.getByRole("button", { name: /^(خروج|Log out)$/ }));
+  await page.waitForSelector(".login");
+  await page.getByRole("button", { name: "Cashier Two" }).click();
+  for (const d of "2222") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
+  await clickEither(page, "login-submit", page.getByRole("button", { name: "Log in" }));
+  await page.waitForSelector('[data-testid="cart"], .cart');
+  await tab(page, "Sell");
+  await sell(page, ["مياه"], "Cash", 3);
+
+  await app.close();
+
+  const f = ledgerFacts();
+  log("v7 baseline ledger:", JSON.stringify(f));
+  assert(f.schema === 7, `the baseline really is schema v7 (got ${f.schema})`);
+  // 🔴 null, not 0 — a v7 ledger cannot express the idea of an operator at all.
+  assert(f.operators === null, "a v7 ledger has NO operators table");
+  assert(f.sales === 2 && f.voids === 1, "two till sales and one void exist");
+  assert(f.audit !== null && f.audit > 0, `the v7 build left real audit history (${f.auditTypes})`);
+  assert(/PRODUCT_CREATED/.test(f.auditTypes), `including the product it created (${f.auditTypes})`);
+  // Both fixture ids are referenced by real SALES before migration 8 runs. These are the
+  // references migration 8 promises to keep resolvable, and part 2 asserts they are byte-identical
+  // afterwards.
+  assert(
+    f.cashierSnapshots.includes("cashier-01=") && f.cashierSnapshots.includes("cashier-02="),
+    `the v7 ledger names BOTH fixture operators (${f.cashierSnapshots})`,
+  );
+  log("V7 BASELINE READY:", JSON.stringify({ sales: f.sales, voids: f.voids, audit: f.audit, snapshots: f.cashierSnapshots }));
+} else if (PHASE === "verify-from-v7") {
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // Scenario G, part 2 — THIS build installed over that real v7 profile.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  assert(existsSync(LEDGER), "the v7 ledger is still there");
+  const before = ledgerFacts();
+  const auditBefore = auditRows();
+  assert(before.schema === 7, `starting from the real v7 profile (got ${before.schema})`);
+
+  // 🔴 launch() goes through the REAL mandatory-setup screen here, because the flag is on disk in a
+  // profile a previous build wrote. That is the upgrade a shop experiences, and it is why this
+  // phase is also the proof that the widened audit_events CHECK works on a MIGRATED ledger.
+  let { app, page } = await launch();
+  await assertBuildLine(page);
+  await app.close();
+
+  const m = ledgerFacts();
+  log("after migration:", JSON.stringify(m));
+  assert(m.schema === 8, `the schema moved to v8 (got ${m.schema})`);
+  assert(m.integrity === "ok", "integrity_check is ok");
+  assert(m.foreignKeys === "[]", `foreign_key_check is empty (got ${m.foreignKeys})`);
+
+  // ── Nothing the shop already had was altered ─────────────────────────────────────────────────
+  assert(m.sales === before.sales && m.voids === before.voids, "every till sale and void survived");
+  assert(JSON.stringify(m.receipts) === JSON.stringify(before.receipts), "the receipt sequence is unchanged");
+  assert(JSON.stringify(m.quantities) === JSON.stringify(before.quantities), "every sale line quantity is unchanged");
+  assert(m.catalog === before.catalog, "the catalog is unchanged");
+
+  // 🔴 THE SNAPSHOT IS NOT BACKFILLED. sales.cashier_id / cashier_name are plain TEXT with no
+  // foreign key, and migration 8 must leave them exactly as the v7 build wrote them. A migration
+  // that "tidied" them to point at the new operators table would fail here.
+  assert(
+    m.cashierSnapshots === before.cashierSnapshots,
+    `the ledger's cashier snapshots are byte-identical (${m.cashierSnapshots})`,
+  );
+
+  // ── The audit_events REBUILD preserved the real trail ────────────────────────────────────────
+  const auditAfter = auditRows();
+  assert(
+    auditAfter.length >= auditBefore.length,
+    `the rebuilt audit trail kept every row (${auditBefore.length} -> ${auditAfter.length})`,
+  );
+  for (const old of auditBefore) {
+    const same = auditAfter.find((r) => r.id === old.id);
+    assert(!!same, `audit row ${old.id} survived the rebuild`);
+    assert(
+      same.event_type === old.event_type && String(same.seq) === String(old.seq) && same.actor_name === old.actor_name,
+      `and row ${old.id} is unchanged (type, seq and actor)`,
+    );
+  }
+  assert(
+    auditAfter.every((r, i) => Number(r.seq) === i + 1),
+    "seq is still a gapless increasing sequence after the rebuild",
+  );
+  // The triggers were recreated AFTER the copy, so the trail is append-only again.
+  const guard = auditIsAppendOnly();
+  assert(guard.update, "UPDATE on the rebuilt audit_events is rejected by SQLite itself");
+  assert(guard.delete, "DELETE on the rebuilt audit_events is rejected by SQLite itself");
+
+  // ── The two accounts exist, with their OWN credentials, as bootstrap ─────────────────────────
+  assert(m.operators === 2, `migration 8 created exactly the two migrated accounts (got ${m.operators})`);
+  // cashier-01 went through mandatory setup during launch() above, so its flag is cleared and
+  // cashier-02's is not. That difference IS the proof the flag is per-operator and real.
+  assert(
+    m.operatorRows === "cashier-01:owner:reset=0:active=1,cashier-02:cashier:reset=1:active=1",
+    `cashier-01 is the OWNER and set up; cashier-02 is a CASHIER still pending (got ${m.operatorRows})`,
+  );
+
+  {
+    const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
+    try {
+      // 🔴 THE WIDENED CHECK, PROVEN ON A MIGRATED LEDGER. Completing setup wrote OPERATOR_* rows
+      // into the table migration 8 rebuilt. If the CHECK had not been widened, the insert would
+      // have been refused and setup would have failed — on a REAL v7 ledger, not a synthetic one.
+      const ops = db
+        .prepare("SELECT event_type AS t FROM audit_events WHERE entity_type = 'operator' ORDER BY seq")
+        .all()
+        .map((r) => r.t)
+        .join(",");
+      assert(ops === "OPERATOR_RENAMED,OPERATOR_PIN_RESET" || ops === "OPERATOR_PIN_RESET",
+        `an operator event was accepted by the rebuilt table (${ops})`);
+
+      // 🔴 cashier-02 KEPT ITS ORIGINAL HASH. The literals are migration 8's own, written here so
+      // that re-hashing them — which would lock a shop out of its own terminal on upgrade day —
+      // cannot pass. cashier-01's was replaced by the setup above, which is the point of setup.
+      const two = db.prepare("SELECT pin_salt_hex AS s, pin_hash_hex AS h FROM operators WHERE id = 'cashier-02'").get();
+      assert(two.s === "5c8e01d7f9a3b264", "cashier-02 carries the fixture salt verbatim");
+      assert(
+        two.h === "0ca57b50d33e8f2f395a2a636e8babd96c096120e439cc069d17a6586fb90537",
+        "and the fixture hash verbatim — the upgrade does not lock the shop out",
+      );
+      const one = db.prepare("SELECT pin_hash_hex AS h FROM operators WHERE id = 'cashier-01'").get();
+      assert(
+        one.h !== "a8f8c45b97712daec733a8b4d198ac96376c05697b5935a7b30f965e27478bce",
+        "🔴 and cashier-01's bootstrap hash is GONE, replaced by the PIN set during mandatory setup",
+      );
+
+      // No operator anywhere carries the legacy 'admin' value the CHECK still permits.
+      assert(
+        Number(db.prepare("SELECT count(*) AS n FROM operators WHERE role = 'admin'").get().n) === 0,
+        "no migrated operator carries the legacy 'admin' role",
+      );
+    } finally {
+      db.close();
+    }
+  }
+
+  // ── The pre-migration backup, which is the ONLY coherent rollback boundary ───────────────────
+  const pre = backupFiles().find((b) => /^pre-migration-v7-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(pre, `a pre-migration v7->v8 backup exists (got ${JSON.stringify(backupFiles())})`);
+  const snap = new Database(join(DEFAULT_PROFILE, "backups", pre), { readonly: true, fileMustExist: true });
+  try {
+    assert(Number(snap.prepare("SELECT max(version) AS n FROM schema_migrations").get().n) === 7, "the snapshot is at v7");
+    assert(
+      snap.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().every((r) => r.name !== "operators"),
+      "and it really predates operator accounts — no operators table in it",
+    );
+    assert(
+      Number(snap.prepare("SELECT count(*) AS n FROM sales").get().n) === before.sales,
+      "and it holds every sale the shop had before the upgrade",
+    );
+  } finally {
+    snap.close();
+  }
+
+  log(
+    "SCENARIO G FINAL:",
+    JSON.stringify({
+      schema: m.schema,
+      operators: m.operatorRows,
+      sales: m.sales,
+      snapshots: m.cashierSnapshots,
+      audit: `${auditBefore.length} -> ${auditAfter.length}`,
+      backup: pre,
+    }),
+  );
 } else {
   console.error(
-    "usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main|seed-v4|verify-from-v4|seed-v5|verify-from-v5|seed-v6|verify-from-v6",
+    "usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main|seed-v4|verify-from-v4|seed-v5|verify-from-v5|seed-v6|verify-from-v6|seed-v7|verify-from-v7",
   );
   process.exit(2);
 }
