@@ -360,7 +360,27 @@ async function invoiceRow(page, { description, quantity, unit, price }) {
   await invTestid(page, "add-row").click();
   await invTestid(page, "new-line-description").fill(description);
   await invTestid(page, "new-line-quantity").fill(quantity);
-  await invTestid(page, "new-line-unit").fill(unit);
+  // 🔴 TWO BUILDS AGAIN. Up to and including `d771a2d` the unit was a free-text input; from
+  // 2026-10-10 it is the same dropdown the product form uses, with «Other» for anything the build
+  // does not know. Whichever this build has is used, and the options are read off the select rather
+  // than listed here, so neither a language nor a new BASE_UNITS member breaks it.
+  const freeText = invTestid(page, "new-line-unit");
+  if ((await freeText.count()) > 0) {
+    await freeText.fill(unit);
+  } else {
+    const row = page.locator('[data-testid="sheet-draft-row"]').last();
+    const select = row.locator('[data-testid^="unit-select-"]').first();
+    const options = await select.evaluate((el) =>
+      Array.from(el.options).map((o) => ({ value: o.value, label: (o.textContent || "").trim() })),
+    );
+    const hit = options.find((o) => o.value === unit || o.label === unit);
+    if (hit && hit.value !== "other") {
+      await select.selectOption(hit.value);
+    } else {
+      await select.selectOption("other");
+      await row.locator('[data-testid^="unit-custom-"]').first().fill(unit);
+    }
+  }
   await invTestid(page, "new-line-price").fill(price);
   // 🔴 THIS FILE DRIVES TWO BUILDS, so it must not assume either one's row model. Up to and
   // including `ce4dd28` a row was committed by its own "save" button; from 2026-10-10 the sheet

@@ -103,11 +103,34 @@ async function commitCustomer(page, which, value) {
 const customerValue = (page, which) => page.locator(".inv-customer input").nth(CUSTOMER_FIELD[which]).inputValue();
 
 /** Adds one line through the sheet exactly as an operator would. */
+
+/**
+ * Chooses a unit the way an operator now does: the dropdown if this build knows the unit, else
+ * «Other» plus the free-text field.
+ *
+ * 🔴 NO HARDCODED UNIT LIST HERE. The options are READ OFF THE SELECT, by value and by visible
+ * label, so this works in either UI language and a unit added to BASE_UNITS needs no edit here.
+ * Nothing is swallowed in a try/catch — an unknown unit takes the Other path deliberately.
+ */
+async function chooseUnit(scope, value) {
+  const select = scope.locator('[data-testid^="unit-select-"]').first();
+  const options = await select.evaluate((el) =>
+    Array.from(el.options).map((o) => ({ value: o.value, label: (o.textContent || "").trim() })),
+  );
+  const hit = options.find((o) => o.value === value || o.label === value);
+  if (hit && hit.value !== "other") {
+    await select.selectOption(hit.value);
+    return;
+  }
+  await select.selectOption("other");
+  await scope.locator('[data-testid^="unit-custom-"]').first().fill(value);
+}
+
 async function addRow(page, { description, quantity, unit, price }) {
   await testid(page, "add-row").click();
   await testid(page, "new-line-description").fill(description);
   await testid(page, "new-line-quantity").fill(quantity);
-  await testid(page, "new-line-unit").fill(unit);
+  await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), unit);
   await testid(page, "new-line-price").fill(price);
   await testid(page, "save-draft").click();
   await page.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });
@@ -207,7 +230,7 @@ await testid(page, "add-row").click();
 await page.waitForSelector('[data-testid="sheet-draft-row"]');
 await testid(page, "new-line-description").fill("صنف المسودّة الأول");
 await testid(page, "new-line-quantity").fill("3");
-await testid(page, "new-line-unit").fill("حبة");
+await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), "حبة");
 await testid(page, "new-line-price").fill("2.50");
 
 // The button must be LIVE while row 1 sits there unsaved. This one assertion is the whole defect.
@@ -223,7 +246,7 @@ assert(JSON.stringify(row1).includes("صنف المسودّة الأول"), `row
 // Row 2 is typed into the row that Add Row opened, with row 1 untouched beside it.
 await testid(page, "new-line-description").last().fill("صنف المسودّة الثاني");
 await testid(page, "new-line-quantity").last().fill("2");
-await testid(page, "new-line-unit").last().fill("علبة");
+await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), "علبة");
 await testid(page, "new-line-price").last().fill("4.00");
 assert((await testid(page, "sheet-unsaved-rows").count()) === 1, "the sheet says how many rows are unsaved");
 await page.screenshot({ path: SHOTS + "D0-two-rows-one-unsaved.png" });
