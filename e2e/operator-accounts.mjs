@@ -105,13 +105,20 @@ const direct = (page, channel, payload) =>
 const tab = (page, name) => page.locator(`[data-testid="tab-${name}"]`).click();
 const opsRow = (page, id) => page.locator(`[data-testid="ops-row"][data-operator-id="${id}"]`);
 
-/** Sells one Espresso for cash. The cheapest real ledger write this app has. */
+/**
+ * Sells one Espresso for cash. The cheapest real ledger write this app has.
+ *
+ * 🔴 It waits for the RECEIPT NUMBER, and the wait is not swallowed. The first draft ended with
+ * `.catch(() => {})` on a loose selector, which would have let every following ledger read race
+ * the write it is meant to observe — a flake that reads as a product failure, and one that would
+ * have appeared only sometimes.
+ */
 async function sell(page) {
   await tab(page, "sell");
   await page.locator("button.product", { hasText: "Espresso" }).click();
   await page.locator('[data-testid="complete-sale"]').click();
   await page.locator('[data-testid="pay-cash"]').click();
-  await page.waitForSelector('[data-testid="receipt"], .receipt', { timeout: 15000 }).catch(() => {});
+  await page.waitForSelector('[data-testid="receipt-number"]', { timeout: 20000 });
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -183,9 +190,34 @@ assert(true, "setup completes and lands on the till");
   const rows = ledger((all) => all("SELECT event_type AS t, changed_json AS j FROM audit_events WHERE entity_type = 'operator' ORDER BY seq"));
   const types = rows.map((r) => r.t).join(",");
   assert(types === "OPERATOR_RENAMED,OPERATOR_PIN_RESET", `setup wrote exactly the rename and the PIN reset (${types})`);
+
+  // 🔴 ASSERTED ON THE PAYLOAD'S KEYS, NOT ON THE WHOLE ROW — and this is the SECOND time this
+  // exact mistake has been made in this repository. A blanket /pin_/ over the serialised row
+  // matches the EVENT TYPE "OPERATOR_PIN_RESET", which is not a leak: the event type IS the fact
+  // the trail is supposed to record. The first version of this script failed the Windows gate on
+  // precisely that, after the same error had already been corrected once in the unit tests.
+  //
+  // What actually must never appear: a KEY naming a credential field, the PIN itself, or the stored
+  // salt and hash read back out of the operators table.
+  for (const row of rows) {
+    const keys = row.j === null ? [] : Object.keys(JSON.parse(row.j));
+    for (const key of keys) {
+      assert(
+        !/pin|password|passwd|token|secret|credential|api[_-]?key|hash|salt|must_reset/i.test(key),
+        `no audited field name is a credential (${row.t} -> ${key})`,
+      );
+    }
+  }
   const blob = JSON.stringify(rows);
   assert(!blob.includes(OWNER_PIN), "🔴 the PIN does not appear in the audit trail");
-  assert(!/salt|hash|pin_|must_reset/i.test(blob), "🔴 and neither does any credential field name");
+  const stored = ledger((_all, get) =>
+    get("SELECT pin_salt_hex AS s, pin_hash_hex AS h FROM operators WHERE id = 'cashier-01'"),
+  );
+  assert(stored.s.length >= 16 && stored.h.length === 64, "the credential really is stored as a salt and a hash");
+  assert(
+    !blob.includes(stored.s) && !blob.includes(stored.h),
+    "🔴 and neither the stored salt nor the stored hash appears anywhere in it",
+  );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -243,9 +275,18 @@ assert(
 
 // 🔴 Two PINs have now been typed into this app. Neither may appear on screen.
 {
-  const shown = await page.evaluate(() => document.body.innerText);
-  assert(!shown.includes(OWNER_PIN) && !shown.includes(CASHIER_BOOTSTRAP), "🔴 no PIN appears in the rendered document");
-  const html = await page.evaluate(() => document.body.innerHTML);
+  // 🔴 The build line is excluded, and only the build line. "Alzabt POS 0.1.1 · Build 181aa43" is a
+  // commit SHA in hex, so any four-digit PIN can occur inside it by chance — roughly a 0.4% false
+  // failure per run on a gate that takes two hours. Removing that one element keeps the assertion
+  // strong (every other pixel of the document is still checked) without a coin flip in it.
+  const strip = () => {
+    const clone = document.body.cloneNode(true);
+    for (const el of clone.querySelectorAll('[data-testid="build-line"]')) el.remove();
+    return { text: clone.textContent ?? "", html: clone.innerHTML ?? "" };
+  };
+  const { text, html } = await page.evaluate(strip);
+  assert(text.length > 0, "(the document has text to search)");
+  assert(!text.includes(OWNER_PIN) && !text.includes(CASHIER_BOOTSTRAP), "🔴 no PIN appears in the rendered document");
   assert(!html.includes(OWNER_PIN) && !html.includes(CASHIER_BOOTSTRAP), "🔴 and none is hiding in an attribute either");
 }
 
@@ -392,24 +433,41 @@ await page.waitForFunction(
 assert(true, "the owner reactivates them from the operators table");
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// 8 · 🔴 THE LAST ACTIVE OWNER IS PROTECTED
+// 8 · 🔴 OWNER SAFETY — TWO DIFFERENT RULES, AND THEY REFUSE FOR DIFFERENT REASONS
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// The first draft of this section asserted LAST_OWNER_PROTECTED for a self-demotion and was WRONG
+// about the product: `setRole` refuses a self-role-change FIRST and unconditionally
+// (operatorService.ts, SELF_ROLE_CHANGE), before it ever asks how many owners remain. That is the
+// STRONGER guarantee — nobody can change their own role, owner or cashier, however many owners
+// exist — and asserting the weaker code would have let a real regression through: swap the two
+// checks and a sole owner could demote themselves whenever a second owner happened to exist.
+//
+// So the two rules are asserted separately, by the code each one actually returns:
+//   SELF_ROLE_CHANGE      — your own role is never yours to change
+//   LAST_OWNER_PROTECTED  — the shop must never reach zero active owners
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 assert(
   (await opsRow(page, "cashier-01").locator('[data-testid="ops-toggle-role"]').count()) === 0,
   "the owner is not offered a role change on their OWN row",
 );
-// The service is what actually refuses it — proven through the bridge, not through the missing button.
+// The service is what refuses it — proven through the bridge, not through the missing button.
 {
   const r = await direct(page, "setOperatorRole", { operatorId: "cashier-01", role: "cashier" });
-  assert(r.ok === false, "🔴 the only active owner cannot demote themselves even by calling directly");
-  assert(r.error.code === "LAST_OWNER_PROTECTED", `  …refused as LAST_OWNER_PROTECTED (${r.error.code})`);
+  assert(r.ok === false, "🔴 an owner cannot demote THEMSELVES, even by calling the channel directly");
+  assert(r.error.code === "SELF_ROLE_CHANGE", `  …refused as SELF_ROLE_CHANGE (${r.error.code})`);
 }
 {
   const r = await direct(page, "setOperatorActive", { operatorId: "cashier-01", isActive: false });
-  assert(r.ok === false && r.error.code === "LAST_OWNER_PROTECTED", "🔴 and cannot deactivate themselves either");
+  assert(r.ok === false, "🔴 and the sole owner cannot deactivate themselves either");
+  assert(r.error.code === "LAST_OWNER_PROTECTED", `  …and THAT one is LAST_OWNER_PROTECTED (${r.error.code})`);
+  assert(
+    ledger((_all, get) => get("SELECT is_active AS a FROM operators WHERE id = 'cashier-01'")).a === 1n ||
+      ledger((_all, get) => get("SELECT is_active AS a FROM operators WHERE id = 'cashier-01'")).a === 1,
+    "and they are still active — a refused call changes nothing",
+  );
 }
 
-// With a SECOND owner present, the same demotion becomes legal — the rule is about the last one.
+// ── Promote a second owner, through the owner's own surface ───────────────────────────────────
 await opsRow(page, jaafar.id).locator('[data-testid="ops-toggle-role"]').click();
 await page.waitForFunction(
   (id) => document.querySelector(`[data-testid="ops-row"][data-operator-id="${id}"]`)?.dataset.role === "owner",
@@ -417,19 +475,17 @@ await page.waitForFunction(
 );
 await page.screenshot({ path: SHOTS + "OP4-owner-management.png" });
 assert(true, "a cashier is promoted to OWNER through the owner's own surface");
+// Still refused, and still for the same reason: a second owner existing does not make your own role
+// yours to change. This is the assertion that would fail if the two checks were ever reordered.
 {
   const r = await direct(page, "setOperatorRole", { operatorId: "cashier-01", role: "cashier" });
-  assert(r.ok === true, "🔴 with another active owner, the first owner MAY be demoted");
-  // Put it back, so the shop ends this script with its real owner.
-  const back = await direct(page, "setOperatorRole", { operatorId: "cashier-01", role: "owner" });
-  assert(back.ok === false && back.error.code === "NOT_AUTHORIZED",
-    "🔴 and having just demoted themselves, they can no longer promote anyone — live authorization, same session");
+  assert(r.ok === false && r.error.code === "SELF_ROLE_CHANGE",
+    `🔴 even with a second owner present, self-demotion is still refused (${r.error.code})`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// 9 · 🔴 THE LEDGER SNAPSHOT SURVIVES A RENAME
+// 9 · 🔴 THE PROMOTION IS REAL, AND THE LEDGER SNAPSHOT SURVIVES A RENAME
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// cashier-01 is a cashier now; sign in as the remaining owner to do the rename.
 await page.locator('[data-testid="logout"]').click();
 await page.waitForSelector('[data-testid="select-cashier"]');
 await page.getByRole("button", { name: CASHIER_NAME }).click();
@@ -437,16 +493,38 @@ await keypad(page, CASHIER_PIN);
 await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
 await tab(page, "tools");
 await page.waitForSelector('[data-testid="operators-section"]');
-assert(true, "the promoted operator now sees the owner surface — with no reinstall and no fixture change");
+assert(true, "🔴 the promoted operator now sees the owner surface — no reinstall, no fixture change");
+{
+  const r = await direct(page, "listOperators");
+  assert(r.ok === true && r.data.length === 3, "and the owner-only channel answers them through the bridge");
+}
 
+// 🔴 ONE OWNER MAY DEMOTE ANOTHER. The rule was never "owners are immutable" — it is "not yourself,
+// and never the last one". With two owners, the OTHER one can be demoted.
+{
+  const r = await direct(page, "setOperatorRole", { operatorId: "cashier-01", role: "cashier" });
+  assert(r.ok === true, "🔴 a second owner MAY demote the first — the rule is self, and last, not rank");
+  assert(
+    ledger((_all, get) => get("SELECT role FROM operators WHERE id = 'cashier-01'")).role === "cashier",
+    "and the durable row says cashier",
+  );
+}
+// Now the promoted operator is the SOLE owner, so both rules land on them instead.
+{
+  const self = await direct(page, "setOperatorRole", { operatorId: jaafar.id, role: "cashier" });
+  assert(self.ok === false && self.error.code === "SELF_ROLE_CHANGE", "the new sole owner cannot demote themselves");
+  const off = await direct(page, "setOperatorActive", { operatorId: jaafar.id, isActive: false });
+  assert(off.ok === false && off.error.code === "LAST_OWNER_PROTECTED",
+    "nor deactivate themselves — the protection moved with the role");
+}
+
+// ── The ledger snapshot ───────────────────────────────────────────────────────────────────────
 const salesBeforeRename = ledger((all) => all("SELECT id, cashier_id AS cid, cashier_name AS n FROM sales ORDER BY completed_at"));
 await opsRow(page, "cashier-01").locator('[data-testid="ops-rename"]').click();
 await page.waitForSelector('[data-testid="ops-dialog"]');
 await page.locator('[data-testid="ops-name"]').fill("حسين رقا (سابقاً)");
 await page.locator('[data-testid="ops-dialog-save"]').click();
-await page.waitForFunction(
-  () => !document.querySelector('[data-testid="ops-dialog"]'),
-);
+await page.waitForFunction(() => !document.querySelector('[data-testid="ops-dialog"]'));
 {
   const after = ledger((all) => all("SELECT id, cashier_id AS cid, cashier_name AS n FROM sales ORDER BY completed_at"));
   assert(
