@@ -52,6 +52,16 @@ import type { AuditRepository } from "../persistence/auditRepository";
 import type { PinStateRepository } from "../persistence/pinStateRepository";
 import type { SaleRepository } from "../persistence/saleRepository";
 import { type Cashier, pinMatches } from "./cashierAuth";
+import type { LoginOutcome as OperatorLoginOutcome, OperatorService } from "./operatorService";
+import type { OperatorRole } from "../persistence/operatorRepository";
+
+/**
+ * What a login attempt produces.
+ *
+ * 🔴 A `setup` outcome CARRIES NO SESSION and assigns none, so a bootstrap credential cannot reach
+ * anything that calls `requireCashier`. The ticket is the only thing it yields.
+ */
+export type LoginResult = OperatorLoginOutcome;
 
 export interface PosServiceDeps {
   readonly repository: SaleRepository;
@@ -59,7 +69,17 @@ export interface PosServiceDeps {
   readonly catalog: Catalog;
   /** The local catalog table. Without it (tests, older callers) catalog import is unavailable. */
   readonly catalogStore?: CatalogRepository;
+  /**
+   * The compiled-in TEST cashiers. Still here for tests and for a terminal with no `operators`
+   * service wired; once `operators` is present it is the authority and this is ignored.
+   */
   readonly cashiers: ReadonlyArray<CashierFixture>;
+  /**
+   * Real operator accounts (migration 8). When present, `login` and `listCashiers` read it instead
+   * of the fixture — the lockout, the constant-time compare and the error wording are unchanged,
+   * which is the whole point of the fixture having been a dependency rather than an import.
+   */
+  readonly operators?: OperatorService;
   readonly terminal: TerminalConfig;
   readonly now?: () => Date;
   readonly newId?: () => string;
@@ -181,6 +201,8 @@ export class PosService {
   private readonly now: () => Date;
   private readonly newId: () => string;
   private cashier: Cashier | null = null;
+  /** The signed-in operator's role. Null with no session, and null on a fixture-only terminal. */
+  private role: OperatorRole | null = null;
   private catalog: Catalog;
 
   constructor(private readonly deps: PosServiceDeps) {
@@ -193,7 +215,15 @@ export class PosService {
 
   // ── Session ─────────────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Who the login screen may offer.
+   *
+   * 🔴 THE MINIMUM PROJECTION, DELIBERATELY: id and name. This channel is PUBLIC — callable with no
+   * session — so it must not become a way to learn who is an owner, who is deactivated, or who has
+   * never set their PIN. An inactive operator is not listed at all.
+   */
   listCashiers(): Cashier[] {
+    if (this.deps.operators) return [...this.deps.operators.listForLogin()];
     return this.deps.cashiers.map((c) => ({ id: c.id, name: c.name }));
   }
 
@@ -202,16 +232,27 @@ export class PosService {
    * BEFORE the PIN, so a correct PIN cannot bypass it. An unknown cashier id gets the generic
    * error and creates no state.
    */
-  login(cashierId: string, pin: string): Cashier {
-    const fixture = this.deps.cashiers.find((c) => c.id === cashierId);
-    if (!fixture) throw new DomainError("INVALID_CREDENTIALS", "Cashier or PIN is incorrect");
+  /**
+   * PIN login with per-operator lockout, and — since migration 8 — the bootstrap-setup outcome.
+   *
+   * 🔴 THE LOCKOUT WRAPPER IS UNCHANGED AND STILL OUTERMOST, so a legacy BOOTSTRAP credential is
+   * rate-limited exactly like an ordinary one. The bootstrap window must not be an unlimited oracle
+   * for guessing the owner's PIN, and it is not: the attempt is counted before the outcome is known.
+   *
+   * It returns either a session or a SETUP outcome. A setup outcome assigns no session, so nothing
+   * downstream — `requireCashier` included — can be reached with a bootstrap credential.
+   */
+  login(cashierId: string, pin: string): LoginResult {
+    const account = this.credentialFor(cashierId);
+    if (!account) throw new DomainError("INVALID_CREDENTIALS", "Cashier or PIN is incorrect");
+    const fixture = account;
     const now = this.now();
     const lockMinutes = PIN_LOCKOUT_POLICY.lockDurationMs / 60000;
 
     const outcome = this.deps.pinStates.update<LoginOutcome>(fixture.id, now, (state) => {
       const lock = checkLock(state, now);
       if (lock.locked) return { next: state, result: { kind: "locked", remainingMs: lock.remainingMs } };
-      if (pinMatches(fixture, pin)) return { next: CLEAR_PIN_STATE, result: { kind: "ok" } };
+      if (pinMatches(account.credential, pin)) return { next: CLEAR_PIN_STATE, result: { kind: "ok" } };
       const next = afterFailure(state, now);
       const nowLocked = checkLock(next, now);
       return nowLocked.locked
@@ -232,16 +273,72 @@ export class PosService {
         `Cashier or PIN is incorrect. ${outcome.left} attempt${outcome.left === 1 ? "" : "s"} left before a ${lockMinutes}-minute lock.`,
       );
     }
-    this.cashier = { id: fixture.id, name: fixture.name };
+    // The PIN was correct. Whether that opens a session is the operator service's decision.
+    if (this.deps.operators) {
+      const outcome = this.deps.operators.authenticate(cashierId, pin);
+      if (outcome.kind === "setup") return outcome;
+      this.cashier = { id: outcome.session.id, name: outcome.session.name };
+      this.role = outcome.session.role;
+      return { kind: "session", session: outcome.session };
+    }
+    this.cashier = { id: account.id, name: account.name };
+    this.role = null;
+    return { kind: "session", session: { id: account.id, name: account.name, role: "cashier" } };
+  }
+
+  /** Finishes mandatory setup and opens the session it was blocking. */
+  completeBootstrapSetup(ticket: string, name: string, pin: string): Cashier {
+    if (!this.deps.operators) throw new DomainError("NOT_AVAILABLE", "Operator accounts are not available");
+    const session = this.deps.operators.completeSetup(ticket, name, pin);
+    this.cashier = { id: session.id, name: session.name };
+    this.role = session.role;
     return this.cashier;
   }
 
   logout(): void {
     this.cashier = null;
+    this.role = null;
+    this.deps.operators?.clearSetup();
   }
 
   currentCashier(): Cashier | null {
     return this.cashier;
+  }
+
+  /** The signed-in operator's role, or null when nobody is signed in. Read by the channel guard. */
+  currentRole(): OperatorRole | null {
+    return this.role;
+  }
+
+  /** The operator service, for the management channels. Null on a terminal without accounts. */
+  operatorAccounts(): OperatorService | null {
+    return this.deps.operators ?? null;
+  }
+
+  /** The session the management methods need — identity plus the role they act under. */
+  requireOperatorSession(): { id: string; name: string; role: OperatorRole } {
+    const cashier = this.requireCashier();
+    if (!this.role) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
+    return { id: cashier.id, name: cashier.name, role: this.role };
+  }
+
+  /**
+   * The account a login attempt is against — an operator row when accounts exist, else the fixture.
+   *
+   * Returns the NAME too, because the lockout message says who is locked, and the credential
+   * separately, because `pinMatches` takes only a salt and a hash.
+   */
+  private credentialFor(
+    id: string,
+  ): { id: string; name: string; credential: { pinSaltHex: string; pinHashHex: string } } | null {
+    if (this.deps.operators) {
+      const row = this.deps.operators.credentialFor(id);
+      return row;
+    }
+    const fixture = this.deps.cashiers.find((c) => c.id === id);
+    return fixture
+      ? { id: fixture.id, name: fixture.name, credential: { pinSaltHex: fixture.pinSaltHex, pinHashHex: fixture.pinHashHex } }
+      : null;
   }
 
   private requireCashier(): Cashier {

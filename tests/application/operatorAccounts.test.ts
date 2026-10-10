@@ -354,3 +354,105 @@ describe("operator management", () => {
     expect(auditRows()).toHaveLength(before);
   });
 });
+
+/**
+ * 🔴 completeSetup IS ALL OR NOTHING, and this is the proof rather than the claim.
+ *
+ * It does five things — rename if the name changed, write the new salt and hash, clear
+ * must_reset_pin, append OPERATOR_RENAMED, append OPERATOR_PIN_RESET — and a partial outcome is the
+ * dangerous one. A cleared flag with the OLD hash would leave a published bootstrap PIN live as an
+ * ordinary credential. A new hash with the flag still set would trap the operator in setup for ever.
+ * A rename that committed without its audit row would be an unexplained change of identity.
+ *
+ * The fault is injected at the LAST step, which is the only position that can prove the earlier
+ * writes roll back.
+ */
+describe("completeSetup atomicity", () => {
+  /** A service whose audit repository throws on the Nth append. */
+  function serviceFailingAuditAt(n: number) {
+    let calls = 0;
+    const real = new AuditRepository(db, { appVersion: "0.1.1", schemaVersion: 8 });
+    const failing = {
+      append: (draft: Parameters<AuditRepository["append"]>[0], id: string) => {
+        calls += 1;
+        if (calls === n) throw new Error("injected audit failure");
+        return real.append(draft, id);
+      },
+    } as unknown as AuditRepository;
+    return new OperatorService({
+      operators,
+      audit: failing,
+      transact: (fn) => db.transaction(fn).immediate(),
+      terminal: FIXTURE_TERMINAL,
+      now: () => new Date("2026-10-10T12:00:00.000Z"),
+      newId: () => `id-${++ids}`,
+    });
+  }
+
+  const snapshot = () => {
+    const r = operators.findById("cashier-01")!;
+    return { name: r.name, salt: r.pin_salt_hex, hash: r.pin_hash_hex, flag: r.must_reset_pin };
+  };
+
+  it("🔴 rolls back EVERYTHING when the final audit append fails", () => {
+    const before = snapshot();
+    // The name changes, so the flow is: rename -> audit(1) -> setPin -> audit(2). Failing at 2 is
+    // the case where the rename AND the new credential are already written in this transaction.
+    const failing = serviceFailingAuditAt(2);
+    const outcome = failing.authenticate("cashier-01", "1111");
+    if (outcome.kind !== "setup") throw new Error("expected setup");
+    expect(() => failing.completeSetup(outcome.ticket, "حسين رقا", "4321")).toThrow(/injected audit failure/);
+
+    // Nothing moved: not the name, not the credential, not the flag.
+    expect(snapshot()).toEqual(before);
+    // No audit row survived either — not even the rename that had already been appended.
+    expect(auditRows()).toEqual([]);
+    // And the OLD bootstrap PIN still works, while the attempted new one does not. This is the
+    // assertion that matters: a half-applied setup would have made 4321 live with the flag set, or
+    // left 1111 live with the flag cleared.
+    expect(failing.authenticate("cashier-01", "1111").kind).toBe("setup");
+    expect(() => failing.authenticate("cashier-01", "4321")).toThrow(/incorrect/);
+  });
+
+  it("rolls back when the FIRST audit append fails, before the credential is written", () => {
+    const before = snapshot();
+    const failing = serviceFailingAuditAt(1);
+    const outcome = failing.authenticate("cashier-01", "1111");
+    if (outcome.kind !== "setup") throw new Error("expected setup");
+    expect(() => failing.completeSetup(outcome.ticket, "حسين رقا", "4321")).toThrow();
+    expect(snapshot()).toEqual(before);
+    expect(auditRows()).toEqual([]);
+  });
+
+  it("🔴 the ticket SURVIVES a rolled-back attempt, so the operator is not locked out", () => {
+    const failing = serviceFailingAuditAt(2);
+    const outcome = failing.authenticate("cashier-01", "1111");
+    if (outcome.kind !== "setup") throw new Error("expected setup");
+    expect(() => failing.completeSetup(outcome.ticket, "حسين", "4321")).toThrow();
+    // A crash in the app's own audit layer must not strand the shop at a login screen whose only
+    // credential leads to a flow that already failed. The same ticket still works.
+    const working = new OperatorService({
+      operators,
+      audit: new AuditRepository(db, { appVersion: "0.1.1", schemaVersion: 8 }),
+      transact: (fn) => db.transaction(fn).immediate(),
+      terminal: FIXTURE_TERMINAL,
+    });
+    const retry = working.authenticate("cashier-01", "1111");
+    if (retry.kind !== "setup") throw new Error("expected setup");
+    expect(working.completeSetup(retry.ticket, "حسين", "4321").role).toBe("owner");
+  });
+
+  it("a rolled-back setup leaves the audit sequence unbroken for the next real write", () => {
+    const failing = serviceFailingAuditAt(1);
+    const o1 = failing.authenticate("cashier-01", "1111");
+    if (o1.kind !== "setup") throw new Error("expected setup");
+    expect(() => failing.completeSetup(o1.ticket, "حسين", "4321")).toThrow();
+    // seq is allocated as max(seq)+1 inside the transaction, so a rolled-back append must not have
+    // consumed a number.
+    bootstrapOwner("حسين", "4321");
+    const seqs = (db.prepare("SELECT seq FROM audit_events ORDER BY seq").all() as Array<{ seq: bigint }>).map(
+      (r) => Number(r.seq),
+    );
+    expect(seqs).toEqual([1, 2]);
+  });
+});

@@ -11,6 +11,15 @@ export const CHANNELS = {
   listCashiers: "pos:listCashiers",
   login: "pos:login",
   logout: "pos:logout",
+  // Migration 8 — operator accounts. `completeBootstrapSetup` is PUBLIC and takes a one-operator
+  // setup ticket; the six management channels are owner-only (src/main/channelPolicy.ts).
+  completeBootstrapSetup: "pos:completeBootstrapSetup",
+  listOperators: "pos:listOperators",
+  createOperator: "pos:createOperator",
+  renameOperator: "pos:renameOperator",
+  resetOperatorPin: "pos:resetOperatorPin",
+  setOperatorActive: "pos:setOperatorActive",
+  setOperatorRole: "pos:setOperatorRole",
   currentCashier: "pos:currentCashier",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
@@ -67,6 +76,63 @@ export interface MoneyDto {
 export interface CashierDto {
   readonly id: string;
   readonly name: string;
+  /** Migration 8. Present on a SESSION; the login list deliberately carries only id and name. */
+  readonly role?: OperatorRoleDto;
+}
+
+export type OperatorRoleDto = "owner" | "admin" | "cashier";
+
+/** An operator as the owner's management list sees them. No salt, no hash — there is nothing to show. */
+export interface OperatorDto {
+  readonly id: string;
+  readonly name: string;
+  readonly role: OperatorRoleDto;
+  readonly isActive: boolean;
+  readonly mustResetPin: boolean;
+}
+
+/**
+ * What `login` answers.
+ *
+ * 🔴 TWO OUTCOMES, NOT A SESSION WITH A FLAG. A legacy bootstrap credential yields `setup` and NO
+ * session, so there is no logged-in state for a reload to find and nothing for the rest of the API
+ * to accept. The ticket is the only thing it buys, and `completeBootstrapSetup` is the only channel
+ * that takes one.
+ */
+export type LoginResponse =
+  | { readonly status: "session"; readonly cashier: CashierDto }
+  | { readonly status: "setup"; readonly ticket: string; readonly operatorId: string; readonly name: string };
+
+export interface CompleteSetupRequest {
+  readonly ticket: string;
+  readonly name: string;
+  readonly pin: string;
+}
+
+export interface CreateOperatorRequest {
+  readonly name: string;
+  readonly role: OperatorRoleDto;
+  readonly pin: string;
+}
+
+export interface OperatorIdRequest {
+  readonly operatorId: string;
+}
+
+export interface RenameOperatorRequest extends OperatorIdRequest {
+  readonly name: string;
+}
+
+export interface ResetOperatorPinRequest extends OperatorIdRequest {
+  readonly pin: string;
+}
+
+export interface SetOperatorActiveRequest extends OperatorIdRequest {
+  readonly isActive: boolean;
+}
+
+export interface SetOperatorRoleRequest extends OperatorIdRequest {
+  readonly role: OperatorRoleDto;
 }
 
 export interface ProductDto {
@@ -629,8 +695,15 @@ export type PrintInvoiceResponse =
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
   listCashiers(): Promise<IpcResult<CashierDto[]>>;
-  login(req: LoginRequest): Promise<IpcResult<CashierDto>>;
+  login(req: LoginRequest): Promise<IpcResult<LoginResponse>>;
   logout(): Promise<IpcResult<null>>;
+  completeBootstrapSetup(req: CompleteSetupRequest): Promise<IpcResult<CashierDto>>;
+  listOperators(): Promise<IpcResult<ReadonlyArray<OperatorDto>>>;
+  createOperator(req: CreateOperatorRequest): Promise<IpcResult<OperatorDto>>;
+  renameOperator(req: RenameOperatorRequest): Promise<IpcResult<OperatorDto>>;
+  resetOperatorPin(req: ResetOperatorPinRequest): Promise<IpcResult<OperatorDto>>;
+  setOperatorActive(req: SetOperatorActiveRequest): Promise<IpcResult<OperatorDto>>;
+  setOperatorRole(req: SetOperatorRoleRequest): Promise<IpcResult<OperatorDto>>;
   currentCashier(): Promise<IpcResult<CashierDto | null>>;
   getCatalog(): Promise<IpcResult<CatalogDto>>;
   createSale(req: CreateSaleRequest): Promise<IpcResult<CreateSaleResponse>>;

@@ -29,6 +29,8 @@ import { CompanyProfileRepository } from "../persistence/companyProfileRepositor
 import { InvoiceRepository } from "../persistence/invoiceRepository";
 import { ReconciliationRepository } from "../persistence/reconciliationRepository";
 import { PinStateRepository } from "../persistence/pinStateRepository";
+import { OperatorRepository } from "../persistence/operatorRepository";
+import { OperatorService } from "../application/operatorService";
 import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
 import { toInvoiceViewDto } from "../shared/dto";
@@ -517,20 +519,36 @@ function startTill(): void {
   // Named rather than inlined, because the invoice stack below must share THIS object: one
   // repository, one connection, one transaction (migration 7).
   const saleStore = new SaleRepository(db);
+  // ONE audit repository, shared by PosService and the operator service. Two instances would be two
+  // `nextSeq()` readers on the same table, which is safe only because they run inside the same
+  // BEGIN IMMEDIATE — sharing it removes the need to rely on that at all.
+  const auditStore = new AuditRepository(db, {
+    appVersion: BUILD_INFO.version,
+    schemaVersion: MIGRATIONS.length,
+  });
+  const ledger = db;
   const service = new PosService({
     repository: saleStore,
     pinStates: new PinStateRepository(db),
     catalog: start.catalog,
     catalogStore,
+    // 🔴 THE FIXTURE IS NO LONGER THE AUTHORITY. Migration 8 created real `operators` rows — both
+    // fixture accounts preserved BY ID so every historical sales.cashier_id still resolves — and
+    // `operators` below is what `login` and `listCashiers` read. The array stays only because a
+    // terminal whose database predates the table would otherwise have no accounts at all; the
+    // service ignores it whenever `operators` is present.
     cashiers: FIXTURE_CASHIERS,
+    operators: new OperatorService({
+      operators: new OperatorRepository(db),
+      audit: auditStore,
+      transact: (fn) => ledger.transaction(fn).immediate(),
+      terminal: FIXTURE_TERMINAL,
+    }),
     terminal: FIXTURE_TERMINAL,
     // The durable audit trail (migration 5) and the transaction that binds it to the business
     // mutation. Both use THIS connection — there is no second database handle anywhere, because
     // atomicity across two connections would not be atomicity.
-    auditStore: new AuditRepository(db, {
-      appVersion: BUILD_INFO.version,
-      schemaVersion: MIGRATIONS.length,
-    }),
+    auditStore,
     transact: (fn) => {
       if (!db) throw new Error("ledger is not open");
       return db.transaction(fn).immediate();

@@ -33,6 +33,11 @@ function handlers(overrides: Partial<Record<string, unknown>> = {}) {
     updateProduct: vi.fn(() => ROW),
     setProductActive: vi.fn(() => ({ ...ROW, is_active: 0n })),
     currentCashier: vi.fn(() => ({ id: "cashier-01", name: "Cashier One" })),
+    // 🔴 THE GUARD ASKS FOR THIS. Every product channel is owner-only (channelPolicy.ts), and a
+    // fake missing `currentRole` made the guard throw — surfacing as "Unexpected error" and
+    // hiding the payload-validation behaviour these tests are actually about. A fake poorer than
+    // reality tests the fake.
+    currentRole: vi.fn(() => "owner"),
     ...overrides,
   } as unknown as PosService;
   return { h: syncHandlers(createIpcHandlers(service)), service };

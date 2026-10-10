@@ -108,6 +108,26 @@ export class OperatorService {
     return this.deps.operators.listActive().map((o) => ({ id: o.id, name: o.name }));
   }
 
+  /**
+   * The credential a login attempt is made against, plus the name the lockout message needs.
+   *
+   * Returns a row even when it is INACTIVE, on purpose: the lockout must count a failed attempt
+   * against a deactivated account exactly as it would against a live one, and `authenticate`
+   * refuses the inactive account afterwards with the same generic message as an unknown id. Doing
+   * it the other way round would make "wrong PIN" and "deactivated" distinguishable by timing.
+   */
+  credentialFor(
+    id: string,
+  ): { id: string; name: string; credential: { pinSaltHex: string; pinHashHex: string } } | null {
+    const row = this.deps.operators.findById(id);
+    if (!row) return null;
+    return {
+      id: row.id,
+      name: row.name,
+      credential: { pinSaltHex: row.pin_salt_hex, pinHashHex: row.pin_hash_hex },
+    };
+  }
+
   /** Everyone, for the owner's management list. */
   listAll(): OperatorView[] {
     return this.deps.operators.listAll().map(toOperatorView);

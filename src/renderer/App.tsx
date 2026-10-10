@@ -4,6 +4,7 @@ import { BuildLine } from "./BuildLine";
 import { call, errorText, pos } from "./api";
 import { HistoryScreen } from "./screens/HistoryScreen";
 import { LoginScreen } from "./screens/LoginScreen";
+import { SetupScreen } from "./screens/SetupScreen";
 import { SellScreen } from "./screens/SellScreen";
 import { TodayScreen } from "./screens/TodayScreen";
 import { ProductsScreen } from "./screens/ProductsScreen";
@@ -19,6 +20,8 @@ type ErrorNotice = { status: "error"; title: string; message: string };
 export function App() {
   const { t, lang, setLanguage } = useT();
   const [cashier, setCashier] = useState<CashierDto | null | undefined>(undefined);
+  /** An outstanding bootstrap setup. Non-null means the till is unreachable until it completes. */
+  const [setup, setSetup] = useState<{ readonly ticket: string; readonly name: string } | null>(null);
   const [tab, setTab] = useState<Tab>("sell");
   // Bumped after a catalog import so the Sell screen reloads the catalog from the main process.
   const [catalogVersion, setCatalogVersion] = useState(0);
@@ -31,11 +34,29 @@ export function App() {
   }, []);
 
   if (cashier === undefined) return <div className="center muted">Loading…</div>;
+
+  // 🔴 MANDATORY SETUP COMES BEFORE THE APPLICATION, and it is not merely rendered first: there is
+  // no session behind it, so every other channel refuses regardless of what this renderer shows.
+  if (setup !== null)
+    return (
+      <div className="app">
+        <main className="content">
+          <SetupScreen ticket={setup.ticket} operatorName={setup.name} onReady={setCashier} />
+        </main>
+        <BuildLine />
+      </div>
+    );
+
   if (cashier === null)
     return (
       <div className="app">
         <main className="content">
-          <LoginScreen onLogin={setCashier} />
+          <LoginScreen
+            onOutcome={(r) => {
+              if (r.status === "setup") setSetup({ ticket: r.ticket, name: r.name });
+              else setCashier(r.cashier);
+            }}
+          />
         </main>
         <BuildLine />
       </div>
@@ -44,6 +65,7 @@ export function App() {
   const logout = async () => {
     await call(pos().logout());
     setCashier(null);
+    setSetup(null);
     setTab("sell");
   };
 
@@ -119,7 +141,12 @@ export function App() {
         {tab === "products" && <ProductsScreen />}
         {tab === "invoices" && <InvoicesScreen />}
         {tab === "tools" && (
-          <ToolsScreen onImportCatalog={importCatalog} onExportCatalog={exportCatalog} onExportBackup={exportBackup} />
+          <ToolsScreen
+            onImportCatalog={importCatalog}
+            onExportCatalog={exportCatalog}
+            onExportBackup={exportBackup}
+            operator={cashier}
+          />
         )}
       </main>
       <BuildLine />

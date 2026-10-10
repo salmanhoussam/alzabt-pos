@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { CashierDto } from "../../shared/ipcContract";
+import type { CashierDto, LoginResponse } from "../../shared/ipcContract";
 import { BRAND } from "../../shared/i18n";
 import { call, errorText, pos } from "../api";
 import { useT } from "../i18n";
@@ -10,7 +10,12 @@ const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "clear", "0", "back"]
 const PIN_MAX = 8;
 const PIN_MIN = 4;
 
-export function LoginScreen({ onLogin }: { onLogin: (c: CashierDto) => void }) {
+/**
+ * 🔴 `onOutcome`, NOT `onLogin`. Since migration 8 a correct PIN may be a LEGACY BOOTSTRAP
+ * credential, which yields a setup ticket and NO session. This screen must not assume it signed
+ * anybody in, so it hands the outcome up and App decides which screen comes next.
+ */
+export function LoginScreen({ onOutcome }: { onOutcome: (r: LoginResponse) => void }) {
   const { t, lang, setLanguage } = useT();
   const [cashiers, setCashiers] = useState<CashierDto[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -33,14 +38,14 @@ export function LoginScreen({ onLogin }: { onLogin: (c: CashierDto) => void }) {
     if (!selected || pin.length < PIN_MIN) return;
     setBusy(true);
     try {
-      onLogin(await call(pos().login({ cashierId: selected, pin })));
+      onOutcome(await call(pos().login({ cashierId: selected, pin })));
     } catch (e) {
       setError(errorText(e));
       setPin("");
     } finally {
       setBusy(false);
     }
-  }, [onLogin, pin, selected]);
+  }, [onOutcome, pin, selected]);
 
   /**
    * The physical keyboard mirrors the on-screen pad.
