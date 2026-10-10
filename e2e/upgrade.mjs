@@ -362,8 +362,18 @@ async function invoiceRow(page, { description, quantity, unit, price }) {
   await invTestid(page, "new-line-quantity").fill(quantity);
   await invTestid(page, "new-line-unit").fill(unit);
   await invTestid(page, "new-line-price").fill(price);
-  await invTestid(page, "new-line-save").click();
-  await page.waitForSelector('[data-testid="new-line-save"]', { state: "detached" });
+  // 🔴 THIS FILE DRIVES TWO BUILDS, so it must not assume either one's row model. Up to and
+  // including `ce4dd28` a row was committed by its own "save" button; from 2026-10-10 the sheet
+  // holds several unsaved rows and they are flushed together by "Save draft". Whichever exists
+  // here is pressed, and the row is then gone from the unsaved sheet in both.
+  const perRowSave = invTestid(page, "new-line-save");
+  if ((await perRowSave.count()) > 0) {
+    await perRowSave.click();
+    await page.waitForSelector('[data-testid="new-line-save"]', { state: "detached" });
+  } else {
+    await invTestid(page, "save-draft").click();
+    await page.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });
+  }
 }
 
 /** A catalog product's stored base_unit, read from the ledger (the app must be closed). */

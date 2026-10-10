@@ -188,8 +188,10 @@ async function addRow(page, { description, quantity, unit, price }) {
   await testid(page, "new-line-quantity").fill(quantity);
   await testid(page, "new-line-unit").fill(unit);
   await testid(page, "new-line-price").fill(price);
-  await testid(page, "new-line-save").click();
-  await page.waitForSelector('[data-testid="new-line-save"]', { state: "detached" });
+  // The row model changed 2026-10-10: there is no per-row save. The sheet holds the rows the
+  // operator typed and flushes them together, so this commits through the durable save path.
+  await testid(page, "save-draft").click();
+  await page.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -320,8 +322,8 @@ await testid(page, "add-row").click();
 await page.locator('.inv-new-line .btn.ghost.small').first().click();
 await page.waitForSelector('[data-testid="product-picker"]');
 await testid(page, "picker-option").first().click();
-await testid(page, "new-line-save").click();
-await page.waitForSelector('[data-testid="new-line-save"]', { state: "detached" });
+await testid(page, "save-draft").click();
+await page.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });
 assert((await testid(page, "sheet-line").count()) === 1, "a row picked from the catalog was added");
 
 // Row 2 — the same catalog product at a DIFFERENT price (PRICE_DIFFERENCE).
