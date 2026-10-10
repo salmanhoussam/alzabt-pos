@@ -11,7 +11,7 @@
  * The amounts were exact — this was only ever a display defect — but a receipt line a shopkeeper
  * cannot read is still a defect. Found on Windows, run 37616948728.
  *
- * The fix is bidi ISOLATION, not translation and not an English unit string: `<bdi>` isolates the
+ * The fix is bidi ISOLATION at BOTH levels — the whole run, and the unit word within it: `<bdi>` isolates the
  * run from its surroundings (`unicode-bidi: isolate`), and `dir="ltr"` fixes the base direction of
  * the arithmetic itself. An Arabic unit label still renders right-to-left WITHIN its own word, which
  * is correct — only the order of the five parts is pinned. So this stays right when units are
@@ -40,7 +40,14 @@ export function LineMath({ quantityMilli, saleUnit, unitPrice, unitLabel }: Line
       {label !== null && (
         <>
           {" "}
-          <span className="line-math-unit">{label}</span>
+          {/* 🔴 THE UNIT IS ISOLATED TOO, and this is not belt-and-braces. Once the label is
+              localized it is an RTL run inside this LTR one, and an un-isolated RTL span absorbs
+              the neutral characters that follow it: the installed app printed
+                  1 2.50 × USD حبة        instead of        1 حبة × 2.50 USD
+              The outer bdi pins this run against the PAGE; it cannot stop a child run from
+              reordering its own siblings. Only a screenshot shows this — innerText returns DOM
+              order, so an assertion on the text passes while the operator reads it backwards. */}
+          <bdi className="line-math-unit">{label}</bdi>
         </>
       )}{" "}
       ×{" "}

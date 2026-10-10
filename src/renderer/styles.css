@@ -442,3 +442,7 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
   background: var(--surface-sunken); border-radius: var(--radius);
   padding: 10px var(--space-3); margin-top: var(--space-3);
 }
+
+/* The unit word may be Arabic inside an LTR arithmetic run; isolate it so it cannot reorder the
+   × , the price or the currency that follow it. */
+.line-math-unit { unicode-bidi: isolate; }

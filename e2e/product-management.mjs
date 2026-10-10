@@ -162,6 +162,29 @@ assert(
   /2\.5\s+\S+\s+×\s+2\.50\s+USD/.test(receiptFlat),
   `the receipt reads quantity -> unit -> × -> price -> currency ("${receiptFlat.slice(0, 140)}")`,
 );
+
+// 🔴 WHERE THE PARTS ACTUALLY ARE, NOT WHAT THE DOM SAYS. innerText returns DOM order, so a line
+// the operator reads backwards still satisfies the assertion above — which is exactly what
+// happened when the unit word was localized: the receipt printed "1 2.50 × USD حبة" while every
+// text assertion passed. This measures the rendered positions instead.
+{
+  const math = page.locator('[data-testid="line-math"]').first();
+  const at = async (cls) => {
+    const box = await math.locator(cls).boundingBox();
+    if (!box) throw new Error(`no box for ${cls}`);
+    return box.x;
+  };
+  const [qx, ux, px, cx] = [
+    await at(".line-math-qty"),
+    await at(".line-math-unit"),
+    await at(".line-math-price"),
+    await at(".line-math-currency"),
+  ];
+  assert(
+    qx < ux && ux < px && px < cx,
+    `the line reads left-to-right as quantity, unit, price, currency (x: ${qx} ${ux} ${px} ${cx})`,
+  );
+}
 assert(fractionalReceipt.includes("6.25"), "the receipt total is 6.25");
 await page.screenshot({ path: SHOTS + "P7-fractional-sale.png" });
 // 🔴 CLICK THE REAL CONTROL, AND DO NOT SWALLOW THE FAILURE. This matched the receipt's button by
