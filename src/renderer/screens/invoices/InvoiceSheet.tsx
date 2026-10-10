@@ -877,7 +877,9 @@ export function InvoiceSheet({
             </button>
           </>
         )}
-        <button className="btn ghost" onClick={onClosed}>
+        {/* The way out of a sheet, in every state including read-only. It had no testid, so a
+            script could not leave an issued invoice without restarting the application. */}
+        <button className="btn ghost" onClick={onClosed} data-testid="sheet-close">
           {t("action.cancel")}
         </button>
       </div>

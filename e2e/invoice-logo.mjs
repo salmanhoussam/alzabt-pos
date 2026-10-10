@@ -257,6 +257,10 @@ assert(
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 4 · The shop changes its logo — and the ISSUED invoice must not change with it
 // ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🔴 LEAVE THE SHEET FIRST. While a sheet is open it REPLACES the invoices view, so the sub-tab
+// nav does not exist — dismissing the notice was not enough, and the gate caught exactly that.
+await testid(page, "sheet-close").click();
+await page.waitForSelector('[data-testid="inv-tab-company"]');
 await testid(page, "inv-tab-company").click();
 await page.waitForSelector('[data-testid="company-name-ar"]', { timeout: 30000 });
 await stubOpen(app, LOGO_TWO);
