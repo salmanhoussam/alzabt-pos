@@ -20,7 +20,7 @@ const METHOD_KEY: Record<PaymentMethod, string> = {
 };
 
 export function SellScreen() {
-  const { t } = useT();
+  const { t, unit } = useT();
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [clearing, setClearing] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -192,8 +192,10 @@ export function SellScreen() {
               </span>
               {p.sku && <span className="product-sku muted">{p.sku}</span>}
               <span className="product-price">
-                {formatDecimal(p.price)}
-                {p.baseUnit !== "piece" && <span className="muted"> / {p.baseUnit}</span>}
+                {/* One isolated run, amount and currency together — the same shape the cart line
+                    and the total use, so a price reads identically wherever it appears. */}
+                <bdi dir="ltr">{`${formatDecimal(p.price)} ${catalog.currency}`}</bdi>
+                {p.baseUnit !== "piece" && <span className="muted"> / {unit(p.baseUnit)}</span>}
                 {p.priceNeedsReview && (
                   <span className="badge warn" data-testid="price-review" title={t("sell.placeholderPrice")}>
                     {t("sell.priceUnknown")}
@@ -226,7 +228,12 @@ export function SellScreen() {
                 <div className="line-main">
                   <span dir="auto">{l.productName}</span>
                   <span className="muted">
-                    <LineMath quantityMilli={l.quantityMilli} saleUnit={l.saleUnit} unitPrice={l.unitPrice} />
+                    <LineMath
+                      quantityMilli={l.quantityMilli}
+                      saleUnit={l.saleUnit}
+                      unitPrice={l.unitPrice}
+                      unitLabel={unit}
+                    />
                   </span>
                 </div>
                 <div className="qty">
@@ -274,7 +281,9 @@ export function SellScreen() {
                     ✕
                   </button>
                 </div>
-                <span className="line-total">{formatDecimal(l.lineTotal)}</span>
+                <span className="line-total">
+                  <bdi dir="ltr">{`${formatDecimal(l.lineTotal)} ${catalog.currency}`}</bdi>
+                </span>
               </li>
             ))}
           </ul>

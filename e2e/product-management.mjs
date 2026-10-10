@@ -155,8 +155,11 @@ const receiptFlat = fractionalReceipt.replace(/\s+/g, " ").trim();
 // 🔴 The ORDER, not just the presence: on an RTL terminal this line used to render as
 // "2.5 USD 2.50 × kg". The quantity, its unit, the ×, the price and the currency must read in that
 // sequence, which is what the bdi isolation in components/LineMath.tsx pins.
+// 🔴 THE ORDER, NOT THE LANGUAGE. The unit word is now translated — this receipt is Arabic, so it
+// reads «كيلو» — and pinning the English "kg" would assert the translation rather than the bidi
+// order this test exists to protect. The shape is what matters: quantity, unit, ×, price, currency.
 assert(
-  receiptFlat.includes("2.5 kg × 2.50 USD"),
+  /2\.5\s+\S+\s+×\s+2\.50\s+USD/.test(receiptFlat),
   `the receipt reads quantity -> unit -> × -> price -> currency ("${receiptFlat.slice(0, 140)}")`,
 );
 assert(fractionalReceipt.includes("6.25"), "the receipt total is 6.25");

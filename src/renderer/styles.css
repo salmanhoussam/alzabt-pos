@@ -425,3 +425,20 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
   display: grid; place-items: center; gap: var(--space-3);
   padding: var(--space-4); text-align: center;
 }
+
+/* RECEIPT — these classes were written into the component without their styles, so the label and
+   its value collided ("طريقة الدفعنقداً") and the success check floated bare. Only looking at the
+   installed app showed it; no CSS assertion can. */
+.receipt-ok { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-1); }
+.receipt-ok h2 { margin: 0; font-size: 21px; line-height: var(--leading-tight); }
+.receipt-check {
+  width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--status-success-text); color: var(--surface); font-weight: 700; font-size: 15px;
+}
+.receipt-meta { margin: 0 0 var(--space-3); }
+.receipt-total { font-size: 24px; font-variant-numeric: tabular-nums; }
+.receipt-paid {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
+  background: var(--surface-sunken); border-radius: var(--radius);
+  padding: 10px var(--space-3); margin-top: var(--space-3);
+}

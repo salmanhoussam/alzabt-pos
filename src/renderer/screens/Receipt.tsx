@@ -7,7 +7,7 @@ import { stamp } from "../format";
 
 /** On-screen receipt summary (no printing in this gate). */
 export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => void }) {
-  const { t } = useT();
+  const { t, unit } = useT();
   return (
     <div className="center">
       <div className="card receipt" data-testid="receipt">
@@ -31,7 +31,12 @@ export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => 
                   {l.sku && <span className="muted small"><bdi dir="ltr">{l.sku}</bdi></span>}
                 </td>
                 <td className="num">
-                  <LineMath quantityMilli={l.quantityMilli} saleUnit={l.saleUnit} unitPrice={fromMoneyDto(l.unitPrice)} />
+                  <LineMath
+                    quantityMilli={l.quantityMilli}
+                    saleUnit={l.saleUnit}
+                    unitPrice={fromMoneyDto(l.unitPrice)}
+                    unitLabel={unit}
+                  />
                 </td>
                 <td className="num"><bdi dir="ltr">{fmt(l.lineTotal)}</bdi></td>
               </tr>
