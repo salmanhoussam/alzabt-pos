@@ -437,11 +437,16 @@ function auditIsAppendOnly() {
         return pattern.test(String(err.message));
       }
     };
-    return {
-      update: refused("UPDATE audit_events SET actor_name = 'Someone Else'", /append-only/),
-      delete: refused("DELETE FROM audit_events", /cannot be deleted/),
-      intact: Number(db.prepare("SELECT count(*) AS n FROM audit_events").get().n),
-    };
+    // 🔴 `intact` is a COMPARISON, not a remembered number. It used to return the row count and
+    // every call site asserted `=== 1`, which was true until mandatory setup added a row to the
+    // same table — the third place one literal silently became wrong because the trail grew. The
+    // count is now read BEFORE the refused writes and again after, and "intact" means the two
+    // agree. That is what the assertion was always trying to say, and it cannot drift again.
+    const before = Number(db.prepare("SELECT count(*) AS n FROM audit_events").get().n);
+    const update = refused("UPDATE audit_events SET actor_name = 'Someone Else'", /append-only/);
+    const del = refused("DELETE FROM audit_events", /cannot be deleted/);
+    const after = Number(db.prepare("SELECT count(*) AS n FROM audit_events").get().n);
+    return { update, delete: del, before, after, intact: before === after && before > 0 };
   } finally {
     db.close();
   }
@@ -978,7 +983,7 @@ if (PHASE === "seed-v2") {
   const guard = auditIsAppendOnly();
   assert(guard.update, "UPDATE on audit_events is rejected by SQLite itself");
   assert(guard.delete, "DELETE on audit_events is rejected by SQLite itself");
-  assert(guard.intact === 1, "and the trail is intact after both attempts");
+  assert(guard.intact, `and the trail is intact after both attempts (${guard.before} -> ${guard.after})`);
 
   // ── A new catalog import produces the expected summary and entity rows ────────────────────────
   ({ app, page } = await launch());
