@@ -330,7 +330,13 @@ for (const [channel, payload] of [
   ["resetOperatorPin", { operatorId: "cashier-01", pin: "0000" }],
   ["exportBackup", null],
   ["getCompanyProfile", null],
-  ["listReconciliation", null],
+  // 🔴 listReconciliationQueue, NOT listReconciliation. Both are owner-only, but
+  // listReconciliation needs an invoice id and this profile has no invoices, so without the guard
+  // it would answer INVOICE_NOT_FOUND — an error either way, and the assertion could not fail for
+  // the right reason. The QUEUE listing succeeds on an empty shop, so removing the guard turns this
+  // line green, which is exactly what it must do. (The first draft also called it with no payload
+  // at all, which threw inside the PRELOAD and never reached the main process to be refused.)
+  ["listReconciliationQueue", { filter: "unresolved", limit: 10 }],
   ["createProduct", { draft: { nameAr: "صنف مزيّف", nameEn: null, sku: null, price: "1.00", baseUnit: "piece" } }],
 ]) {
   const r = await direct(page, channel, payload);
