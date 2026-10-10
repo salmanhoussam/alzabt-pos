@@ -22,7 +22,9 @@
 // prints it, and reads the ledger file directly (app closed) for schema/backup evidence.
 // Synthetic Arabic data and fake prices only.
 import { _electron as electron } from "playwright-core";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { spawn, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -218,6 +220,84 @@ function salesHasSource(db) {
     .prepare("PRAGMA table_info(sales)")
     .all()
     .some((c) => c.name === "source_type");
+}
+
+const sha256 = (f) => createHash("sha256").update(readFileSync(f)).digest("hex");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Where a phase leaves facts for a LATER PROCESS to assert against. CI keeps the workspace. */
+const factFile = (name) => join(APP, "e2e-output", name);
+function saveFacts(name, data) {
+  mkdirSync(join(APP, "e2e-output"), { recursive: true });
+  writeFileSync(factFile(name), JSON.stringify(data, null, 2));
+  log(`facts saved: ${name}`);
+}
+const loadFacts = (name) => JSON.parse(readFileSync(factFile(name), "utf8"));
+
+function killTree(pid) {
+  try {
+    if (process.platform === "win32") execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
+    else process.kill(pid, "SIGKILL");
+  } catch {
+    // already gone
+  }
+}
+
+function windowTitle(pid) {
+  if (process.platform !== "win32") return null;
+  try {
+    return execFileSync("powershell", ["-NoProfile", "-Command", `(Get-Process -Id ${pid}).MainWindowTitle`], {
+      encoding: "utf8",
+    }).trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Runs the CURRENT E2E_EXECUTABLE against the REAL default profile and requires it to REFUSE with a
+ * named startup-failure code.
+ *
+ * 🔴 Modelled on e2e/startup-failure.mjs, with one difference that matters: that script uses a
+ * throw-away profile, and this one must use the real one, because the whole question is what the
+ * OLD BUILD does to the SHOP'S OWN database. The error box is modal, so the process stays alive
+ * showing it; the log is read, the window title checked, then the tree is killed.
+ *
+ * 🔴 AND IT ONLY ACCEPTS A LINE WRITTEN AFTER IT STARTED. The log is shared with every earlier
+ * phase in this profile, so matching anywhere in the file could pass on a stale entry and would
+ * keep passing if the old build silently started instead of refusing.
+ */
+async function runRefusing(expectedCode) {
+  const logFile = join(DEFAULT_PROFILE, "logs", "alzabt-pos.log");
+  const before = existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").length : 0;
+  log(`log lines before the refusal attempt: ${before}`);
+  const child = spawn(ELECTRON, [...EXTRA_ARGS, ...APP_ARGS], {
+    env: { ...env, ALZABT_POS_DISABLE_AUTOSTART: "1" },
+    stdio: "ignore",
+  });
+  let exited = null;
+  child.on("exit", (code) => (exited = code));
+  let line = null;
+  let title = null;
+  for (let i = 0; i < 160 && !line; i++) {
+    await sleep(250);
+    if (!existsSync(logFile)) continue;
+    const lines = readFileSync(logFile, "utf8").split("\n");
+    line = lines.slice(Math.max(0, before - 1)).find((l) => l.includes('"event":"startup-failure"')) ?? null;
+  }
+  for (let i = 0; i < 40 && process.platform === "win32" && !title; i++) {
+    title = windowTitle(child.pid);
+    if (!title) await sleep(250);
+  }
+  killTree(child.pid);
+  assert(line !== null, `the old build recorded a NEW startup failure (not a stale one)`);
+  const entry = JSON.parse(line);
+  assert(entry.code === expectedCode, `and classified it as ${expectedCode} (got ${entry.code})`);
+  const after = readFileSync(logFile, "utf8").split("\n").slice(Math.max(0, before - 1)).join("\n");
+  assert(!after.includes('"event":"catalog"'), "the till never started behind the error box");
+  if (process.platform === "win32") {
+    log("error box window title:", JSON.stringify(title), "process exited early:", exited);
+    assert(title === "Alzabt POS — cannot start", "the operator is TOLD, in a native error box");
+  }
 }
 
 function ledgerFacts() {
@@ -1613,6 +1693,21 @@ if (PHASE === "seed-v2") {
     f.cashierSnapshots.includes("cashier-01=") && f.cashierSnapshots.includes("cashier-02="),
     `the v7 ledger names BOTH fixture operators (${f.cashierSnapshots})`,
   );
+  // 🔴 The rollback phases are SEPARATE PROCESSES, and the only honest way to prove "the original
+  // ledger is intact" after a restore is to compare against what was really there before the
+  // upgrade — not against what the restored file says about itself.
+  saveFacts("v7-baseline.json", {
+    schema: f.schema,
+    sales: f.sales,
+    voids: f.voids,
+    receipts: f.receipts,
+    quantities: f.quantities,
+    catalog: f.catalog,
+    audit: f.audit,
+    auditTypes: f.auditTypes,
+    cashierSnapshots: f.cashierSnapshots,
+    ledgerSha256: sha256(LEDGER),
+  });
   log("V7 BASELINE READY:", JSON.stringify({ sales: f.sales, voids: f.voids, audit: f.audit, snapshots: f.cashierSnapshots }));
 } else if (PHASE === "verify-from-v7") {
   // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1750,9 +1845,198 @@ if (PHASE === "seed-v2") {
       backup: pre,
     }),
   );
+} else if (PHASE === "rollback-prepare-v7") {
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // Rollback, part 1 — make REAL v8-only changes, so the restore has something to lose.
+  //
+  // 🔴 WHY THIS PHASE EXISTS. "The pre-migration snapshot is a valid rollback" is only a meaningful
+  // claim if we can say exactly WHAT rolling back costs. So the owner does two things only v8 can
+  // do — renames an operator and creates a third one — and part 3 asserts both are GONE afterwards.
+  // That is correct rollback semantics, not corruption, and it is written down rather than
+  // discovered by a shop.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  assert(existsSync(LEDGER), "the migrated v8 ledger is there");
+  const start = ledgerFacts();
+  assert(start.schema === 8, `this phase runs on the v8 build (got ${start.schema})`);
+
+  const { app, page } = await launch();
+  await tab(page, "Tools");
+  await page.waitForSelector('[data-testid="operators-section"]');
+
+  // Rename cashier-01 — a change that exists ONLY in v8, because v7 has no operators table.
+  await page.locator('[data-testid="ops-row"][data-operator-id="cashier-01"] [data-testid="ops-rename"]').click();
+  await page.waitForSelector('[data-testid="ops-dialog"]');
+  await page.locator('[data-testid="ops-name"]').fill("اسم بعد الترقية");
+  await page.locator('[data-testid="ops-dialog-save"]').click();
+  await page.waitForFunction(() => !document.querySelector('[data-testid="ops-dialog"]'));
+
+  // And a third operator, who has never existed in any v7 ledger.
+  await page.locator('[data-testid="ops-add"]').click();
+  await page.waitForSelector('[data-testid="ops-dialog"]');
+  await page.locator('[data-testid="ops-name"]').fill("موظف بعد الترقية");
+  await page.locator('[data-testid="ops-pin"]').fill("8642");
+  await page.locator('[data-testid="ops-dialog-save"]').click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="ops-row"]').length === 3);
+  await app.close();
+
+  const f = ledgerFacts();
+  assert(f.operators === 3, `three operators now exist on v8 (got ${f.operators})`);
+  assert(/cashier-01:owner/.test(f.operatorRows), `cashier-01 is still the owner (${f.operatorRows})`);
+  {
+    const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
+    try {
+      const name = db.prepare("SELECT name FROM operators WHERE id = 'cashier-01'").get().name;
+      assert(name === "اسم بعد الترقية", `the v8-only rename landed (${name})`);
+    } finally {
+      db.close();
+    }
+  }
+  // The ledger's own snapshots are untouched by an operator rename — the same property
+  // operator-accounts.mjs proves on a fresh profile, re-proven here on a MIGRATED one.
+  assert(f.cashierSnapshots === start.cashierSnapshots, "and no past sale changed when the operator was renamed");
+  saveFacts("v8-changes.json", {
+    operators: f.operators,
+    operatorRows: f.operatorRows,
+    renamedTo: "اسم بعد الترقية",
+    thirdOperator: "موظف بعد الترقية",
+  });
+  log("V8 CHANGES READY:", JSON.stringify({ operators: f.operators, rows: f.operatorRows }));
+} else if (PHASE === "rollback-refuse-v7") {
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // Rollback, part 2 — 🔴 THE v7 EXECUTABLE MUST REFUSE THE v8 DATABASE.
+  //
+  // This is the half that makes "install the old EXE" NOT a rollback. CI has reinstalled the real
+  // v7 build over this machine, so E2E_EXECUTABLE is now the v7 executable pointed at the shop's
+  // own v8 profile. It must refuse cleanly: no silent downgrade, no destructive reset, no mutation.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  assert(existsSync(LEDGER), "the v8 ledger is there");
+  const before = ledgerFacts();
+  assert(before.schema === 8, `the active database really is v8 (got ${before.schema})`);
+  const shaBefore = sha256(LEDGER);
+  const backupsBefore = backupFiles();
+
+  await runRefusing("DB_NEWER_THAN_APP");
+
+  // 🔴 NOTHING WAS TOUCHED. Byte-for-byte, not "looks the same".
+  assert(sha256(LEDGER) === shaBefore, "🔴 the v8 database is byte-for-byte unchanged");
+  const after = ledgerFacts();
+  assert(after.schema === 8, `no silent downgrade — the schema is still v8 (got ${after.schema})`);
+  assert(after.operators === before.operators, `and the operators table is intact (${after.operators})`);
+  assert(after.operatorRows === before.operatorRows, "including every operator's role and flags");
+  assert(after.sales === before.sales && after.voids === before.voids, "no destructive reset — every sale and void is there");
+  assert(
+    JSON.stringify(backupFiles()) === JSON.stringify(backupsBefore),
+    `and the refusal wrote no backup of its own (${JSON.stringify(backupFiles())})`,
+  );
+  log("REFUSAL CONFIRMED: the v7 build will not open a v8 database, and changed nothing");
+} else if (PHASE === "rollback-restore-v7") {
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // Rollback, part 3 — restore the automatic pre-migration snapshot, then run the v7 build on it.
+  //
+  //     🔴 OLD EXE ALONE IS NOT ROLLBACK.
+  //     🔴 VALID ROLLBACK = RESTORE THE PRE-MIGRATION v7 DATABASE + RUN THE v7 EXECUTABLE.
+  //
+  // Part 2 proved the first half of that sentence. This phase proves the second.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  const baseline = loadFacts("v7-baseline.json");
+  const v8changes = loadFacts("v8-changes.json");
+
+  const snapName = backupFiles().find((b) => /^pre-migration-v7-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  assert(snapName, `the automatic pre-migration snapshot is still there (${JSON.stringify(backupFiles())})`);
+  const snapPath = join(DEFAULT_PROFILE, "backups", snapName);
+
+  // Read the snapshot BEFORE promoting it, so a bad snapshot is caught before it becomes the ledger.
+  {
+    const snap = new Database(snapPath, { readonly: true, fileMustExist: true });
+    try {
+      assert(Number(snap.prepare("SELECT max(version) AS n FROM schema_migrations").get().n) === 7, "the snapshot is schema v7");
+      assert(
+        snap.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().every((r) => r.name !== "operators"),
+        "🔴 and it has NO operators table — it predates migration 8 entirely",
+      );
+      assert(
+        Number(snap.prepare("SELECT count(*) AS n FROM sales").get().n) === baseline.sales,
+        `and it holds the shop's ${baseline.sales} pre-upgrade sales`,
+      );
+    } finally {
+      snap.close();
+    }
+  }
+
+  // The app is fully stopped by CI before this phase. Promote the snapshot to BE the ledger, and
+  // remove the WAL sidecars so no v8 page can survive into the restored database.
+  copyFileSync(snapPath, LEDGER);
+  for (const side of ["-wal", "-shm"]) {
+    if (existsSync(LEDGER + side)) rmSync(LEDGER + side);
+  }
+  log(`restored ${snapName} over the active ledger`);
+
+  const restored = ledgerFacts();
+  assert(restored.schema === 7, `the ACTIVE database is now schema v7 (got ${restored.schema})`);
+  assert(restored.operators === null, "🔴 and has no operators table at all");
+  assert(restored.integrity === "ok", "integrity_check on the restored database is ok");
+
+  // ── 🔴 The v7 EXECUTABLE now STARTS NORMALLY on it ───────────────────────────────────────────
+  // launch() waits for the login screen, asserts the real profile, signs in as Cashier One with
+  // 1111 and waits for the till. On a v7 build its mandatory-setup branch cannot fire — there is no
+  // operators table — so reaching the cart IS the proof that the old credential model is back.
+  const { app, page } = await launch();
+  await tab(page, "History");
+  await page.waitForSelector(".history-table");
+  const rows = await historyRows(page);
+  log("history rows after rollback:", JSON.stringify(rows.length));
+  await app.close();
+
+  const f = ledgerFacts();
+  // ── The original ledger is intact, compared against what was REALLY there before the upgrade ──
+  assert(f.sales === baseline.sales, `every sale is back (${f.sales} of ${baseline.sales})`);
+  assert(f.voids === baseline.voids, `and every void (${f.voids} of ${baseline.voids})`);
+  assert(JSON.stringify(f.receipts) === JSON.stringify(baseline.receipts), "the receipt sequence is the original one");
+  assert(JSON.stringify(f.quantities) === JSON.stringify(baseline.quantities), "every sale line quantity is the original one");
+  assert(f.catalog === baseline.catalog, "the catalog is the original one");
+  assert(f.audit === baseline.audit, `the audit history is the original one (${f.audit} rows)`);
+  assert(f.auditTypes === baseline.auditTypes, `including its exact composition (${f.auditTypes})`);
+  // 🔴 cashier ids AND names, which is what a receipt reprint depends on.
+  assert(
+    f.cashierSnapshots === baseline.cashierSnapshots,
+    `and every sale still names the operator who rang it (${f.cashierSnapshots})`,
+  );
+  const guard = auditIsAppendOnly();
+  assert(guard.update && guard.delete, "the restored audit trail is append-only again");
+
+  // ── 🔴 WHAT ROLLING BACK COSTS, stated as an assertion rather than a footnote ─────────────────
+  assert(f.operators === null, "🔴 the operators table is gone — every v8 account went with the snapshot");
+  {
+    const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
+    try {
+      const names = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        .all()
+        .map((r) => r.name);
+      assert(!names.includes("operators"), "no operators table in sqlite_master");
+      // The v8-only rename and the third operator are both gone with it — EXPECTED, not corruption.
+      const trail = db
+        .prepare("SELECT count(*) AS n FROM audit_events WHERE entity_type = 'operator'")
+        .get().n;
+      assert(Number(trail) === 0, "and no operator audit row survived either");
+    } finally {
+      db.close();
+    }
+  }
+  log(
+    "ROLLBACK COST (expected, not corruption):",
+    JSON.stringify({
+      lost: [`rename to ${v8changes.renamedTo}`, `operator ${v8changes.thirdOperator}`, "every PIN set on v8"],
+      regained: "the v7 credential model — Cashier One / 1111 opens the till again, as it did before the upgrade",
+    }),
+  );
+  log("");
+  log("🔴 OLD EXE ALONE IS NOT ROLLBACK.");
+  log("🔴 VALID ROLLBACK = RESTORE THE PRE-MIGRATION v7 DATABASE + RUN THE v7 EXECUTABLE.");
+  log(`   proven on this machine: ${snapName} + the real v7 build`);
 } else {
   console.error(
-    "usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main|seed-v4|verify-from-v4|seed-v5|verify-from-v5|seed-v6|verify-from-v6|seed-v7|verify-from-v7",
+    "usage: node e2e/upgrade.mjs seed-v2|verify-from-v2|seed-v3|verify-from-v3|seed-main|verify-from-main|seed-v4|verify-from-v4|seed-v5|verify-from-v5|seed-v6|verify-from-v6|seed-v7|verify-from-v7|rollback-prepare-v7|rollback-refuse-v7|rollback-restore-v7",
   );
   process.exit(2);
 }

@@ -29,7 +29,9 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 90
+    # Raised from 90 when scenario G (a seventh prior-release build) and the rollback proof landed.
+    # A timeout reads like a product failure, which is the most misleading red this gate can show.
+    timeout-minutes: 130
     defaults:
       run:
         shell: pwsh
@@ -390,6 +392,43 @@ jobs:
           Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host "Profile after the migration-8 upgrade:"
           Get-ChildItem $posProfile -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: "Rollback: OLD EXE ALONE IS NOT ROLLBACK (v7 refuses v8, then snapshot + v7 EXE)"
+        run: |
+          # Continues on the SAME profile scenario G just migrated to v8. Three phases, and the
+          # installs between them are the point: this is the sequence a shop would actually perform
+          # on a bad upgrade day.
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/upgrade.mjs rollback-prepare-v7
+          if ($LASTEXITCODE -ne 0) { throw "rollback-prepare-v7 failed" }
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 2
+
+          # 🔴 Reinstall the REAL designated v7 rollback build over the v8 installation. Both
+          # installers target the same per-user path, so INSTALLED_EXE now resolves to the v7
+          # executable — the same thing a merchant gets by running the old setup file.
+          $old = Get-ChildItem ..\old-b18b5b4\release -Filter "*Setup*.exe" | Select-Object -First 1
+          Write-Host "Rolling back the EXECUTABLE to: $($old.Name)"
+          $p = Start-Process -FilePath $old.FullName -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "v7 rollback installer exit $($p.ExitCode)" }
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/upgrade.mjs rollback-refuse-v7
+          if ($LASTEXITCODE -ne 0) { throw "rollback-refuse-v7 failed — the v7 build did NOT refuse the v8 database" }
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 2
+
+          # Fully stopped. Now the other half of a real rollback: restore the automatic
+          # pre-migration v7 snapshot and run that same v7 executable against it.
+          node e2e/upgrade.mjs rollback-restore-v7
+          if ($LASTEXITCODE -ne 0) { throw "rollback-restore-v7 failed" }
+          Get-Process -Name "Alzabt POS" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host "Profile after the rollback:"
+          Get-ChildItem (Join-Path $env:APPDATA "Alzabt POS") -Recurse | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+          # Leave the machine on THIS build, so nothing after this step runs against the old one.
+          $p = Start-Process -FilePath "${{ steps.installer.outputs.path }}" -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "reinstalling this build after the rollback proof exit $($p.ExitCode)" }
+          Write-Host "Reinstalled this build; the rolled-back v7 ledger stays in place for inspection."
 
       - name: Upload E2E screenshots
         if: always()
