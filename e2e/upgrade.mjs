@@ -1739,6 +1739,9 @@ if (PHASE === "seed-v2") {
   await page.getByRole("button", { name: "Cashier Two" }).click();
   for (const d of "2222") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
   await clickEither(page, "login-submit", page.getByRole("button", { name: "Log in" }));
+  // No setup branch here, deliberately: this phase drives the v7 build, which has no `operators`
+  // table and so cannot demand setup. Stated because a mechanical sweep for inline logins flags
+  // this shape, and the answer should be in the file rather than rediscovered each time.
   await page.waitForSelector('[data-testid="cart"], .cart');
   await tab(page, "Sell");
   await sell(page, ["مياه"], "Cash", 3);

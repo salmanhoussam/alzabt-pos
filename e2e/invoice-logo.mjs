@@ -339,11 +339,11 @@ delete bareEnv.ELECTRON_RUN_AS_NODE;
 {
   const a = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env: bareEnv });
   const p = await a.firstWindow();
-  await p.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
-  await p.getByRole("button", { name: "Cashier One" }).click();
-  for (const d of "1111") await p.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await p.locator('[data-testid="login-submit"]').click();
-  await p.waitForSelector('[data-testid="cart"]');
+  // 🔴 A SECOND, SEPARATE PROFILE — and therefore a second mandatory setup. The first patch of
+  // this suite replaced one exact five-line login shape and missed this block because it differs
+  // (its page variable is `p`, not `page`). A fresh profile is a fresh `must_reset_pin = 1`, so
+  // this waited for a till that was never going to render.
+  await signIn(p, "Cashier One", "1111");
 
   await p.locator('[data-testid="tab-invoices"]').click();
   await p.locator('[data-testid="inv-tab-company"]').click();
