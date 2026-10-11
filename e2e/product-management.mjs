@@ -373,8 +373,15 @@ await app.close();
           `no bootstrap PIN value in ${row.event_type}.${field} (${row[field].slice(0, 120)})`,
         );
       }
-      // actor_name is a person's name and actor_id an operator id; neither may carry a credential.
-      assert(!SECRET_KEY.test(row.actor_id) && !SECRET_KEY.test(row.actor_name), "no credential in the actor columns");
+      // 🔴 NOT `SECRET_KEY.test(actor_name)`. That pattern contains /hash/i, and «هاشم» / Hashem is
+      // an ordinary name — so the first shop that employs one would fail a security assertion for
+      // having hired them. It cannot fire today (the operator here is "Cashier One"), which is
+      // exactly why it would have sat there until it bit someone real. An independent review
+      // flagged it. What actually must not appear in these columns is a PIN or a stored credential,
+      // and that is what is checked.
+      for (const col of ["actor_id", "actor_name", "entity_id"]) {
+        assert(!/1111|2222/.test(String(row[col] ?? "")), `no bootstrap PIN value in ${row.event_type}.${col}`);
+      }
     }
     // And the real stored credentials, read back out of the operators table, appear nowhere at all.
     {

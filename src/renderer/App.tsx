@@ -63,9 +63,16 @@ export function App() {
 
   const screen = screenFor(cashier, setup);
 
-  // These three stay keyed on `cashier` itself so TypeScript narrows it for the till below;
-  // `screen` is the authority for the one decision that was wrong, and the unit test asserts the
-  // two cannot disagree.
+  // These three stay keyed on `cashier` itself so TypeScript narrows it for the till below, while
+  // `screen` is the authority for the one decision that was wrong.
+  //
+  // 🔴 NOTHING MECHANICAL CHECKS THAT THE TWO AGREE. An earlier version of this comment claimed the
+  // unit test did; it does not — `appScreen.test.ts` exercises `screenFor` in isolation and this
+  // repository has no DOM harness to mount the component. An independent review caught the
+  // overstatement. The agreement holds by inspection: `screen === "setup"` already implies
+  // `cashier === null`, so the `&& setup !== null` below is narrowing rather than a second
+  // condition, and the login branch is reached only when `setup` is absent. If these inline
+  // conditions are ever edited, that reasoning has to be redone by hand.
   if (cashier === undefined) return <div className="center muted">Loading…</div>;
 
   // 🔴 MANDATORY SETUP COMES BEFORE THE APPLICATION, and it is not merely rendered first: there is
