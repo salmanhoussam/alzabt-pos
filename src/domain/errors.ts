@@ -32,6 +32,14 @@ export type DomainErrorCode =
   | "NOT_AVAILABLE"
   | "PRODUCT_NOT_FOUND"
   | "DUPLICATE_SKU"
+  // Migration 9, Product Master. Each is a business refusal the UI acts on, not an internal
+  // error: a duplicate barcode names the product that holds it, and an inactive category is
+  // refused only when newly ASSIGNED — a product that already carries one keeps it.
+  | "DUPLICATE_BARCODE"
+  | "CATEGORY_NOT_FOUND"
+  | "CATEGORY_INACTIVE"
+  | "CATEGORY_IN_USE"
+  | "DUPLICATE_CATEGORY"
   | "UNSUPPORTED_UNIT"
   // migration 4 — exact quantities
   | "FRACTION_NOT_ALLOWED"

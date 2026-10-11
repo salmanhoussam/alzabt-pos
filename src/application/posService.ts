@@ -14,6 +14,7 @@ import { decodeUtf8Strict, toImportCsv, validateImport, type ImportRejection } f
 import { DomainError } from "../domain/errors";
 import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
+import type { CategoryRepository } from "../persistence/categoryRepository";
 import {
   type PaymentMethod,
   type SaleRecord,
@@ -69,6 +70,16 @@ export interface PosServiceDeps {
   readonly catalog: Catalog;
   /** The local catalog table. Without it (tests, older callers) catalog import is unavailable. */
   readonly catalogStore?: CatalogRepository;
+  /**
+   * Migration 9's categories. OPTIONAL, like `catalogStore` above and for the same reason: a
+   * terminal or a test that never touches a category needs no category table wired, and every
+   * existing caller keeps working untouched.
+   *
+   * 🔴 Its absence FAILS CLOSED rather than silently skipping the check: assigning a category with
+   * no repository to validate it against raises NOT_AVAILABLE. An unvalidated category id would
+   * reach the foreign key and abort a transaction the operator cannot diagnose.
+   */
+  readonly categories?: CategoryRepository;
   /**
    * The compiled-in TEST cashiers. Still here for tests and for a terminal with no `operators`
    * service wired; once `operators` is present it is the authority and this is ignored.
@@ -628,6 +639,59 @@ export class PosService {
    * does not get to change master data. That is why this refuses rather than quietly writing an
    * unaudited edit — the whole point of migration 5 would otherwise be optional at runtime.
    */
+  /**
+   * Refuses a barcode another product already holds.
+   *
+   * 🔴 THE VALUE IS ALREADY CANONICAL when it arrives — `validateProductMaster` normalized it — so
+   * this compares like with like. A raw 12-digit UPC-A would find nothing here and the partial
+   * unique index would then accept it as a second product for the same box, which is the exact
+   * failure the canonical form exists to prevent.
+   *
+   * `selfId` is excluded so that saving a product without changing its barcode is not a duplicate
+   * of itself — the mistake that makes an edit screen impossible to save twice.
+   */
+  private assertBarcodeFree(
+    store: CatalogRepository,
+    canonical: string | null,
+    selfId: string | null,
+  ): void {
+    if (canonical === null) return;
+    const holder = store.findByBarcode(canonical);
+    if (holder && holder.id !== selfId) {
+      throw new DomainError(
+        "DUPLICATE_BARCODE",
+        `Another product already uses the barcode ${canonical} — ${holder.name_ar}`,
+      );
+    }
+  }
+
+  /**
+   * Refuses a category that does not exist, and refuses newly ASSIGNING an inactive one.
+   *
+   * 🔴 THE ASYMMETRY IS THE POINT, and it is the rule the approved contract states: deactivating a
+   * category must PRESERVE the link on products that already carry it, while the owner must not be
+   * able to pick a retired category for something new. So existence is required always, and
+   * activity is required only at the moment of assignment.
+   *
+   * `undefined` means the caller is not touching the category, so there is nothing to check —
+   * which is what keeps invoice reconciliation and the import path working unchanged.
+   */
+  private assertCategoryUsable(categoryId: string | null | undefined): void {
+    if (categoryId === undefined || categoryId === null) return;
+    const categories = this.deps.categories;
+    if (!categories) {
+      throw new DomainError("NOT_AVAILABLE", "Categories are not available on this terminal");
+    }
+    const row = categories.findById(categoryId);
+    if (!row) throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
+    if (row.is_active !== 1) {
+      throw new DomainError(
+        "CATEGORY_INACTIVE",
+        `'${row.name_ar}' is no longer offered — choose another category, or reactivate it first`,
+      );
+    }
+  }
+
   private requireProductStack(): {
     readonly store: CatalogRepository;
     readonly auditStore: AuditRepository;
@@ -668,6 +732,11 @@ export class PosService {
       if (valid.sku !== null && store.findBySku(valid.sku)) {
         throw new DomainError("DUPLICATE_SKU", `Another product already uses the SKU '${valid.sku}'`);
       }
+      // 🔴 THE SAME REASONING AS THE SKU CHECK ABOVE, for the same reason it was moved in here:
+      // outside the transaction, two near-simultaneous creates could both pass and only the index
+      // would catch the second — and a category could be deleted between the check and the write.
+      this.assertBarcodeFree(store, valid.master?.barcode ?? null, null);
+      this.assertCategoryUsable(valid.master?.categoryId);
       const created = store.createManual(
         {
           nameAr: valid.nameAr,
@@ -676,6 +745,7 @@ export class PosService {
           priceMinor: valid.price.minor,
           currency: valid.price.currency,
           baseUnit: valid.baseUnit,
+          ...(valid.master === undefined ? {} : { master: valid.master }),
         },
         instant,
       );
@@ -731,6 +801,8 @@ export class PosService {
           throw new DomainError("DUPLICATE_SKU", `Another product already uses the SKU '${valid.sku}'`);
         }
       }
+      this.assertBarcodeFree(store, valid.master?.barcode ?? null, id);
+      this.assertCategoryUsable(valid.master?.categoryId);
       const updated = store.updateProduct(
         id,
         {
@@ -741,6 +813,7 @@ export class PosService {
           baseUnit: valid.baseUnit,
           isActive,
           priceNeedsReview: provenance.priceNeedsReview,
+          ...(valid.master === undefined ? {} : { master: valid.master }),
         },
         instant,
       );
