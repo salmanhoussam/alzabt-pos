@@ -58,6 +58,13 @@ const CH = {
   listCashiers: "pos:listCashiers",
   login: "pos:login",
   logout: "pos:logout",
+  completeBootstrapSetup: "pos:completeBootstrapSetup",
+  listOperators: "pos:listOperators",
+  createOperator: "pos:createOperator",
+  renameOperator: "pos:renameOperator",
+  resetOperatorPin: "pos:resetOperatorPin",
+  setOperatorActive: "pos:setOperatorActive",
+  setOperatorRole: "pos:setOperatorRole",
   currentCashier: "pos:currentCashier",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
@@ -107,6 +114,20 @@ const api: PosApi = {
   listCashiers: () => ipcRenderer.invoke(CH.listCashiers),
   login: (req) => ipcRenderer.invoke(CH.login, { cashierId: req.cashierId, pin: req.pin }),
   logout: () => ipcRenderer.invoke(CH.logout),
+  // Each request is rebuilt field by field, exactly like every other call here, so a renderer
+  // object cannot smuggle an extra property across the bridge.
+  completeBootstrapSetup: (req) =>
+    ipcRenderer.invoke(CH.completeBootstrapSetup, { ticket: req.ticket, name: req.name, pin: req.pin }),
+  listOperators: () => ipcRenderer.invoke(CH.listOperators),
+  createOperator: (req) =>
+    ipcRenderer.invoke(CH.createOperator, { name: req.name, role: req.role, pin: req.pin }),
+  renameOperator: (req) => ipcRenderer.invoke(CH.renameOperator, { operatorId: req.operatorId, name: req.name }),
+  resetOperatorPin: (req) =>
+    ipcRenderer.invoke(CH.resetOperatorPin, { operatorId: req.operatorId, pin: req.pin }),
+  setOperatorActive: (req) =>
+    ipcRenderer.invoke(CH.setOperatorActive, { operatorId: req.operatorId, isActive: req.isActive }),
+  setOperatorRole: (req) =>
+    ipcRenderer.invoke(CH.setOperatorRole, { operatorId: req.operatorId, role: req.role }),
   currentCashier: () => ipcRenderer.invoke(CH.currentCashier),
   getCatalog: () => ipcRenderer.invoke(CH.getCatalog),
   createSale: (req) => ipcRenderer.invoke(CH.createSale, req),

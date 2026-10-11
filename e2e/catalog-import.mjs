@@ -8,6 +8,7 @@
 // stubbed inside the main process (the test cannot click an OS dialog); everything after the file
 // is picked is the production path.
 import { _electron as electron } from "playwright-core";
+import { signIn } from "./_signin.mjs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -48,11 +49,7 @@ writeFileSync(BAD, [HEADER, "1,مياه,,$1.00,USD,piece,0"].join("\n") + "\n", 
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page = await app.firstWindow();
-  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
-  await page.getByRole("button", { name: "Cashier One" }).click();
-  for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.locator('[data-testid="login-submit"]').click();
-  await page.waitForSelector('[data-testid="cart"]');
+  await signIn(page, "Cashier One", "1111");
   return { app, page };
 }
 

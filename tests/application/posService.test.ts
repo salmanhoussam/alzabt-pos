@@ -37,7 +37,14 @@ describe("cashier session", () => {
     expect(codeOf(() => service.login("cashier-01", "9999"))).toBe("INVALID_CREDENTIALS");
     expect(codeOf(() => service.login("cashier-99", "1111"))).toBe("INVALID_CREDENTIALS");
     expect(codeOf(() => service.login("cashier-01", "11'; DROP TABLE sales; --"))).toBe("INVALID_CREDENTIALS");
-    expect(service.login("cashier-02", "2222")).toEqual({ id: "cashier-02", name: "Cashier Two" });
+    // 🔴 TRANSITION, migration 8. `login` returned the Cashier directly; it now answers one of two
+    // outcomes because a legacy bootstrap credential yields a setup ticket and NO session. This
+    // harness clears the bootstrap flag, so a correct PIN is a real session with a real role.
+    // Old value: `{ id: "cashier-02", name: "Cashier Two" }`.
+    expect(service.login("cashier-02", "2222")).toEqual({
+      kind: "session",
+      session: { id: "cashier-02", name: "Cashier Two", role: "cashier" },
+    });
     db.close();
   });
 });

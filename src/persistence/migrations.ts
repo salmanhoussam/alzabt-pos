@@ -792,4 +792,225 @@ CREATE TRIGGER voids_immutable_delete BEFORE DELETE ON voids
 BEGIN SELECT RAISE(ABORT, 'ledger: voids cannot be deleted'); END;
 `,
   },
+  {
+    version: 8,
+    name: "operator_accounts",
+    // ── Real operator accounts, and the audit vocabulary to describe managing them ───────────────
+    //
+    // 🔴 WHAT WAS WRONG. There was no operator table at all. `FIXTURE_CASHIERS` — a frozen
+    // TypeScript array in src/fixtures/cashiers.ts, whose own header says "NOT real accounts" —
+    // WAS the account store, so the shop ran on two accounts named "Cashier One" and "Cashier Two"
+    // whose PINs are 1111 and 2222 and are published in this repository. Changing a name or a PIN
+    // meant editing source, rebuilding and reinstalling.
+    //
+    // WHY THE LEDGER IS NOT TOUCHED, measured rather than assumed. `sales.cashier_id`,
+    // `sales.cashier_name`, `voids.cashier_id` and `voids.cashier_name` are plain TEXT NOT NULL
+    // with NO REFERENCES: every sale carries its own cashier SNAPSHOT, the same discipline that
+    // already stops a renamed product from altering a past sale. So there is no backfill, no
+    // foreign key added to any ledger table, and the old ids stay meaningful because they are
+    // PRESERVED here — not because anything points at a row.
+    //
+    // 🔴 WHY audit_events IS REBUILT AND NOT ALTERED. Three of its constraints name `event_type`
+    // or `entity_type` — the column CHECK, the entity_type CHECK, and the pairing CHECK — and
+    // SQLite cannot alter a CHECK in place.
+    //
+    // AND WHY THAT IS THE CHEAP KIND OF REBUILD. `audit_events` is a LEAF table: nothing anywhere
+    // REFERENCES it (checked). So this is migration 4's plain create-copy-drop-rename, NOT
+    // migration 7's problem — there is no child table whose rows make DROP TABLE count deferred
+    // foreign-key violations, which is the trap that passed on an empty database and failed
+    // instantly on a real v3 ledger. No `defer_foreign_keys` pragma is needed and none is used.
+    //
+    // DROP TABLE does not fire a BEFORE DELETE trigger, so the append-only rule does not block its
+    // own table's replacement — the same fact migrations 4 and 7 both relied on. The indexes and
+    // triggers are recreated AFTER the copy, so `audit_events_seq_monotonic` does not fire once per
+    // historical row on the way in.
+    //
+    // NOTHING IS TRANSFORMED. `INSERT INTO ... SELECT *` with no expression, so every historical
+    // row crosses byte for byte. The new CHECKs therefore cannot fail the upgrade: every existing
+    // row is 'product' or 'catalog', and those two branches are unchanged. If one somehow were
+    // not, this migration ABORTS and the pre-migration backup plus the v7 database are untouched.
+    //
+    // 🔴 actor_tier IS NOT BACKFILLED. Every historical row stays 'unspecified', exactly as
+    // src/domain/audit.ts promised when it chose that value: writing a tier the application could
+    // not have known would be a permanent lie on an append-only trail. Real tiers begin
+    // PROSPECTIVELY. History will contain a visible boundary and that is the truthful outcome.
+    //
+    // 🔴 TWO ROLES IN THE PRODUCT: OWNER IS THE ADMINISTRATOR, CASHIER IS THE EMPLOYEE. Confirmed
+    // 2026-10-10. There is no separate Admin account type.
+    //
+    // The CHECK admits 'admin' as a RESERVED, UNUSED value, and it stays only because it is already
+    // here: a CHECK cannot be widened without rebuilding this table, and rebuilding it merely to
+    // remove a value nothing writes would add risk for no gain. The application refuses it at the
+    // IPC boundary AND in the service, bootstrap never assigns it, and no v1 path writes
+    // actor_tier='admin'. A hand-edited 'admin' row is not an owner — the guard asks whether the
+    // role IS owner, never whether it is cashier — so it fails closed rather than falling into a
+    // gap. Asserted in tests/main/channelPolicy.test.ts.
+    //
+    // 🔴 THIS MIGRATION WAS REVISED BEFORE IT SHIPPED, AND THE FINGERPRINT CHANGED WITH IT.
+    // Authorised 2026-10-11, while v8 was still unmerged and no installer carrying it had ever
+    // reached a shop: migrations 1-7 are released and untouchable, this one was not yet. The
+    // revision adds `terminal_security_state` and is a SECURITY fix, not a tidy-up — the first
+    // draft had only `must_reset_pin`, and the ownership ceremony deduced the terminal's state from
+    // the shape of the operator rows. A fourth independent review falsified that deduction by
+    // execution. Preserving the old fingerprint by appending a migration 9 instead would have left
+    // the broken schema contract in the file as the thing v8 means. The old fingerprint
+    // (530e891e…b318c) is NOT valid for this migration any more, and every gate taken against it
+    // was re-run rather than carried forward.
+    //
+    // 🔴 ROLLBACK CHANGES MEANING WITH THIS MIGRATION, and it is the first time in this product's
+    // history. Every installer up to b18b5b4 is schema v7, so rolling back meant reinstalling an
+    // EXE. A v7 build opening a v8 database raises SchemaNewerThanAppError and refuses. So:
+    // rollback from v8 is RESTORE THE PRE-MIGRATION BACKUP, then install the v7 EXE. Reinstalling
+    // the old EXE alone is NOT a rollback. Worse, if an operator completes PIN setup on v8 and a
+    // v7 build is then run against an un-restored database, that build reads its hashes from
+    // FIXTURE_CASHIERS — so 1111 would authenticate again and the newly set PIN would not exist in
+    // its account model. The pre-migration backup is the only coherent rollback boundary.
+    sql: `
+-- ── Operators ─────────────────────────────────────────────────────────────────────────────────
+CREATE TABLE operators (
+  id             TEXT    PRIMARY KEY,
+  name           TEXT    NOT NULL CHECK (length(trim(name)) > 0),
+  role           TEXT    NOT NULL CHECK (role IN ('owner', 'admin', 'cashier')),
+  -- scrypt, per-operator salt, hex. Shaped exactly like the fixture's own fields, so the two
+  -- migrated accounts need no re-hashing and no plaintext PIN exists at any point.
+  pin_salt_hex   TEXT    NOT NULL CHECK (length(pin_salt_hex) BETWEEN 16 AND 64),
+  pin_hash_hex   TEXT    NOT NULL CHECK (length(pin_hash_hex) = 64),
+  -- 1 means the stored PIN is a LEGACY BOOTSTRAP credential: it authenticates ONLY into mandatory
+  -- setup and is replaced there. It is not a "change your password soon" nag.
+  must_reset_pin INTEGER NOT NULL CHECK (must_reset_pin IN (0, 1)),
+  is_active      INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+  created_at     TEXT    NOT NULL,
+  updated_at     TEXT    NOT NULL
+) STRICT;
+
+-- Two operators must not share a name: an audit row naming "أحمد" has to identify one person.
+CREATE UNIQUE INDEX operators_name ON operators (name);
+CREATE INDEX operators_active ON operators (is_active, role);
+
+-- The two fixture accounts become real rows, KEEPING THEIR IDS so every historical
+-- sales.cashier_id, voids.cashier_id and cashier_pin_state.cashier_id stays resolvable.
+--
+-- The hashes are carried across as bootstrap credentials with must_reset_pin = 1 — not because
+-- they are good (they are 1111 and 2222, in a public repository) but because an upgrade must not
+-- lock a shop out of its own terminal. They authenticate into setup and nothing else.
+--
+-- The literals are written HERE rather than read from the fixture at runtime: a migration's SQL is
+-- fingerprinted and must mean the same thing for ever, and a TypeScript constant can be edited.
+INSERT INTO operators (id, name, role, pin_salt_hex, pin_hash_hex, must_reset_pin, is_active,
+                       created_at, updated_at)
+SELECT 'cashier-01', 'Cashier One', 'owner',
+       'a1f3c9e27b4d6058', 'a8f8c45b97712daec733a8b4d198ac96376c05697b5935a7b30f965e27478bce',
+       1, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+UNION ALL
+SELECT 'cashier-02', 'Cashier Two', 'cashier',
+       '5c8e01d7f9a3b264', '0ca57b50d33e8f2f395a2a636e8babd96c096120e439cc069d17a6586fb90537',
+       1, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+
+-- ── The terminal's own ownership state ────────────────────────────────────────────────────────
+--
+-- 🔴 TWO QUESTIONS, TWO COLUMNS. The first build of this migration had only must_reset_pin, and
+-- the ceremony INFERRED the terminal's state from combinations of it ("no operator holds a
+-- credential they chose themselves"). An independent review proved that inference wrong by
+-- execution: with two owners, an owner who reset a colleague's PIN and then their own re-armed the
+-- bootstrap ceremony, and the exemption went to the LOWEST id rather than to the person acting —
+-- so the acting owner was refused their own setup screen and the only way back in was to sign in
+-- as the colleague. An account fact was being read as a terminal fact.
+--
+--   must_reset_pin   does THIS PERSON still need to choose a private credential?
+--   terminal_claimed has THIS TERMINAL already been claimed by its real owner?
+--
+-- Neither is ever inferred from the other again.
+--
+-- A SINGLETON TABLE rather than a row in company_profile, measured and not assumed:
+-- company_profile is live settings the owner edits from a form (name, tax, logo, invoice
+-- numbering), so a settings write path could clear a security invariant. This table has no UI, no
+-- update path outside the claim transaction, and no DELETE path at all.
+--
+-- The CHECK makes the singleton structural — one row, for ever — so "which row is authoritative"
+-- is not a question the application can get wrong.
+CREATE TABLE terminal_security_state (
+  id                     TEXT    PRIMARY KEY CHECK (id = 'terminal'),
+  -- 0 = never claimed. The install/upgrade ownership ceremony is armed and ONLY the seeded
+  -- bootstrap owner may enter it. 1 = claimed; the ceremony is over and cannot be re-armed by any
+  -- operator or account lifecycle action.
+  terminal_claimed       INTEGER NOT NULL CHECK (terminal_claimed IN (0, 1)),
+  -- Both NULL until the claim, and both written in the same transaction that sets the flag.
+  claimed_at             TEXT             CHECK (claimed_at IS NULL OR claimed_at GLOB
+                           '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  -- Deliberately NOT a foreign key into operators: this records WHO claimed the terminal as a
+  -- snapshot, the same discipline the ledger already uses for sales.cashier_id. Deactivating or
+  -- renaming that operator later must not be able to touch the terminal's history.
+  claimed_by_operator_id TEXT             CHECK (claimed_by_operator_id IS NULL
+                                                 OR length(claimed_by_operator_id) > 0),
+  -- The two nullable columns travel together: claimed means both are known, unclaimed means
+  -- neither is. A half-written claim is not representable.
+  CHECK ((terminal_claimed = 1 AND claimed_at IS NOT NULL AND claimed_by_operator_id IS NOT NULL)
+         OR (terminal_claimed = 0 AND claimed_at IS NULL AND claimed_by_operator_id IS NULL))
+) STRICT;
+
+-- 🔴 UNCLAIMED ON BOTH PATHS, and this is the whole point of seeding it here rather than lazily in
+-- code: a fresh v8 install and a real v7 -> v8 upgrade arrive at the identical state. An absent row
+-- would have to be interpreted, and interpreting absence is how the first defect happened.
+INSERT INTO terminal_security_state (id, terminal_claimed, claimed_at, claimed_by_operator_id)
+VALUES ('terminal', 0, NULL, NULL);
+
+-- ── audit_events, rebuilt to widen three CHECKs ───────────────────────────────────────────────
+CREATE TABLE audit_events_v8 (
+  id             TEXT    PRIMARY KEY,
+  seq            INTEGER NOT NULL UNIQUE CHECK (seq > 0),
+  event_type     TEXT    NOT NULL CHECK (event_type IN
+                   ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED',
+                    'PRODUCT_DEACTIVATED', 'CATALOG_IMPORTED',
+                    'OPERATOR_CREATED', 'OPERATOR_RENAMED', 'OPERATOR_PIN_RESET',
+                    'OPERATOR_ACTIVATED', 'OPERATOR_DEACTIVATED', 'OPERATOR_ROLE_CHANGED')),
+  entity_type    TEXT    NOT NULL CHECK (entity_type IN ('product', 'catalog', 'operator')),
+  entity_id      TEXT    NOT NULL CHECK (length(entity_id) > 0),
+  actor_id       TEXT    NOT NULL CHECK (length(actor_id) > 0),
+  actor_name     TEXT    NOT NULL CHECK (length(trim(actor_name)) > 0),
+  actor_tier     TEXT    NOT NULL CHECK (actor_tier IN
+                   ('owner', 'admin', 'cashier', 'system', 'unspecified')),
+  occurred_at    TEXT    NOT NULL CHECK (occurred_at GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date  TEXT    NOT NULL CHECK (business_date GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  changed_json   TEXT    NOT NULL CHECK (json_valid(changed_json)
+                                         AND json_type(changed_json) = 'object'),
+  metadata_json  TEXT             CHECK (metadata_json IS NULL
+                                         OR (json_valid(metadata_json)
+                                             AND json_type(metadata_json) = 'object')),
+  app_version    TEXT    NOT NULL CHECK (length(app_version) > 0),
+  schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+  -- The pairing, extended with the operator branch. A product event may only describe a product,
+  -- an import only the catalog, and an operator event only an operator. The same pairing is
+  -- enforced in src/domain/audit.ts; this is the backstop no code path can talk past.
+  CHECK (
+    (entity_type = 'product' AND event_type IN
+       ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED', 'PRODUCT_DEACTIVATED'))
+    OR (entity_type = 'catalog' AND event_type = 'CATALOG_IMPORTED')
+    OR (entity_type = 'operator' AND event_type IN
+       ('OPERATOR_CREATED', 'OPERATOR_RENAMED', 'OPERATOR_PIN_RESET',
+        'OPERATOR_ACTIVATED', 'OPERATOR_DEACTIVATED', 'OPERATOR_ROLE_CHANGED'))
+  )
+) STRICT;
+
+-- Byte for byte, in seq order. No expression, nothing invented, nothing dropped.
+INSERT INTO audit_events_v8 SELECT * FROM audit_events ORDER BY seq;
+
+DROP TABLE audit_events;
+ALTER TABLE audit_events_v8 RENAME TO audit_events;
+
+CREATE INDEX audit_events_entity ON audit_events (entity_type, entity_id, seq DESC);
+CREATE INDEX audit_events_type   ON audit_events (event_type, seq DESC);
+CREATE INDEX audit_events_actor  ON audit_events (actor_id, seq DESC);
+CREATE INDEX audit_events_date   ON audit_events (business_date, seq DESC);
+
+CREATE TRIGGER audit_events_immutable_update BEFORE UPDATE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: the audit trail is append-only'); END;
+CREATE TRIGGER audit_events_immutable_delete BEFORE DELETE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: audit events cannot be deleted'); END;
+CREATE TRIGGER audit_events_seq_monotonic BEFORE INSERT ON audit_events
+WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
+BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
+`,
+  },
 ];

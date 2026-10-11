@@ -32,6 +32,9 @@ import { type TempDir, tempDir } from "../helpers/harness";
 const V6 = 6;
 const V7 = 7;
 
+/** Exactly the migrations a v7 build knows. Pinned, so migration 8 cannot change what this file tests. */
+const V7_SET = MIGRATIONS.filter((m) => m.version <= 7);
+
 let t: TempDir;
 beforeEach(() => {
   t = tempDir();
@@ -155,15 +158,17 @@ function v6Ledger(): Array<Record<string, unknown>> {
 
 describe("migration 7 — v6 to v7", () => {
   it("is the seventh migration, and 1-6 are byte-identical after it", () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]); // 7 -> 8 with operator accounts
     expect(MIGRATIONS[6]!.name).toBe("invoice_sales_integration");
-    expect(MIGRATIONS).toHaveLength(7);
+    expect(MIGRATIONS).toHaveLength(8);
 
     // The released fingerprints of 1-6. A ledger upgraded by this build must still recognise every
     // one of them, or openDatabase refuses the file — which is what the next test proves.
     const released = MIGRATIONS.slice(0, 6).map((m) => checksum(m.sql));
     v6Ledger();
-    const db = openDatabase(t.dbPath, MIGRATIONS, { fileMustExist: true });
+    // V7_SET, so this stays a test about reaching v7. With the full set it would reach v8 and the
+    // assertion below would be measuring migration 8's work in migration 7's file.
+    const db = openDatabase(t.dbPath, V7_SET, { fileMustExist: true });
     try {
       expect(schemaVersion(db)).toBe(V7);
       const recorded = (
@@ -426,7 +431,11 @@ describe("migration 7 — v6 to v7", () => {
 
   it("🔴 an older build refuses a v7 ledger and does not write one byte", () => {
     v6Ledger();
-    openDatabase(t.dbPath, MIGRATIONS, { fileMustExist: true }).close();
+    // 🔴 V7, NOT `MIGRATIONS`. Once migration 8 existed this line built a v8 ledger, and the
+    // tampering assertion below then tripped SchemaNewerThanAppError before the checksum loop was
+    // ever reached — the second half of this test would have gone on passing while testing nothing.
+    // This test is about a v7 ledger; it now says so.
+    openDatabase(t.dbPath, V7_SET, { fileMustExist: true }).close();
     const bytesBefore = readFileSync(t.dbPath);
 
     // A build that only knows 1-6 — exactly the released 6e3984f installer.
@@ -437,12 +446,13 @@ describe("migration 7 — v6 to v7", () => {
 
     // And a build whose migration 7 source differs is refused as a mismatch, not silently accepted.
     const tampered = [...MIGRATIONS.slice(0, 6), { ...MIGRATIONS[6]!, sql: `${MIGRATIONS[6]!.sql}\n-- edited` }];
+    // 7 known vs 7 applied, so the checksum comparison is actually reached.
     expect(() => openDatabase(t.dbPath, tampered, { fileMustExist: true })).toThrow(MigrationMismatchError);
     expect(readFileSync(t.dbPath).equals(bytesBefore)).toBe(true);
   });
 
   it("backup table coverage still names every table a v7 ledger has", () => {
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, V7_SET);
     try {
       const present = (
         db
@@ -451,8 +461,14 @@ describe("migration 7 — v6 to v7", () => {
       ).map((r) => r.name);
       // The rebuild renamed tables through *_v7 names; a leftover would show up here.
       expect(present.filter((n) => n.endsWith("_v7"))).toEqual([]);
+      // The direction that matters here, and the one that catches a real hole: no table a v7
+      // ledger HAS is missing from the backup contract.
       expect(present.filter((n) => !(COUNTED_TABLES as readonly string[]).includes(n))).toEqual([]);
-      expect((COUNTED_TABLES as readonly string[]).filter((n) => !present.includes(n))).toEqual([]);
+      // 🔴 The REVERSE direction is deliberately not asserted on a v7 ledger any more. Since
+      // migration 8, COUNTED_TABLES names `operators`, which a v7 database legitimately does not
+      // have — `snapshotCounts` skips a counted table that is absent. "Every counted table exists"
+      // is only true of a FULLY migrated ledger, and that is asserted in backup.test.ts where it
+      // belongs. Asserting it here would have made this file fail for being correct.
     } finally {
       db.close();
     }

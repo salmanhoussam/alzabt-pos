@@ -40,13 +40,23 @@ const build = (changes: Record<string, unknown>, metadata: Record<string, unknow
   });
 
 describe("the registry is bounded", () => {
-  it("names exactly five event types — PRICE_CHANGED and UNIT_CHANGED are NOT among them", () => {
+  // 🔴 TRANSITION, 2026-10-10. This named exactly FIVE types; migration 8 added the six
+  // OPERATOR_* ones. The assertion's point is unchanged and is NOT weakened: the registry is
+  // exhaustive and bounded, and PRICE_CHANGED / UNIT_CHANGED are still absent — a price changed
+  // during reconciliation is a PRODUCT_UPDATED, exactly as before.
+  it("names exactly eleven event types — PRICE_CHANGED and UNIT_CHANGED are NOT among them", () => {
     expect([...AUDIT_EVENT_TYPES]).toEqual([
       "PRODUCT_CREATED",
       "PRODUCT_UPDATED",
       "PRODUCT_ACTIVATED",
       "PRODUCT_DEACTIVATED",
       "CATALOG_IMPORTED",
+      "OPERATOR_CREATED",
+      "OPERATOR_RENAMED",
+      "OPERATOR_PIN_RESET",
+      "OPERATOR_ACTIVATED",
+      "OPERATOR_DEACTIVATED",
+      "OPERATOR_ROLE_CHANGED",
     ]);
     expect(AUDIT_EVENT_TYPES).not.toContain("PRICE_CHANGED");
     expect(AUDIT_EVENT_TYPES).not.toContain("UNIT_CHANGED");

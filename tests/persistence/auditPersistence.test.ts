@@ -74,8 +74,11 @@ describe("the actor is a snapshot, not a reference", () => {
       const stored = h.audit.listRecent(1)[0]!;
       expect(stored.actor_id).toBe("cashier-01");
       expect(stored.actor_name).toBe("Cashier One");
-      // 🔴 Recorded as unknown rather than guessed: this build has no role model at all.
-      expect(stored.actor_tier).toBe("unspecified");
+      // 🔴 TRANSITION. This asserted "unspecified" because the build had no role model at all.
+      // Migration 8 gave it one and this harness runs as the seeded OWNER, so the row now carries
+      // the real role. Rows written by builds before migration 8 keep "unspecified" for ever and
+      // are never rewritten — e2e/upgrade.mjs is where that boundary is proven on real ledgers.
+      expect(stored.actor_tier).toBe("owner");
       // The row carries the build that wrote it, so a later reader knows which conventions applied.
       expect(stored.app_version).toBe("test");
       expect(stored.schema_version).toBe(MIGRATIONS.length);
@@ -137,6 +140,16 @@ describe("🔴 no secret is ever persisted", () => {
         if (typeof value === "string") {
           // `file_sha256` is the only legitimate digest, and it is a FILE digest, not a credential.
           if (path.endsWith("file_sha256")) return;
+          // 🔴 THE TRAIL'S OWN VOCABULARY IS NOT A LEAK, and this is where the fourth instance of
+          // that mistake actually lived. An earlier commit narrowed the raw substring scan below
+          // and its message claimed the trap was "disarmed before it fires" — half true. This walk
+          // still pushed every non-payload column's VALUE through SECRET, and `event_type` is one
+          // of those values, so the first test here to exercise a real operator event would have
+          // failed on "OPERATOR_PIN_RESET". An independent review caught the half-fix.
+          //
+          // These two columns are closed vocabularies the database itself constrains (migration 8's
+          // CHECKs), so they cannot carry a smuggled secret and must not be tested as if they could.
+          if (/\.(event_type|entity_type)$/.test(path)) return;
           expect(SECRET.test(value), `${path} = '${value}' looks like a credential`).toBe(false);
         }
       };
@@ -147,10 +160,23 @@ describe("🔴 no secret is ever persisted", () => {
         if (r.metadata_json) walk(JSON.parse(r.metadata_json), `${r.id}.metadata_json`);
       }
 
-      // And the raw text of the whole table, as a last resort check.
-      const raw = JSON.stringify(rows).replace(/"file_sha256":"[0-9a-f]{64}"/g, '"file_sha256":""');
+      // And the raw text of the PAYLOAD COLUMNS, as a last resort check.
+      //
+      // 🔴 NOT the whole table. This scanned JSON.stringify(rows) for bare substrings including
+      // "PIN", and it passes today only because makeHarness clears must_reset_pin through the
+      // repository, so no OPERATOR_PIN_RESET row ever reaches this trail. The first test here that
+      // exercises a real operator event would fail on its own event type — which is not a leak,
+      // because that event type IS the fact the trail must record. The identical trap has now been
+      // sprung three times in the E2E suite; this is the fourth instance, disarmed before it fires.
+      //
+      // The keys are already checked properly by walk() above. What this adds is a scan for a
+      // secret hiding in a VALUE, so it looks only where values live.
+      const payloads = rows
+        .map((r) => `${r.changed_json ?? ""}|${r.metadata_json ?? ""}`)
+        .join("|")
+        .replace(/"file_sha256":"[0-9a-f]{64}"/g, '"file_sha256":""');
       for (const needle of ["pin", "Pin", "PIN", "hash", "token", "secret", "1111", "2222"]) {
-        expect(raw, `the stored trail must not contain '${needle}'`).not.toContain(needle);
+        expect(payloads, `no audit payload may contain '${needle}'`).not.toContain(needle);
       }
     } finally {
       h.db.close();

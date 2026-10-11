@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { CashierDto } from "../../shared/ipcContract";
+import type { CashierDto, LoginResponse } from "../../shared/ipcContract";
 import { BRAND } from "../../shared/i18n";
 import { call, errorText, pos } from "../api";
 import { useT } from "../i18n";
@@ -8,9 +8,21 @@ const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "clear", "0", "back"]
 
 /** The product's real rule, preserved: entry caps at 8, submit unlocks at 4. Not a fixed length. */
 const PIN_MAX = 8;
+/**
+ * 🔴 FOUR, DELIBERATELY, AND IT MUST NOT FOLLOW `pinRule.ts` TO SIX. This is the length of a PIN
+ * being TYPED to sign in, not one being chosen. The seeded bootstrap credentials are four digits,
+ * so a six-digit minimum here would leave an upgrading shop unable to type `1111` to start the
+ * owner setup ceremony — locked out of its own terminal by a rule meant to protect it. New PINs are
+ * governed where they are chosen: SetupScreen and the owner's operator dialog.
+ */
 const PIN_MIN = 4;
 
-export function LoginScreen({ onLogin }: { onLogin: (c: CashierDto) => void }) {
+/**
+ * 🔴 `onOutcome`, NOT `onLogin`. Since migration 8 a correct PIN may be a LEGACY BOOTSTRAP
+ * credential, which yields a setup ticket and NO session. This screen must not assume it signed
+ * anybody in, so it hands the outcome up and App decides which screen comes next.
+ */
+export function LoginScreen({ onOutcome }: { onOutcome: (r: LoginResponse) => void }) {
   const { t, lang, setLanguage } = useT();
   const [cashiers, setCashiers] = useState<CashierDto[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -33,14 +45,14 @@ export function LoginScreen({ onLogin }: { onLogin: (c: CashierDto) => void }) {
     if (!selected || pin.length < PIN_MIN) return;
     setBusy(true);
     try {
-      onLogin(await call(pos().login({ cashierId: selected, pin })));
+      onOutcome(await call(pos().login({ cashierId: selected, pin })));
     } catch (e) {
       setError(errorText(e));
       setPin("");
     } finally {
       setBusy(false);
     }
-  }, [onLogin, pin, selected]);
+  }, [onOutcome, pin, selected]);
 
   /**
    * The physical keyboard mirrors the on-screen pad.

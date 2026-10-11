@@ -112,8 +112,13 @@ describe("createProduct", () => {
     expect(event.event_type).toBe("PRODUCT_CREATED");
     expect(event.actor_id).toBe("cashier-01");
     expect(event.actor_name).toBe(FIXTURE_CASHIERS[0]!.name);
-    // 🔴 This build has no role model, so it records that it does not know, rather than guessing.
-    expect(event.actor_tier).toBe("unspecified");
+    // 🔴 TRANSITION. This asserted "unspecified", with the reason "this build has no role model, so
+    // it records that it does not know, rather than guessing". Operator accounts gave it one, so a
+    // product event now records the REAL live role — the boundary audit.ts promised prospectively.
+    // This harness wires no OperatorService, so liveSession() takes its fail-closed fallback and
+    // reports the LEAST privileged role; that seam is dead in the shipped app, where main.ts always
+    // supplies one, and operatorAccounts.test.ts proves the owner case against a real service.
+    expect(event.actor_tier).toBe("cashier");
     expect(event.entity_id).toBe(row.id);
     expect(event.entity_type).toBe("product");
     expect(event.seq).toBe(1);

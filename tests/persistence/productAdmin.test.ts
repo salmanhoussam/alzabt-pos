@@ -41,10 +41,11 @@ const wrench = {
 // stated: if anyone adds a migration or a column, they fail by name and the reviewer sees it.
 
 describe("schema is unchanged by this feature", () => {
-  it("has exactly seven migrations, and offline product management still contributed none of them", () => {
+  it("has exactly eight migrations, and offline product management still contributed none of them", () => {
     // Was three until migration 4 (exact_sale_quantity), four until migration 5
     // (durable_local_audit), five until migration 6 (manual_invoices), and six until migration 7
-    // (invoice_sales_integration). Product administration itself still adds no migration — that is
+    // (invoice_sales_integration), and seven until migration 8 (operator_accounts).
+    // Product administration itself still adds no migration — that is
     // what this file proves, and 1-3 below are byte-identical to the ones it shipped against. This
     // list failing by name on every addition is the whole point of the test, not a nuisance.
     expect(MIGRATIONS.map((m) => [m.version, m.name])).toEqual([
@@ -55,6 +56,7 @@ describe("schema is unchanged by this feature", () => {
       [5, "durable_local_audit"],
       [6, "manual_invoices"],
       [7, "invoice_sales_integration"],
+      [8, "operator_accounts"],
     ]);
   });
 

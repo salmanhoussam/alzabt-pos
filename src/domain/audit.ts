@@ -22,17 +22,26 @@
  * be smuggled in nested inside a payload.
  */
 
-/** The complete, bounded event registry. A sixth type needs a migration — never a free-form string. */
+/** The complete, bounded event registry. A new type needs a migration — never a free-form string. */
 export const AUDIT_EVENT_TYPES = [
   "PRODUCT_CREATED",
   "PRODUCT_UPDATED",
   "PRODUCT_ACTIVATED",
   "PRODUCT_DEACTIVATED",
   "CATALOG_IMPORTED",
+  // Migration 8 — managing an operator is itself an audited act. Six types, because "an operator
+  // changed" would not say WHICH of six very different things happened, and the one that matters
+  // most to read back later (a role change) would be indistinguishable from a rename.
+  "OPERATOR_CREATED",
+  "OPERATOR_RENAMED",
+  "OPERATOR_PIN_RESET",
+  "OPERATOR_ACTIVATED",
+  "OPERATOR_DEACTIVATED",
+  "OPERATOR_ROLE_CHANGED",
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 
-export const AUDIT_ENTITY_TYPES = ["product", "catalog"] as const;
+export const AUDIT_ENTITY_TYPES = ["product", "catalog", "operator"] as const;
 export type AuditEntityType = (typeof AUDIT_ENTITY_TYPES)[number];
 
 /**
@@ -48,23 +57,61 @@ export const AUDIT_EVENTS_BY_ENTITY: Readonly<Record<AuditEntityType, ReadonlyAr
       "PRODUCT_DEACTIVATED",
     ]) as ReadonlyArray<AuditEventType>,
     catalog: Object.freeze(["CATALOG_IMPORTED"]) as ReadonlyArray<AuditEventType>,
+    operator: Object.freeze([
+      "OPERATOR_CREATED",
+      "OPERATOR_RENAMED",
+      "OPERATOR_PIN_RESET",
+      "OPERATOR_ACTIVATED",
+      "OPERATOR_DEACTIVATED",
+      "OPERATOR_ROLE_CHANGED",
+    ]) as ReadonlyArray<AuditEventType>,
   });
 
 export const AUDIT_ACTOR_TIERS = ["owner", "admin", "cashier", "system", "unspecified"] as const;
 export type AuditActorTier = (typeof AUDIT_ACTOR_TIERS)[number];
 
 /**
- * 🔴 The tier every human action gets in V1, and the reason is honesty rather than caution.
+ * 🔴 THE TIER THAT HISTORY CARRIES — and, since migration 8, NOT the tier new events get.
  *
- * This build has NO role or permission model: `Cashier` is `{ id, name }`, the cashiers are a
- * TypeScript fixture, and nothing anywhere distinguishes an owner from a till operator. Writing
- * 'cashier' would assert a fact the application cannot know, and because the trail is append-only
- * that wrong assertion would be permanent — when price edits later become owner-only, history would
- * read "a cashier changed the price" for acts that were the owner's. Migration 4's rule applies
- * unchanged: unknown data stays unknown. Real tiers start being written prospectively, by the
- * permission work, and these rows are never rewritten.
+ * What this used to say, and why it was right at the time: builds before migration 8 had no role or
+ * permission model at all. `Cashier` was `{ id, name }`, the cashiers were a TypeScript fixture, and
+ * nothing anywhere distinguished an owner from a till operator — so writing 'cashier' would have
+ * asserted a fact the application could not know, permanently, in an append-only trail. Migration
+ * 4's rule applied: unknown data stays unknown.
+ *
+ * That paragraph also named its own expiry: "Real tiers start being written prospectively, by the
+ * permission work, and these rows are never rewritten." Operator accounts ARE the permission work.
+ * `PosService.requireLiveRole()` now re-reads the durable role on every authenticated action, so the
+ * application knows, and `auditDraft` writes what it knows.
+ *
+ * 🔴 SO THIS CONSTANT IS NOW HISTORY'S VALUE, NOT THE DEFAULT. It stays because every row written
+ * before migration 8 carries it and those rows are NEVER rewritten — the boundary the old comment
+ * promised is kept exactly. A row reading 'unspecified' means "written by a build that could not
+ * know", which is still true of those rows and must stay readable as such. Nothing new writes it.
  */
 export const CURRENT_ACTOR_TIER: AuditActorTier = "unspecified";
+
+/**
+ * The fields an OPERATOR_* event may describe.
+ *
+ * 🔴 DELIBERATELY NO PIN FIELD, AND NOT EVEN `must_reset_pin`. `SECRET_KEY` below matches
+ * /pin|…|hash/i and REJECTS such a key outright, so naming one here would be a contract breach the
+ * moment it was used — the guard would throw and roll back the operator mutation. That is the
+ * correct outcome and the reason this list is three fields long: an `OPERATOR_PIN_RESET` records
+ * THAT a reset happened, by whom, to whom and when. The event type is the whole fact; there is
+ * nothing about the credential to record, and no way to record it if there were.
+ */
+export const AUDITED_OPERATOR_FIELDS = ["is_active", "name", "role"] as const;
+export type AuditedOperatorField = (typeof AUDITED_OPERATOR_FIELDS)[number];
+
+/**
+ * Metadata an OPERATOR_* event may carry.
+ *
+ * `origin` only, reusing the key PRODUCT_* events already use — "bootstrap_setup" distinguishes the
+ * mandatory first-run reset from an owner resetting an employee's PIN later, which are the same
+ * event type and genuinely different acts.
+ */
+export const AUDIT_OPERATOR_METADATA_KEYS = ["origin"] as const;
 
 /** The actor used by actions the application takes on its own behalf. Nothing emits one yet. */
 export const SYSTEM_ACTOR = Object.freeze({
@@ -293,9 +340,13 @@ export function allowlistsFor(eventType: AuditEventType): {
   readonly changes: ReadonlyArray<string>;
   readonly metadata: ReadonlyArray<string>;
 } {
-  return eventType === "CATALOG_IMPORTED"
-    ? { changes: [], metadata: AUDIT_IMPORT_METADATA_KEYS }
-    : { changes: AUDITED_PRODUCT_FIELDS, metadata: AUDIT_PRODUCT_METADATA_KEYS };
+  if (eventType === "CATALOG_IMPORTED") {
+    return { changes: [], metadata: AUDIT_IMPORT_METADATA_KEYS };
+  }
+  if (eventType.startsWith("OPERATOR_")) {
+    return { changes: AUDITED_OPERATOR_FIELDS, metadata: AUDIT_OPERATOR_METADATA_KEYS };
+  }
+  return { changes: AUDITED_PRODUCT_FIELDS, metadata: AUDIT_PRODUCT_METADATA_KEYS };
 }
 
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;

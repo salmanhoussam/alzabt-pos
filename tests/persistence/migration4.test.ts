@@ -57,7 +57,7 @@ describe("migration 4 — v3 to v4", () => {
   it("is the fourth migration, and 1-3 are not touched by it", () => {
     // Was [1, 2, 3, 4], then [1..5], then [1..6]. Migration 4's own position and content are what
     // this file is about, and neither has moved through any later addition.
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8] /* 4 -> 8 as later migrations landed */);
     expect(MIGRATIONS[3]!.name).toBe("exact_sale_quantity");
     // Migration 5 is additive and must not reach into this one's table either.
     expect(MIGRATIONS[4]!.name).toBe("durable_local_audit");

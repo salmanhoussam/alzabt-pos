@@ -2,12 +2,16 @@ import { useEffect, useState } from "react";
 import type { AppInfoDto } from "../../shared/ipcContract";
 import { call, pos } from "../api";
 import { useT } from "../i18n";
+import { OperatorsSection } from "./OperatorsSection";
 
 /** Operator tools: catalog import/export, backup export, and installation identity. */
 export function ToolsScreen(props: {
   onImportCatalog: () => void;
   onExportCatalog: () => void;
   onExportBackup: () => void;
+  /** The signed-in operator. Operator management renders for an owner only — a courtesy; the
+   *  channels themselves are refused below the UI boundary (src/main/channelPolicy.ts). */
+  readonly operator: { readonly id: string; readonly role?: string };
 }) {
   const { t } = useT();
   const [info, setInfo] = useState<AppInfoDto | null>(null);
@@ -38,6 +42,8 @@ export function ToolsScreen(props: {
           </button>
         </div>
       </section>
+      {/* Owner only. The channels are owner-only regardless of whether this renders. */}
+      {props.operator.role === "owner" && <OperatorsSection selfId={props.operator.id} />}
       <section className="card about" data-testid="about">
         <h2>{t("tools.about")}</h2>
         <dl className="stats">
