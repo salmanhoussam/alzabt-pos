@@ -432,6 +432,92 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
     expect(svc.authenticate("cashier-01", OWNER_PIN).kind).toBe("session");
   });
 
+  it("🔴 an unclaimed terminal refuses a session even if must_reset_pin was CLEARED by hand", () => {
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // 🔴 THIS GUARD HAD NO TEST, AND AN INDEPENDENT REVIEW PROVED IT: deleting the second check in
+    // `authenticate` left all 753 tests green. The guard works — the reviewer confirmed that by
+    // execution — but "the terminal's own state is the authority" was an unfalsifiable claim, which
+    // is the exact species of defect that cost this branch two real lock-outs and five review
+    // passes. So it is pinned here.
+    //
+    // Only a hand-edited database reaches this state, which is why no ordinary flow regresses. The
+    // point is that the TERMINAL decides the terminal's ceremony: an account fact — even one as
+    // close as "this operator no longer needs setup" — must not be able to open an unclaimed till.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    expect(claimed()).toBe(false);
+    // The credential stays the real bootstrap one; ONLY the account flag is forged.
+    db.prepare("UPDATE operators SET must_reset_pin = 0 WHERE id = 'cashier-01'").run();
+    expect(operators.findById("cashier-01")!.must_reset_pin).toBe(0);
+
+    // 🔴 Without the guard this returns `{kind: "session"}` — a till open on an unclaimed terminal.
+    expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/has not been claimed by its owner/);
+    expect(claimed()).toBe(false);
+  });
+
+  it("🔴 terminalClaimed() FAILS CLOSED when the singleton row is missing", () => {
+    // Also unfalsifiable until now: inverting the `: false` fallback left all 753 tests green,
+    // while the comment above it makes an explicit security claim. A missing security record must
+    // read as "not satisfied" — never as "satisfied".
+    claimTerminal();
+    expect(claimed()).toBe(true);
+
+    // Reachable only by writing the database directly. The ceremony must RE-ARM, not open.
+    db.prepare("DELETE FROM terminal_security_state").run();
+    expect(claimed()).toBe(false);
+    expect(operators.terminalClaim()).toBeNull();
+    // And the terminal behaves as unclaimed: nobody but the seeded owner gets in.
+    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/waiting for the shop owner/);
+  });
+
+  it("🔴 the claim is one-way IN SQL — a second claimTerminal cannot re-attribute it", () => {
+    // The repository half of the two re-attribution guards, pinned ON ITS OWN. Dropping the
+    // service's `if (claiming)` and dropping this `WHERE terminal_claimed = 0` each left the suite
+    // green individually; only removing BOTH failed anything. Defence in depth is only defence if
+    // each layer is held by something.
+    claimTerminal();
+    const first = operators.terminalClaim()!;
+
+    // A direct second call, naming a different operator and a later instant.
+    operators.claimTerminal("someone-else", "2027-01-01T00:00:00.000Z");
+    expect(operators.terminalClaim()).toEqual(first);
+    expect(claimed()).toBe(true);
+  });
+
+  it("🔴 an ORDINARY setup does not even ATTEMPT to claim — the service half, pinned", () => {
+    // The service half of the same pair. Its removal is invisible through the database because the
+    // SQL guard above absorbs it, so the only way to hold it is to observe that the attempt is not
+    // made. That is a real contract — "a later setup is not a claim" — not an implementation
+    // detail: if it were ever attempted, the terminal's ownership record would be one refused
+    // UPDATE away from being rewritten.
+    let attempts = 0;
+    const counting = new Proxy(operators, {
+      get(target, prop, recv) {
+        if (prop === "claimTerminal") {
+          return (id: string, now: string) => {
+            attempts += 1;
+            return (target as OperatorRepository).claimTerminal(id, now);
+          };
+        }
+        return Reflect.get(target, prop, recv);
+      },
+    }) as OperatorRepository;
+    operators = counting;
+    svc = newService();
+
+    // The claim itself: exactly one attempt.
+    const session = claimTerminal();
+    expect(attempts).toBe(1);
+
+    // An ordinary later setup — the owner resets their own PIN and chooses a new one.
+    svc.resetPin(session, "cashier-01", "654321");
+    const again = svc.authenticate("cashier-01", "654321");
+    if (again.kind !== "setup") throw new Error("expected setup");
+    svc.completeSetup(again.ticket, "حسين رقا", "431987");
+
+    // 🔴 STILL ONE. Not "one that was refused" — not attempted at all.
+    expect(attempts).toBe(1);
+  });
+
   it("the singleton is structural — a second terminal row cannot exist", () => {
     // "Which row is authoritative" is not a question the application can get wrong, because the
     // CHECK makes a second row unrepresentable rather than merely unused.

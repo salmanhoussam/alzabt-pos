@@ -122,7 +122,16 @@ export class OperatorRepository {
     return row ? Number(row.terminal_claimed) === 1 : false;
   }
 
-  /** Who claimed the terminal and when, for the operators screen and for the record. */
+  /**
+   * Who claimed the terminal and when.
+   *
+   * 🔴 READ BY TESTS TODAY, AND BY NOTHING ELSE. The previous sentence here said "for the operators
+   * screen", which no screen does — an independent review caught it by grepping for the callers.
+   * That is the same defect class as the comments this whole change exists to correct: a sentence
+   * asserting a consumer that is not there. It is kept because the claim record is what the
+   * ceremony's regression tests assert against, and because surfacing it on the operators screen is
+   * a real future use — but the comment now says what is true, not what sounds complete.
+   */
   terminalClaim(): { readonly claimedAt: string; readonly byOperatorId: string } | null {
     const row = this.db
       .prepare(

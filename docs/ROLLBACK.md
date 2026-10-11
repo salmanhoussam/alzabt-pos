@@ -91,6 +91,47 @@ published; an upgraded-but-unclaimed terminal is claimable by whoever reaches it
 claims the owner account sets its PIN permanently with no in-app recovery. Complete owner setup
 before the machine goes back to the counter.
 
+## 🔴 The one state that locks everybody out — and how to get out of it
+
+Recorded here because it is a **support path**, not a defect: it is the deliberate fail-closed
+direction of the ownership ceremony, and the shop needs to know the way back BEFORE it happens.
+
+The terminal keeps its own durable record of having been claimed by its owner
+(`terminal_security_state.terminal_claimed`). If that record says UNCLAIMED while the seeded owner
+account `Cashier One` has already been set up — or while that account has been deactivated — then:
+
+```
+NOBODY CAN SIGN IN AT ALL.
+Not the owner. Not a cashier. Not with a correct PIN.
+```
+
+That is on purpose. An unclaimed terminal admits exactly one identity, the seeded bootstrap owner,
+and if that identity cannot complete the ceremony then the terminal refuses everyone rather than
+letting the next person claim a till whose published PINs are in a public repository. Failing closed
+is the right direction; being unable to find the way out is not.
+
+**How it is reached.** Not by any ordinary action. Resetting PINs, adding staff, promoting an owner,
+deactivating anyone — none of these can touch the claim record, and that is asserted by test. It
+takes a database edited by hand, a restored backup from before the claim combined with accounts set
+up after it, or storage corruption.
+
+**The way out.** Restore a backup, exactly as below. The automatic daily backup is usually the
+cheapest choice; the pre-migration snapshot takes you back to v7 and needs the v7 executable too:
+
+```
+1. stop the app
+2. restore the most recent backup from
+     %APPDATA%\Alzabt POS\backups\
+3. start the app
+   - a v8 backup from AFTER the claim  -> the shop signs in normally again
+   - a v8 backup from BEFORE the claim -> the terminal asks the owner to claim it again,
+                                          with the PINs that backup held
+   - the pre-migration v7 snapshot     -> ALSO install the v7 EXE (see above)
+```
+
+Nothing in the ledger is at risk in this state: sales, invoices and the audit trail are intact and
+unreadable only because nobody can open the door. Restoring re-opens it.
+
 One consequence for rollback specifically: a restored pre-migration v7 database has no operator
 accounts at all **and no terminal-claim state** — v7 does not have either concept — so the shop
 returns to the **v7 credential model**: the bundled PINs work again, exactly as they did before the

@@ -317,7 +317,11 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           str(o.ticket, "ticket", 128),
           str(o.name, "name", 60),
           // 🔴 Bounded, and NOT validated for shape here. `domain/pinRule.ts` owns digits-only and
-          // 4-8, so there is ONE definition every write path meets; a second copy here could drift.
+          // the length, so there is ONE definition every write path meets; a second copy here could
+          // drift — and it DID: this comment said "4-8" for a day after the rule became 6-8, which
+          // is precisely the drift it warns about, written in the file a reviewer reads first. The
+          // range is deliberately not repeated here; `PIN_MIN_DIGITS`/`PIN_MAX_DIGITS` are the only
+          // place it is stated.
           str(o.pin, "pin", 16),
         ),
       );
