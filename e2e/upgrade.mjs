@@ -1539,7 +1539,7 @@ if (PHASE === "seed-v2") {
   const f = ledgerFacts();
   log("v6 baseline ledger:", JSON.stringify(f));
   assert(f.schema === 6, `the baseline really is schema v6 (got ${f.schema})`);
-  assert(f.sales === 3 && f.voids === 1, "three till sales and one void exist");
+  assert(f.sales === 2 && f.voids === 1, "two till sales and one void exist");
   assert(f.invoices === 1 && f.invoiceLines === 1, "and one finalized invoice with one line");
   assert(f.invoiceNumber > 0, "the invoice really carries a number");
   // 🔴 THE COLUMN DOES NOT EXIST YET. `null`, not 0 — the honest answer for a v6 ledger, which
@@ -1762,7 +1762,10 @@ if (PHASE === "seed-v2") {
   assert(f.schema === 7, `the baseline really is schema v7 (got ${f.schema})`);
   // 🔴 null, not 0 — a v7 ledger cannot express the idea of an operator at all.
   assert(f.operators === null, "a v7 ledger has NO operators table");
-  assert(f.sales === 2 && f.voids === 1, "two till sales and one void exist");
+  // Three, not two: this phase adds a sale by cashier-02 so the pre-upgrade ledger references
+  // BOTH fixture operators. seed-v6 above makes two, and the two lines are textually identical —
+  // which is how an earlier edit of mine landed in v6 instead of here.
+  assert(f.sales === 3 && f.voids === 1, "three till sales and one void exist");
   assert(f.audit !== null && f.audit > 0, `the v7 build left real audit history (${f.auditTypes})`);
   assert(/PRODUCT_CREATED/.test(f.auditTypes), `including the product it created (${f.auditTypes})`);
   // Both fixture ids are referenced by real SALES before migration 8 runs. These are the
