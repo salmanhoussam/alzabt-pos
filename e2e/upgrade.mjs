@@ -49,6 +49,9 @@ const LEDGER = join(DEFAULT_PROFILE, "alzabt-pos-ledger.sqlite");
 const env = { ...process.env };
 delete env.ALZABT_POS_USER_DATA;
 
+/** Must match E2E_PIN in e2e/_signin.mjs — six digits, so it satisfies the real PIN rule. */
+const E2E_PIN = "246813";
+
 const log = (...a) => console.log("•", ...a);
 const assert = (cond, msg) => {
   if (!cond) throw new Error("ASSERTION FAILED: " + msg);
@@ -73,13 +76,26 @@ async function launch() {
   // which is why both outcomes are awaited rather than branching on which phase we think we are in.
   // The PIN is re-set to 1111 and the name is left alone: this script's subject is the UPGRADE, and
   // the real setup flow is proven in operator-accounts.mjs with a genuinely new PIN.
-  await page.waitForSelector('[data-testid="cart"], .cart, [data-testid="setup-screen"]');
+  await page.waitForSelector('[data-testid="cart"], .cart, [data-testid="setup-screen"], .login .error');
   if (await page.locator('[data-testid="setup-screen"]').count()) {
-    await page.locator('[data-testid="setup-pin"]').fill("1111");
-    await page.locator('[data-testid="setup-confirm"]').fill("1111");
+    // 🔴 E2E_PIN, not 1111: a newly chosen PIN must be 6-8 digits now, so the service refuses the
+    // bootstrap value here. Kept inline rather than importing _signin.mjs because this script also
+    // drives OLDER builds whose login screen predates those testids.
+    await page.locator('[data-testid="setup-pin"]').fill(E2E_PIN);
+    await page.locator('[data-testid="setup-confirm"]').fill(E2E_PIN);
     await page.locator('[data-testid="setup-submit"]').click();
     await page.waitForSelector('[data-testid="cart"], .cart');
     log("mandatory setup completed (schema v8 build)");
+  } else if (!(await page.locator('[data-testid="cart"], .cart').count())) {
+    // 🔴 REFUSED, WHICH MEANS THIS PROFILE IS ALREADY PAST SETUP. The phases of one scenario are
+    // SEPARATE PROCESSES against the SAME real profile — verify-from-v7 completes setup, and
+    // rollback-prepare-v7 then starts fresh with no memory of it — so the live credential is
+    // E2E_PIN rather than the bootstrap one. Discovered by trying, because nothing crosses the
+    // process boundary to be remembered.
+    for (const d of E2E_PIN) await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
+    await clickEither(page, "login-submit", page.getByRole("button", { name: "Log in" }));
+    await page.waitForSelector('[data-testid="cart"], .cart');
+    log("signed in with the PIN an earlier phase set");
   }
   return { app, page };
 }

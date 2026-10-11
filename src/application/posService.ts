@@ -568,9 +568,17 @@ export class PosService {
   }
 
   /**
-   * Everything a product or catalog audit event needs except its own changes and metadata. The
-   * actor tier is `CURRENT_ACTOR_TIER` — 'unspecified' — because this build genuinely cannot know
-   * one; see the reasoning at that constant.
+   * Everything a product or catalog audit event needs except its own changes and metadata.
+   *
+   * 🔴 THE ACTOR TIER IS THE OPERATOR'S LIVE ROLE. It used to be `CURRENT_ACTOR_TIER`
+   * ('unspecified') "because this build genuinely cannot know one" — true before migration 8 and
+   * false after it, since `liveSession()` re-reads the durable role on every authenticated action.
+   * An independent review found the two trails disagreeing: an operator event recorded the real
+   * role while a product event, written seconds later by the same person, recorded 'unspecified'.
+   *
+   * The role is read from `liveSession()` rather than passed in, so it cannot drift from the role
+   * the authorization guard just enforced. Rows written before migration 8 keep 'unspecified' and
+   * are never rewritten — that boundary is the point, not a limitation.
    */
   private auditDraft(
     cashier: Cashier,
@@ -587,7 +595,7 @@ export class PosService {
       entityId,
       actorId: cashier.id,
       actorName: cashier.name,
-      actorTier: CURRENT_ACTOR_TIER,
+      actorTier: this.liveSession().role,
       occurredAt: instant,
       businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
       changes,

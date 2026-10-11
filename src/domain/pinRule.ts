@@ -13,7 +13,25 @@
  */
 import { DomainError } from "./errors";
 
-export const PIN_MIN_DIGITS = 4;
+/**
+ * 🔴 SIX, NOT FOUR, AND THE FOUR WAS MEASURED RATHER THAN DISLIKED. scrypt here is fixed at
+ * N=16384, r=8, p=1 (`cashierAuth.ts`), which an independent review timed on real hardware at
+ * 41.8 ms per guess — so the whole four-digit space is about 418 seconds single-threaded, and it
+ * recovered the seeded owner's `1111` from its real salt in 46 seconds. The salt and hash sit
+ * unencrypted in the ledger file, which anyone with the physical access this product already
+ * assumes can read. Four digits was therefore not a weak rule, it was no rule at all.
+ *
+ * Six digits is 100× that work — about 11.6 hours for the full space — which is not unbreakable
+ * and is not claimed to be. It is enough that recovering a PIN stops being something done during
+ * a lunch break, and it is the longest a shop will actually type on a keypad all day.
+ *
+ * 🔴 THIS GOVERNS NEWLY CHOSEN PINS ONLY. The seeded bootstrap credentials are 4 digits and must
+ * keep VERIFYING, or migration 8 locks every shop out of its own terminal. They can, because
+ * verification hashes and compares (`authenticate`) and never asks this function — the one place
+ * the two could have been confused. A legacy credential buys the setup form and nothing else, and
+ * the PIN chosen there must satisfy the rule below.
+ */
+export const PIN_MIN_DIGITS = 6;
 export const PIN_MAX_DIGITS = 8;
 
 /** Digits only. Not `\d`, which in some engines admits other scripts' digits. */

@@ -100,7 +100,13 @@ export function makeHarness(
     const operatorStore = new OperatorRepository(db);
     for (const fixture of FIXTURE_CASHIERS) {
       if (operatorStore.findById(fixture.id)) {
-        operatorStore.setPin(fixture.id, fixture.pinSaltHex, fixture.pinHashHex, clock.now().toISOString());
+        // `mustResetPin: false`: re-storing each fixture+s OWN salt and hash clears the bootstrap
+        // flag and changes no credential, which is the whole point of this seam — 1111 still works
+        // for every existing test. It also puts the harness past OWNER SETUP REQUIRED, so harness
+        // tests exercise ordinary operation; the bootstrap ceremony is tested directly instead.
+        operatorStore.setPin(fixture.id, fixture.pinSaltHex, fixture.pinHashHex, clock.now().toISOString(), {
+          mustResetPin: false,
+        });
       }
     }
     const operators = new OperatorService({

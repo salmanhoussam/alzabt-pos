@@ -46,10 +46,14 @@ const LEDGER = join(home, "userData", "alzabt-pos-ledger.sqlite");
 // The two credentials this script sets. Both are GENUINELY NEW — the whole point of mandatory setup
 // is that 1111 and 2222 stop working, so re-using them here would prove nothing.
 const OWNER_NAME = "حسين رقا";
-const OWNER_PIN = "4321";
+// 🔴 SIX DIGITS. A newly chosen PIN must be 6-8 (domain/pinRule.ts), measured rather than guessed:
+// scrypt here runs ~41.8 ms/guess, so the whole four-digit space is ~418 s and an independent
+// review recovered the seeded owner's 1111 from its real salt in 46 s. These were 4321 / 5678 /
+// 1357 and every one of them is now refused as a new PIN — which this script proves below.
+const OWNER_PIN = "431987";
 const CASHIER_NAME = "جعفر صالح";
-const CASHIER_BOOTSTRAP = "5678";
-const CASHIER_PIN = "1357";
+const CASHIER_BOOTSTRAP = "567812";
+const CASHIER_PIN = "135790";
 
 const log = (...a) => console.log("•", ...a);
 const assert = (cond, msg) => {
@@ -147,6 +151,39 @@ assert(beforeLogin.error.code === "NOT_LOGGED_IN", `and the reason is NOT_LOGGED
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 2 · Mandatory setup stands between the bootstrap PIN and the till
 // ════════════════════════════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🔴 OWNER SETUP REQUIRED — nobody else may enter, on the real installed app
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// The published bootstrap credentials make an unclaimed terminal claimable by whoever reaches it
+// first, and whoever claims the owner row sets its PIN permanently with no in-product recovery. So
+// the second account cannot sign in, cannot reach setup, and learns nothing — until the owner has
+// claimed the installation. Proven here with the CORRECT credential for cashier-02, which is the
+// only version of this test that means anything.
+await page.getByRole("button", { name: "Cashier Two" }).click();
+await keypad(page, "2222");
+await page.waitForSelector(".login .error", { timeout: 20000 });
+{
+  const shown = (await page.locator(".login .error").innerText()).trim();
+  assert(/owner|المالك/.test(shown), `the refusal explains the ceremony rather than blaming the PIN ("${shown}")`);
+  assert((await page.locator('[data-testid="setup-screen"]').count()) === 0, "🔴 and it does NOT reach setup");
+  assert((await page.locator('[data-testid="cart"]').count()) === 0, "nor the till");
+}
+// And through the bridge, with no session, the same refusal by code.
+{
+  const r = await direct(page, "login", { cashierId: "cashier-02", pin: "2222" });
+  assert(r.ok === false, "🔴 the same refusal through window.pos.login directly");
+  assert(r.error.code === "OWNER_SETUP_REQUIRED", `  …as OWNER_SETUP_REQUIRED (${r.error.code})`);
+}
+// A WRONG PIN still answers the generic refusal — the state is not an enumeration oracle.
+{
+  const r = await direct(page, "login", { cashierId: "cashier-02", pin: "999999" });
+  assert(r.ok === false && r.error.code !== "OWNER_SETUP_REQUIRED",
+    `a wrong PIN learns nothing about the terminal's state (${r.error.code})`);
+}
+await page.screenshot({ path: SHOTS + "OP0-owner-setup-required.png" });
+
+await page.locator('[data-testid="change-cashier"]').click().catch(() => {});
+await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 20000 });
 await page.getByRole("button", { name: "Cashier One" }).click();
 await keypad(page, "1111");
 await page.waitForSelector('[data-testid="setup-screen"]', { timeout: 30000 });
@@ -169,6 +206,24 @@ await page.locator('[data-testid="setup-pin"]').fill("12");
 await page.locator('[data-testid="setup-confirm"]').fill("12");
 await page.waitForSelector('[data-testid="setup-pin-invalid"]');
 assert(await page.locator('[data-testid="setup-submit"]').isDisabled(), "a 2-digit PIN cannot be submitted");
+
+// 🔴 FOUR DIGITS IS THE REAL BOUNDARY, and the one a shop would actually try: it is what the
+// bootstrap credential looks like. Refused by the screen, and — because a screen is not a rule —
+// refused by the service when the bridge is called directly with the live setup ticket.
+await page.locator('[data-testid="setup-pin"]').fill("4321");
+await page.locator('[data-testid="setup-confirm"]').fill("4321");
+await page.waitForSelector('[data-testid="setup-pin-invalid"]');
+assert(await page.locator('[data-testid="setup-submit"]').isDisabled(), "🔴 a 4-digit PIN cannot be submitted either");
+{
+  const ticket = await page.evaluate(() => document.querySelector('[data-testid="setup-screen"]') && null);
+  // The renderer holds the ticket in React state, so it is not readable from the DOM. Call the
+  // channel with a deliberately wrong ticket: INVALID_PIN must not be what comes back, because the
+  // ticket is checked first — this asserts the ORDER, so the next check proves the PIN rule itself.
+  const r = await direct(page, "completeBootstrapSetup", { ticket: "f".repeat(48), name: "x", pin: "4321" });
+  assert(r.ok === false, "a bogus ticket is refused");
+  assert(r.error.code === "SETUP_REQUIRED", `  …on the TICKET, before the PIN is even read (${r.error.code})`);
+  void ticket;
+}
 
 // The real thing: a real name and a credential nobody else knows.
 await page.locator('[data-testid="setup-name"]').fill(OWNER_NAME);
@@ -544,6 +599,54 @@ await page.waitForFunction(() => !document.querySelector('[data-testid="ops-dial
   assert(
     ledger((_all, get) => get("SELECT name FROM operators WHERE id = 'cashier-01'")).name === "حسين رقا (سابقاً)",
     "while the operator's own row carries the new name",
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 10 · 🔴 AN OWNER-SET PIN IS TEMPORARY
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// LAST, deliberately. A reset REPLACES the operator's credential, so doing it earlier would change
+// the PIN every later step signs in with — the first draft did exactly that and would have broken
+// the flow three sections downstream. The owner resets the cashier's PIN, and that PIN must open the
+// SETUP FORM and nothing else: otherwise the owner holds a live credential belonging to an employee
+// for ever, and can ring sales the ledger attributes to that employee.
+{
+  await opsRow(page, "cashier-01").locator('[data-testid="ops-reset-pin"]').click();
+  await page.waitForSelector('[data-testid="ops-dialog"]');
+  await page.locator('[data-testid="ops-pin"]').fill("876543");
+  await page.locator('[data-testid="ops-dialog-save"]').click();
+  await page.waitForFunction(() => !document.querySelector('[data-testid="ops-dialog"]'));
+
+  const flag = ledger((_all, get) => get("SELECT must_reset_pin AS f FROM operators WHERE id = 'cashier-01'")).f;
+  assert(Number(flag) === 1, `🔴 the reset ARMED that operator's own setup rather than handing them a PIN (${flag})`);
+  assert(
+    (await opsRow(page, "cashier-01").locator('[data-testid="ops-row-pending"]').count()) === 1,
+    "and the owner's screen shows them as pending setup",
+  );
+
+  // 🔴 AND THE TEMPORARY PIN DOES NOT OPEN A SESSION. Signing in with it reaches setup, not the till.
+  await page.locator('[data-testid="logout"]').click();
+  await page.waitForSelector('[data-testid="select-cashier"]');
+  await page.getByRole("button", { name: "حسين رقا (سابقاً)" }).click();
+  await keypad(page, "876543");
+  await page.waitForSelector('[data-testid="setup-screen"]', { timeout: 30000 });
+  assert((await page.locator('[data-testid="cart"]').count()) === 0, "🔴 the owner's chosen PIN buys the setup form only");
+
+  // The operator chooses their own, and the one the owner knows dies with it.
+  await page.locator('[data-testid="setup-pin"]').fill("778899");
+  await page.locator('[data-testid="setup-confirm"]').fill("778899");
+  await page.locator('[data-testid="setup-submit"]').click();
+  await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+  assert(true, "the operator sets their own final PIN and reaches the till");
+  await page.locator('[data-testid="logout"]').click();
+  await page.waitForSelector('[data-testid="select-cashier"]');
+  await page.getByRole("button", { name: "حسين رقا (سابقاً)" }).click();
+  await keypad(page, "876543");
+  await page.waitForSelector(".login .error", { timeout: 20000 });
+  assert(
+    (await page.locator('[data-testid="cart"]').count()) === 0 &&
+      (await page.locator('[data-testid="setup-screen"]').count()) === 0,
+    "🔴 and the PIN the owner chose no longer works at all",
   );
 }
 

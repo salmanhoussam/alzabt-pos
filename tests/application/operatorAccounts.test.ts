@@ -57,7 +57,7 @@ const auditRows = () =>
     .all() as Array<Record<string, string>>;
 
 /** Signs the owner in with the bootstrap PIN and finishes setup. Returns the session. */
-function bootstrapOwner(name = "حسين", pin = "4321") {
+function bootstrapOwner(name = "حسين", pin = "431987") {
   const outcome = svc.authenticate("cashier-01", "1111");
   if (outcome.kind !== "setup") throw new Error("expected setup");
   return svc.completeSetup(outcome.ticket, name, pin);
@@ -109,7 +109,7 @@ describe("the two migrated accounts", () => {
 
 describe("mandatory setup", () => {
   it("replaces the credential, clears the flag, and opens the session", () => {
-    const session = bootstrapOwner("حسين رقا", "4321");
+    const session = bootstrapOwner("حسين رقا", "431987");
     expect(session).toEqual({ id: "cashier-01", name: "حسين رقا", role: "owner" });
 
     const row = operators.findById("cashier-01")!;
@@ -120,16 +120,16 @@ describe("mandatory setup", () => {
   });
 
   it("🔴 the OLD bootstrap PIN stops authenticating, and the NEW one works", () => {
-    bootstrapOwner("حسين", "4321");
+    bootstrapOwner("حسين", "431987");
     expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/incorrect/);
-    const again = svc.authenticate("cashier-01", "4321");
+    const again = svc.authenticate("cashier-01", "431987");
     expect(again.kind).toBe("session");
   });
 
   it("🔴 the ticket is consumed — it cannot be replayed to rewrite the PIN", () => {
     const outcome = svc.authenticate("cashier-01", "1111");
     if (outcome.kind !== "setup") throw new Error("expected setup");
-    svc.completeSetup(outcome.ticket, "حسين", "4321");
+    svc.completeSetup(outcome.ticket, "حسين", "431987");
     expect(() => svc.completeSetup(outcome.ticket, "مهاجم", "9999")).toThrow(/Sign in again/);
     // And the PIN the attacker tried does not work.
     expect(() => svc.authenticate("cashier-01", "9999")).toThrow(/incorrect/);
@@ -137,21 +137,28 @@ describe("mandatory setup", () => {
 
   it("a forged or stale ticket is refused", () => {
     svc.authenticate("cashier-01", "1111");
-    expect(() => svc.completeSetup("f".repeat(48), "x", "4321")).toThrow(/Sign in again/);
+    expect(() => svc.completeSetup("f".repeat(48), "x", "431987")).toThrow(/Sign in again/);
   });
 
   it("🔴 a ticket for one operator cannot set up ANOTHER operator", () => {
-    const first = svc.authenticate("cashier-01", "1111");
+    // 🔴 THE OWNER CLAIMS THE TERMINAL FIRST, because the ceremony now requires it. This test used
+    // to authenticate cashier-02 while cashier-01 was still unclaimed, which OWNER_SETUP_REQUIRED
+    // forbids; the SUBJECT — one ticket slot, and a ticket that names its own operator — is
+    // unchanged and is now exercised between two operators who are both allowed to be there.
+    bootstrapOwner("حسين رقا", "431987");
+    const created = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
+
+    const first = svc.authenticate(created.id, "567812");
     if (first.kind !== "setup") throw new Error("expected setup");
     // A second bootstrap login replaces the single slot, so the first ticket dies. The ticket names
     // its operator, so there is no field in which to substitute a different one.
     const second = svc.authenticate("cashier-02", "2222");
     if (second.kind !== "setup") throw new Error("expected setup");
-    expect(() => svc.completeSetup(first.ticket, "x", "4321")).toThrow(/Sign in again/);
+    expect(() => svc.completeSetup(first.ticket, "x", "431987")).toThrow(/Sign in again/);
 
-    svc.completeSetup(second.ticket, "جعفر", "5678");
-    // Only cashier-02 was set up. The owner is still waiting.
-    expect(operators.findById("cashier-01")!.must_reset_pin).toBe(1);
+    svc.completeSetup(second.ticket, "سمير", "778899");
+    // Only cashier-02 was set up. The operator whose ticket died is still waiting.
+    expect(operators.findById(created.id)!.must_reset_pin).toBe(1);
     expect(operators.findById("cashier-02")!.must_reset_pin).toBe(0);
   });
 
@@ -167,7 +174,7 @@ describe("mandatory setup", () => {
     expect(operators.findById("cashier-01")!.must_reset_pin).toBe(1);
   });
 
-  it("refuses a PIN that is not 4-8 digits, and leaves the account in setup", () => {
+  it("refuses a PIN that is not 6-8 digits, and leaves the account in setup", () => {
     const outcome = svc.authenticate("cashier-01", "1111");
     if (outcome.kind !== "setup") throw new Error("expected setup");
     for (const bad of ["123", "123456789", "12a4", "", "12 34", " 1234"]) {
@@ -175,17 +182,17 @@ describe("mandatory setup", () => {
     }
     expect(operators.findById("cashier-01")!.must_reset_pin).toBe(1);
     // 🔴 The ticket SURVIVES a refused PIN, so a typo does not send the operator back to login.
-    expect(() => svc.completeSetup(outcome.ticket, "حسين", "4321")).not.toThrow();
+    expect(() => svc.completeSetup(outcome.ticket, "حسين", "431987")).not.toThrow();
   });
 
   it("refuses an empty name", () => {
     const outcome = svc.authenticate("cashier-01", "1111");
     if (outcome.kind !== "setup") throw new Error("expected setup");
-    expect(() => svc.completeSetup(outcome.ticket, "   ", "4321")).toThrow(/needs a name/);
+    expect(() => svc.completeSetup(outcome.ticket, "   ", "431987")).toThrow(/needs a name/);
   });
 
   it("🔴 writes TWO events when the name changed — a rename and a reset, not one ambiguous act", () => {
-    bootstrapOwner("حسين رقا", "4321");
+    bootstrapOwner("حسين رقا", "431987");
     const rows = auditRows();
     expect(rows.map((r) => r.type)).toEqual(["OPERATOR_RENAMED", "OPERATOR_PIN_RESET"]);
     expect(rows.every((r) => r.target === "cashier-01")).toBe(true);
@@ -197,17 +204,17 @@ describe("mandatory setup", () => {
   });
 
   it("writes ONLY the reset when the operator kept the name — no empty rename", () => {
-    bootstrapOwner("Cashier One", "4321");
+    bootstrapOwner("Cashier One", "431987");
     expect(auditRows().map((r) => r.type)).toEqual(["OPERATOR_PIN_RESET"]);
   });
 
   it("🔴 a PIN reset's audit row carries NO credential material at all", () => {
-    bootstrapOwner("حسين", "4321");
+    bootstrapOwner("حسين", "431987");
     const reset = auditRows().find((r) => r.type === "OPERATOR_PIN_RESET")!;
     expect(JSON.parse(reset.changed!)).toEqual({});
     const blob = JSON.stringify(reset);
     // Neither PIN appears anywhere in the row.
-    expect(blob).not.toContain("4321");
+    expect(blob).not.toContain("431987");
     expect(blob).not.toContain("1111");
     // Nor the stored credential itself — read from the row and searched for, so this cannot pass
     // by the hash simply having changed.
@@ -233,20 +240,20 @@ describe("mandatory setup", () => {
 });
 
 describe("operator management", () => {
-  beforeEach(() => bootstrapOwner("حسين", "4321"));
+  beforeEach(() => bootstrapOwner("حسين", "431987"));
 
   it("creates an operator who must set their own PIN on first login", () => {
-    const created = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "5678" });
+    const created = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
     expect(created).toMatchObject({ name: "جعفر", role: "cashier", isActive: true, mustResetPin: true });
     // 🔴 The owner typed that PIN, so the owner knows it. An employee's real PIN must not be known
     // to anyone else, which is why a created account still goes through setup.
-    expect(svc.authenticate(created.id, "5678").kind).toBe("setup");
+    expect(svc.authenticate(created.id, "567812").kind).toBe("setup");
   });
 
   it("refuses a duplicate name, case- and space-insensitively", () => {
-    svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "5678" });
-    expect(() => svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "1234" })).toThrow(/already called/);
-    svc.create(OWNER, { name: "Ali", role: "cashier", pin: "1234" });
+    svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
+    expect(() => svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "123456" })).toThrow(/already called/);
+    svc.create(OWNER, { name: "Ali", role: "cashier", pin: "123456" });
     // 🔴 The UNIQUE index is on the raw column, so SQLite would accept these as two rows. The
     // service is what actually stops two operators reading as the same person.
     expect(() => svc.create(OWNER, { name: "  ali ", role: "cashier", pin: "1111" })).toThrow(/already called/);
@@ -258,15 +265,15 @@ describe("operator management", () => {
   });
 
   it("🔴 refuses 'admin' — reserved in the schema, not assignable in v1", () => {
-    expect(() => svc.create(OWNER, { name: "y", role: "admin" as never, pin: "1234" })).toThrow(
+    expect(() => svc.create(OWNER, { name: "y", role: "admin" as never, pin: "123456" })).toThrow(
       /owner or cashier/,
     );
   });
 
   it("renames, resets a PIN, deactivates and reactivates, each with its own event", () => {
-    const op = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "5678" });
+    const op = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
     svc.rename(OWNER, op.id, "جعفر صالح");
-    svc.resetPin(OWNER, op.id, "8765");
+    svc.resetPin(OWNER, op.id, "876543");
     svc.setActive(OWNER, op.id, false);
     svc.setActive(OWNER, op.id, true);
     expect(auditRows().map((r) => r.type)).toEqual([
@@ -281,14 +288,14 @@ describe("operator management", () => {
   });
 
   it("🔴 an INACTIVE operator cannot authenticate, even with the right PIN", () => {
-    const op = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "5678" });
-    const outcome = svc.authenticate(op.id, "5678");
+    const op = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
+    const outcome = svc.authenticate(op.id, "567812");
     if (outcome.kind !== "setup") throw new Error("expected setup");
-    svc.completeSetup(outcome.ticket, "جعفر", "1357");
-    expect(svc.authenticate(op.id, "1357").kind).toBe("session");
+    svc.completeSetup(outcome.ticket, "جعفر", "135790");
+    expect(svc.authenticate(op.id, "135790").kind).toBe("session");
 
     svc.setActive(OWNER, op.id, false);
-    expect(() => svc.authenticate(op.id, "1357")).toThrow(/incorrect/);
+    expect(() => svc.authenticate(op.id, "135790")).toThrow(/incorrect/);
     // ...and they are not offered on the login screen either.
     expect(svc.listForLogin().some((o) => o.id === op.id)).toBe(false);
   });
@@ -299,7 +306,7 @@ describe("operator management", () => {
   });
 
   it("🔴 the LAST ACTIVE OWNER cannot be demoted", () => {
-    const other = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "5678" });
+    const other = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
     expect(() => svc.setRole({ ...OWNER, id: other.id, name: "جعفر" }, "cashier-01", "cashier")).toThrow(
       /last active owner/,
     );
@@ -307,42 +314,42 @@ describe("operator management", () => {
   });
 
   it("allows demoting an owner once a SECOND active owner exists", () => {
-    const second = svc.create(OWNER, { name: "شريك", role: "owner", pin: "5678" });
+    const second = svc.create(OWNER, { name: "شريك", role: "owner", pin: "567812" });
     const demoted = svc.setRole({ id: second.id, name: "شريك", role: "owner" }, "cashier-01", "cashier");
     expect(demoted.role).toBe("cashier");
   });
 
   it("🔴 counts only ACTIVE owners — a deactivated owner does not protect the last one", () => {
-    const second = svc.create(OWNER, { name: "شريك", role: "owner", pin: "5678" });
+    const second = svc.create(OWNER, { name: "شريك", role: "owner", pin: "567812" });
     svc.setActive(OWNER, second.id, false);
     // Only cashier-01 is an active owner now, so it is protected again.
     expect(() => svc.setActive(OWNER, "cashier-01", false)).toThrow(/last active owner/);
   });
 
   it("🔴 an operator cannot change their OWN role", () => {
-    svc.create(OWNER, { name: "شريك", role: "owner", pin: "5678" });
+    svc.create(OWNER, { name: "شريك", role: "owner", pin: "567812" });
     // Even though a second owner exists, so the last-owner rule is not what refuses this.
     expect(() => svc.setRole(OWNER, "cashier-01", "cashier")).toThrow(/their own role/);
     expect(operators.findById("cashier-01")!.role).toBe("owner");
   });
 
   it("records a role change with before and after", () => {
-    const op = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "5678" });
+    const op = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
     svc.setRole(OWNER, op.id, "owner");
     const changed = auditRows().find((r) => r.type === "OPERATOR_ROLE_CHANGED")!;
     expect(JSON.parse(changed.changed!)).toEqual({ role: { before: "cashier", after: "owner" } });
   });
 
   it("never exposes a salt or a hash in anything the UI receives", () => {
-    const op = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "5678" });
+    const op = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
     const blob = JSON.stringify([op, svc.listAll(), svc.listForLogin()]);
     expect(blob.toLowerCase()).not.toMatch(/salt|hash|pin_/);
-    expect(blob).not.toContain("5678");
+    expect(blob).not.toContain("567812");
   });
 
   it("refuses to act on an operator who does not exist", () => {
     expect(() => svc.rename(OWNER, "ghost", "x")).toThrow(/no longer exists/);
-    expect(() => svc.resetPin(OWNER, "ghost", "1234")).toThrow(/no longer exists/);
+    expect(() => svc.resetPin(OWNER, "ghost", "123456")).toThrow(/no longer exists/);
     expect(() => svc.setActive(OWNER, "ghost", false)).toThrow(/no longer exists/);
     expect(() => svc.setRole(OWNER, "ghost", "cashier")).toThrow(/no longer exists/);
   });
@@ -401,7 +408,7 @@ describe("completeSetup atomicity", () => {
     const failing = serviceFailingAuditAt(2);
     const outcome = failing.authenticate("cashier-01", "1111");
     if (outcome.kind !== "setup") throw new Error("expected setup");
-    expect(() => failing.completeSetup(outcome.ticket, "حسين رقا", "4321")).toThrow(/injected audit failure/);
+    expect(() => failing.completeSetup(outcome.ticket, "حسين رقا", "431987")).toThrow(/injected audit failure/);
 
     // Nothing moved: not the name, not the credential, not the flag.
     expect(snapshot()).toEqual(before);
@@ -411,7 +418,7 @@ describe("completeSetup atomicity", () => {
     // assertion that matters: a half-applied setup would have made 4321 live with the flag set, or
     // left 1111 live with the flag cleared.
     expect(failing.authenticate("cashier-01", "1111").kind).toBe("setup");
-    expect(() => failing.authenticate("cashier-01", "4321")).toThrow(/incorrect/);
+    expect(() => failing.authenticate("cashier-01", "431987")).toThrow(/incorrect/);
   });
 
   it("rolls back when the FIRST audit append fails, before the credential is written", () => {
@@ -419,7 +426,7 @@ describe("completeSetup atomicity", () => {
     const failing = serviceFailingAuditAt(1);
     const outcome = failing.authenticate("cashier-01", "1111");
     if (outcome.kind !== "setup") throw new Error("expected setup");
-    expect(() => failing.completeSetup(outcome.ticket, "حسين رقا", "4321")).toThrow();
+    expect(() => failing.completeSetup(outcome.ticket, "حسين رقا", "431987")).toThrow();
     expect(snapshot()).toEqual(before);
     expect(auditRows()).toEqual([]);
   });
@@ -428,7 +435,7 @@ describe("completeSetup atomicity", () => {
     const failing = serviceFailingAuditAt(2);
     const outcome = failing.authenticate("cashier-01", "1111");
     if (outcome.kind !== "setup") throw new Error("expected setup");
-    expect(() => failing.completeSetup(outcome.ticket, "حسين", "4321")).toThrow();
+    expect(() => failing.completeSetup(outcome.ticket, "حسين", "431987")).toThrow();
     // A crash in the app's own audit layer must not strand the shop at a login screen whose only
     // credential leads to a flow that already failed. The same ticket still works.
     const working = new OperatorService({
@@ -439,17 +446,17 @@ describe("completeSetup atomicity", () => {
     });
     const retry = working.authenticate("cashier-01", "1111");
     if (retry.kind !== "setup") throw new Error("expected setup");
-    expect(working.completeSetup(retry.ticket, "حسين", "4321").role).toBe("owner");
+    expect(working.completeSetup(retry.ticket, "حسين", "431987").role).toBe("owner");
   });
 
   it("a rolled-back setup leaves the audit sequence unbroken for the next real write", () => {
     const failing = serviceFailingAuditAt(1);
     const o1 = failing.authenticate("cashier-01", "1111");
     if (o1.kind !== "setup") throw new Error("expected setup");
-    expect(() => failing.completeSetup(o1.ticket, "حسين", "4321")).toThrow();
+    expect(() => failing.completeSetup(o1.ticket, "حسين", "431987")).toThrow();
     // seq is allocated as max(seq)+1 inside the transaction, so a rolled-back append must not have
     // consumed a number.
-    bootstrapOwner("حسين", "4321");
+    bootstrapOwner("حسين", "431987");
     const seqs = (db.prepare("SELECT seq FROM audit_events ORDER BY seq").all() as Array<{ seq: bigint }>).map(
       (r) => Number(r.seq),
     );

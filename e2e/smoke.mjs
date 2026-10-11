@@ -8,7 +8,7 @@
 // Uses a throw-away profile directory — it never touches a real ledger. Screenshots land in
 // e2e-output/ (git-ignored).
 import { _electron as electron } from "playwright-core";
-import { signIn } from "./_signin.mjs";
+import { E2E_PIN, signIn } from "./_signin.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -125,8 +125,10 @@ await page.locator('[data-testid="login-submit"]').click();
 await page.waitForSelector('[data-testid="cart"], [data-testid="setup-screen"]');
 if (await page.locator('[data-testid="setup-screen"]').count()) {
   await page.screenshot({ path: SHOTS + "01b-mandatory-setup.png" });
-  await page.locator('[data-testid="setup-pin"]').fill("1111");
-  await page.locator('[data-testid="setup-confirm"]').fill("1111");
+  // 🔴 E2E_PIN, not 1111. A newly chosen PIN must be 6-8 digits, so re-setting the bootstrap value
+  // is now refused by the service — the old trick would fail here rather than in an assertion.
+  await page.locator('[data-testid="setup-pin"]').fill(E2E_PIN);
+  await page.locator('[data-testid="setup-confirm"]').fill(E2E_PIN);
   await page.locator('[data-testid="setup-submit"]').click();
   log("PASS mandatory setup stands between the bootstrap PIN and the till");
 }

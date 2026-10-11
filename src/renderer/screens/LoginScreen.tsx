@@ -8,6 +8,13 @@ const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "clear", "0", "back"]
 
 /** The product's real rule, preserved: entry caps at 8, submit unlocks at 4. Not a fixed length. */
 const PIN_MAX = 8;
+/**
+ * 🔴 FOUR, DELIBERATELY, AND IT MUST NOT FOLLOW `pinRule.ts` TO SIX. This is the length of a PIN
+ * being TYPED to sign in, not one being chosen. The seeded bootstrap credentials are four digits,
+ * so a six-digit minimum here would leave an upgrading shop unable to type `1111` to start the
+ * owner setup ceremony — locked out of its own terminal by a rule meant to protect it. New PINs are
+ * governed where they are chosen: SetupScreen and the owner's operator dialog.
+ */
 const PIN_MIN = 4;
 
 /**

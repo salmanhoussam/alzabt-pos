@@ -1,68 +1,56 @@
 /**
- * Signing in to the INSTALLED app, after migration 8 made mandatory setup part of the first login.
+ * Signing in to the INSTALLED app: mandatory setup, the owner-first ceremony, and the 6–8 digit rule.
  *
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  * 🔴 WHY THIS FILE EXISTS. Migration 8 seeds `operators` with `must_reset_pin = 1` for both
  * accounts — on an upgraded ledger AND on a fresh one, because the seed is an unconditional
- * INSERT. So `login('cashier-01', '1111')` no longer opens a session: it returns a SETUP ticket and
- * the app shows SetupScreen. Nine E2E scripts were written against the old door and would wait for
- * `[data-testid="cart"]` until the timeout killed them.
+ * INSERT. So `login('cashier-01', '1111')` does not open a session: it returns a SETUP ticket and
+ * the app shows SetupScreen. The unit harness clears that flag through the repository; an E2E
+ * script cannot, because it drives the real executable and the flag is on real disk.
  *
- * The unit harness clears the flag through the repository (tests/helpers/harness.ts says so in its
- * own comment). An E2E script CANNOT: it drives the real executable, the flag is on real disk, and
- * the only way past it is the screen a real operator sees. That asymmetry is the whole reason this
- * helper is a separate module rather than a copy in each script.
+ * 🔴 AND THE PIN IT CHOOSES IS NOT 1111 ANY MORE. A newly chosen PIN must be 6–8 digits
+ * (`domain/pinRule.ts`), so the old trick of re-setting the same bootstrap value is now refused by
+ * the service. Every script therefore ends up on `E2E_PIN` after setup, and anything that signs in
+ * again has to know that.
  *
- * 🔴 AND IT COMPLETES SETUP WITH THE SAME PIN ON PURPOSE. `completeSetup` validates only that the
- * PIN is 4–8 digits (`assertValidPin`); nothing refuses reusing the bootstrap value, and nothing
- * requires the name to change. So re-setting 1111 gets a script whose subject is invoices or
- * products through the door with its own PIN logic untouched, and every later login in that script
- * keeps working. The REAL setup flow — a different PIN, a changed name, the refusals — is proven
- * where it belongs, in operator-accounts.mjs, with a PIN that is genuinely new.
+ * 🔴 WHICH IT DISCOVERS BY TRYING, NOT BY REMEMBERING. An earlier design kept a Set of operators
+ * already carried through setup — and that was wrong for `invoice-logo.mjs`, which creates a SECOND
+ * profile part way through: the same operator NAME is past setup in one profile and untouched in
+ * the other, so remembering by name would type the wrong PIN at a fresh door. Attempting the
+ * bootstrap credential first and falling back on refusal is profile-agnostic and cannot get this
+ * wrong. It costs one failed attempt, and the lockout allows five before it bites, with a success
+ * resetting the count.
  *
- * One consequence every caller inherits: completing setup writes ONE `OPERATOR_PIN_RESET` audit
- * row per profile (one, not two, because the name is kept). A script asserting an absolute
- * audit_events total must account for it — and must name its old value rather than loosen the
- * assertion.
+ * One consequence every caller inherits: completing setup writes ONE `OPERATOR_PIN_RESET` audit row
+ * per profile (one, not two, because the name is kept). A script asserting an absolute
+ * audit_events total must account for it — and must name its old value rather than loosen.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 
-/** True once the setup screen has been dealt with for this profile, per operator name. */
-const settled = new Set();
-
 /**
- * Clicks an operator, types a PIN on the keypad, and lands on the till — completing mandatory
- * setup on the way if this profile still demands it.
- *
- * Returns "setup" when it went through SetupScreen, "session" when the door opened directly, so a
- * caller that cares can assert which path it took instead of guessing.
+ * The disposable PIN every E2E profile ends up on. Six digits, so it satisfies the real rule, and
+ * deliberately not a bootstrap value — `1111` is now invalid as a NEW PIN and the product refuses
+ * it, which is the point of rule 3.
  */
-export async function signIn(page, name, pin) {
-  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
-  await page.getByRole("button", { name }).click();
+export const E2E_PIN = "246813";
+
+const keypad = async (page, pin) => {
   for (const d of pin) await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
   await page.locator('[data-testid="login-submit"]').click();
+};
 
-  // Whichever arrives first decides. Waiting for the cart alone is what used to hang.
-  await page.waitForSelector('[data-testid="cart"], [data-testid="setup-screen"]', { timeout: 30000 });
-  if ((await page.locator('[data-testid="setup-screen"]').count()) === 0) {
-    await page.waitForSelector('[data-testid="cart"]');
-    return "session";
-  }
-
-  // Mandatory setup. The name field arrives prefilled with the operator's current name; it is left
-  // exactly as it is, so no OPERATOR_RENAMED row is written and the login button keeps its label.
-  await page.locator('[data-testid="setup-pin"]').fill(pin);
-  await page.locator('[data-testid="setup-confirm"]').fill(pin);
+/** Fills the mandatory-setup form with E2E_PIN, keeping the operator's existing name. */
+async function completeSetup(page) {
+  await page.locator('[data-testid="setup-pin"]').fill(E2E_PIN);
+  await page.locator('[data-testid="setup-confirm"]').fill(E2E_PIN);
   await page.locator('[data-testid="setup-submit"]').click();
-  // 🔴 ON TIMEOUT, SAY WHY. The first Windows gate this helper ever ran failed exactly here, and
-  // the log said only "waiting for [data-testid=cart]" — true, useless, and worth a whole gate
-  // cycle to diagnose. The cause was a renderer defect (a live session losing to a spent setup
-  // ticket, see screenFor in App.tsx), and any of the three facts captured below would have named
-  // it immediately: the visible error, the screen still mounted, and the DOM.
   try {
     await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
   } catch (err) {
+    // 🔴 ON TIMEOUT, SAY WHY. The first Windows gate this helper ever ran failed exactly here and
+    // the log said only "waiting for [data-testid=cart]" — true, useless, and worth a whole gate
+    // cycle to diagnose. The cause was a renderer defect (a live session losing to a spent setup
+    // ticket, see screenFor in App.tsx) and any of these facts would have named it immediately.
     const diag = await page
       .evaluate(() => ({
         stillOnSetup: !!document.querySelector('[data-testid="setup-screen"]'),
@@ -77,9 +65,34 @@ export async function signIn(page, name, pin) {
     await page.screenshot({ path: "e2e-output/setup-stuck.png" }).catch(() => {});
     throw err;
   }
-  settled.add(name);
-  return "setup";
 }
 
-/** Whether `signIn` has already carried this operator through mandatory setup in this process. */
-export const wentThroughSetup = (name) => settled.has(name);
+/**
+ * Clicks an operator and lands on the till, whatever state this profile is in:
+ * a bootstrap account needing setup, or one already carried through it by an earlier launch.
+ *
+ * Returns "setup" when it went through SetupScreen, "session" when the bootstrap credential opened
+ * the door directly, and "resumed" when the profile was already past setup — so a caller that
+ * cares can assert which path it took instead of guessing.
+ */
+export async function signIn(page, name, bootstrapPin) {
+  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+  await page.getByRole("button", { name }).click();
+  await keypad(page, bootstrapPin);
+
+  // Whichever arrives first decides. Waiting for the cart alone is what used to hang.
+  await page.waitForSelector('[data-testid="cart"], [data-testid="setup-screen"], .login .error', {
+    timeout: 30000,
+  });
+  if (await page.locator('[data-testid="setup-screen"]').count()) {
+    await completeSetup(page);
+    return "setup";
+  }
+  if (await page.locator('[data-testid="cart"]').count()) return "session";
+
+  // Refused: this profile is already past setup, so the live credential is E2E_PIN. The PIN field
+  // clears itself on a refusal, so the operator stays selected and only the digits are retyped.
+  await keypad(page, E2E_PIN);
+  await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+  return "resumed";
+}

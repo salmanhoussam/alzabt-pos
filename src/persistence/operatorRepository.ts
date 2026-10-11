@@ -64,6 +64,26 @@ export class OperatorRepository {
   }
 
   /** Every operator, active first then by name — what the owner's management list shows. */
+  /**
+   * The terminal's un-claimed bootstrap OWNER, or null once the installation has been claimed.
+   *
+   * 🔴 A STATE, ASKED IN SQL, NOT A HARDCODED ID. "An active owner whose PIN is still the seeded
+   * bootstrap credential" is true on a fresh install and on a real v7 -> v8 upgrade alike, and it
+   * becomes false for ever the moment that owner completes setup — because `setPin` clears the flag
+   * and no path ever re-arms it for an owner. Keying on `cashier-01` by name would have been a
+   * rule about one literal rather than about the terminal's condition.
+   *
+   * Only ONE row can satisfy this: migration 8 seeds exactly one owner with the flag set, and
+   * `create` cannot make an owner (roles are assigned afterwards, and only by an owner who has
+   * therefore already completed setup). The `LIMIT 1` is belt and braces, not a choice.
+   */
+  findBootstrapOwner(): OperatorRow | null {
+    const row = this.db
+      .prepare(`SELECT ${COLUMNS} FROM operators WHERE role = 'owner' AND must_reset_pin = 1 AND is_active = 1 LIMIT 1`)
+      .get() as Record<string, unknown> | undefined;
+    return normalise(row);
+  }
+
   listAll(): OperatorRow[] {
     return (
       this.db
@@ -118,20 +138,35 @@ export class OperatorRepository {
   }
 
   /**
-   * Replaces the credential, and clears `must_reset_pin` in the same statement.
+   * Replaces the credential and sets `must_reset_pin` in the same statement.
    *
-   * 🔴 ONE STATEMENT ON PURPOSE. A new hash written without clearing the flag would leave an
-   * operator permanently trapped in setup; the flag cleared without a new hash would leave a
-   * legacy bootstrap PIN live as an ordinary credential. Neither half is ever correct alone.
+   * 🔴 ONE STATEMENT ON PURPOSE. A new hash written without setting the flag correctly would either
+   * leave an operator permanently trapped in setup, or leave a credential someone else chose live
+   * as an ordinary one. Neither half is ever correct alone, so both move together or not at all.
+   *
+   * 🔴 AND THE CALLER MUST SAY WHICH KIND OF CREDENTIAL THIS IS. It used to hard-code
+   * `must_reset_pin = 0`, which was right for setup and wrong for an owner's reset: the owner typed
+   * that PIN, so they know it, and nothing ever forced the employee off it. An independent review
+   * found that an owner could then sign in as that employee and ring a sale the ledger attributes
+   * to them — impersonation inside the one record operator accounts exist to make trustworthy.
+   *
+   *   `mustResetPin: false`  the operator chose this themselves, in setup. Final.
+   *   `mustResetPin: true`   somebody else chose it. Temporary: it buys the setup form only.
    */
-  setPin(id: string, pinSaltHex: string, pinHashHex: string, now: string): OperatorRow {
+  setPin(
+    id: string,
+    pinSaltHex: string,
+    pinHashHex: string,
+    now: string,
+    opts: { readonly mustResetPin: boolean },
+  ): OperatorRow {
     this.db
       .prepare(
         `UPDATE operators
-            SET pin_salt_hex = ?, pin_hash_hex = ?, must_reset_pin = 0, updated_at = ?
+            SET pin_salt_hex = ?, pin_hash_hex = ?, must_reset_pin = ?, updated_at = ?
           WHERE id = ?`,
       )
-      .run(pinSaltHex, pinHashHex, now, id);
+      .run(pinSaltHex, pinHashHex, opts.mustResetPin ? 1 : 0, now, id);
     return this.findById(id)!;
   }
 

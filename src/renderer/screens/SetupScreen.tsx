@@ -20,7 +20,16 @@ import { call, errorText, pos } from "../api";
 import { useT } from "../i18n";
 
 /** The same bounds `domain/pinRule.ts` enforces. UX only — the service is what refuses. */
-const PIN_MIN = 4;
+/**
+ * The bounds `domain/pinRule.ts` enforces for a NEWLY CHOSEN PIN. UX only — the service refuses.
+ *
+ * 🔴 SIX HERE, FOUR ON THE LOGIN KEYPAD, AND THAT ASYMMETRY IS LOAD-BEARING. This screen is where a
+ * PIN is CHOSEN, so it follows the real rule. LoginScreen is where a PIN is TYPED, and the seeded
+ * bootstrap credentials are four digits — raising its minimum would make the owner unable to type
+ * `1111` to begin the very ceremony that replaces it, which would lock every upgrading shop out of
+ * its own terminal. The "consistent" edit is the one that breaks the product.
+ */
+const PIN_MIN = 6;
 const PIN_MAX = 8;
 
 const digitsOnly = (v: string) => v.replace(/[^0-9]/g, "").slice(0, PIN_MAX);

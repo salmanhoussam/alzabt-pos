@@ -164,7 +164,7 @@ describe("a void snapshots its own actor the same way", () => {
 describe("audit rows snapshot the actor too", () => {
   it("an operator event keeps the actor name it was written with", () => {
     h.service.login("cashier-01", "1111");
-    const created = h.operators.create(OWNER, { name: "جعفر", role: "cashier", pin: "5678" });
+    const created = h.operators.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
 
     const row = () =>
       h.db
@@ -184,7 +184,7 @@ describe("audit rows snapshot the actor too", () => {
 describe("the application no longer depends on the bundled fixtures", () => {
   it("🔴 listCashiers comes from the TABLE — a row the fixtures never had is offered", () => {
     h.service.login("cashier-01", "1111");
-    const created = h.operators.create(OWNER, { name: "جعفر", role: "cashier", pin: "5678" });
+    const created = h.operators.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
     const offered = h.service.listCashiers();
     expect(offered.some((c) => c.id === created.id)).toBe(true);
     // And a deactivated operator disappears from it, which a compiled-in array could never express.
@@ -204,12 +204,12 @@ describe("the application no longer depends on the bundled fixtures", () => {
 
   it("a PIN set through the repository authenticates, which the fixture array cannot explain", () => {
     h.service.login("cashier-01", "1111");
-    const created = h.operators.create(OWNER, { name: "جعفر", role: "cashier", pin: "5678" });
-    const setup = h.service.login(created.id, "5678");
+    const created = h.operators.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
+    const setup = h.service.login(created.id, "567812");
     if (setup.kind !== "setup") throw new Error("expected setup");
-    h.service.completeBootstrapSetup(setup.ticket, "جعفر صالح", "1357");
+    h.service.completeBootstrapSetup(setup.ticket, "جعفر صالح", "135790");
     h.service.logout();
     // A credential that exists ONLY in the database now opens a session.
-    expect(h.service.login(created.id, "1357").kind).toBe("session");
+    expect(h.service.login(created.id, "135790").kind).toBe("session");
   });
 });

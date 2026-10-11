@@ -71,15 +71,23 @@ export const AUDIT_ACTOR_TIERS = ["owner", "admin", "cashier", "system", "unspec
 export type AuditActorTier = (typeof AUDIT_ACTOR_TIERS)[number];
 
 /**
- * 🔴 The tier every human action gets in V1, and the reason is honesty rather than caution.
+ * 🔴 THE TIER THAT HISTORY CARRIES — and, since migration 8, NOT the tier new events get.
  *
- * This build has NO role or permission model: `Cashier` is `{ id, name }`, the cashiers are a
- * TypeScript fixture, and nothing anywhere distinguishes an owner from a till operator. Writing
- * 'cashier' would assert a fact the application cannot know, and because the trail is append-only
- * that wrong assertion would be permanent — when price edits later become owner-only, history would
- * read "a cashier changed the price" for acts that were the owner's. Migration 4's rule applies
- * unchanged: unknown data stays unknown. Real tiers start being written prospectively, by the
- * permission work, and these rows are never rewritten.
+ * What this used to say, and why it was right at the time: builds before migration 8 had no role or
+ * permission model at all. `Cashier` was `{ id, name }`, the cashiers were a TypeScript fixture, and
+ * nothing anywhere distinguished an owner from a till operator — so writing 'cashier' would have
+ * asserted a fact the application could not know, permanently, in an append-only trail. Migration
+ * 4's rule applied: unknown data stays unknown.
+ *
+ * That paragraph also named its own expiry: "Real tiers start being written prospectively, by the
+ * permission work, and these rows are never rewritten." Operator accounts ARE the permission work.
+ * `PosService.requireLiveRole()` now re-reads the durable role on every authenticated action, so the
+ * application knows, and `auditDraft` writes what it knows.
+ *
+ * 🔴 SO THIS CONSTANT IS NOW HISTORY'S VALUE, NOT THE DEFAULT. It stays because every row written
+ * before migration 8 carries it and those rows are NEVER rewritten — the boundary the old comment
+ * promised is kept exactly. A row reading 'unspecified' means "written by a build that could not
+ * know", which is still true of those rows and must stay readable as such. Nothing new writes it.
  */
 export const CURRENT_ACTOR_TIER: AuditActorTier = "unspecified";
 

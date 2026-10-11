@@ -171,6 +171,33 @@ export class OperatorService {
     if (!pinMatches({ pinSaltHex: row.pin_salt_hex, pinHashHex: row.pin_hash_hex }, pin)) {
       throw new DomainError("INVALID_CREDENTIALS", "Operator or PIN is incorrect");
     }
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // 🔴 OWNER SETUP REQUIRED — the install/upgrade ceremony, enforced rather than documented.
+    //
+    // While the seeded bootstrap owner has not claimed the terminal, NOBODY ELSE gets past this
+    // point: not a session, not a setup ticket. The published bootstrap credentials are in a public
+    // repository, so a terminal left in this state is claimable by whoever reaches it first — and
+    // whoever claims the owner row sets its PIN permanently, with no in-product recovery. An
+    // independent review measured the real shape of that window: it is not "the first login", it is
+    // "until somebody takes it", `listCashiers` advertises which name to click, and the lockout lets
+    // an attacker hold the real owner out for five minutes at a time while they take it.
+    //
+    // So the window is closed by construction instead of by procedure. The ceremony is: install,
+    // owner claims the terminal, then the terminal is usable. A cashier cannot even begin their own
+    // setup until that has happened.
+    //
+    // 🔴 THE CHECK IS AFTER CREDENTIAL VERIFICATION, DELIBERATELY. A wrong PIN still answers
+    // INVALID_CREDENTIALS, so this cannot be used to probe who exists; the state is only revealed
+    // to someone who already proved they hold a valid credential for a real account.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    const bootstrapOwner = this.deps.operators.findBootstrapOwner();
+    if (bootstrapOwner && bootstrapOwner.id !== row.id) {
+      throw new DomainError(
+        "OWNER_SETUP_REQUIRED",
+        "This terminal is waiting for the shop owner to set up their account. Nobody else can sign in yet.",
+      );
+    }
+
     if (row.must_reset_pin === 1) {
       // 🔴 NO SESSION. The credential was correct and it is a bootstrap credential, so the only
       // thing it buys is the setup form.
@@ -207,6 +234,17 @@ export class OperatorService {
       throw new DomainError("SETUP_NOT_REQUIRED", "This account has already been set up");
     }
 
+    // Belt and braces: a ticket for anyone else cannot exist while the owner is unclaimed, because
+    // `authenticate` refuses to mint one. Asserted here too, so the rule survives a future caller
+    // that reaches this method by another route.
+    const bootstrapOwner = this.deps.operators.findBootstrapOwner();
+    if (bootstrapOwner && bootstrapOwner.id !== row.id) {
+      throw new DomainError(
+        "OWNER_SETUP_REQUIRED",
+        "This terminal is waiting for the shop owner to set up their account. Nobody else can set up yet.",
+      );
+    }
+
     const cleanName = this.requireFreeName(name, row.id);
     assertValidPin(pin);
 
@@ -220,7 +258,10 @@ export class OperatorService {
           role: row.role,
         }, "bootstrap_setup");
       }
-      const withPin = this.deps.operators.setPin(row.id, ...this.hash(pin), instant.toISOString());
+      // The operator chose this one themselves, here, now: it is their final credential.
+      const withPin = this.deps.operators.setPin(row.id, ...this.hash(pin), instant.toISOString(), {
+        mustResetPin: false,
+      });
       // No field diff: AUDITED_OPERATOR_FIELDS cannot name a PIN field, because the audit domain's
       // SECRET_KEY rejects any key matching /pin|…|hash/i. The event type IS the fact.
       this.writeAudit("OPERATOR_PIN_RESET", withPin, withPin, instant, { id: row.id, name: cleanName, role: withPin.role }, "bootstrap_setup");
@@ -276,12 +317,27 @@ export class OperatorService {
     });
   }
 
+  /**
+   * An owner gives an operator a way back in. The PIN they type is TEMPORARY.
+   *
+   * 🔴 IT DOES NOT BECOME THAT PERSON'S CREDENTIAL. `must_reset_pin` is set, so the operator's next
+   * authentication with it returns a SETUP outcome and no session, and they choose their own final
+   * PIN through `completeSetup`. Without that, the owner would know a live credential belonging to
+   * an employee for ever, and could ring sales the ledger and the audit trail both attribute to
+   * that employee. `create` has always worked this way for the same stated reason; a reset is the
+   * same act performed later, so it behaves the same.
+   *
+   * What this does NOT promise: safety from someone who can write the database directly. It
+   * promises only that impersonation is not the ordinary reset workflow.
+   */
   resetPin(actor: OperatorSession, id: string, pin: string): OperatorView {
     const row = this.require(id);
     assertValidPin(pin);
     const instant = this.now();
     return this.inTransaction(() => {
-      const next = this.deps.operators.setPin(id, ...this.hash(pin), instant.toISOString());
+      const next = this.deps.operators.setPin(id, ...this.hash(pin), instant.toISOString(), {
+        mustResetPin: true,
+      });
       this.writeAudit("OPERATOR_PIN_RESET", next, next, instant, actor);
       return toOperatorView(next);
     });

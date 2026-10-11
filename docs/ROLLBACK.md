@@ -75,3 +75,22 @@ again, exactly as they did before the upgrade.
 | `rollback-prepare-v7` | real v8-only changes are made, so the restore has something to lose |
 | `rollback-refuse-v7` | 🔴 the v7 executable **refuses** the v8 database, and the file is byte-for-byte unchanged — no silent downgrade, no destructive reset, no mutation |
 | `rollback-restore-v7` | 🔴 snapshot restored + the v7 executable starts normally, the original ledger is intact against facts recorded **before** the upgrade, and the v8-only changes are gone |
+
+---
+
+## Before any of this: the v8 install/upgrade ceremony
+
+Added 2026-10-11 with schema v8. A terminal is **not operational** the moment the installer
+finishes — it is in **OWNER SETUP REQUIRED** until the shop owner signs in on `Cashier One` with the
+old PIN and sets their real name and their own 6–8 digit PIN. Until then nobody else can sign in at
+all, and the terminal cannot sell.
+
+**This is part of the upgrade, not a follow-up task.** The PINs that ship with the product are
+published; an upgraded-but-unclaimed terminal is claimable by whoever reaches it first, and whoever
+claims the owner account sets its PIN permanently with no in-app recovery. Complete owner setup
+before the machine goes back to the counter.
+
+One consequence for rollback specifically: a restored pre-migration v7 database has no operator
+accounts at all, so the shop returns to the **v7 credential model** — the bundled PINs work again,
+exactly as they did before the upgrade. Re-upgrading later puts the terminal back into OWNER SETUP
+REQUIRED, and the ceremony has to be performed again.

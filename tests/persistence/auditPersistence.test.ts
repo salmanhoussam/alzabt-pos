@@ -74,8 +74,11 @@ describe("the actor is a snapshot, not a reference", () => {
       const stored = h.audit.listRecent(1)[0]!;
       expect(stored.actor_id).toBe("cashier-01");
       expect(stored.actor_name).toBe("Cashier One");
-      // 🔴 Recorded as unknown rather than guessed: this build has no role model at all.
-      expect(stored.actor_tier).toBe("unspecified");
+      // 🔴 TRANSITION. This asserted "unspecified" because the build had no role model at all.
+      // Migration 8 gave it one and this harness runs as the seeded OWNER, so the row now carries
+      // the real role. Rows written by builds before migration 8 keep "unspecified" for ever and
+      // are never rewritten — e2e/upgrade.mjs is where that boundary is proven on real ledgers.
+      expect(stored.actor_tier).toBe("owner");
       // The row carries the build that wrote it, so a later reader knows which conventions applied.
       expect(stored.app_version).toBe("test");
       expect(stored.schema_version).toBe(MIGRATIONS.length);
