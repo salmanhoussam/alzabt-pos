@@ -1013,4 +1013,129 @@ WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
 BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
 `,
   },
+  {
+    version: 9,
+    name: "product_master",
+    // ── Product Master: the catalog becomes the shop's own product record ───────────────────────
+    //
+    // 🔴 WHAT WAS WRONG. `catalog_products` carried only what a 7-column import file could say:
+    // names, SKU, price, unit, active. A merchant could not record what the product IS — no
+    // category, no brand, no description, no photo — so the shop's own knowledge of its own
+    // products lived in the owner's head, and an online catalog had nothing to export.
+    //
+    // 🔴 WHY THIS IS ONE MIGRATION AND NOT THREE. The approved architecture proposed M9 categories,
+    // M10 online content, M11 images. Its own rollback paragraph is the argument against that
+    // split: SQLite on this project's pinned path cannot drop a column without a table rebuild, so
+    // rollback for every one of them is the same automatic pre-migration snapshot. Three
+    // migrations therefore buy ZERO additional rollback granularity, while costing three
+    // fingerprints, three populated-prior-schema upgrade tests and three seams — for one feature,
+    // behind one form, that is never shipped partially. Migration 7's lesson was one commit
+    // carrying five UNRELATED things; category, online content and the primary image are one.
+    //
+    // EVERYTHING HERE IS ADDITIVE. Two CREATE TABLEs and five ADD COLUMNs. No table is rebuilt, no
+    // row is rewritten, no backfill runs, and no released migration is touched. `catalog_products`
+    // is referenced by nothing — sale lines and invoice lines carry their own snapshots, which is
+    // the discipline that makes this safe — so ADD COLUMN on a STRICT table suffices.
+    //
+    // 🔴 AND EVERY NEW COLUMN IS NULLABLE OR DEFAULTED, because the shop's existing products must
+    // keep selling the moment this migration lands. A product with no category, no brand, no
+    // description and no photo is a perfectly valid product for the till. Online content is
+    // enrichment, never a precondition for trade.
+    //
+    // WHAT IS DELIBERATELY ABSENT: stock quantity, warehouses, suppliers, purchase accounting,
+    // barcode, a category TREE, a photo GALLERY, and specifications. Each is either a separate
+    // business domain or an unapproved phase. The image table's shape admits a future gallery
+    // without any of its UX existing now.
+    sql: `
+-- ── Categories ────────────────────────────────────────────────────────────────────────────────
+--
+-- FLAT and owner-managed. No parent_id: a tree is not approved, and adding one later is an
+-- additive column on a table nothing references, which is exactly the position this table is in.
+--
+-- Names are compared case- and whitespace-insensitively by a UNIQUE INDEX below rather than by a
+-- CHECK, so "عدد" and " عدد " cannot both exist. The shop is Arabic-first, so name_ar is the
+-- required one and name_en is optional, matching the rule catalog naming already follows.
+CREATE TABLE catalog_categories (
+  id         TEXT    PRIMARY KEY,
+  name_ar    TEXT    NOT NULL CHECK (length(trim(name_ar)) > 0),
+  name_en    TEXT             CHECK (name_en IS NULL OR length(trim(name_en)) > 0),
+  -- Deactivated rather than deleted once a product has ever used it: the product keeps its link,
+  -- the owner stops being offered the category. Deletion is allowed ONLY while unused, which the
+  -- service enforces by counting referencing products inside the same transaction.
+  is_active  INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+  -- The owner's own display order. Not alphabetical: a hardware shop thinks "عدد" before "دهان".
+  sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+  created_at TEXT    NOT NULL,
+  updated_at TEXT    NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX catalog_categories_name_ar ON catalog_categories (lower(trim(name_ar)));
+CREATE INDEX catalog_categories_order ON catalog_categories (is_active, sort_order, id);
+
+-- ── Product Master columns ────────────────────────────────────────────────────────────────────
+--
+-- 🔴 ON DELETE SET NULL, chosen deliberately over RESTRICT. A category the owner is allowed to
+-- delete is one no product uses, so this clause should never fire; if a future path ever deletes a
+-- used category anyway, a product that loses its category is a product that still sells, whereas
+-- RESTRICT would abort a transaction the owner cannot diagnose from the till. The service refuses
+-- the delete first; this is the floor under it, not the rule.
+ALTER TABLE catalog_products ADD COLUMN category_id TEXT REFERENCES catalog_categories(id) ON DELETE SET NULL;
+
+-- Free text with suggestions drawn from what the shop has already typed, per the approved study: a
+-- normalized brands table was measured and rejected as weight this product cannot yet justify.
+ALTER TABLE catalog_products ADD COLUMN brand TEXT;
+
+-- ONE description per language. The earlier draft had short + long per language, which the study
+-- revised: four fields invite three of them to be stale, and nothing in V1 renders two lengths.
+ALTER TABLE catalog_products ADD COLUMN description_ar TEXT;
+ALTER TABLE catalog_products ADD COLUMN description_en TEXT;
+
+-- 🔴 DEFAULT 0 — every existing product is OFF the website until the owner says otherwise.
+-- Opting a shop's whole catalog into publication by migration would be a decision made for them.
+ALTER TABLE catalog_products ADD COLUMN is_online_visible INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX catalog_products_category ON catalog_products (category_id);
+CREATE INDEX catalog_products_online ON catalog_products (is_online_visible, is_active);
+
+-- ── Product images ────────────────────────────────────────────────────────────────────────────
+--
+-- 🔴 A CHILD TABLE, NOT COLUMNS ON catalog_products, and this is the one shape decision that is
+-- load-bearing rather than tidy. listProducts selects from catalog_products directly to render
+-- the products list; a BLOB column there means every list render reads every photo. Measured on
+-- the real repository: listAll() has no column list narrow enough to avoid it.
+--
+-- Bytes live in SQLite so the EXISTING backup contract already covers them — VACUUM INTO copies
+-- the database, and a photo stored beside it in the filesystem would be the frozen-logo gap again,
+-- at the scale of a whole catalog. Nothing stores the merchant's original Desktop path: the file
+-- they picked may be deleted the moment after import without affecting the product.
+--
+-- V1 SUPPORTS ONE PRIMARY IMAGE. The table admits many rows per product so a gallery needs no
+-- migration later, and is_primary with its partial UNIQUE index makes "the one current image"
+-- a fact the schema enforces rather than a convention the service remembers.
+CREATE TABLE catalog_product_images (
+  id           TEXT    PRIMARY KEY,
+  product_id   TEXT    NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+  -- The real bytes, already normalized by the application (resized and re-encoded) before arrival.
+  bytes        BLOB    NOT NULL CHECK (length(bytes) > 0),
+  mime         TEXT    NOT NULL CHECK (mime IN ('image/jpeg', 'image/png')),
+  -- SHA-256 of bytes, lower-case hex. The export contract verifies the file it writes against
+  -- this, so a silent corruption between database and website cannot pass unnoticed.
+  sha256_hex   TEXT    NOT NULL CHECK (length(sha256_hex) = 64
+                                       AND sha256_hex = lower(sha256_hex)),
+  byte_size    INTEGER NOT NULL CHECK (byte_size > 0),
+  width_px     INTEGER NOT NULL CHECK (width_px > 0),
+  height_px    INTEGER NOT NULL CHECK (height_px > 0),
+  -- 1 for the product's current image. The index below permits exactly one per product.
+  is_primary   INTEGER NOT NULL CHECK (is_primary IN (0, 1)),
+  -- How it arrived, so a support question has an answer: 'desktop' or 'phone'.
+  origin       TEXT    NOT NULL CHECK (origin IN ('desktop', 'phone')),
+  created_at   TEXT    NOT NULL,
+  updated_at   TEXT    NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX catalog_product_images_primary
+  ON catalog_product_images (product_id) WHERE is_primary = 1;
+CREATE INDEX catalog_product_images_product ON catalog_product_images (product_id);
+`,
+  },
 ];

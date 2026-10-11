@@ -22,7 +22,9 @@ import { type Db, openDatabase, schemaVersion } from "../../src/persistence/db";
 import { type TempDir, tempDir } from "../helpers/harness";
 
 const V7 = MIGRATIONS.filter((m) => m.version <= 7);
-const V8 = MIGRATIONS;
+// 🔴 TRANSITION: this was `MIGRATIONS` — "the whole set" — which silently stopped meaning
+// "schema v8" the moment migration 9 existed. A version constant must name its version.
+const V8 = MIGRATIONS.filter((m) => m.version <= 8);
 
 let t: TempDir;
 
@@ -428,7 +430,7 @@ describe("the migration is fingerprinted and immutable", () => {
     // Their checksums are what an existing installation already has on disk; editing any of them
     // would make every real ledger refuse to open with MigrationMismatchError.
     expect(MIGRATIONS.filter((m) => m.version <= 7)).toHaveLength(7);
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]); // 8 -> 9 product master
     expect(MIGRATIONS[7]!.name).toBe("operator_accounts");
   });
 });
