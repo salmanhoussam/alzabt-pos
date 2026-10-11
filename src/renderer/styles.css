@@ -446,3 +446,19 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 /* The unit word may be Arabic inside an LTR arithmetic run; isolate it so it cannot reorder the
    × , the price or the currency that follow it. */
 .line-math-unit { unicode-bidi: isolate; }
+
+/* ── Mandatory account setup (migration 8) ─────────────────────────────────────────────────────
+   A screen with no session behind it. Shaped like the login screen on purpose: the operator has
+   just signed in with a temporary code and should recognise where they are.
+
+   🔴 ONLY TOKENS THAT EXIST. My first version of this block used --space-5, --space-6 and
+   --text-2xl, none of which are declared — the same phantom-var defect the foundation pass removed
+   sixteen of. var() with no fallback resolves to nothing and the rule silently does nothing. */
+.setup { display: grid; gap: var(--space-4); max-width: 32rem; margin-inline: auto; padding-block: var(--space-4); }
+.setup-head { text-align: center; display: grid; gap: var(--space-2); }
+.setup-head h1 { margin: 0; font-size: var(--text-h); }
+.setup-form { display: grid; gap: var(--space-3); }
+
+/* ── Operators (owner only) ──────────────────────────────────────────────────────────────────── */
+.ops { display: grid; gap: var(--space-3); }
+.ops .row-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: flex-end; }

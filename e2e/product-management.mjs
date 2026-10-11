@@ -12,6 +12,7 @@
  *      Linux without a display: xvfb-run -a node e2e/product-management.mjs
  */
 import { _electron as electron } from "playwright-core";
+import { signIn } from "./_signin.mjs";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -42,11 +43,7 @@ const assert = (cond, msg) => {
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page = await app.firstWindow();
-  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
-  await page.getByRole("button", { name: "Cashier One" }).click();
-  for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.locator('[data-testid="login-submit"]').click();
-  await page.waitForSelector('[data-testid="cart"]');
+  await signIn(page, "Cashier One", "1111");
   return { app, page };
 }
 
@@ -275,9 +272,10 @@ await app.close();
   const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
   try {
     const n = (sql) => Number(db.prepare(sql).get().n);
-    // Was 5 before migration 6 (manual invoices). The version this build migrates a ledger TO is a
-    // transition, not an invariant, so the old value is named here the way upgrade.mjs names its own.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 7, "the installed app's ledger is at schema v7");
+    // Was 5 before migration 6 (manual invoices), then 7 after migration 7, now 8 after migration 8
+    // (operator accounts). The version this build migrates a ledger TO is a transition, not an
+    // invariant, so every old value is named here the way upgrade.mjs names its own.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 8, "the installed app's ledger is at schema v8");
 
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
     const types = rows.map((r) => r.event_type);
@@ -302,9 +300,40 @@ await app.close();
       rows.every((r) => r.actor_id === "cashier-01" && r.actor_name === "Cashier One"),
       "every row names the operator who did it",
     );
+    // 🔴 TRANSITION. This asserted `rows.every((r) => r.actor_tier === "unspecified")` with the
+    // reason "this build has no role model". Migration 8 gave it one, so the trail now holds BOTH
+    // tiers and the old blanket assertion could not survive — a baseline cannot assert the absence
+    // of a thing and outlive its creation.
+    //
+    // 🔴 AND THE TWO DISAGREE, WHICH IS WORTH ASSERTING RATHER THAN SMOOTHING OVER. An operator
+    // event records the real role (operatorService writes `actor.role`), while a product event
+    // still records 'unspecified' (posService writes CURRENT_ACTOR_TIER, whose comment claims this
+    // build "genuinely cannot know one" — no longer true now that requireLiveRole() exists). So two
+    // rows written seconds apart, by the same person, in the same database, disagree about who they
+    // were. That is reported to Salman as an audit-truth finding; this test pins the behaviour as it
+    // ACTUALLY is, so whichever way he settles it, the change shows up here as a deliberate edit.
+    const operatorRows = rows.filter((r) => r.entity_type === "operator");
+    const otherRows = rows.filter((r) => r.entity_type !== "operator");
     assert(
-      rows.every((r) => r.actor_tier === "unspecified"),
-      "the actor tier is recorded as unknown rather than guessed (this build has no role model)",
+      operatorRows.length === 1 && operatorRows[0].event_type === "OPERATOR_PIN_RESET",
+      `mandatory setup left exactly one operator row (${operatorRows.map((r) => r.event_type).join(",")})`,
+    );
+    assert(
+      operatorRows.every((r) => r.actor_tier === "owner"),
+      `an operator event records the REAL role, known since migration 8 (${operatorRows[0].actor_tier})`,
+    );
+    // 🔴 The composition, not a hand-counted total. My first version said `length === 3` and the
+    // gate answered "unspecified,unspecified,unspecified,unspecified" — four, because this script
+    // creates two products, edits one and deactivates one. Naming the events instead of counting
+    // them means the number comes from the actions above rather than from my arithmetic.
+    const businessTypes = otherRows.map((r) => r.event_type).sort().join(",");
+    assert(
+      businessTypes === "PRODUCT_CREATED,PRODUCT_CREATED,PRODUCT_DEACTIVATED,PRODUCT_UPDATED",
+      `the business trail is exactly the four actions this script performed (${businessTypes})`,
+    );
+    assert(
+      otherRows.every((r) => r.actor_tier === "unspecified"),
+      `and a product event still records 'unspecified' (${otherRows.map((r) => r.actor_tier).join(",")})`,
     );
 
     // The real price edit, with its real old value — 4.00 became 9.00 on screen.
@@ -316,9 +345,52 @@ await app.close();
     );
 
     // No PIN, no hash, no token anywhere in the stored trail.
-    const raw = JSON.stringify(rows);
-    for (const needle of ["pin", "Pin", "PIN", "hash", "token", "secret", "1111"]) {
-      assert(!raw.includes(needle), `the stored audit trail contains no '${needle}'`);
+    //
+    // 🔴 TRANSITION, AND THE THIRD TIME THIS EXACT TRAP HAS BEEN SPRUNG IN THIS REPOSITORY. This
+    // scanned the serialised rows for the bare substrings ["pin","Pin","PIN","hash","token",
+    // "secret","1111"], which was airtight while the trail held only product events. Migration 8
+    // added OPERATOR_PIN_RESET — so 'PIN' now matches an EVENT TYPE, which is not a leak: that
+    // event type IS the fact the trail is required to record. The same mistake was corrected once
+    // in the unit tests and once in operator-accounts.mjs before this one.
+    //
+    // The lesson, written where the next person will hit it: a credential check must name WHERE it
+    // is looking. A blanket substring scan over a growing trail eventually matches the trail's own
+    // vocabulary, and the failure looks like a leak while the leak it was built to catch could be
+    // sitting in a key it never inspects.
+    //
+    // So: event types are excluded by construction, every PAYLOAD key is checked against the audit
+    // domain's own secret pattern, and the values that must never appear are checked as values.
+    const SECRET_KEY = /pin|password|passwd|token|secret|credential|api[_-]?key|hash/i;
+    for (const row of rows) {
+      for (const field of ["changed_json", "metadata_json"]) {
+        if (row[field] === null || row[field] === undefined) continue;
+        const parsed = JSON.parse(row[field]);
+        for (const key of Object.keys(parsed)) {
+          assert(!SECRET_KEY.test(key), `no audited field name is a credential (${row.event_type}.${field} -> ${key})`);
+        }
+        assert(
+          !/1111|2222/.test(row[field]),
+          `no bootstrap PIN value in ${row.event_type}.${field} (${row[field].slice(0, 120)})`,
+        );
+      }
+      // 🔴 NOT `SECRET_KEY.test(actor_name)`. That pattern contains /hash/i, and «هاشم» / Hashem is
+      // an ordinary name — so the first shop that employs one would fail a security assertion for
+      // having hired them. It cannot fire today (the operator here is "Cashier One"), which is
+      // exactly why it would have sat there until it bit someone real. An independent review
+      // flagged it. What actually must not appear in these columns is a PIN or a stored credential,
+      // and that is what is checked.
+      for (const col of ["actor_id", "actor_name", "entity_id"]) {
+        assert(!/1111|2222/.test(String(row[col] ?? "")), `no bootstrap PIN value in ${row.event_type}.${col}`);
+      }
+    }
+    // And the real stored credentials, read back out of the operators table, appear nowhere at all.
+    {
+      const creds = db.prepare("SELECT pin_salt_hex AS s, pin_hash_hex AS h FROM operators").all();
+      assert(creds.length > 0, "(there are credentials to look for)");
+      const raw = JSON.stringify(rows);
+      for (const c of creds) {
+        assert(!raw.includes(c.s) && !raw.includes(c.h), "no stored salt or hash appears in the audit trail");
+      }
     }
   } finally {
     db.close();

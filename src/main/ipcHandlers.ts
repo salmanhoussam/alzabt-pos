@@ -47,6 +47,7 @@ import {
   type IpcResult,
 } from "../shared/ipcContract";
 import { type Logger, nullLogger } from "./logger";
+import { accessFor } from "./channelPolicy";
 
 /**
  * A handler answers synchronously, or with a promise for the two channels that genuinely cannot:
@@ -214,9 +215,36 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   const log = options.logger ?? nullLogger;
   const now = options.now ?? (() => new Date());
 
+  /**
+   * 🔴 THE AUTHORIZATION GATE. It runs BEFORE the handler body, on every channel, for both the sync
+   * and async wrappers — so a restricted action is refused whether or not any UI drew a button for
+   * it. The renderer is the untrusted side of this bridge: `page.evaluate` on `window.pos` reaches
+   * every channel directly, and an E2E test does exactly that to prove this is real.
+   *
+   * FAIL CLOSED: `accessFor` THROWS for a channel it does not know, and the policy table is typed
+   * `Record<ChannelName, Access>` so an unclassified channel is a compile error in the first place.
+   *
+   * ONE refusal code for every restricted channel, deliberately: the operator learns that this
+   * needs an owner, not which channels exist to probe.
+   */
+  function authorize(channel: ChannelName): void {
+    const access = accessFor(channel);
+    if (access === "public") return;
+    // 🔴 LIVE. `requireLiveRole` re-reads the durable operator row and fails closed on a missing or
+    // deactivated account, so a promotion or demotion takes effect on the NEXT action with no
+    // logout and no restart, and a deactivated operator's session stops working immediately.
+    const role = service.requireLiveRole();
+    if (access === "owner" && role !== "owner") {
+      // 'admin' exists in the schema CHECK as a reserved value and is never assignable, so it can
+      // only arrive from a hand-edited database. It is NOT an owner, and lands here.
+      throw new DomainError("NOT_AUTHORIZED", "Only the shop owner can do that");
+    }
+  }
+
   function wrap(channel: ChannelName, fn: (payload: unknown) => unknown, onInternal?: (payload: unknown) => IpcError): Handler {
     return (payload) => {
       try {
+        authorize(channel);
         return { ok: true, data: fn(payload) };
       } catch (err) {
         if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
@@ -230,6 +258,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   function wrapAsync(channel: ChannelName, fn: (payload: unknown) => Promise<unknown>): Handler {
     return async (payload) => {
       try {
+        authorize(channel);
         return { ok: true, data: await fn(payload) };
       } catch (err) {
         if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
@@ -242,6 +271,28 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
 
   const stamp = () => now().toISOString().slice(0, 10).replace(/-/g, "");
 
+  /** The operator service, or a refusal. A terminal without accounts has no management surface. */
+  function operators() {
+    const svc = service.operatorAccounts();
+    if (!svc) throw new DomainError("NOT_AVAILABLE", "Operator accounts are not available");
+    return svc;
+  }
+
+  /**
+   * A role from the renderer. 'admin' is refused HERE as well as in the service: it is reserved in
+   * the schema so widening the CHECK later costs no rebuild, and it has no v1 behaviour.
+   */
+  function role(value: unknown): "owner" | "cashier" {
+    if (value !== "owner" && value !== "cashier") invalid("'role' must be owner or cashier");
+    return value;
+  }
+
+  /** The login/session shape, with the role the UI uses to hide what the service would refuse. */
+  function cashierDto(c: { id: string; name: string }) {
+    const r = service.currentRole();
+    return r ? { id: c.id, name: c.name, role: r } : { id: c.id, name: c.name };
+  }
+
   return {
     listCashiers: wrap("listCashiers", (p) => {
       noPayload(p);
@@ -249,7 +300,72 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     }),
     login: wrap("login", (p) => {
       const o = exactObject(p, ["cashierId", "pin"]);
-      return service.login(str(o.cashierId, "cashierId", 64), str(o.pin, "pin", 16));
+      const outcome = service.login(str(o.cashierId, "cashierId", 64), str(o.pin, "pin", 16));
+      // 🔴 The SETUP outcome carries the ticket and NOTHING resembling a session, so a renderer
+      // cannot mistake one for the other — and the only channel that accepts a ticket is
+      // completeBootstrapSetup. The service's internal `kind` is mapped to the DTO's `status`
+      // rather than leaked: the IPC contract is the boundary, not an echo of the service.
+      if (outcome.kind === "setup") {
+        return { status: "setup", ticket: outcome.ticket, operatorId: outcome.operatorId, name: outcome.name };
+      }
+      return { status: "session", cashier: cashierDto(outcome.session) };
+    }),
+    completeBootstrapSetup: wrap("completeBootstrapSetup", (p) => {
+      const o = exactObject(p, ["ticket", "name", "pin"]);
+      return cashierDto(
+        service.completeBootstrapSetup(
+          str(o.ticket, "ticket", 128),
+          str(o.name, "name", 60),
+          // 🔴 Bounded, and NOT validated for shape here. `domain/pinRule.ts` owns digits-only and
+          // 4-8, so there is ONE definition every write path meets; a second copy here could drift.
+          str(o.pin, "pin", 16),
+        ),
+      );
+    }),
+    listOperators: wrap("listOperators", (p) => {
+      noPayload(p);
+      return operators().listAll();
+    }),
+    createOperator: wrap("createOperator", (p) => {
+      const o = exactObject(p, ["name", "role", "pin"]);
+      return operators().create(service.requireOperatorSession(), {
+        name: str(o.name, "name", 60),
+        role: role(o.role),
+        pin: str(o.pin, "pin", 16),
+      });
+    }),
+    renameOperator: wrap("renameOperator", (p) => {
+      const o = exactObject(p, ["operatorId", "name"]);
+      return operators().rename(
+        service.requireOperatorSession(),
+        str(o.operatorId, "operatorId", 100),
+        str(o.name, "name", 60),
+      );
+    }),
+    resetOperatorPin: wrap("resetOperatorPin", (p) => {
+      const o = exactObject(p, ["operatorId", "pin"]);
+      return operators().resetPin(
+        service.requireOperatorSession(),
+        str(o.operatorId, "operatorId", 100),
+        str(o.pin, "pin", 16),
+      );
+    }),
+    setOperatorActive: wrap("setOperatorActive", (p) => {
+      const o = exactObject(p, ["operatorId", "isActive"]);
+      if (typeof o.isActive !== "boolean") invalid("'isActive' must be a boolean");
+      return operators().setActive(
+        service.requireOperatorSession(),
+        str(o.operatorId, "operatorId", 100),
+        o.isActive,
+      );
+    }),
+    setOperatorRole: wrap("setOperatorRole", (p) => {
+      const o = exactObject(p, ["operatorId", "role"]);
+      return operators().setRole(
+        service.requireOperatorSession(),
+        str(o.operatorId, "operatorId", 100),
+        role(o.role),
+      );
     }),
     logout: wrap("logout", (p) => {
       noPayload(p);

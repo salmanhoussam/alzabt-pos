@@ -77,6 +77,16 @@ describe("IPC surface", () => {
         // transaction. The list stays EXHAUSTIVE on purpose — this assertion exists to catch a
         // channel nobody meant to expose, so a new one is declared here deliberately.
         "addInvoiceLines",
+        // Added 2026-10-10 by migration 8 — operator accounts. The list stays EXHAUSTIVE: it
+        // exists to catch a channel nobody meant to expose, so each new one is declared here
+        // deliberately. `completeBootstrapSetup` is the only PUBLIC one of the seven.
+        "completeBootstrapSetup",
+        "createOperator",
+        "listOperators",
+        "renameOperator",
+        "resetOperatorPin",
+        "setOperatorActive",
+        "setOperatorRole",
         "updateInvoiceLine",
         "removeInvoiceLine",
         "discardInvoiceDraft",
@@ -98,7 +108,7 @@ describe("IPC surface", () => {
         "saveInvoicePdf",
       ].sort(),
     );
-    expect(CHANNEL_NAMES).toHaveLength(46); // 19 -> 44 manual invoicing -> 45 -> 46 (addInvoiceLines, 2026-10-10)
+    expect(CHANNEL_NAMES).toHaveLength(53); // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8)
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.
@@ -129,16 +139,24 @@ describe("IPC surface", () => {
   it("full flow through the handlers: login → sale → today → void → today", () => {
     const { db, ipc } = setup();
     expect(errCode(ipc.createSale(goodSale()))).toBe("NOT_LOGGED_IN");
-    expect(ipc.login({ cashierId: "cashier-02", pin: "2222" })).toEqual({
+    // 🔴 TRANSITION, migration 8. This returned the CashierDto directly. `login` now answers one
+    // of TWO outcomes, because a legacy bootstrap credential yields a setup ticket and NO session —
+    // so the session case is tagged rather than being the only possible shape. Old value:
+    // `data: { id: "cashier-02", name: "Cashier Two" }`.
+    // 🔴 THE OWNER, NOT CASHIER TWO. This flow ends in a VOID, and voiding is an owner-only
+    // channel since migration 8 — reversing money is not a till operator's decision. Signing in as
+    // a cashier here would now be refused with NOT_AUTHORIZED, which is the feature working.
+    expect(ipc.login({ cashierId: "cashier-01", pin: "1111" })).toEqual({
       ok: true,
-      data: { id: "cashier-02", name: "Cashier Two" },
+      data: { status: "session", cashier: { id: "cashier-01", name: "Cashier One", role: "owner" } },
     });
 
     const created = ipc.createSale(goodSale());
     if (!created.ok) throw new Error(JSON.stringify(created));
     const sale = (created.data as { sale: { id: string; total: unknown; cashierId: string } }).sale;
     expect(sale.total).toEqual({ minor: "597", currency: "USD" });
-    expect(sale.cashierId).toBe("cashier-02");
+    // Follows the login above, which is now the OWNER because this flow voids.
+    expect(sale.cashierId).toBe("cashier-01");
 
     expect(ipc.getTodaySales(undefined)).toMatchObject({
       ok: true,

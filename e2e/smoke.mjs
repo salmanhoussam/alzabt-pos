@@ -8,6 +8,7 @@
 // Uses a throw-away profile directory — it never touches a real ledger. Screenshots land in
 // e2e-output/ (git-ignored).
 import { _electron as electron } from "playwright-core";
+import { signIn } from "./_signin.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -48,12 +49,7 @@ async function launch() {
   return { app, page };
 }
 
-async function login(page, name, pin) {
-  await page.getByRole("button", { name }).click();
-  for (const d of pin) await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.locator('[data-testid="login-submit"]').click();
-  await page.waitForSelector('[data-testid="cart"]');
-}
+const login = (page, name, pin) => signIn(page, name, pin);
 
 const product = (page, name) => page.locator("button.product", { hasText: name });
 const line = (page, name) => page.locator("li.line", { hasText: name });
@@ -103,15 +99,15 @@ assert(surface.require === "undefined" && surface.process === "undefined" && sur
 // It was 13 before offline product management; the six that added are createProduct, listProducts,
 // updateProduct, setProductActive, getSettings and setTerminalLanguage.
 // It went 19 -> 44 with manual invoices (migration 6), 45 with per-invoice tax (setInvoiceTax),
-// and 46 on 2026-10-10 with addInvoiceLines — several typed rows in ONE transaction.
+// and 46 on 2026-10-10 with addInvoiceLines, then 53 with operator accounts (migration 8).
 //
 // 🔴 This assertion did its job. It FAILED the first Windows gate for migration 6, because the
 // channels had been added to the contract, the handlers, the preload and the unit-level surface
 // test — and not here. That is exactly why it is written by name: the one place that is not
 // derived from the contract is the one place a human has to notice.
 assert(
-  JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","addInvoiceLines","createInvoiceDraft","createProduct","createSale","currentCashier","discardInvoiceDraft","exportBackup","exportCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getInvoice","getSaleHistory","getSettings","getTodaySales","importCatalog","listCashiers","listInvoiceDrafts","listInvoices","listProducts","listReconciliation","listReconciliationQueue","login","logout","pickInvoiceLogo","printInvoice","removeInvoiceLine","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchInvoices","setInvoiceTax","setNextInvoiceNumber","setProductActive","setTerminalLanguage","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
-  `window.pos exposes exactly the 46 business methods, and nothing else (got ${surface.posKeys.length})`,
+  JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","addInvoiceLines","completeBootstrapSetup","createInvoiceDraft","createOperator","createProduct","createSale","currentCashier","discardInvoiceDraft","exportBackup","exportCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getInvoice","getSaleHistory","getSettings","getTodaySales","importCatalog","listCashiers","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","pickInvoiceLogo","printInvoice","removeInvoiceLine","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchInvoices","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorRole","setProductActive","setTerminalLanguage","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
+  `window.pos exposes exactly the 53 business methods, and nothing else (got ${surface.posKeys.length})`,
 );
 await page.screenshot({ path: SHOTS + "01-login.png" });
 
@@ -123,6 +119,17 @@ await page.waitForSelector("text=Cashier or PIN is incorrect");
 log("PASS wrong PIN refused");
 for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
 await page.locator('[data-testid="login-submit"]').click();
+// 🔴 The operator is deliberately NOT re-clicked here: staying on the same selection is what proves
+// the PIN field cleared after the refusal. So mandatory setup (migration 8) is handled inline rather
+// than through signIn, which starts from the operator list.
+await page.waitForSelector('[data-testid="cart"], [data-testid="setup-screen"]');
+if (await page.locator('[data-testid="setup-screen"]').count()) {
+  await page.screenshot({ path: SHOTS + "01b-mandatory-setup.png" });
+  await page.locator('[data-testid="setup-pin"]').fill("1111");
+  await page.locator('[data-testid="setup-confirm"]').fill("1111");
+  await page.locator('[data-testid="setup-submit"]').click();
+  log("PASS mandatory setup stands between the bootstrap PIN and the till");
+}
 await page.waitForSelector('[data-testid="cart"]');
 
 // Cart editing.

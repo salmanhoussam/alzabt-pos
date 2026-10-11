@@ -19,6 +19,7 @@
  *          ./node_modules/electron/dist/electron e2e/manual-invoice.mjs
  */
 import { _electron as electron } from "playwright-core";
+import { signIn } from "./_signin.mjs";
 import { existsSync, mkdirSync, mkdtempSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -72,11 +73,7 @@ const assert = (cond, msg) => {
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page = await app.firstWindow();
-  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
-  await page.getByRole("button", { name: "Cashier One" }).click();
-  for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.locator('[data-testid="login-submit"]').click();
-  await page.waitForSelector('[data-testid="cart"]');
+  await signIn(page, "Cashier One", "1111");
   return { app, page };
 }
 
@@ -295,7 +292,7 @@ await app.close();
 {
   const f = facts();
   log("after setup:", JSON.stringify(f));
-  assert(f.schema === 7, `the ledger is at schema v7 (got ${f.schema})`);
+  assert(f.schema === 8, `the ledger is at schema v8 (got ${f.schema})`);
   assert(f.invoices === 0 && f.invoiceLines === 0 && f.reconciliation === 0, "no invoice exists yet");
   assert(count("company_profile") === 1, "exactly one company_profile row, however many saves happened");
   assert(Number(one("SELECT next_invoice_number AS n FROM company_profile").n) === 61, "the sequence starts at 61 as configured");
@@ -485,7 +482,15 @@ await app.close();
   // Finalizing changed no product and wrote no catalog audit event.
   // TWO products were created in setup, so two PRODUCT_CREATED rows — and nothing else. Finalizing
   // an invoice is not a catalog event, which is what this really asserts.
-  assert(f.audit === 2 && f.auditTypes === "PRODUCT_CREATED=2", `only the two products I created are audited (${f.auditTypes})`);
+  // 🔴 TRANSITION, not a weakened assertion. This was `f.audit === 2` with
+  // `auditTypes === "PRODUCT_CREATED=2"`. Migration 8 put mandatory setup behind the first login,
+  // and completing it writes exactly ONE OPERATOR_PIN_RESET row — one, not two, because the sign-in
+  // helper keeps the operator's name, so no OPERATOR_RENAMED is written. The total stays EXACT
+  // rather than becoming "at least 2": the point of this line is that finalizing audits nothing.
+  assert(
+    f.audit === 3 && f.auditTypes === "OPERATOR_PIN_RESET=1,PRODUCT_CREATED=2",
+    `only my two products, plus the one mandatory-setup row, are audited (${f.auditTypes})`,
+  );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -699,7 +704,7 @@ await app.close();
 {
   const f = facts();
   log("FINAL LEDGER:", JSON.stringify(f));
-  assert(f.schema === 7 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v7");
+  assert(f.schema === 8 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v8");
   assert(f.invoices === 1 && f.invoiceLines === 4, "the invoice and its lines survived the restart");
   assert(f.highestNumber === 61, "the invoice number is unchanged");
   assert(f.reconciliation === 4, "every reconciliation row survived");

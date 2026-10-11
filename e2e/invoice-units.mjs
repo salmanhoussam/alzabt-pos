@@ -23,6 +23,7 @@
  * Run: node e2e/invoice-units.mjs            (CI sets E2E_EXECUTABLE to the installed .exe)
  */
 import { _electron as electron } from "playwright-core";
+import { signIn } from "./_signin.mjs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -65,11 +66,7 @@ const assert = (cond, msg) => {
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page = await app.firstWindow();
-  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
-  await page.getByRole("button", { name: "Cashier One" }).click();
-  for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
-  await page.locator('[data-testid="login-submit"]').click();
-  await page.waitForSelector('[data-testid="cart"]');
+  await signIn(page, "Cashier One", "1111");
   return { app, page };
 }
 
