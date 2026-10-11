@@ -143,8 +143,30 @@ async function waitForEither(page, a, b, timeoutMs = 60000) {
   }
 }
 
-async function clickEither(page, testid, fallback) {
+/**
+ * Clicks a control by testid on THIS build, or by its English label on an older one.
+ *
+ * 🔴 IT WAITS FOR EITHER TO EXIST FIRST, and that is a fix, not a flourish. The original sampled
+ * `count()` once, immediately — so every call was a race against render. Losing that race fell
+ * through to the English label, and on an Arabic-default build (every release since ce4dd28) that
+ * label does not exist at all, so the call then burned a full 30-second timeout waiting for a
+ * button that was never coming while the real one had appeared milliseconds later. That is exactly
+ * how seed-v7 failed: `tab(page, "Products")` had been clicked but the screen had not painted yet.
+ *
+ * Waiting for whichever arrives first cannot make any existing call site worse — a control already
+ * present resolves immediately — and it removes the race from all of them at once.
+ */
+async function clickEither(page, testid, fallback, timeoutMs = 15000) {
   const byId = page.locator(`[data-testid="${testid}"]`);
+  try {
+    await Promise.any([
+      byId.first().waitFor({ state: "attached", timeout: timeoutMs }),
+      fallback.first().waitFor({ state: "attached", timeout: timeoutMs }),
+    ]);
+  } catch {
+    // Neither appeared. Fall through so the click itself reports which locator was missing, rather
+    // than this helper swallowing the detail into an AggregateError.
+  }
   if ((await byId.count()) > 0) {
     await byId.first().click();
     return;
@@ -1729,6 +1751,10 @@ if (PHASE === "seed-v2") {
   // itself — it passed on an empty ledger and failed on a real one. So this phase refuses to hand
   // part 2 an empty trail.
   await tab(page, "Products");
+  // The products screen must be PAINTED before anything is clicked on it. `product-search` is the
+  // anchor product-management.mjs already uses for the same reason, and it is a testid rather than
+  // a label, so it works whichever language the build defaults to.
+  await page.waitForSelector('[data-testid="product-search"]');
   await clickEither(page, "add-product", page.getByRole("button", { name: "Add product" }));
   await page.waitForSelector('[data-testid="field-nameAr"]');
   await page.locator('[data-testid="field-nameAr"]').fill("صنف قبل الترقية");
