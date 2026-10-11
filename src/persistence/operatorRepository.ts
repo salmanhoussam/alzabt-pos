@@ -67,19 +67,35 @@ export class OperatorRepository {
   /**
    * The terminal's un-claimed bootstrap OWNER, or null once the installation has been claimed.
    *
-   * 🔴 A STATE, ASKED IN SQL, NOT A HARDCODED ID. "An active owner whose PIN is still the seeded
-   * bootstrap credential" is true on a fresh install and on a real v7 -> v8 upgrade alike, and it
-   * becomes false for ever the moment that owner completes setup — because `setPin` clears the flag
-   * and no path ever re-arms it for an owner. Keying on `cashier-01` by name would have been a
-   * rule about one literal rather than about the terminal's condition.
+   * 🔴 A STATE, ASKED IN SQL, NOT A HARDCODED ID. "An active owner whose PIN is still a bootstrap
+   * credential, on a terminal where NOBODY has claimed anything yet" is true on a fresh install and
+   * on a real v7 -> v8 upgrade alike. Keying on `cashier-01` by name would have been a rule about
+   * one literal rather than about the terminal's condition.
    *
-   * Only ONE row can satisfy this: migration 8 seeds exactly one owner with the flag set, and
-   * `create` cannot make an owner (roles are assigned afterwards, and only by an owner who has
-   * therefore already completed setup). The `LIMIT 1` is belt and braces, not a choice.
+   * 🔴 THE `NOT EXISTS` IS THE WHOLE RULE, AND ITS ABSENCE WAS A REAL DEFECT. An earlier version
+   * asked only `role = 'owner' AND must_reset_pin = 1 AND is_active = 1`, and carried a comment
+   * claiming only one row could ever satisfy it because "`create` cannot make an owner". Both
+   * halves were false. `create` takes the role from its caller and `requireAssignableRole` accepts
+   * 'owner'; `setRole` updates the role and never touches the flag. So either creating an owner, or
+   * promoting a not-yet-set-up cashier to owner — TWO CLICKS on the owner's own screen — produced a
+   * row `(owner, must_reset_pin = 1, active)` that matched the predicate again. The ceremony then
+   * re-armed and locked EVERY operator out, the real owner included, until the new hire arrived to
+   * use the PIN the owner had typed. An independent review found it by reading; it was reproduced by
+   * execution before this fix was written, from both routes.
+   *
+   * `NOT EXISTS (… must_reset_pin = 0)` is false for ever from the instant anybody completes setup,
+   * so the state genuinely cannot come back — which is what the old comment, the release note and a
+   * test had all asserted while nothing verified it.
    */
   findBootstrapOwner(): OperatorRow | null {
     const row = this.db
-      .prepare(`SELECT ${COLUMNS} FROM operators WHERE role = 'owner' AND must_reset_pin = 1 AND is_active = 1 LIMIT 1`)
+      .prepare(
+        `SELECT ${COLUMNS} FROM operators
+          WHERE role = 'owner' AND must_reset_pin = 1 AND is_active = 1
+            AND NOT EXISTS (SELECT 1 FROM operators WHERE must_reset_pin = 0)
+          ORDER BY id
+          LIMIT 1`,
+      )
       .get() as Record<string, unknown> | undefined;
     return normalise(row);
   }

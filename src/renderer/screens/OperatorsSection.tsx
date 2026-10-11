@@ -20,7 +20,19 @@ import type { OperatorDto } from "../../shared/ipcContract";
 import { call, errorText, pos } from "../api";
 import { useT } from "../i18n";
 
-const digitsOnly = (v: string) => v.replace(/[^0-9]/g, "").slice(0, 8);
+/**
+ * The bounds `domain/pinRule.ts` enforces. UX only — the service is what refuses.
+ *
+ * 🔴 THE MINIMUM WAS MISSING WHILE THE RULE WAS ON SCREEN. This dialog displayed "6 to 8 digits"
+ * and accepted four, letting the operator submit a PIN the service would reject — and in
+ * e2e/upgrade.mjs that produced a dialog that silently stayed open and a wait that expired 30
+ * seconds later saying nothing useful. A rule shown without being enforced is worse than one not
+ * shown: it reads as permission.
+ */
+const PIN_MIN = 6;
+const PIN_MAX = 8;
+
+const digitsOnly = (v: string) => v.replace(/[^0-9]/g, "").slice(0, PIN_MAX);
 
 type Draft = { readonly kind: "create" } | { readonly kind: "rename" | "pin"; readonly op: OperatorDto };
 
@@ -222,7 +234,13 @@ export function OperatorsSection({ selfId }: { readonly selfId: string }) {
             <p className="muted small">{t("setup.pinRule")}</p>
 
             <div className="inv-actions">
-              <button className="btn primary" type="submit" disabled={busy} data-testid="ops-dialog-save">
+              <button
+                className="btn primary"
+                type="submit"
+                // A PIN is required when creating or resetting; a rename has no PIN field at all.
+                disabled={busy || (draft.kind !== "rename" && (pin.length < PIN_MIN || pin.length > PIN_MAX))}
+                data-testid="ops-dialog-save"
+              >
                 {t("ops.save")}
               </button>
               <button

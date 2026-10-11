@@ -378,7 +378,13 @@ assert((await page.locator('[data-testid="export-backup"]').count()) >= 0, "(the
 // the UI entirely and must each come back refused, by CODE, from the main process.
 for (const [channel, payload] of [
   ["listOperators", null],
-  ["createOperator", { name: "مدير مزيّف", role: "owner", pin: "9876" }],
+  // 🔴 role "cashier", NOT "owner", and the PIN is six digits. The point of this loop is that the
+  // GUARD refuses — so every payload must be one the handler would ACCEPT without it. `role:
+  // "owner"` is now refused by `create` itself (a new operator is never an owner) and a 4-digit PIN
+  // by the PIN rule, so either would have made this line pass for the wrong reason the moment the
+  // guard was removed. That is the same unfailable-assertion shape this suite has already paid for
+  // three times.
+  ["createOperator", { name: "موظف مزيّف", role: "cashier", pin: "987612" }],
   ["setOperatorRole", { operatorId: "cashier-01", role: "cashier" }],
   ["setOperatorActive", { operatorId: "cashier-01", isActive: false }],
   ["renameOperator", { operatorId: "cashier-01", name: "مغيَّر" }],

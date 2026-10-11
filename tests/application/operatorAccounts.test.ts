@@ -56,6 +56,23 @@ const auditRows = () =>
     )
     .all() as Array<Record<string, string>>;
 
+/**
+ * A REAL second owner, by the only route the product now allows.
+ *
+ * 🔴 `create(..., role: "owner")` is refused, and promoting a PENDING operator is refused, because a
+ * pending owner row is exactly what used to re-arm the install ceremony and lock the terminal. So a
+ * second owner is made the way a shop makes one: create the cashier, let them claim their own
+ * account with their own PIN, then promote. Four tests below needed "a second owner" and were
+ * written against the old shortcut; this is the real sequence, in one place.
+ */
+function secondOwner(name = "شريك", pin = "567812") {
+  const created = svc.create(OWNER, { name, role: "cashier", pin });
+  const ticket = svc.authenticate(created.id, pin);
+  if (ticket.kind !== "setup") throw new Error("expected setup");
+  svc.completeSetup(ticket.ticket, name, pin === "567812" ? "135790" : "246813");
+  return svc.setRole(OWNER, created.id, "owner");
+}
+
 /** Signs the owner in with the bootstrap PIN and finishes setup. Returns the session. */
 function bootstrapOwner(name = "حسين", pin = "431987") {
   const outcome = svc.authenticate("cashier-01", "1111");
@@ -314,29 +331,30 @@ describe("operator management", () => {
   });
 
   it("allows demoting an owner once a SECOND active owner exists", () => {
-    const second = svc.create(OWNER, { name: "شريك", role: "owner", pin: "567812" });
+    const second = secondOwner();
     const demoted = svc.setRole({ id: second.id, name: "شريك", role: "owner" }, "cashier-01", "cashier");
     expect(demoted.role).toBe("cashier");
   });
 
   it("🔴 counts only ACTIVE owners — a deactivated owner does not protect the last one", () => {
-    const second = svc.create(OWNER, { name: "شريك", role: "owner", pin: "567812" });
+    const second = secondOwner();
     svc.setActive(OWNER, second.id, false);
     // Only cashier-01 is an active owner now, so it is protected again.
     expect(() => svc.setActive(OWNER, "cashier-01", false)).toThrow(/last active owner/);
   });
 
   it("🔴 an operator cannot change their OWN role", () => {
-    svc.create(OWNER, { name: "شريك", role: "owner", pin: "567812" });
+    secondOwner();
     // Even though a second owner exists, so the last-owner rule is not what refuses this.
     expect(() => svc.setRole(OWNER, "cashier-01", "cashier")).toThrow(/their own role/);
     expect(operators.findById("cashier-01")!.role).toBe("owner");
   });
 
   it("records a role change with before and after", () => {
-    const op = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
-    svc.setRole(OWNER, op.id, "owner");
+    // Promotion requires them to have claimed their own account first, so this goes the real route.
+    const op = secondOwner("جعفر");
     const changed = auditRows().find((r) => r.type === "OPERATOR_ROLE_CHANGED")!;
+    void op;
     expect(JSON.parse(changed.changed!)).toEqual({ role: { before: "cashier", after: "owner" } });
   });
 

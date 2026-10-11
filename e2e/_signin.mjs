@@ -88,10 +88,30 @@ export async function signIn(page, name, bootstrapPin) {
     await completeSetup(page);
     return "setup";
   }
-  if (await page.locator('[data-testid="cart"]').count()) return "session";
+  if (await page.locator('[data-testid="cart"]').count()) {
+    // 🔴 THIS OUTCOME IS THE DEFECT, NOT A PATH. A 4-digit bootstrap credential reaching the till
+    // means either mandatory setup was skipped or a legacy PIN became a real one — the two things
+    // the PIN rule and the ceremony exist to prevent. The helper used to return "session" here and
+    // carry on, which would have turned exactly that defect into a silent pass.
+    throw new Error(
+      `ASSERTION FAILED: the bootstrap PIN "${bootstrapPin}" opened a SESSION for ${name} — ` +
+        "mandatory setup was bypassed, or a legacy credential is valid as a real PIN",
+    );
+  }
 
-  // Refused: this profile is already past setup, so the live credential is E2E_PIN. The PIN field
-  // clears itself on a refusal, so the operator stays selected and only the digits are retyped.
+  // Refused. Two very different reasons look identical here — this profile is already past setup,
+  // or the terminal is still waiting for its owner — so the message is read rather than assumed.
+  // Guessing cost a 30-second timeout reported as a PIN problem when it was a ceremony refusal.
+  const refusal = (await page.locator(".login .error").innerText().catch(() => "")).trim();
+  if (/owner/i.test(refusal)) {
+    throw new Error(
+      `ASSERTION FAILED: ${name} cannot sign in because the terminal is unclaimed — ` +
+        `the OWNER must complete setup first ("${refusal}")`,
+    );
+  }
+
+  // Already past setup, so the live credential is E2E_PIN. The PIN field clears itself on a
+  // refusal, so the operator stays selected and only the digits are retyped.
   await keypad(page, E2E_PIN);
   await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
   return "resumed";

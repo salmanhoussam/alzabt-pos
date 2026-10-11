@@ -284,6 +284,17 @@ export class OperatorService {
   create(actor: OperatorSession, input: { name: string; role: OperatorRole; pin: string }): OperatorView {
     const name = this.requireFreeName(input.name, null);
     const role = this.requireAssignableRole(input.role);
+    // 🔴 A NEW OPERATOR IS NEVER AN OWNER. Every created account starts pending (`mustResetPin`
+    // below), and a pending OWNER is precisely the row shape that used to re-arm the install
+    // ceremony and lock the terminal. Ownership is granted afterwards, by `setRole`, to somebody
+    // who has already set their own PIN — which is also what the UI has always done (its create
+    // dialog hardcodes 'cashier'). This makes that the rule rather than the habit of one screen.
+    if (role === "owner") {
+      throw new DomainError(
+        "INVALID_INPUT",
+        "A new operator is created as a cashier; make them an owner afterwards, once they have set their own PIN",
+      );
+    }
     assertValidPin(input.pin);
     const instant = this.now();
     const id = this.newId();
@@ -362,6 +373,16 @@ export class OperatorService {
     // demote themselves and the shop locks itself out of its own terminal.
     if (actor.id === id) {
       throw new DomainError("SELF_ROLE_CHANGE", "An operator cannot change their own role");
+    }
+    // 🔴 AND AN OPERATOR WHO HAS NOT SET THEIR OWN PIN CANNOT BE MADE AN OWNER. Their credential is
+    // still one somebody else typed, so promoting them would hand ownership to a PIN the owner
+    // knows — and it was the second of the two routes that re-armed the install ceremony and locked
+    // the terminal. They become an owner after they have claimed their own account.
+    if (next === "owner" && row.must_reset_pin === 1) {
+      throw new DomainError(
+        "SETUP_REQUIRED",
+        "This operator has not set their own PIN yet; they can be made an owner once they have",
+      );
     }
     if (row.role === "owner" && next !== "owner") this.assertNotLastOwner(row, "demoted");
     if (row.role === next) return toOperatorView(row);

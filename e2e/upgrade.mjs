@@ -1890,9 +1890,15 @@ if (PHASE === "seed-v2") {
     // migration that backfilled historical tiers — the exact thing migration 8's own comment
     // promises never to do — would have passed this phase while breaking the promise. The proof now
     // covers the promise.
+    // 🔴 app_version and schema_version INCLUDED. The review judged the loop sufficient to catch a
+    // tier backfill but short by exactly these two — and they are the same class of plausible,
+    // well-meant rewrite: "these rows live in a v8 table now, so say schema_version = 8" destroys
+    // the row's own statement about which build's conventions applied to it. All 14 columns bar the
+    // three compared above are now compared.
     for (const col of [
       "actor_tier", "actor_id", "entity_type", "entity_id",
       "changed_json", "metadata_json", "occurred_at", "business_date",
+      "app_version", "schema_version",
     ]) {
       assert(
         String(same[col] ?? "∅") === String(old[col] ?? "∅"),
