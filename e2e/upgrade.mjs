@@ -990,7 +990,10 @@ if (PHASE === "seed-v2") {
   // 🔴 AND THE TWO TRAILS DISAGREE ABOUT THE SAME PERSON, which is reported rather than smoothed:
   // posService still writes CURRENT_ACTOR_TIER for a product event while operatorService writes the
   // real role for an account event. Asserted as it IS, so settling it shows up here as a real edit.
-  assert(audit[0].actor_tier === "unspecified", "a product event still records the tier as unspecified");
+  // 🔴 TRANSITION. This asserted 'unspecified'. The edit above was made by THIS build, which knows
+  // the live role, so the row carries it. The only rows that keep 'unspecified' are the ones an
+  // OLDER build wrote, and those are asserted where such rows actually exist — scenario G.
+  assert(audit[0].actor_tier === "owner", `a product event records the REAL role (${audit[0].actor_tier})`);
   {
     const accounts = auditRows().filter((r) => r.entity_type === "operator");
     assert(accounts.length === 1 && Number(accounts[0].seq) === 1, "the account trail holds exactly the setup row, at seq 1");
@@ -1881,6 +1884,25 @@ if (PHASE === "seed-v2") {
     assert(
       same.event_type === old.event_type && String(same.seq) === String(old.seq) && same.actor_name === old.actor_name,
       `and row ${old.id} is unchanged (type, seq and actor)`,
+    );
+    // 🔴 HISTORICAL actor_tier, COMPARED EXPLICITLY — and every other column with it. The
+    // independent review found this loop proved type, seq and actor NAME but not the tier, so a
+    // migration that backfilled historical tiers — the exact thing migration 8's own comment
+    // promises never to do — would have passed this phase while breaking the promise. The proof now
+    // covers the promise.
+    for (const col of [
+      "actor_tier", "actor_id", "entity_type", "entity_id",
+      "changed_json", "metadata_json", "occurred_at", "business_date",
+    ]) {
+      assert(
+        String(same[col] ?? "∅") === String(old[col] ?? "∅"),
+        `and ${old.id}.${col} is byte-identical ("${String(old[col] ?? "∅")}" -> "${String(same[col] ?? "∅")}")`,
+      );
+    }
+    // The v7 build could not know a role, so every row it wrote must STILL say so after migrating.
+    assert(
+      old.actor_tier === "unspecified" && same.actor_tier === "unspecified",
+      `🔴 a pre-v8 row keeps 'unspecified' for ever — never backfilled (${same.actor_tier})`,
     );
   }
   assert(
