@@ -67,7 +67,7 @@ describe("schema is unchanged by this feature", () => {
     ]);
   });
 
-  it("catalog_products has migration 3's columns PLUS migration 9's five — no more, no fewer", () => {
+  it("catalog_products has migration 3's columns PLUS migration 9's six — no more, no fewer", () => {
     const columns = (db.prepare("PRAGMA table_info(catalog_products)").all() as Array<{ name: string }>).map(
       (c) => c.name,
     );
@@ -89,17 +89,23 @@ describe("schema is unchanged by this feature", () => {
       // All five are additive and nullable-or-defaulted, so every existing product keeps selling
       // the moment the migration lands: online content is enrichment, never a precondition.
       "category_id",
+      // 🔴 TRANSITION within migration 9 itself: barcode was approved into it while it was still
+      // unmerged, rather than becoming a migration 10 for one adjacent Product Master field.
+      "barcode",
       "brand",
       "description_ar",
       "description_en",
       "is_online_visible",
     ]);
     // Named explicitly, because each one is a documented follow-up PR rather than an oversight.
-    // 🔴 `category_id` and `description` LEFT this list in migration 9 — category_id because it
-    // now exists, and `description` because it never will under that name: the approved model is
-    // one description PER LANGUAGE, so a bare `description` column appearing would mean somebody
-    // had reintroduced the short+long shape the study rejected.
-    for (const absent of ["barcode", "description", "unit_needs_review", "stock_qty", "image_url"]) {
+    // 🔴 `category_id`, `barcode` and `description` all LEFT this list — the first two because
+    // they now exist, and `description` because it never will under that bare name: the approved
+    // model is one description PER LANGUAGE, so a bare `description` column appearing would mean
+    // somebody had reintroduced the short+long shape the study rejected.
+    //
+    // `stock_qty` staying absent is the one that matters most: inventory is a separate business
+    // domain, and a quantity column arriving here is how a POS quietly becomes a stock system.
+    for (const absent of ["description", "unit_needs_review", "stock_qty", "image_url", "barcodes"]) {
       expect(columns, `${absent} must still be absent`).not.toContain(absent);
     }
   });

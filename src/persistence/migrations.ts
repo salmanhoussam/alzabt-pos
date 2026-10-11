@@ -1042,10 +1042,17 @@ BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
     // description and no photo is a perfectly valid product for the till. Online content is
     // enrichment, never a precondition for trade.
     //
+    // 🔴 BARCODE IS IN, approved 2026-10-11 while this migration was still unmerged. It is one
+    // additive column and one partial index on a table this migration is already touching, so it
+    // rides here rather than becoming a migration 10 for a single adjacent Product Master field.
+    // The fingerprint changed again with it, and the previous v9 value is not preserved as if it
+    // had been released — it never was.
+    //
     // WHAT IS DELIBERATELY ABSENT: stock quantity, warehouses, suppliers, purchase accounting,
-    // barcode, a category TREE, a photo GALLERY, and specifications. Each is either a separate
-    // business domain or an unapproved phase. The image table's shape admits a future gallery
-    // without any of its UX existing now.
+    // a category TREE, a photo GALLERY, MULTIPLE barcodes per product, and specifications. Each is
+    // either a separate business domain or an unapproved phase. The image table's shape admits a
+    // future gallery without any of its UX existing now, and barcode's single column admits a
+    // child table later the same way.
     sql: `
 -- ── Categories ────────────────────────────────────────────────────────────────────────────────
 --
@@ -1081,6 +1088,22 @@ CREATE INDEX catalog_categories_order ON catalog_categories (is_active, sort_ord
 -- the delete first; this is the floor under it, not the rule.
 ALTER TABLE catalog_products ADD COLUMN category_id TEXT REFERENCES catalog_categories(id) ON DELETE SET NULL;
 
+-- The barcode the manufacturer printed on the box. SEPARATE FROM SKU, and that separation is the
+-- point: SKU is what the shop calls the product, barcode is what the world calls it. One shop's
+-- SKU-1 is another's; a barcode is global, so it is the field a website and a scanner both key on.
+--
+-- NULLABLE, because most of this shop's stock is building material sold loose and carries no
+-- barcode at all. Unique only WHEN PRESENT, by the partial index below, exactly as sku already is.
+--
+-- 🔴 STORED CANONICAL. src/domain/barcode.ts owns the one normalization contract: a 12-digit UPC-A
+-- is stored as its 13-digit EAN-13 form, because they are THE SAME SYMBOL and a shop that stored
+-- both would have two products for one box. That equivalence was found by execution during the
+-- mobile-LAN study, when the decoder read back a typed UPC-A as a zero-prefixed EAN-13.
+--
+-- V1 IS ONE BARCODE PER PRODUCT. A product with several (a box and its singles) needs a child
+-- table, which is a real shop requirement nobody has yet reported; one column is the truthful V1.
+ALTER TABLE catalog_products ADD COLUMN barcode TEXT;
+
 -- Free text with suggestions drawn from what the shop has already typed, per the approved study: a
 -- normalized brands table was measured and rejected as weight this product cannot yet justify.
 ALTER TABLE catalog_products ADD COLUMN brand TEXT;
@@ -1093,6 +1116,13 @@ ALTER TABLE catalog_products ADD COLUMN description_en TEXT;
 -- 🔴 DEFAULT 0 — every existing product is OFF the website until the owner says otherwise.
 -- Opting a shop's whole catalog into publication by migration would be a decision made for them.
 ALTER TABLE catalog_products ADD COLUMN is_online_visible INTEGER NOT NULL DEFAULT 0;
+
+-- Shaped exactly like catalog_products_sku, deliberately. Two honest reasons, and one that is NOT
+-- a reason: SQLite treats NULLs as distinct in a PLAIN unique index as well (measured), so the
+-- WHERE clause is not what makes "unique when present" work. What it does is keep the index to the
+-- rows that actually have a barcode -- most of this catalog will not -- and say the intent in the
+-- schema where a reader meets it.
+CREATE UNIQUE INDEX catalog_products_barcode ON catalog_products (barcode) WHERE barcode IS NOT NULL;
 
 CREATE INDEX catalog_products_category ON catalog_products (category_id);
 CREATE INDEX catalog_products_online ON catalog_products (is_online_visible, is_active);

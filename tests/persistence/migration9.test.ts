@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import { MIGRATIONS } from "../../src/persistence/migrations";
 import { type Db, openDatabase, schemaVersion } from "../../src/persistence/db";
 import { type TempDir, tempDir } from "../helpers/harness";
+import { normalizeBarcode } from "../../src/domain/barcode";
 
 const V8 = MIGRATIONS.filter((m) => m.version <= 8);
 const V9 = MIGRATIONS.filter((m) => m.version <= 9);
@@ -132,6 +133,7 @@ describe("migration 9 on a populated v8 database", () => {
       // brand for an existing product would be writing the shop's data for it.
       for (const r of after) {
         expect(r.category_id).toBeNull();
+        expect(r.barcode).toBeNull();
         expect(r.brand).toBeNull();
         expect(r.description_ar).toBeNull();
         expect(r.description_en).toBeNull();
@@ -169,8 +171,11 @@ describe("migration 9 on a populated v8 database", () => {
     const db = upgrade();
     try {
       const after = cols(db, "catalog_products");
-      expect(after.slice(-5)).toEqual([
+      // 🔴 TRANSITION: this read `slice(-5)` without `barcode` until barcode was approved into
+      // this same unreleased migration rather than becoming a migration 10 for one column.
+      expect(after.slice(-6)).toEqual([
         "category_id",
+        "barcode",
         "brand",
         "description_ar",
         "description_en",
@@ -392,6 +397,106 @@ describe("product images", () => {
   });
 });
 
+describe("barcode", () => {
+  it("is nullable — most of this shop's stock carries no barcode at all", () => {
+    seedV8();
+    const db = upgrade();
+    try {
+      // Three pre-existing products, none of which has one, and all of which still sell.
+      expect(Number(one(db, "SELECT count(*) AS n FROM catalog_products WHERE barcode IS NULL").n)).toBe(3);
+      expect(() =>
+        db.prepare("UPDATE catalog_products SET barcode = NULL WHERE id = 'p-1'").run(),
+      ).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("🔴 is unique WHEN PRESENT, and many NULLs are not a collision", () => {
+    seedV8();
+    const db = upgrade();
+    try {
+      db.prepare("UPDATE catalog_products SET barcode = '5901234123457' WHERE id = 'p-1'").run();
+      // The same barcode on a second product is refused — one physical symbol, one product.
+      expect(() =>
+        db.prepare("UPDATE catalog_products SET barcode = '5901234123457' WHERE id = 'p-2'").run(),
+      ).toThrow();
+      // 🔴 But two products WITHOUT one are not duplicates of each other.
+      //
+      // AND MY FIRST COMMENT HERE WAS WRONG ABOUT WHY. It said this is "the whole reason the index
+      // is partial, and the assertion a plain UNIQUE index would fail". It is not: SQLite treats
+      // NULLs as distinct in a PLAIN unique index too — measured, three NULL rows inserted into a
+      // plain `UNIQUE INDEX t (bc)` on SQLite 3.45.1, all accepted. A negative control caught the
+      // claim: replacing the partial index with a plain one failed only the shape test below, not
+      // this one.
+      //
+      // The real reasons for `WHERE barcode IS NOT NULL` are that it indexes only the rows that
+      // have a barcode — most of this shop's catalog does not — and that it states the intent in
+      // the schema where a reader meets it. Not NULL-collision avoidance, which SQLite gives for
+      // free either way.
+      expect(Number(one(db, "SELECT count(*) AS n FROM catalog_products WHERE barcode IS NULL").n)).toBe(2);
+      expect(() =>
+        db.prepare("UPDATE catalog_products SET barcode = '96385074' WHERE id = 'p-2'").run(),
+      ).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("is shaped exactly like sku's partial index — the pattern is not reinvented", () => {
+    seedV8();
+    const db = upgrade();
+    try {
+      const idx = rows(db, "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name LIKE 'catalog_products_%'");
+      const barcode = idx.find((r) => r.name === "catalog_products_barcode")!;
+      const sku = idx.find((r) => r.name === "catalog_products_sku")!;
+      expect(barcode.sql).toMatch(/UNIQUE INDEX .* \(barcode\) WHERE barcode IS NOT NULL/);
+      // Same shape, same clause, so one cannot drift from the other unnoticed.
+      expect(String(barcode.sql).replace(/barcode/g, "X")).toBe(String(sku.sql).replace(/sku/g, "X"));
+    } finally {
+      db.close();
+    }
+  });
+
+  it("🔴 the canonical form is what reaches the database — the UPC-A equivalence, end to end", () => {
+    seedV8();
+    const db = upgrade();
+    try {
+      // The domain normalizes; the database stores. This test runs the real normalizer so the two
+      // halves cannot disagree: a typed UPC-A and a decoded EAN-13 must collide, not coexist.
+      const typed = normalizeBarcode("036000291452")!;   // merchant reads the box
+      const decoded = normalizeBarcode("0036000291452")!; // phone photographs the same box
+      expect(typed.value).toBe(decoded.value);
+
+      db.prepare("UPDATE catalog_products SET barcode = ? WHERE id = 'p-1'").run(typed.value);
+      expect(one(db, "SELECT barcode AS b FROM catalog_products WHERE id = 'p-1'").b).toBe("0036000291452");
+      // 🔴 AND THE SECOND ROUTE IS REFUSED BY THE INDEX, which is only true because both routes
+      // normalize to one string. Without normalization this insert would succeed and the shop
+      // would own two products for one box.
+      expect(() =>
+        db.prepare("UPDATE catalog_products SET barcode = ? WHERE id = 'p-2'").run(decoded.value),
+      ).toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("is searchable by exact canonical value", () => {
+    seedV8();
+    const db = upgrade();
+    try {
+      db.prepare("UPDATE catalog_products SET barcode = '0036000291452' WHERE id = 'p-2'").run();
+      const hit = one(db, "SELECT id, name_ar FROM catalog_products WHERE barcode = '0036000291452'");
+      expect(hit.id).toBe("p-2");
+      // And the 12-digit form finds nothing on its own, which is exactly why the application must
+      // normalize before it queries — asserted so nobody later "fixes" search with a LIKE.
+      expect(rows(db, "SELECT id FROM catalog_products WHERE barcode = '036000291452'")).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe("the migration is fingerprinted, additive and immutable", () => {
   it("registers with its own checksum, and migrations 1-8 are byte-identical after it", () => {
     seedV8();
@@ -433,7 +538,7 @@ describe("the migration is fingerprinted, additive and immutable", () => {
     expect(code).toMatch(/ON DELETE CASCADE/);
     // What it DOES do, named: two tables and five columns.
     expect(code.match(/CREATE TABLE/gi)).toHaveLength(2);
-    expect(code.match(/ADD COLUMN/gi)).toHaveLength(5);
+    expect(code.match(/ADD COLUMN/gi)).toHaveLength(6); // was 5 before barcode joined this migration
     // 🔴 And it does not touch any table an earlier migration owns, apart from the five columns.
     for (const table of ["sales", "sale_lines", "voids", "invoices", "invoice_lines", "operators", "audit_events"]) {
       expect(code, `migration 9 must not mention ${table}`).not.toMatch(new RegExp(`\\b${table}\\b`, "i"));
