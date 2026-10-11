@@ -2020,8 +2020,16 @@ if (PHASE === "seed-v2") {
   await page.locator('[data-testid="ops-add"]').click();
   await page.waitForSelector('[data-testid="ops-dialog"]');
   await page.locator('[data-testid="ops-name"]').fill("موظف بعد الترقية");
-  await page.locator('[data-testid="ops-pin"]').fill("8642");
+  // 🔴 SIX DIGITS. This said "8642" and the gate caught it: a newly chosen PIN must be 6-8 digits
+  // now, so the service refused the create, the dialog stayed open, and the wait below timed out
+  // after 30 seconds saying only "waitForFunction". The reason was on screen the whole time, in
+  // `ops-error`, which is why that is now read before the wait rather than after a failure.
+  await page.locator('[data-testid="ops-pin"]').fill("864213");
   await page.locator('[data-testid="ops-dialog-save"]').click();
+  {
+    const shown = await page.locator('[data-testid="ops-error"]').innerText().catch(() => "");
+    assert(shown.trim() === "", `the create was accepted rather than refused ("${shown.trim()}")`);
+  }
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="ops-row"]').length === 3);
   await app.close();
 
