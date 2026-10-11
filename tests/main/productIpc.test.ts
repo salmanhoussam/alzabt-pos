@@ -22,6 +22,15 @@ const ROW: AdminProductRow = {
   is_active: 1n,
   created_at: "2026-10-07T09:00:00.000Z",
   updated_at: "2026-10-07T09:00:00.000Z",
+  // 🔴 TRANSITION — migration 9. A product with none of these is complete and sellable, which is
+  // exactly what this fixture represents: the shape the IPC boundary has always returned, now
+  // carrying the Product Master columns as the empty values a pre-enrichment product really has.
+  category_id: null,
+  barcode: null,
+  brand: null,
+  description_ar: null,
+  description_en: null,
+  is_online_visible: 0n,
 };
 
 const DRAFT = { nameAr: "مفتاح أحمر", nameEn: "Red Wrench", sku: "SKU-001", price: "4.00", baseUnit: "piece" };
