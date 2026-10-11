@@ -16,12 +16,16 @@ freshly upgraded terminal is in **OWNER SETUP REQUIRED**, and in that state:
 The moment the owner completes setup, the state clears **permanently** and the terminal becomes
 ordinary: the second account may then set its own PIN, and normal role-based operation begins.
 
-*Permanently* means permanently. An independent review found an earlier build in which creating a
-second owner, or promoting a new employee before they had chosen their own PIN, put the terminal
-back into this state and locked everybody out of it — including the owner. That is now impossible by
-construction: a new operator is always created as a cashier, somebody can only be made an owner
-after they have set their own PIN, and the state itself is defined as "nobody has claimed anything
-yet", which stops being true for ever the first time anybody does.
+An independent review found an earlier build in which creating a second owner, or promoting a new
+employee before they had chosen their own PIN, put the terminal back into this state and **locked
+everybody out of it — including the owner**. That is now impossible: a new operator is always
+created as a cashier, and somebody can only be made an owner after they have set their own PIN.
+
+There is one way the terminal can ask for owner setup again, and it is harmless: if the owner
+**resets their own PIN** on a terminal where nobody else has set theirs up yet, the terminal waits
+for the owner again — and the owner is the person it waits for, so they simply set a new PIN and
+carry on. Nobody is locked out and the old bundled PINs do not come back. Worth knowing only so that
+it does not look like a fault if you see it.
 
 **Why it is enforced rather than recommended.** The PINs that ship with the product are published,
 so an upgraded-but-unclaimed terminal can be claimed by whoever reaches it first — and whoever

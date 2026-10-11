@@ -388,7 +388,10 @@ for (const [channel, payload] of [
   ["setOperatorRole", { operatorId: "cashier-01", role: "cashier" }],
   ["setOperatorActive", { operatorId: "cashier-01", isActive: false }],
   ["renameOperator", { operatorId: "cashier-01", name: "مغيَّر" }],
-  ["resetOperatorPin", { operatorId: "cashier-01", pin: "0000" }],
+  // Six digits, for the same reason as createOperator above: "0000" would be refused by the PIN
+  // rule rather than by the guard, so with the guard deleted this line would still go red — for the
+  // wrong reason. The review caught it four lines after I fixed its neighbour.
+  ["resetOperatorPin", { operatorId: "cashier-01", pin: "987612" }],
   ["exportBackup", null],
   ["getCompanyProfile", null],
   // 🔴 listReconciliationQueue, NOT listReconciliation. Both are owner-only, but

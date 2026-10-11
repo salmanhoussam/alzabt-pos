@@ -130,7 +130,7 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
     expect(svc.authenticate("cashier-02", "567812").kind).toBe("session");
   });
 
-  it("🔴 and the state cannot come back — EVERY route that produces a pending owner row", () => {
+  it("🔴 no PRODUCT ACTION can re-arm it — every route that produces a pending owner row", () => {
     // ══════════════════════════════════════════════════════════════════════════════════════════
     // 🔴 THIS TEST USED TO PROVE ONE THIRD OF ITS OWN TITLE, AND THAT GAP WAS A REAL DEFECT.
     //
@@ -180,6 +180,49 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
     // Both owners can still sign in. This is the assertion that would have failed before the fix.
     expect(svc.authenticate("cashier-01", OWNER_PIN).kind).toBe("session");
     expect(svc.authenticate(created.id, "135790").kind).toBe("session");
+  });
+
+  it("🔴 the ONE route that DOES re-arm it: the owner resetting their OWN PIN — and why it is benign", () => {
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // 🔴 THE PREDICATE SAYS "nobody currently holds a credential they chose themselves", and that
+    // is weaker than "for ever" by exactly one operation: `resetPin` can un-make a claim. On a shop
+    // where only the owner has claimed anything — the common shape right after an upgrade — the
+    // owner resetting their own PIN puts every row back to `must_reset_pin = 1` and the terminal
+    // asks to be claimed again.
+    //
+    // A third review found this by reading, after two earlier passes had accepted the absolute
+    // wording. It is written as a TEST rather than a comment because a comment is what failed:
+    // "cannot come back" was asserted in three places and verified in none, and the route nothing
+    // tested is the route that falsified it.
+    //
+    // It is benign for a structural reason, and every part of that is asserted below: the person it
+    // waits for is the owner themselves, the credential is their own 6-8 digit PIN rather than the
+    // published bootstrap one, and the only operator blocked is one who had not claimed and so
+    // could not have signed in anyway.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    const session = claimTerminal();
+    expect(operators.findBootstrapOwner()).toBeNull();
+
+    svc.resetPin(session, "cashier-01", "654321");
+    expect(operators.findBootstrapOwner()?.id).toBe("cashier-01");
+
+    // 🔴 THE OWNER IS NOT LOCKED OUT. They are the row the guard exempts, so they reach setup.
+    const again = svc.authenticate("cashier-01", "654321");
+    expect(again.kind).toBe("setup");
+    if (again.kind !== "setup") throw new Error("unreachable");
+
+    // The operator who had not claimed is deferred, not denied — and could not have signed in
+    // before this either, because they had never set a PIN.
+    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/waiting for the shop owner/);
+
+    // 🔴 AND THE PUBLISHED CREDENTIAL DOES NOT COME BACK. The re-armed account's PIN is the one the
+    // owner just typed, not 1111 — which is the window the whole ceremony exists to close.
+    expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/Operator or PIN is incorrect/);
+
+    // Re-claiming clears it again, and then the deferred operator may proceed.
+    svc.completeSetup(again.ticket, "حسين رقا", "431987");
+    expect(operators.findBootstrapOwner()).toBeNull();
+    expect(svc.authenticate("cashier-02", "2222").kind).toBe("setup");
   });
 
   it("🔴 the predicate is about an UNCLAIMED TERMINAL, not about any pending owner row", () => {

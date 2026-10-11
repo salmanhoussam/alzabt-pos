@@ -83,9 +83,23 @@ export class OperatorRepository {
    * use the PIN the owner had typed. An independent review found it by reading; it was reproduced by
    * execution before this fix was written, from both routes.
    *
-   * `NOT EXISTS (… must_reset_pin = 0)` is false for ever from the instant anybody completes setup,
-   * so the state genuinely cannot come back — which is what the old comment, the release note and a
-   * test had all asserted while nothing verified it.
+   * `NOT EXISTS (… must_reset_pin = 0)` means "nobody currently holds a credential they chose
+   * themselves". That is false from the instant anybody completes setup — and TRUE AGAIN if every
+   * such claim is later un-made, which `resetPin` can do.
+   *
+   * 🔴 SO THE HONEST CLAIM IS NARROWER THAN "FOR EVER", and the narrower one is what is written
+   * here, because a third independent review found this comment's previous wording ("cannot come
+   * back") true of two routes and false of a third. On a shop where only the owner has claimed
+   * anything, the owner resetting their OWN PIN re-arms this state: every row is back to
+   * `must_reset_pin = 1` and the owner is an active owner again. That is verified by test, not
+   * asserted — `operatorCeremony.test.ts` holds it.
+   *
+   * It is benign, and benign for a structural reason rather than by luck: the re-armed owner is the
+   * same row the guard exempts (`bootstrapOwner.id === row.id`), so they reach setup and re-claim;
+   * the claiming credential is their own 6-8 digit PIN and never the published bootstrap one; only
+   * an owner can trigger it; and the only operator it blocks is one who had not claimed and so
+   * could not sign in anyway. What it is NOT is "impossible", and writing that down three times
+   * without verifying it is exactly what produced the defect this clause fixes.
    */
   findBootstrapOwner(): OperatorRow | null {
     const row = this.db
