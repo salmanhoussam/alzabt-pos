@@ -37,11 +37,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { OperatorService } from "../../src/application/operatorService";
 import { AuditRepository } from "../../src/persistence/auditRepository";
-import { OperatorRepository } from "../../src/persistence/operatorRepository";
+import { BOOTSTRAP_OWNER_ID, OperatorRepository } from "../../src/persistence/operatorRepository";
 import { type Db, openDatabase } from "../../src/persistence/db";
 import { FIXTURE_TERMINAL } from "../../src/fixtures/terminal";
 import { PIN_MAX_DIGITS, PIN_MIN_DIGITS } from "../../src/domain/pinRule";
 import { type TempDir, tempDir } from "../helpers/harness";
+import { scryptSync } from "node:crypto";
+import { SCRYPT } from "../../src/application/cashierAuth";
 
 let t: TempDir;
 let db: Db;
@@ -52,19 +54,58 @@ let ids = 0;
 const OWNER = { id: "cashier-01", name: "Cashier One", role: "owner" as const };
 const OWNER_PIN = "431987";
 
-beforeEach(() => {
-  t = tempDir();
-  db = openDatabase(t.dbPath);
-  operators = new OperatorRepository(db);
-  ids = 0;
-  svc = new OperatorService({
+/**
+ * 🔴 THE NEXT OPERATOR ID, WHEN A TEST NEEDS TO CONTROL THE ORDERING.
+ *
+ * Default ids stay `id-N`. The real generator is `randomUUID`, whose first character is a hex
+ * digit, and "id-1" sorts AFTER "cashier-01" while a uuid sorts BEFORE it for twelve of sixteen
+ * first characters. The old suite therefore could not see the two-owner lock-out defect at all:
+ * its own fixture ordering masked the exact comparison that caused it. Tests that care about that
+ * now set this explicitly, from both sides.
+ */
+let nextOpId: string | null = null;
+
+/**
+ * A second owner's REAL credential, so a land-grab refusal fails for the right reason.
+ *
+ * Computed with the product's own scrypt parameters rather than written as a literal, because a
+ * refusal test whose credential is merely wrong proves nothing about the terminal guard — it would
+ * pass identically with the guard removed.
+ */
+const SECOND_PIN = "908172";
+const SECOND_SALT_HEX = "b2e4d0a86c195f73";
+const SECOND_HASH_HEX = scryptSync(
+  SECOND_PIN,
+  Buffer.from(SECOND_SALT_HEX, "hex"),
+  32,
+  SCRYPT,
+).toString("hex");
+
+function newService(): OperatorService {
+  return new OperatorService({
     operators,
     audit: new AuditRepository(db, { appVersion: "0.1.1", schemaVersion: 8 }),
     transact: (fn) => db.transaction(fn).immediate(),
     terminal: FIXTURE_TERMINAL,
     now: () => new Date("2026-10-11T09:00:00.000Z"),
-    newId: () => `id-${++ids}`,
+    newId: () => {
+      if (nextOpId !== null) {
+        const held = nextOpId;
+        nextOpId = null;
+        return held;
+      }
+      return `id-${++ids}`;
+    },
   });
+}
+
+beforeEach(() => {
+  t = tempDir();
+  db = openDatabase(t.dbPath);
+  operators = new OperatorRepository(db);
+  ids = 0;
+  nextOpId = null;
+  svc = newService();
 });
 afterEach(() => {
   db.close();
@@ -80,17 +121,27 @@ function claimTerminal(pin = OWNER_PIN) {
 
 const flagOf = (id: string) => operators.findById(id)!.must_reset_pin;
 
+// 🔴 THE TERMINAL'S OWN STATE, READ DIRECTLY. Not a proxy over pending-owner rows — reading a
+// proxy is what let the previous build's lock-out defect through four reviews.
+const claimed = () => operators.terminalClaimed();
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
-  it("a freshly migrated terminal is in the state, and names the owner who must claim it", () => {
-    const pending = operators.findBootstrapOwner();
-    expect(pending).not.toBeNull();
-    expect(pending!.id).toBe("cashier-01");
-    expect(pending!.role).toBe("owner");
-    // 🔴 Asked in SQL, about the terminal's condition — not about a hardcoded id. The same question
-    // answers correctly on a fresh install and on a real v7 -> v8 upgrade.
+  it("a freshly migrated terminal is UNCLAIMED, and the claim identity is the seeded owner", () => {
+    // 🔴 TEST A. The durable terminal fact, and the two account facts, asserted as the separate
+    // things they are. Migration 8 seeds all three, so a fresh v8 install and a real v7 -> v8
+    // upgrade arrive here identically — and neither is derived from the other.
+    expect(claimed()).toBe(false);
+    expect(operators.terminalClaim()).toBeNull();
+    expect(BOOTSTRAP_OWNER_ID).toBe("cashier-01");
+    const owner = operators.findById(BOOTSTRAP_OWNER_ID)!;
+    expect(owner.role).toBe("owner");
     expect(flagOf("cashier-01")).toBe(1);
     expect(flagOf("cashier-02")).toBe(1);
+    // And there is exactly one owner to begin with, so "the seeded identity" is unambiguous.
+    expect(operators.listAll().filter((o) => o.role === "owner").map((o) => o.id)).toEqual([
+      "cashier-01",
+    ]);
   });
 
   it("🔴 the OTHER operator cannot sign in at all — not even with the correct credential", () => {
@@ -116,10 +167,19 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
     expect(outcome.kind).toBe("setup");
   });
 
-  it("🔴 claiming the terminal clears the state permanently, and then the other operator may set up", () => {
-    claimTerminal();
-    expect(operators.findBootstrapOwner()).toBeNull();
+  it("🔴 claiming the terminal sets the durable flag, and then the other operator may set up", () => {
+    // 🔴 TEST C. The claim is the transition, and it is asserted on the terminal row itself.
+    const session = claimTerminal();
+    expect(claimed()).toBe(true);
+    expect(operators.terminalClaim()).toEqual({
+      claimedAt: "2026-10-11T09:00:00.000Z",
+      byOperatorId: "cashier-01",
+    });
     expect(flagOf("cashier-01")).toBe(0);
+    expect(session.role).toBe("owner");
+    // The bootstrap credential is dead and the owner's own 6-8 digit PIN is live.
+    expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/Operator or PIN is incorrect/);
+    expect(svc.authenticate("cashier-01", OWNER_PIN).kind).toBe("session");
 
     // cashier-02 is still a bootstrap account, so it gets setup — but now it is allowed to.
     const second = svc.authenticate("cashier-02", "2222");
@@ -130,144 +190,266 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
     expect(svc.authenticate("cashier-02", "567812").kind).toBe("session");
   });
 
-  it("🔴 no PRODUCT ACTION can re-arm it — every route that produces a pending owner row", () => {
+  it("🔴 ONCE CLAIMED, NO account lifecycle action can return terminal_claimed to 0", () => {
     // ══════════════════════════════════════════════════════════════════════════════════════════
-    // 🔴 THIS TEST USED TO PROVE ONE THIRD OF ITS OWN TITLE, AND THAT GAP WAS A REAL DEFECT.
+    // 🔴 THIS TEST'S TITLE USED TO BE FALSE, TWICE, AND EACH TIME THE FIX WAS A NARROWER CLAIM.
     //
-    // It said "the state cannot come back" and checked only the cashier case: create a cashier,
-    // reset that cashier's PIN, assert the terminal is still claimed. The predicate behind the
-    // ceremony, though, was `role = 'owner' AND must_reset_pin = 1 AND is_active = 1` — and TWO
-    // ordinary owner actions produced exactly that row, because `create` took its role from the
-    // caller and `setRole` never touched the flag. Creating an owner, or promoting a not-yet-set-up
-    // cashier — two clicks on the owner's own screen — re-armed the ceremony and locked EVERY
-    // operator out, the real owner included, until the new hire arrived with the PIN the owner had
-    // typed. The repository comment, the release note and this test's own title all asserted it
-    // could not happen; nothing verified it. An independent review found it by reading the SQL, and
-    // it was reproduced by execution from both routes before the fix was written.
+    // Round 1 it said "the state cannot come back" and checked only the cashier case. The ceremony
+    // then keyed on (owner, must_reset_pin = 1, active), and TWO ordinary actions produced that
+    // row — creating an owner, or promoting a not-yet-set-up cashier. Both re-armed the ceremony
+    // and locked everyone out. Round 2 added a NOT EXISTS clause and the title became "no PRODUCT
+    // ACTION can re-arm it", which was also false: an owner resetting their own PIN re-armed it.
+    // Round 3 wrote that down as benign — and it was not, because with two owners the exemption
+    // went to the lowest id rather than to the person acting.
     //
-    // So the title is now held to its full meaning: every route back, plus the two row shapes the
-    // review named as having no test at all.
+    // 🔴 THE TITLE IS TRUE NOW FOR A DIFFERENT REASON THAN WORDING: terminal_claimed is a durable
+    // column, written once, with no statement anywhere in the application that can set it back to
+    // 0. So this asserts the TERMINAL'S OWN STATE after every lifecycle action in turn, instead of
+    // asserting a proxy over pending-owner rows. Reading the proxy is what let three rounds pass.
     // ══════════════════════════════════════════════════════════════════════════════════════════
-    claimTerminal();
-    expect(operators.findBootstrapOwner()).toBeNull();
+    const session = claimTerminal();
+    expect(claimed()).toBe(true);
 
-    // ROUTE 1 — a reset arms THAT operator's own setup and must not re-close the terminal.
-    const created = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
-    svc.resetPin(OWNER, created.id, "876543");
-    expect(flagOf(created.id)).toBe(1);
-    expect(operators.findBootstrapOwner()).toBeNull();
-    expect(svc.authenticate("cashier-01", OWNER_PIN).kind).toBe("session");
+    // H · promote a pending cashier — the two-click route that used to re-arm it.
+    const created = svc.create(session, { name: "جعفر", role: "cashier", pin: "567812" });
+    expect(claimed()).toBe(true);
+    expect(() => svc.setRole(session, created.id, "owner")).toThrow(/has not set their own PIN/);
+    expect(claimed()).toBe(true);
 
-    // ROUTE 2 — creating an owner outright is now refused at the service.
-    expect(() => svc.create(OWNER, { name: "مالك ثانٍ", role: "owner", pin: "123456" })).toThrow(
+    // I · create an owner outright — refused at the service, and no effect on the terminal.
+    expect(() => svc.create(session, { name: "مالك ثانٍ", role: "owner", pin: "123456" })).toThrow(
       /created as a cashier/,
     );
-    expect(operators.findBootstrapOwner()).toBeNull();
+    expect(claimed()).toBe(true);
 
-    // ROUTE 3 — promoting a PENDING operator is refused, because their PIN is still one the owner
-    // typed. This is the two-click route, and it is the one the UI actually offers.
-    expect(() => svc.setRole(OWNER, created.id, "owner")).toThrow(/has not set their own PIN/);
-    expect(operators.findBootstrapOwner()).toBeNull();
-    expect(svc.authenticate("cashier-01", OWNER_PIN).kind).toBe("session");
+    // owner resets a CASHIER's PIN
+    svc.resetPin(session, created.id, "876543");
+    expect(flagOf(created.id)).toBe(1);
+    expect(claimed()).toBe(true);
 
-    // 🔴 AND PROMOTION STILL WORKS once they have claimed their own account — the rule is about a
-    // credential somebody else chose, not about ownership being unreachable.
+    // promotion once they have claimed their own account — this is the supported route to a second
+    // owner, and it is where the two-owner lock-out defect lived.
     const ticket = svc.authenticate(created.id, "876543");
     if (ticket.kind !== "setup") throw new Error("expected setup");
     svc.completeSetup(ticket.ticket, "جعفر صالح", "135790");
-    expect(() => svc.setRole(OWNER, created.id, "owner")).not.toThrow();
-    expect(operators.findBootstrapOwner()).toBeNull();
-    // Both owners can still sign in. This is the assertion that would have failed before the fix.
+    expect(claimed()).toBe(true);
+    svc.setRole(session, created.id, "owner");
+    expect(claimed()).toBe(true);
+
+    // J · deactivate and reactivate
+    svc.setActive(session, created.id, false);
+    expect(claimed()).toBe(true);
+    svc.setActive(session, created.id, true);
+    expect(claimed()).toBe(true);
+
+    // rename
+    svc.rename(session, created.id, "جعفر ص");
+    expect(claimed()).toBe(true);
+
+    // 🔴 AND THE CLAIM RECORD ITSELF IS UNMOVED by all of it — not merely still 1, but still the
+    // same instant and the same operator. A re-attributed claim would be a silent rewrite of the
+    // terminal's only ownership record.
+    expect(operators.terminalClaim()).toEqual({
+      claimedAt: "2026-10-11T09:00:00.000Z",
+      byOperatorId: "cashier-01",
+    });
+    // Both owners can still sign in. This is the assertion that failed before the first fix.
     expect(svc.authenticate("cashier-01", OWNER_PIN).kind).toBe("session");
     expect(svc.authenticate(created.id, "135790").kind).toBe("session");
   });
 
-  it("🔴 the ONE route that DOES re-arm it: the owner resetting their OWN PIN — and why it is benign", () => {
-    // ══════════════════════════════════════════════════════════════════════════════════════════
-    // 🔴 THE PREDICATE SAYS "nobody currently holds a credential they chose themselves", and that
-    // is weaker than "for ever" by exactly one operation: `resetPin` can un-make a claim. On a shop
-    // where only the owner has claimed anything — the common shape right after an upgrade — the
-    // owner resetting their own PIN puts every row back to `must_reset_pin = 1` and the terminal
-    // asks to be claimed again.
-    //
-    // A third review found this by reading, after two earlier passes had accepted the absolute
-    // wording. It is written as a TEST rather than a comment because a comment is what failed:
-    // "cannot come back" was asserted in three places and verified in none, and the route nothing
-    // tested is the route that falsified it.
-    //
-    // It is benign for a structural reason, and every part of that is asserted below: the person it
-    // waits for is the owner themselves, the credential is their own 6-8 digit PIN rather than the
-    // published bootstrap one, and the only operator blocked is one who had not claimed and so
-    // could not have signed in anyway.
-    // ══════════════════════════════════════════════════════════════════════════════════════════
+  it("🔴 TEST E · the owner resets their OWN PIN: setup-only, and THEY complete it", () => {
+    // The product decision stands — an owner may reset their own PIN, and no self-reset
+    // prohibition was added to hide the ceremony defect. What changes is that it is now an
+    // ACCOUNT event with no terminal consequence whatsoever.
     const session = claimTerminal();
-    expect(operators.findBootstrapOwner()).toBeNull();
-
     svc.resetPin(session, "cashier-01", "654321");
-    expect(operators.findBootstrapOwner()?.id).toBe("cashier-01");
 
-    // 🔴 THE OWNER IS NOT LOCKED OUT. They are the row the guard exempts, so they reach setup.
+    expect(claimed()).toBe(true);           // the terminal is untouched
+    expect(flagOf("cashier-01")).toBe(1);   // the account needs a new private credential
+
+    // Setup only — the reset credential buys the form and nothing else.
     const again = svc.authenticate("cashier-01", "654321");
     expect(again.kind).toBe("setup");
     if (again.kind !== "setup") throw new Error("unreachable");
 
-    // The operator who had not claimed is deferred, not denied — and could not have signed in
-    // before this either, because they had never set a PIN.
-    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/waiting for the shop owner/);
-
-    // 🔴 AND THE PUBLISHED CREDENTIAL DOES NOT COME BACK. The re-armed account's PIN is the one the
-    // owner just typed, not 1111 — which is the window the whole ceremony exists to close.
+    // 🔴 AND THEY COMPLETE THEIR OWN. No other identity is required or even involved.
+    const back = svc.completeSetup(again.ticket, "حسين رقا", "431987");
+    expect(back.id).toBe("cashier-01");
+    expect(back.role).toBe("owner");
+    expect(svc.authenticate("cashier-01", "431987").kind).toBe("session");
+    // The published credential does not return, and the claim was not re-attributed.
     expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/Operator or PIN is incorrect/);
-
-    // Re-claiming clears it again, and then the deferred operator may proceed.
-    svc.completeSetup(again.ticket, "حسين رقا", "431987");
-    expect(operators.findBootstrapOwner()).toBeNull();
-    expect(svc.authenticate("cashier-02", "2222").kind).toBe("setup");
+    expect(operators.terminalClaim()!.claimedAt).toBe("2026-10-11T09:00:00.000Z");
   });
 
-  it("🔴 the predicate is about an UNCLAIMED TERMINAL, not about any pending owner row", () => {
-    // Written directly against the row shape, bypassing the service guards above, because the
-    // guards and the predicate must BOTH hold: the guards are the cheap half, and a hand-edited or
+  it("🔴 TEST E2 · the SOLE active owner self-resets and is still the one who completes it", () => {
+    // The narrower shape of E: nobody else has claimed anything, which is the common state right
+    // after an upgrade and the exact state the old NOT EXISTS predicate mistook for "unclaimed".
+    const session = claimTerminal();
+    expect(operators.countActiveOwners()).toBe(1);
+    expect(flagOf("cashier-02")).toBe(1); // the other seeded account never claimed anything
+
+    svc.resetPin(session, "cashier-01", "654321");
+    // Every row in the table now has must_reset_pin = 1 — the condition the old predicate read as
+    // "this terminal has never been claimed". It no longer answers that question.
+    expect(operators.listAll().every((o) => o.must_reset_pin === 1)).toBe(true);
+    expect(claimed()).toBe(true);
+
+    const again = svc.authenticate("cashier-01", "654321");
+    expect(again.kind).toBe("setup");
+    if (again.kind !== "setup") throw new Error("unreachable");
+    expect(svc.completeSetup(again.ticket, "حسين رقا", "431987").id).toBe("cashier-01");
+  });
+
+  it("🔴 TEST F+G · two owners, A resets B then A — A completes A's setup, ids are irrelevant", () => {
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // 🔴 THE REGRESSION TEST FOR THE REAL DEFECT, which was reproduced by execution before this
+    // fix: owner A reset B's PIN and then their own, every row went pending, and the old
+    // `ORDER BY id LIMIT 1` handed the exemption to whichever owner sorted first. A was refused
+    // their own setup screen, and the only way back in was to sign in AS B.
+    //
+    // Both id orderings are covered in one test — B BEFORE and B AFTER "cashier-01" — because the
+    // defect was invisible in the old suite precisely for want of that control: the harness's own
+    // newId produced "id-1", which sorts after "cashier-01", so the fixture masked it while real
+    // randomUUID ids hit it roughly three times in four.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    for (const bId of ["0f2a81c4-9b0e-4d77-8a21-6c5e4b1d90ff", "f0f2a81c-9b0e-4d77-8a21-6c5e4b1d90ff"]) {
+      // A fresh terminal per ordering, so neither run can inherit the other's state.
+      db.close();
+      t.cleanup();
+      t = tempDir();
+      db = openDatabase(t.dbPath);
+      operators = new OperatorRepository(db);
+      svc = newService();
+
+      const A = claimTerminal();
+      // 🔴 SET IMMEDIATELY BEFORE THE CREATE, not before the claim: `newId` also allocates audit
+      // row ids, so the claim's own two audit writes would otherwise consume this one. The
+      // assertion below is what catches that — and it caught it once already while this test was
+      // being written, which is why it is an assertion rather than a comment.
+      nextOpId = bId;
+      const b = svc.create(A, { name: "هاشم", role: "cashier", pin: "246813" });
+      expect(b.id).toBe(bId);
+      const bt = svc.authenticate(b.id, "246813");
+      if (bt.kind !== "setup") throw new Error("expected setup for B");
+      svc.completeSetup(bt.ticket, "هاشم", "975312");
+      svc.setRole(A, b.id, "owner");
+
+      // A resets B's forgotten PIN, then A resets their own from the same screen.
+      svc.resetPin(A, b.id, "864213");
+      svc.resetPin(A, A.id, "135790");
+
+      // 🔴 The terminal never moved, whichever way the ids sort.
+      expect(claimed()).toBe(true);
+      expect(operators.terminalClaim()!.byOperatorId).toBe("cashier-01");
+
+      // 🔴 A reaches A's OWN setup and completes it. No login as B, anywhere.
+      const back = svc.authenticate(A.id, "135790");
+      expect(back.kind).toBe("setup");
+      if (back.kind !== "setup") throw new Error("unreachable");
+      const session = svc.completeSetup(back.ticket, "حسين رقا", "246801");
+      expect(session.id).toBe("cashier-01");
+
+      // 🔴 B REMAINS B: still an owner, still pending their own choice, and the credential A typed
+      // for them opens setup only — never a session.
+      const bRow = operators.findById(b.id)!;
+      expect(bRow.role).toBe("owner");
+      expect(bRow.must_reset_pin).toBe(1);
+      expect(svc.authenticate(b.id, "864213").kind).toBe("setup");
+    }
+  });
+
+  it("🔴 a hand-written pending owner row cannot re-arm a claimed terminal", () => {
+    // Written directly against the table, bypassing every service guard, because the guards and
+    // the durable state must BOTH hold: the guards are the cheap half, and a hand-edited or
     // future-written row must still not re-arm a terminal somebody has already claimed.
     claimTerminal();
     db.prepare(
       `INSERT INTO operators (id, name, role, pin_salt_hex, pin_hash_hex, must_reset_pin, is_active,
                               created_at, updated_at)
-       VALUES ('hand-edited', 'مزروع', 'owner', 'aaaaaaaaaaaaaaaa', ?, 1, 1, ?, ?)`,
+       VALUES ('aaa-hand-edited', 'مزروع', 'owner', 'aaaaaaaaaaaaaaaa', ?, 1, 1, ?, ?)`,
     ).run("b".repeat(64), "2026-10-11T09:00:00.000Z", "2026-10-11T09:00:00.000Z");
-    expect(operators.findBootstrapOwner()).toBeNull();
+    // 🔴 Deliberately an id that sorts BEFORE "cashier-01": under the old predicate this row would
+    // have become the terminal's bootstrap owner and locked the real one out.
+    expect(claimed()).toBe(true);
     expect(svc.authenticate("cashier-01", OWNER_PIN).kind).toBe("session");
   });
 
-  it("two bootstrap owners on an unclaimed terminal resolve deterministically", () => {
-    // `LIMIT 1` with no ORDER BY left it to SQLite which row could sign in. Migration 8 seeds one,
-    // so this needs a hand-written second row — but "unspecified" is not an answer a security
-    // predicate should give, so the ordering is now explicit.
+  it("🔴 an UNCLAIMED terminal admits ONLY the seeded owner — no second owner can take it", () => {
+    // The land-grab axis. A hand-written second owner on an unclaimed terminal used to be able to
+    // become the claim identity through `ORDER BY id`. Now the identity is the seeded one, named.
     db.prepare(
       `INSERT INTO operators (id, name, role, pin_salt_hex, pin_hash_hex, must_reset_pin, is_active,
                               created_at, updated_at)
-       VALUES ('aaa-second-owner', 'مالك مزروع', 'owner', 'aaaaaaaaaaaaaaaa', ?, 1, 1, ?, ?)`,
-    ).run("c".repeat(64), "2026-10-11T09:00:00.000Z", "2026-10-11T09:00:00.000Z");
-    const first = operators.findBootstrapOwner();
-    expect(first).not.toBeNull();
-    expect(first!.id).toBe("aaa-second-owner");
-    expect(operators.findBootstrapOwner()!.id).toBe(first!.id);
+       VALUES ('aaa-second-owner', 'مالك مزروع', 'owner', ?, ?, 1, 1, ?, ?)`,
+    ).run(
+      SECOND_SALT_HEX,
+      SECOND_HASH_HEX,
+      "2026-10-11T09:00:00.000Z",
+      "2026-10-11T09:00:00.000Z",
+    );
+    expect(claimed()).toBe(false);
+    // 🔴 It holds a VALID credential — the refusal is about the terminal, not about the PIN, which
+    // is what makes this assertion fail for the right reason.
+    expect(() => svc.authenticate("aaa-second-owner", SECOND_PIN)).toThrow(
+      /waiting for the shop owner/,
+    );
+    expect(claimed()).toBe(false);
+    // And the seeded owner still claims it.
+    claimTerminal();
+    expect(operators.terminalClaim()!.byOperatorId).toBe("cashier-01");
   });
 
-  it("an INACTIVE bootstrap owner leaves no claimable terminal and no reachable owner channel", () => {
-    // The third clause of the predicate had no test. Reachable only by writing the database
-    // directly — `setActive` is owner-only and `assertNotLastOwner` protects the sole owner — and
-    // the result fails CLOSED on the axis that matters: zero active owners, so no owner channel is
-    // ever authorized again. Recorded as behaviour rather than discovered during an incident.
+  it("🔴 a DEACTIVATED seeded owner leaves the terminal unclaimable — it fails CLOSED", () => {
+    // Reachable only by writing the database directly: `setActive` is owner-only and
+    // `assertNotLastOwner` protects the sole owner. Recorded as deliberate behaviour rather than
+    // discovered during an incident — and it is the safe direction. Previously cashier-02 could
+    // then set itself up on an unclaimed terminal; now nobody can, and the shop's route back is
+    // the pre-migration backup, which is the documented rollback path either way.
     db.prepare("UPDATE operators SET is_active = 0 WHERE id = 'cashier-01'").run();
-    expect(operators.findBootstrapOwner()).toBeNull();
+    expect(claimed()).toBe(false);
     expect(operators.countActiveOwners()).toBe(0);
-    // cashier-02 may now claim its own account — it is a CASHIER, so it gains no owner power.
-    const outcome = svc.authenticate("cashier-02", "2222");
-    expect(outcome.kind).toBe("setup");
-    if (outcome.kind !== "setup") throw new Error("unreachable");
-    const session = svc.completeSetup(outcome.ticket, "جعفر صالح", "567812");
-    expect(session.role).toBe("cashier");
+    expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/Operator or PIN is incorrect/);
+    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/waiting for the shop owner/);
+    expect(claimed()).toBe(false);
+  });
+
+  it("🔴 TEST D+K · the claim survives reopening the database — it is durable, not in memory", () => {
+    claimTerminal();
+    const before = operators.terminalClaim();
+    db.close();
+
+    // Same file, new connection, new repository: exactly what a restart does, and what restoring
+    // a VACUUM INTO backup of this database would also produce.
+    db = openDatabase(t.dbPath);
+    operators = new OperatorRepository(db);
+    svc = newService();
+
+    expect(operators.terminalClaimed()).toBe(true);
+    expect(operators.terminalClaim()).toEqual(before);
+    // And the owner's own PIN still opens a session, with no ceremony in the way.
+    expect(svc.authenticate("cashier-01", OWNER_PIN).kind).toBe("session");
+  });
+
+  it("the singleton is structural — a second terminal row cannot exist", () => {
+    // "Which row is authoritative" is not a question the application can get wrong, because the
+    // CHECK makes a second row unrepresentable rather than merely unused.
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO terminal_security_state (id, terminal_claimed, claimed_at,
+                                                claimed_by_operator_id)
+           VALUES ('other', 0, NULL, NULL)`,
+        )
+        .run(),
+    ).toThrow();
+    // And a half-written claim is unrepresentable too: the flag and its two facts travel together.
+    expect(() =>
+      db
+        .prepare(`UPDATE terminal_security_state SET terminal_claimed = 1 WHERE id = 'terminal'`)
+        .run(),
+    ).toThrow();
   });
 });
 
@@ -362,7 +544,7 @@ describe("3 · the real PIN length — six to eight, chosen; four, typed", () =>
     expect(() => svc.completeSetup(outcome.ticket, "حسين", "4321")).toThrow(/between 6 and 8 digits/);
     // 🔴 AND THE TERMINAL IS STILL UNCLAIMED. A refused setup must not half-happen.
     expect(flagOf("cashier-01")).toBe(1);
-    expect(operators.findBootstrapOwner()).not.toBeNull();
+    expect(claimed()).toBe(false);
     // The ticket survives a refusal, so the operator retypes rather than signing in again.
     expect(() => svc.completeSetup(outcome.ticket, "حسين", "431987")).not.toThrow();
   });

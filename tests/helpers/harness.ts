@@ -109,6 +109,22 @@ export function makeHarness(
         });
       }
     }
+    /**
+     * 🔴 AND THE TERMINAL IS MARKED CLAIMED, because that is the state these tests are actually in.
+     *
+     * Clearing `must_reset_pin` used to be enough, and that was the defect: the ceremony INFERRED
+     * the terminal's state from the account rows, so clearing the flags implied a claim without
+     * anyone saying so. The two states are now separate columns, and a harness that wants an
+     * ordinary working terminal has to say which one it means. This says it.
+     *
+     * Written through the repository for the same reason the flags are: running the real ceremony
+     * would append OPERATOR_RENAMED/OPERATOR_PIN_RESET rows to `audit_events` for every
+     * harness-based test, and several of them assert exact audit counts. The ceremony itself is
+     * tested directly in operatorCeremony.test.ts, where the claim is driven through the real flow.
+     */
+    if (operatorStore.findById("cashier-01")) {
+      operatorStore.claimTerminal("cashier-01", clock.now().toISOString());
+    }
     const operators = new OperatorService({
       operators: operatorStore,
       audit,

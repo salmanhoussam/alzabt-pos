@@ -54,6 +54,12 @@ export const COUNTED_TABLES = [
   // still verify as OK, and the shop would restore a database nobody can log into. The backup
   // contract test is what caught this, which is exactly what it is for.
   "operators",
+  // Migration 8, second durable table. ONE ROW, and that is exactly why it has to be named here:
+  // a snapshot that lost it would restore a terminal whose ownership state is absent, which
+  // `terminalClaimed()` reads as unclaimed — re-arming the install ceremony on a shop's real
+  // database. A one-row table is the easiest kind to leave out of a list like this and the most
+  // expensive kind to lose.
+  "terminal_security_state",
   "audit_events",
   "company_profile",
   "invoices",

@@ -16,6 +16,7 @@
  * Synthetic throughout. The two fixture ids are the product's own, not a merchant's.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import path from "node:path";
 import { MIGRATIONS } from "../../src/persistence/migrations";
 import { type Db, openDatabase, schemaVersion } from "../../src/persistence/db";
 import { type TempDir, tempDir } from "../helpers/harness";
@@ -312,6 +313,83 @@ describe("the bootstrap operator rows", () => {
       expect(() => insert("op-bad", "manager")).toThrow();
       // Reserved on purpose: widening this CHECK later would mean rebuilding the table.
       expect(() => insert("op-admin", "admin")).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("the terminal's ownership state", () => {
+  it("🔴 TEST B · a real v7 -> v8 upgrade arrives UNCLAIMED, with the ledger untouched", () => {
+    seedV7();
+    const db = upgrade();
+    try {
+      const state = one(db, "SELECT * FROM terminal_security_state");
+      expect(state.id).toBe("terminal");
+      expect(Number(state.terminal_claimed)).toBe(0);
+      expect(state.claimed_at).toBeNull();
+      expect(state.claimed_by_operator_id).toBeNull();
+      // Exactly one row, seeded by the migration — absence would have to be interpreted, and
+      // interpreting absence is how the previous ceremony defect happened.
+      expect(rows(db, "SELECT id FROM terminal_security_state")).toHaveLength(1);
+      // The historical ledger is not a party to this: the upgrade added a terminal fact, not a
+      // business fact.
+      expect(Number(one(db, "SELECT count(*) AS n FROM sales").n)).toBe(2);
+      expect(Number(one(db, "SELECT count(*) AS n FROM audit_events").n)).toBe(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("🔴 TEST A · a FRESH v8 install arrives in the identical state", () => {
+    // Not the same path as above — nothing is seeded first, so this is a brand-new database that
+    // runs every migration in order. Both paths must land on the same terminal state, because the
+    // ceremony cannot have two different starting points.
+    const fresh = openDatabase(path.join(t.dir, "fresh.sqlite"), V8);
+    try {
+      expect(schemaVersion(fresh)).toBe(8);
+      const state = one(fresh, "SELECT * FROM terminal_security_state");
+      expect(Number(state.terminal_claimed)).toBe(0);
+      expect(state.claimed_at).toBeNull();
+      expect(state.claimed_by_operator_id).toBeNull();
+    } finally {
+      fresh.close();
+    }
+  });
+
+  it("the singleton and the all-or-nothing claim are enforced by SQLite, not by the service", () => {
+    seedV7();
+    const db = upgrade();
+    try {
+      // One row for ever.
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO terminal_security_state (id, terminal_claimed, claimed_at,
+                                                  claimed_by_operator_id)
+             VALUES ('second', 0, NULL, NULL)`,
+          )
+          .run(),
+      ).toThrow();
+      // A claim without its two facts, or facts without the claim, are both unrepresentable.
+      expect(() =>
+        db.prepare("UPDATE terminal_security_state SET terminal_claimed = 1").run(),
+      ).toThrow();
+      expect(() =>
+        db
+          .prepare("UPDATE terminal_security_state SET claimed_by_operator_id = 'cashier-01'")
+          .run(),
+      ).toThrow();
+      // And a malformed timestamp is refused, like every other timestamp in this schema.
+      expect(() =>
+        db
+          .prepare(
+            `UPDATE terminal_security_state
+                SET terminal_claimed = 1, claimed_at = 'yesterday',
+                    claimed_by_operator_id = 'cashier-01'`,
+          )
+          .run(),
+      ).toThrow();
     } finally {
       db.close();
     }

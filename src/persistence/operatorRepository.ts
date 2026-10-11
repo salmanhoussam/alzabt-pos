@@ -14,6 +14,19 @@ import type { Db } from "./db";
 
 export type OperatorRole = "owner" | "admin" | "cashier";
 
+/**
+ * The one operator migration 8 seeds as the terminal's bootstrap OWNER.
+ *
+ * 🔴 EXPLICIT, AND DELIBERATELY NOT A SEARCH. While the terminal is unclaimed, exactly this id may
+ * enter the ownership ceremony. The previous build searched for "an active owner with a bootstrap
+ * credential, lowest id first", which let a randomUUID decide who owned a shop's terminal. The
+ * seeded identity is a fact written into migration 8's own SQL, so it is named here as one.
+ *
+ * It governs the unclaimed terminal ONLY. Once claimed, this constant is never consulted again —
+ * ownership is a role, held by whoever the owner says, and this id has no standing privilege.
+ */
+export const BOOTSTRAP_OWNER_ID = "cashier-01";
+
 export interface OperatorRow {
   readonly id: string;
   readonly name: string;
@@ -64,54 +77,82 @@ export class OperatorRepository {
   }
 
   /** Every operator, active first then by name — what the owner's management list shows. */
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+  // 🔴 THE TERMINAL'S OWNERSHIP STATE — ASKED, NEVER INFERRED.
+  //
+  // What stood here was `findBootstrapOwner()`: a query that deduced whether the terminal had been
+  // claimed from the shape of the `operators` rows —
+  //
+  //     role = 'owner' AND must_reset_pin = 1 AND is_active = 1
+  //       AND NOT EXISTS (SELECT 1 FROM operators WHERE must_reset_pin = 0)
+  //     ORDER BY id LIMIT 1
+  //
+  // Three independent reviews narrowed its comment, and the fourth proved the predicate itself
+  // wrong by execution. `NOT EXISTS (… must_reset_pin = 0)` means "nobody currently holds a
+  // credential they chose themselves" — an ACCOUNT fact, which `resetPin` can un-make at any time.
+  // With two owners, an owner who resets a colleague's PIN and then their own satisfies it again,
+  // and `ORDER BY id` then handed the exemption to the LOWEST id rather than to the person acting.
+  // Real ids are randomUUID, whose first hex character sorts before `cashier-01`'s 'c' for twelve
+  // of sixteen values, so roughly three times in four the acting owner was refused their own setup
+  // screen and the only way back in was to sign in AS the colleague with the temporary PIN they had
+  // just typed — the exact impersonation the temporary-PIN rule exists to prevent, writing audit
+  // rows attributed to the wrong person.
+  //
+  // Each narrowing of that comment was true and none of them helped, because the defect was not in
+  // the wording: a terminal fact was being read out of account facts. So the state is now durable
+  // and explicit, and the two questions never answer each other again:
+  //
+  //     must_reset_pin    does THIS PERSON still need to choose a private credential?
+  //     terminal_claimed  has THIS TERMINAL already been claimed by its real owner?
+  //
+  // No ordering. No subquery over `operators`. No lowest-id search. One row, one column, asked.
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+
   /**
-   * The terminal's un-claimed bootstrap OWNER, or null once the installation has been claimed.
+   * True once the real owner has completed the one-time installation/upgrade ownership ceremony.
    *
-   * 🔴 A STATE, ASKED IN SQL, NOT A HARDCODED ID. "An active owner whose PIN is still a bootstrap
-   * credential, on a terminal where NOBODY has claimed anything yet" is true on a fresh install and
-   * on a real v7 -> v8 upgrade alike. Keying on `cashier-01` by name would have been a rule about
-   * one literal rather than about the terminal's condition.
-   *
-   * 🔴 THE `NOT EXISTS` IS THE WHOLE RULE, AND ITS ABSENCE WAS A REAL DEFECT. An earlier version
-   * asked only `role = 'owner' AND must_reset_pin = 1 AND is_active = 1`, and carried a comment
-   * claiming only one row could ever satisfy it because "`create` cannot make an owner". Both
-   * halves were false. `create` takes the role from its caller and `requireAssignableRole` accepts
-   * 'owner'; `setRole` updates the role and never touches the flag. So either creating an owner, or
-   * promoting a not-yet-set-up cashier to owner — TWO CLICKS on the owner's own screen — produced a
-   * row `(owner, must_reset_pin = 1, active)` that matched the predicate again. The ceremony then
-   * re-armed and locked EVERY operator out, the real owner included, until the new hire arrived to
-   * use the PIN the owner had typed. An independent review found it by reading; it was reproduced by
-   * execution before this fix was written, from both routes.
-   *
-   * `NOT EXISTS (… must_reset_pin = 0)` means "nobody currently holds a credential they chose
-   * themselves". That is false from the instant anybody completes setup — and TRUE AGAIN if every
-   * such claim is later un-made, which `resetPin` can do.
-   *
-   * 🔴 SO THE HONEST CLAIM IS NARROWER THAN "FOR EVER", and the narrower one is what is written
-   * here, because a third independent review found this comment's previous wording ("cannot come
-   * back") true of two routes and false of a third. On a shop where only the owner has claimed
-   * anything, the owner resetting their OWN PIN re-arms this state: every row is back to
-   * `must_reset_pin = 1` and the owner is an active owner again. That is verified by test, not
-   * asserted — `operatorCeremony.test.ts` holds it.
-   *
-   * It is benign, and benign for a structural reason rather than by luck: the re-armed owner is the
-   * same row the guard exempts (`bootstrapOwner.id === row.id`), so they reach setup and re-claim;
-   * the claiming credential is their own 6-8 digit PIN and never the published bootstrap one; only
-   * an owner can trigger it; and the only operator it blocks is one who had not claimed and so
-   * could not sign in anyway. What it is NOT is "impossible", and writing that down three times
-   * without verifying it is exactly what produced the defect this clause fixes.
+   * Fails CLOSED: if the singleton row is somehow absent, this answers `false`, which arms the
+   * ceremony rather than opening the terminal. Migration 8 seeds the row, so absence means a
+   * hand-edited database — and the safe reading of a missing security record is "not satisfied".
    */
-  findBootstrapOwner(): OperatorRow | null {
+  terminalClaimed(): boolean {
+    const row = this.db
+      .prepare(`SELECT terminal_claimed FROM terminal_security_state WHERE id = 'terminal'`)
+      .get() as Record<string, unknown> | undefined;
+    return row ? Number(row.terminal_claimed) === 1 : false;
+  }
+
+  /** Who claimed the terminal and when, for the operators screen and for the record. */
+  terminalClaim(): { readonly claimedAt: string; readonly byOperatorId: string } | null {
     const row = this.db
       .prepare(
-        `SELECT ${COLUMNS} FROM operators
-          WHERE role = 'owner' AND must_reset_pin = 1 AND is_active = 1
-            AND NOT EXISTS (SELECT 1 FROM operators WHERE must_reset_pin = 0)
-          ORDER BY id
-          LIMIT 1`,
+        `SELECT claimed_at, claimed_by_operator_id FROM terminal_security_state
+          WHERE id = 'terminal' AND terminal_claimed = 1`,
       )
       .get() as Record<string, unknown> | undefined;
-    return normalise(row);
+    if (!row) return null;
+    return {
+      claimedAt: row.claimed_at as string,
+      byOperatorId: row.claimed_by_operator_id as string,
+    };
+  }
+
+  /**
+   * Marks the terminal claimed. Called ONLY from inside the setup transaction, so the flag and the
+   * owner's final credential commit together or not at all.
+   *
+   * 🔴 `WHERE terminal_claimed = 0` makes this idempotent AND one-way at the SQL level: a second
+   * call matches no row, so a claim can never be re-attributed, and nothing in this file can set
+   * the flag back to 0 — there is no such statement anywhere in the application.
+   */
+  claimTerminal(operatorId: string, now: string): void {
+    this.db
+      .prepare(
+        `UPDATE terminal_security_state
+            SET terminal_claimed = 1, claimed_at = ?, claimed_by_operator_id = ?
+          WHERE id = 'terminal' AND terminal_claimed = 0`,
+      )
+      .run(now, operatorId);
   }
 
   listAll(): OperatorRow[] {

@@ -130,6 +130,20 @@ async function sell(page) {
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 let { app, page } = await open();
 
+// 🔴 THE TERMINAL'S OWN STATE, ON A FRESH INSTALL, READ FROM DISK — not inferred from the account
+// rows. The previous build had no such column and deduced the terminal's condition from
+// `must_reset_pin` across `operators`, which an independent review falsified by execution: with two
+// owners, an owner who reset a colleague's PIN and then their own re-armed this ceremony, and the
+// exemption went to the lowest id rather than to the person acting. Two states, two columns, and
+// the terminal's one is asserted here before anybody touches anything.
+{
+  const st = ledger((_all, get) => get("SELECT * FROM terminal_security_state"));
+  assert(st !== undefined && st.id === "terminal", "a fresh install has exactly one terminal state row");
+  assert(Number(st.terminal_claimed) === 0, `and it is UNCLAIMED (${st.terminal_claimed})`);
+  assert(st.claimed_at === null && st.claimed_by_operator_id === null,
+    "with no claim instant and no claimant, because nobody has claimed it");
+}
+
 const offered = await direct(page, "listCashiers");
 assert(offered.ok === true, "listCashiers answers with no session — it is the login screen's own list");
 assert(offered.data.length === 2, `the fresh ledger offers exactly the two migrated accounts (${offered.data.length})`);
@@ -225,6 +239,9 @@ assert(await page.locator('[data-testid="setup-submit"]').isDisabled(), "🔴 a 
   void ticket;
 }
 
+/** The claim instant, captured here so section 7 can prove it was never rewritten. */
+let claimedAt = null;
+
 // The real thing: a real name and a credential nobody else knows.
 await page.locator('[data-testid="setup-name"]').fill(OWNER_NAME);
 await page.locator('[data-testid="setup-pin"]').fill(OWNER_PIN);
@@ -238,6 +255,16 @@ assert(true, "setup completes and lands on the till");
   assert(row.name === OWNER_NAME, `the durable row carries the typed name (${row.name})`);
   assert(row.role === "owner", "and cashier-01 is the OWNER, as migration 8 seeded it");
   assert(Number(row.flag) === 0, "and must_reset_pin is cleared, so setup never runs twice");
+}
+
+// 🔴 AND THE TERMINAL IS NOW CLAIMED — the transition, committed with the credential it is about.
+{
+  const st = ledger((_all, get) => get("SELECT * FROM terminal_security_state"));
+  assert(Number(st.terminal_claimed) === 1, `the terminal is CLAIMED (${st.terminal_claimed})`);
+  assert(st.claimed_by_operator_id === "cashier-01", `by the seeded bootstrap owner (${st.claimed_by_operator_id})`);
+  assert(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(st.claimed_at),
+    `at a real recorded instant (${st.claimed_at})`);
+  claimedAt = st.claimed_at;
 }
 
 // 🔴 The audit trail records the act and NOT the credential.
@@ -482,6 +509,39 @@ await page.getByRole("button", { name: OWNER_NAME }).click();
 await keypad(page, OWNER_PIN);
 await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
 assert(true, "the owner's PIN still works after a restart");
+
+// 🔴 THE CLAIM IS DURABLE, and it was not re-attributed by any of sections 4-6's work — the
+// creations, promotions, resets, deactivations and role changes above. Not merely "still 1": still
+// the same claimant and the same instant, because a silently re-attributed claim would rewrite the
+// terminal's only ownership record.
+{
+  const st = ledger((_all, get) => get("SELECT * FROM terminal_security_state"));
+  assert(Number(st.terminal_claimed) === 1, "the claim survived a real restart");
+  assert(st.claimed_by_operator_id === "cashier-01" && st.claimed_at === claimedAt,
+    `and was never re-attributed (${st.claimed_by_operator_id} @ ${st.claimed_at})`);
+}
+
+// 🔴 AND A HAND-WRITTEN PENDING OWNER CANNOT RE-ARM IT. Written from OUTSIDE the app, with an id
+// chosen to sort BEFORE "cashier-01": under the previous build's `ORDER BY id LIMIT 1` predicate
+// this row would have become the terminal's bootstrap owner and locked the real one out. The
+// terminal's state is no longer a function of the operators table, so it cannot.
+writeLedger(
+  `INSERT INTO operators (id, name, role, pin_salt_hex, pin_hash_hex, must_reset_pin, is_active,
+                          created_at, updated_at)
+   VALUES ('0000-planted-owner', 'مالك مزروع', 'owner', 'aaaaaaaaaaaaaaaa',
+           '${"b".repeat(64)}', 1, 1, '2026-10-11T09:00:00.000Z', '2026-10-11T09:00:00.000Z')`,
+);
+{
+  const st = ledger((_all, get) => get("SELECT terminal_claimed AS c FROM terminal_security_state"));
+  assert(Number(st.c) === 1, "a planted pending owner does not re-arm a claimed terminal");
+}
+// The owner's own next action still works, with no ceremony in the way — which is the assertion
+// that would have failed on the previous build.
+{
+  const r = await direct(page, "listOperators");
+  assert(r.ok === true, "and the owner's session is unaffected by the planted row");
+}
+writeLedger("DELETE FROM operators WHERE id = '0000-planted-owner'");
 
 await tab(page, "tools");
 await page.waitForSelector('[data-testid="ops-table"]');

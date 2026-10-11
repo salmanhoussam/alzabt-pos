@@ -363,6 +363,22 @@ function ledgerFacts() {
       // every ledger written before operator accounts existed.
       operators: tables.includes("operators") ? n("SELECT count(*) AS n FROM operators") : null,
       /**
+       * 🔴 THE TERMINAL'S OWN OWNERSHIP STATE — the second durable thing migration 8 adds, and the
+       * reason the first version of it was wrong. The ceremony used to DEDUCE this from the shape
+       * of the `operators` rows, and an independent review falsified the deduction by execution: an
+       * owner who reset a colleague's PIN and then their own re-armed the install ceremony, which
+       * then handed the exemption to the lowest id rather than to the person acting.
+       *
+       * `null` — never 0 — when the table is absent, which is the honest answer for every ledger
+       * written before operator accounts existed, and the answer a RESTORED v7 backup gives.
+       */
+      terminalClaimed: tables.includes("terminal_security_state")
+        ? n("SELECT terminal_claimed AS n FROM terminal_security_state WHERE id = 'terminal'")
+        : null,
+      terminalClaimedBy: tables.includes("terminal_security_state")
+        ? (db.prepare("SELECT claimed_by_operator_id AS i FROM terminal_security_state WHERE id = 'terminal'").get().i ?? null)
+        : null,
+      /**
        * 🔴 THE BUSINESS TRAIL, SEPARATED FROM THE ACCOUNT TRAIL — and this split is a transition,
        * not a tidy-up. Every `verify-from-*` phase launches THIS build, and this build's first
        * login goes through real mandatory setup, which writes one OPERATOR_PIN_RESET row. So
@@ -749,6 +765,12 @@ if (PHASE === "seed-v2") {
   assert(afterMigration.schema === 8, `migrated to schema v8 (got ${afterMigration.schema})`);
   assert(afterMigration.auditBusiness === 0, `the durable BUSINESS audit trail starts empty (was \`audit === 0\`; got ${afterMigration.auditBusiness})`);
   assert(afterMigration.auditOperators === 1, `and exactly one account event, written by mandatory setup at first login (got ${afterMigration.auditOperators})`);
+  // 🔴 TRANSITION, NEW WITH THE TERMINAL-CLAIM FIX: migration 8 lands UNCLAIMED on every path, and
+  // the mandatory setup this phase's own first login just completed is what claims it. Before the
+  // fix there was no such column and nothing to assert; the ceremony inferred this state from the
+  // account rows, which is the defect.
+  assert(afterMigration.terminalClaimed === 1, `the terminal is CLAIMED by the real setup flow, not by migration (got ${afterMigration.terminalClaimed})`);
+  assert(afterMigration.terminalClaimedBy === "cashier-01", `and the claimant is the seeded bootstrap owner (got ${afterMigration.terminalClaimedBy})`);
 
   ({ app, page } = await launch());
   const h2 = await historyRows(page);
@@ -2115,6 +2137,10 @@ if (PHASE === "seed-v2") {
         "🔴 and it has NO operators table — it predates migration 8 entirely",
       );
       assert(
+        snap.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().every((r) => r.name !== "terminal_security_state"),
+        "🔴 and no terminal_security_state either — v7 has NO terminal-claim concept at all",
+      );
+      assert(
         Number(snap.prepare("SELECT count(*) AS n FROM sales").get().n) === baseline.sales,
         `and it holds the shop's ${baseline.sales} pre-upgrade sales`,
       );
@@ -2134,6 +2160,10 @@ if (PHASE === "seed-v2") {
   const restored = ledgerFacts();
   assert(restored.schema === 7, `the ACTIVE database is now schema v7 (got ${restored.schema})`);
   assert(restored.operators === null, "🔴 and has no operators table at all");
+  // 🔴 TRANSITION: a restored v7 database has no terminal-claim concept, so this reads `null` and
+  // never 0. That distinction matters — 0 would mean "a v8 terminal nobody has claimed", which is a
+  // state a v7 build cannot be in and must not be reported as being in.
+  assert(restored.terminalClaimed === null, `🔴 and no terminal-claim state — v7 does not have the concept (got ${restored.terminalClaimed})`);
   assert(restored.integrity === "ok", "integrity_check on the restored database is ok");
 
   // ── 🔴 The v7 EXECUTABLE now STARTS NORMALLY on it ───────────────────────────────────────────
@@ -2166,6 +2196,7 @@ if (PHASE === "seed-v2") {
 
   // ── 🔴 WHAT ROLLING BACK COSTS, stated as an assertion rather than a footnote ─────────────────
   assert(f.operators === null, "🔴 the operators table is gone — every v8 account went with the snapshot");
+  assert(f.terminalClaimed === null, "🔴 and the terminal's claim went with it — restored v7 is the pre-ceremony credential model");
   {
     const db = new Database(LEDGER, { readonly: true, fileMustExist: true });
     try {

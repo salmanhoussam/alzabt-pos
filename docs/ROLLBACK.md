@@ -54,6 +54,7 @@ gone:
 | Every operator account, including ones created after the upgrade | The `operators` table does not exist in v7 |
 | Every PIN and name set during or after mandatory setup | They live in that table |
 | Every `OPERATOR_*` audit row | Written after the snapshot was taken |
+| The terminal's record of having been claimed | `terminal_security_state` does not exist in v7 either |
 
 What is **not** lost: sales, sale lines, voids, receipt numbers, invoices, invoice lines,
 reconciliation state, the catalog, and the audit history that existed before the upgrade. Those are
@@ -91,6 +92,9 @@ claims the owner account sets its PIN permanently with no in-app recovery. Compl
 before the machine goes back to the counter.
 
 One consequence for rollback specifically: a restored pre-migration v7 database has no operator
-accounts at all, so the shop returns to the **v7 credential model** — the bundled PINs work again,
-exactly as they did before the upgrade. Re-upgrading later puts the terminal back into OWNER SETUP
-REQUIRED, and the ceremony has to be performed again.
+accounts at all **and no terminal-claim state** — v7 does not have either concept — so the shop
+returns to the **v7 credential model**: the bundled PINs work again, exactly as they did before the
+upgrade. Any PIN or name an operator set on v8 is gone with the table that held it. Re-upgrading
+later arrives UNCLAIMED again, so the ceremony has to be performed again. All of that is expected
+rollback semantics, not corruption, and each line of it is asserted by the rollback phases of
+`e2e/upgrade.mjs`.

@@ -13,19 +13,31 @@ freshly upgraded terminal is in **OWNER SETUP REQUIRED**, and in that state:
   cannot even reach their own setup screen;
 - no selling, no invoices, no catalog work. The terminal is waiting to be claimed.
 
-The moment the owner completes setup, the state clears **permanently** and the terminal becomes
-ordinary: the second account may then set its own PIN, and normal role-based operation begins.
+The moment the owner completes setup, the terminal is **claimed**, and it stays claimed: the second
+account may then set its own PIN, and normal role-based operation begins.
 
-An independent review found an earlier build in which creating a second owner, or promoting a new
-employee before they had chosen their own PIN, put the terminal back into this state and **locked
-everybody out of it — including the owner**. That is now impossible: a new operator is always
-created as a cashier, and somebody can only be made an owner after they have set their own PIN.
+**Two different things, which earlier builds confused.** "This person still has to choose their own
+private PIN" and "this terminal has already been claimed by its owner" are separate facts, and the
+terminal now records the second one itself rather than working it out from the first. That is the
+whole of this fix, and it is why the sentence below can be stated without conditions:
 
-There is one way the terminal can ask for owner setup again, and it is harmless: if the owner
-**resets their own PIN** on a terminal where nobody else has set theirs up yet, the terminal waits
-for the owner again — and the owner is the person it waits for, so they simply set a new PIN and
-carry on. Nobody is locked out and the old bundled PINs do not come back. Worth knowing only so that
-it does not look like a fault if you see it.
+> **Once a terminal has been claimed, nothing an owner does to any account will ever ask for owner
+> setup again.** Not resetting a colleague's PIN, not resetting their own, not adding an employee,
+> not making someone an owner, not deactivating anybody.
+
+Two independent reviews each found a real lock-out in the earlier arrangement. The first: creating a
+second owner, or promoting a new employee before they had chosen their own PIN, put the terminal back
+into the unclaimed state and **locked everybody out — including the owner**. The second: on a shop
+with two owners, an owner who reset a colleague's forgotten PIN and then changed their own was
+**refused their own setup screen**, because the terminal picked which owner to wait for by comparing
+internal account identifiers. Both are gone, and neither was fixed by rewording: the terminal keeps
+its own durable record of having been claimed, so there is nothing left to work out and nothing left
+to get wrong.
+
+What you will still see, and it is normal: after the owner resets anybody's PIN — including their
+own — **that person** is asked to choose a new private PIN the next time they sign in. The temporary
+PIN the owner typed opens that screen and nothing else. That is one account being set up, not the
+terminal being claimed again.
 
 **Why it is enforced rather than recommended.** The PINs that ship with the product are published,
 so an upgraded-but-unclaimed terminal can be claimed by whoever reaches it first — and whoever

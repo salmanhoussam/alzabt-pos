@@ -846,6 +846,17 @@ BEGIN SELECT RAISE(ABORT, 'ledger: voids cannot be deleted'); END;
     // role IS owner, never whether it is cashier — so it fails closed rather than falling into a
     // gap. Asserted in tests/main/channelPolicy.test.ts.
     //
+    // 🔴 THIS MIGRATION WAS REVISED BEFORE IT SHIPPED, AND THE FINGERPRINT CHANGED WITH IT.
+    // Authorised 2026-10-11, while v8 was still unmerged and no installer carrying it had ever
+    // reached a shop: migrations 1-7 are released and untouchable, this one was not yet. The
+    // revision adds `terminal_security_state` and is a SECURITY fix, not a tidy-up — the first
+    // draft had only `must_reset_pin`, and the ownership ceremony deduced the terminal's state from
+    // the shape of the operator rows. A fourth independent review falsified that deduction by
+    // execution. Preserving the old fingerprint by appending a migration 9 instead would have left
+    // the broken schema contract in the file as the thing v8 means. The old fingerprint
+    // (530e891e…b318c) is NOT valid for this migration any more, and every gate taken against it
+    // was re-run rather than carried forward.
+    //
     // 🔴 ROLLBACK CHANGES MEANING WITH THIS MIGRATION, and it is the first time in this product's
     // history. Every installer up to b18b5b4 is schema v7, so rolling back meant reinstalling an
     // EXE. A v7 build opening a v8 database raises SchemaNewerThanAppError and refuses. So:
@@ -894,6 +905,54 @@ UNION ALL
 SELECT 'cashier-02', 'Cashier Two', 'cashier',
        '5c8e01d7f9a3b264', '0ca57b50d33e8f2f395a2a636e8babd96c096120e439cc069d17a6586fb90537',
        1, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+
+-- ── The terminal's own ownership state ────────────────────────────────────────────────────────
+--
+-- 🔴 TWO QUESTIONS, TWO COLUMNS. The first build of this migration had only must_reset_pin, and
+-- the ceremony INFERRED the terminal's state from combinations of it ("no operator holds a
+-- credential they chose themselves"). An independent review proved that inference wrong by
+-- execution: with two owners, an owner who reset a colleague's PIN and then their own re-armed the
+-- bootstrap ceremony, and the exemption went to the LOWEST id rather than to the person acting —
+-- so the acting owner was refused their own setup screen and the only way back in was to sign in
+-- as the colleague. An account fact was being read as a terminal fact.
+--
+--   must_reset_pin   does THIS PERSON still need to choose a private credential?
+--   terminal_claimed has THIS TERMINAL already been claimed by its real owner?
+--
+-- Neither is ever inferred from the other again.
+--
+-- A SINGLETON TABLE rather than a row in company_profile, measured and not assumed:
+-- company_profile is live settings the owner edits from a form (name, tax, logo, invoice
+-- numbering), so a settings write path could clear a security invariant. This table has no UI, no
+-- update path outside the claim transaction, and no DELETE path at all.
+--
+-- The CHECK makes the singleton structural — one row, for ever — so "which row is authoritative"
+-- is not a question the application can get wrong.
+CREATE TABLE terminal_security_state (
+  id                     TEXT    PRIMARY KEY CHECK (id = 'terminal'),
+  -- 0 = never claimed. The install/upgrade ownership ceremony is armed and ONLY the seeded
+  -- bootstrap owner may enter it. 1 = claimed; the ceremony is over and cannot be re-armed by any
+  -- operator or account lifecycle action.
+  terminal_claimed       INTEGER NOT NULL CHECK (terminal_claimed IN (0, 1)),
+  -- Both NULL until the claim, and both written in the same transaction that sets the flag.
+  claimed_at             TEXT             CHECK (claimed_at IS NULL OR claimed_at GLOB
+                           '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  -- Deliberately NOT a foreign key into operators: this records WHO claimed the terminal as a
+  -- snapshot, the same discipline the ledger already uses for sales.cashier_id. Deactivating or
+  -- renaming that operator later must not be able to touch the terminal's history.
+  claimed_by_operator_id TEXT             CHECK (claimed_by_operator_id IS NULL
+                                                 OR length(claimed_by_operator_id) > 0),
+  -- The two nullable columns travel together: claimed means both are known, unclaimed means
+  -- neither is. A half-written claim is not representable.
+  CHECK ((terminal_claimed = 1 AND claimed_at IS NOT NULL AND claimed_by_operator_id IS NOT NULL)
+         OR (terminal_claimed = 0 AND claimed_at IS NULL AND claimed_by_operator_id IS NULL))
+) STRICT;
+
+-- 🔴 UNCLAIMED ON BOTH PATHS, and this is the whole point of seeding it here rather than lazily in
+-- code: a fresh v8 install and a real v7 -> v8 upgrade arrive at the identical state. An absent row
+-- would have to be interpreted, and interpreting absence is how the first defect happened.
+INSERT INTO terminal_security_state (id, terminal_claimed, claimed_at, claimed_by_operator_id)
+VALUES ('terminal', 0, NULL, NULL);
 
 -- ── audit_events, rebuilt to widen three CHECKs ───────────────────────────────────────────────
 CREATE TABLE audit_events_v8 (

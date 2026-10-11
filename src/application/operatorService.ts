@@ -32,6 +32,7 @@ import { businessDateOf } from "../domain/businessDay";
 import { DomainError } from "../domain/errors";
 import { assertValidPin } from "../domain/pinRule";
 import { SCRYPT, pinMatches } from "./cashierAuth";
+import { BOOTSTRAP_OWNER_ID } from "../persistence/operatorRepository";
 import type { OperatorRepository, OperatorRole } from "../persistence/operatorRepository";
 import type { OperatorRow } from "../persistence/operatorRepository";
 import type { AuditRepository } from "../persistence/auditRepository";
@@ -190,11 +191,21 @@ export class OperatorService {
     // INVALID_CREDENTIALS, so this cannot be used to probe who exists; the state is only revealed
     // to someone who already proved they hold a valid credential for a real account.
     // ══════════════════════════════════════════════════════════════════════════════════════════
-    const bootstrapOwner = this.deps.operators.findBootstrapOwner();
-    if (bootstrapOwner && bootstrapOwner.id !== row.id) {
+    if (!this.deps.operators.terminalClaimed() && row.id !== BOOTSTRAP_OWNER_ID) {
       throw new DomainError(
         "OWNER_SETUP_REQUIRED",
         "This terminal is waiting for the shop owner to set up their account. Nobody else can sign in yet.",
+      );
+    }
+
+    // 🔴 AND WHILE UNCLAIMED, EVEN THE BOOTSTRAP OWNER GETS NO SESSION — ONLY SETUP. The branch
+    // below already answers "setup" for a bootstrap credential, but it keys on must_reset_pin,
+    // which is an ACCOUNT fact a hand-edited database could clear. The terminal's own state is the
+    // authority for the terminal's own ceremony, so it is asked here rather than inferred there.
+    if (!this.deps.operators.terminalClaimed() && row.must_reset_pin !== 1) {
+      throw new DomainError(
+        "OWNER_SETUP_REQUIRED",
+        "This terminal has not been claimed by its owner yet. Sign in to set up the owner account.",
       );
     }
 
@@ -234,11 +245,11 @@ export class OperatorService {
       throw new DomainError("SETUP_NOT_REQUIRED", "This account has already been set up");
     }
 
-    // Belt and braces: a ticket for anyone else cannot exist while the owner is unclaimed, because
-    // `authenticate` refuses to mint one. Asserted here too, so the rule survives a future caller
-    // that reaches this method by another route.
-    const bootstrapOwner = this.deps.operators.findBootstrapOwner();
-    if (bootstrapOwner && bootstrapOwner.id !== row.id) {
+    // Belt and braces: a ticket for anyone else cannot exist while the terminal is unclaimed,
+    // because `authenticate` refuses to mint one. Asserted here too, so the rule survives a future
+    // caller that reaches this method by another route.
+    const claiming = !this.deps.operators.terminalClaimed();
+    if (claiming && row.id !== BOOTSTRAP_OWNER_ID) {
       throw new DomainError(
         "OWNER_SETUP_REQUIRED",
         "This terminal is waiting for the shop owner to set up their account. Nobody else can set up yet.",
@@ -265,6 +276,24 @@ export class OperatorService {
       // No field diff: AUDITED_OPERATOR_FIELDS cannot name a PIN field, because the audit domain's
       // SECRET_KEY rejects any key matching /pin|…|hash/i. The event type IS the fact.
       this.writeAudit("OPERATOR_PIN_RESET", withPin, withPin, instant, { id: row.id, name: cleanName, role: withPin.role }, "bootstrap_setup");
+      // ════════════════════════════════════════════════════════════════════════════════════════
+      // 🔴 THE CLAIM, IN THE SAME TRANSACTION AS THE CREDENTIAL IT IS ABOUT.
+      //
+      // All of it commits or none of it does: the final name, the final PIN salt/hash,
+      // must_reset_pin = 0, terminal_claimed = 1, claimed_at, claimed_by, and both audit rows. A
+      // failed audit write or a failed PIN write therefore leaves the terminal UNCLAIMED and the
+      // operator's credential untouched, and the setup ticket is still usable — the ticket is
+      // consumed only after this transaction has committed, which is the atomicity contract this
+      // method already had and this does not weaken.
+      //
+      // Inside `if (claiming)` so an ORDINARY later setup — any operator choosing their own PIN
+      // after a reset, owner or cashier — cannot re-attribute the claim. The repository's
+      // `WHERE terminal_claimed = 0` refuses it a second time anyway; two independent guards,
+      // because this flag is the terminal's only ownership record.
+      // ════════════════════════════════════════════════════════════════════════════════════════
+      if (claiming) {
+        this.deps.operators.claimTerminal(withPin.id, instant.toISOString());
+      }
       return { id: withPin.id, name: withPin.name, role: withPin.role };
     });
 
