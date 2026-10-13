@@ -38,11 +38,15 @@ const DRAFT = { nameAr: "مفتاح أحمر", nameEn: "Red Wrench", sku: "SKU-0
 function handlers(overrides: Partial<Record<string, unknown>> = {}) {
   const service = {
     listProducts: vi.fn(() => [ROW]),
-    // 🔴 TRANSITION — migration 9. `listProducts` now asks a SECOND question: which products have
-    // a photo. A fake missing it made the handler throw and surfaced as "Unexpected error", hiding
-    // the mapping these tests are about — the same way the missing role method did, and recorded
-    // here for the same reason. Empty: this fixture product has no photo, which is the truth.
-    productIdsWithPhoto: vi.fn(() => []),
+    // 🔴 TRANSITION — migration 9. `listProducts` now asks a SECOND question: the primary-photo
+    // METADATA of every photographed product. A fake missing it made the handler throw and
+    // surfaced as "Unexpected error", hiding the mapping these tests are about — the same way the
+    // missing role method did, and recorded here for the same reason.
+    //
+    // It returned ids (`productIdsWithPhoto`) until the products list had to show thumbnails: a
+    // set could answer "is there one?" but not "which image, and has it changed". Empty map: this
+    // fixture product has no photo, which is the truth.
+    primaryPhotoIndex: vi.fn(() => new Map()),
     createProduct: vi.fn(() => ROW),
     updateProduct: vi.fn(() => ROW),
     setProductActive: vi.fn(() => ({ ...ROW, is_active: 0n })),

@@ -359,3 +359,105 @@ describe("the draft contract canonicalizes and refuses truthfully", () => {
     expect(() => validateProductMaster({ barcode: "5901234123458" })).toThrow(/check digit/);
   });
 });
+
+/**
+ * 🔴 THE LIST PATH MUST NOT READ THE BLOB — not merely avoid returning it.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * WHY THIS TEST EXISTS, AND IT IS NOT A HYPOTHETICAL. Every other check in this file asserts on
+ * what comes OUT of the repository, and the type system guarantees that much: `ProductImageMeta`
+ * has no `bytes` field, so a blob cannot reach a DTO. A mutation run against
+ * `primaryMetaByProduct` proved that insufficient — adding `, bytes` to its SELECT **broke nothing
+ * at all**, because `normalise()` builds its result key by key and silently ignores the extra
+ * column. Every photo in the catalog would be read out of SQLite into memory on every open of the
+ * products screen, and all 874 tests would still pass.
+ *
+ * That is the exact defect the child table was chosen to prevent, invisible to every output-shaped
+ * assertion. So this asserts on the SQL the repository really prepares, by recording it through a
+ * proxy — not on a copy of the SQL, which would pass while the code did something else.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+describe("🔴 the metadata reads never touch the bytes column", () => {
+  let t: TempDir;
+  let db: Db;
+
+  beforeEach(() => {
+    t = tempDir();
+    db = openDatabase(t.dbPath);
+  });
+  afterEach(() => {
+    db.close();
+    t.cleanup();
+  });
+
+  /** A db that records every SQL string prepared through it, and otherwise behaves exactly as it is. */
+  function recording(real: Db): { db: Db; sql: string[] } {
+    const sql: string[] = [];
+    const proxy = new Proxy(real, {
+      get(target, prop, receiver) {
+        if (prop === "prepare") {
+          return (text: string) => {
+            sql.push(text);
+            return target.prepare(text);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    return { db: proxy as Db, sql };
+  }
+
+  const mentionsBytes = (statements: readonly string[]) => statements.filter((s) => /\bbytes\b/i.test(s));
+
+  it("primaryMetaByProduct — the products list's one read — prepares no statement naming `bytes`", () => {
+    const { db: spy, sql } = recording(db);
+    const images = new ProductImageRepository(spy);
+    images.primaryMetaByProduct();
+    expect(sql).toHaveLength(1);
+    expect(mentionsBytes(sql)).toEqual([]);
+  });
+
+  it("neither do findPrimaryMeta, findMetaById or listMetaForProduct", () => {
+    const { db: spy, sql } = recording(db);
+    const images = new ProductImageRepository(spy);
+    images.findPrimaryMeta("p1");
+    images.findMetaById("img-1");
+    images.listMetaForProduct("p1");
+    images.productIdsWithPrimary();
+    expect(sql.length).toBeGreaterThanOrEqual(4);
+    expect(mentionsBytes(sql)).toEqual([]);
+  });
+
+  it("🔴 CONTROL — readBytes DOES name it, so the assertion above discriminates", () => {
+    // Without this, a repository that never read bytes at all — or a `mentionsBytes` that never
+    // matched anything — would satisfy the two tests above while proving nothing.
+    const { db: spy, sql } = recording(db);
+    new ProductImageRepository(spy).readBytes("img-1");
+    expect(mentionsBytes(sql)).toHaveLength(1);
+  });
+
+  it("🔴 and putPrimary names it too — the one write path, which is supposed to", () => {
+    const { db: spy, sql } = recording(db);
+    const catalog = new CatalogRepository(spy);
+    const product = catalog.createManual(
+      { nameAr: "مفك", nameEn: null, sku: null, priceMinor: 500n, currency: "USD", baseUnit: "piece" },
+      new Date("2026-10-13T09:00:00.000Z"),
+    );
+    sql.length = 0;
+    const png = Buffer.from("89504e470d0a1a0a" + "44".repeat(40), "hex");
+    new ProductImageRepository(spy).putPrimary({
+      id: "img-1",
+      productId: product.id,
+      bytes: png,
+      mime: "image/png",
+      sha256Hex: createHash("sha256").update(png).digest("hex"),
+      widthPx: 10,
+      heightPx: 10,
+      origin: "desktop",
+      now: "2026-10-13T09:00:00.000Z",
+    });
+    // The INSERT names it; the DELETE and the metadata read-back that follow do not.
+    expect(mentionsBytes(sql)).toHaveLength(1);
+  });
+});

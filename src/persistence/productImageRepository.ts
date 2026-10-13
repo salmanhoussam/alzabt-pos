@@ -121,6 +121,26 @@ export class ProductImageRepository {
     );
   }
 
+  /**
+   * The primary image METADATA of every product that has one, keyed by product id.
+   *
+   * 🔴 THIS IS WHAT LETS A LIST SHOW THUMBNAILS WITHOUT CARRYING THEM. The products screen must
+   * distinguish a photographed product from an unphotographed one, and to fetch the right photo it
+   * needs the image's id and a token that changes when the photo is replaced. All of that is
+   * metadata. ONE query returns it for the whole catalog, and `META` has no `bytes` column, so the
+   * blobs stay in the table.
+   *
+   * It supersedes `productIdsWithPrimary` for the list's purpose: a set of ids could only answer
+   * "is there one?", which is not enough to ask for the right image or to know when to stop
+   * trusting a cached one.
+   */
+  primaryMetaByProduct(): ReadonlyMap<string, ProductImageMeta> {
+    const rows = this.db
+      .prepare(`SELECT ${META} FROM catalog_product_images WHERE is_primary = 1`)
+      .all() as Array<Record<string, unknown>>;
+    return new Map(rows.map((r) => [r.product_id as string, normalise(r)!]));
+  }
+
   /** Metadata for every image of one product, newest first. V1 only ever stores one. */
   listMetaForProduct(productId: string): ProductImageMeta[] {
     return (

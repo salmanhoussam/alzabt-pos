@@ -141,15 +141,19 @@ export function toTodaySalesDto(r: TodaySalesReport): TodaySalesDto {
 /**
  * One product for the administration list and the Product Master form.
  *
- * 🔴 `hasImage` IS A PARAMETER, NOT A COLUMN, and that is the point. There is no image field on
- * `AdminProductRow` to read — the photo lives in a child table — so the caller must have asked the
- * one cheap "which products have a photo" question and pass the answer in. The alternative shape, a
- * row that carried its own image, is exactly what the child table exists to prevent.
+ * 🔴 THE PHOTO ARRIVES AS A PARAMETER, NOT AS A COLUMN, and that is the point. There is no image
+ * field on `AdminProductRow` to read — the photo lives in a child table — so a caller that wants
+ * the list to show thumbnails must have asked the one cheap `primaryPhotoIndex()` question and
+ * pass the metadata in. The alternative shape, a row that carried its own image, is exactly what
+ * the child table exists to prevent.
  *
- * It defaults to `false` so every pre-Product-Master call site keeps compiling and keeps meaning
+ * 🔴 AND IT TAKES METADATA, NEVER BYTES. `ProductImageMeta` has no `bytes` field to pass, so this
+ * signature cannot be handed a blob even by accident.
+ *
+ * `photo` defaults to null so every pre-Product-Master call site keeps compiling and keeps meaning
  * what it meant: a product whose photo this caller did not ask about.
  */
-export function toAdminProductDto(row: AdminProductRow, hasImage = false): AdminProductDto {
+export function toAdminProductDto(row: AdminProductRow, photo: ProductImageMeta | null = null): AdminProductDto {
   const price = money(row.selling_price_minor, row.currency);
   return {
     id: row.id,
@@ -170,7 +174,13 @@ export function toAdminProductDto(row: AdminProductRow, hasImage = false): Admin
     descriptionAr: row.description_ar,
     descriptionEn: row.description_en,
     isOnlineVisible: row.is_online_visible === 1n,
-    hasImage,
+    // 🔴 ALL FOUR DERIVE FROM THE SAME `photo`, so `hasImage` and `primaryImageId` cannot
+    // disagree — a list told "there is a photo" that then has no id to ask for would show a
+    // permanent loading state nobody could explain.
+    hasImage: photo !== null,
+    primaryImageId: photo === null ? null : photo.id,
+    imageMime: photo === null ? null : photo.mime,
+    imageVersion: photo === null ? null : photo.sha256_hex,
   };
 }
 

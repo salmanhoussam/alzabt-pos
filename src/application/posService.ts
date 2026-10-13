@@ -1096,14 +1096,15 @@ export class PosService {
   }
 
   /**
-   * WHICH products have a photo. One small read for the whole table.
+   * The primary-photo METADATA of every product that has one. One small read for the whole table.
    *
-   * 🔴 THIS IS WHAT KEEPS BYTES OFF THE LIST. The products list wants to show a thumbnail
-   * placeholder or a "has photo" mark, and the obvious way to get that — read the image row with
-   * the product — would load every photo in the catalog into memory to render a screen that shows
-   * none of them. This returns ids only.
+   * 🔴 THIS IS WHAT KEEPS BYTES OFF THE LIST while still letting the list show thumbnails. The
+   * obvious way to show a photo on a list — read the image row alongside the product — would load
+   * every photo in the catalog to render a screen that displays them at 40 pixels. This returns an
+   * id, a MIME and a content hash per product; the renderer then asks for the bytes of the few
+   * photos actually on screen, and the hash tells it when a cached one is stale.
    */
-  productIdsWithPhoto(): string[] {
+  primaryPhotoIndex(): ReadonlyMap<string, ProductImageMeta> {
     this.requireCashier();
     const images = this.deps.productImages;
     // 🔴 DELIBERATELY TOLERANT, AND ONLY THIS ONE IS. Every other image operation fails closed with
@@ -1113,20 +1114,25 @@ export class PosService {
     // test harness that opted out, not a shop with hidden photos, and the empty set is the literal
     // truth about what this service can see. A refusal here would instead take down the whole
     // products list over a decoration.
-    if (!images) return [];
-    return [...images.productIdsWithPrimary()];
+    if (!images) return new Map();
+    return images.primaryMetaByProduct();
   }
 
   /**
    * The metadata of a product's current photo — never its bytes.
    *
-   * OWNER, matching the one surface that reads it in V1: the owner's Product Master form. The
-   * products list does not need it (`productIdsWithPhoto` answers "is there one?"), and the Sell
-   * screen shows no photo in V1. When a cashier-facing surface does want a thumbnail, this becomes
-   * a deliberate reclassification with its own reason — not a quiet widening.
+   * 🔴 SESSION, AND THIS IS THE DELIBERATE RECLASSIFICATION THE PREVIOUS COMMENT PROMISED. It read
+   * OWNER, with the reason "the only V1 surface that reads a photo is the owner's own Add/Edit
+   * form". That stopped being true the moment the products LIST was required to show thumbnails —
+   * a cashier may read that list, so a cashier must be able to fetch the photos on it, or the
+   * feature is owner-only in practice and the cashier's screen shows placeholders for everything.
+   *
+   * What it exposes is the shop's own product photograph, which is destined for a public website
+   * anyway, to an operator who already sees that product's name, SKU and price on the same row.
+   * The MUTATIONS stay owner: changing a product's photo is a master-data act.
    */
   productImageMeta(productId: string): ProductImageMeta | null {
-    this.requireOwner();
+    this.requireCashier();
     const images = this.requireImages();
     if (!this.requireStore().findById(productId)) {
       throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
@@ -1143,7 +1149,7 @@ export class PosService {
    * (slice G) depends on this guarantee rather than re-deriving it.
    */
   productImageBytes(imageId: string): { readonly meta: ProductImageMeta; readonly bytes: Buffer } {
-    this.requireOwner();
+    this.requireCashier();
     const images = this.requireImages();
     const bytes = images.readBytes(imageId);
     if (bytes === null) throw new DomainError("IMAGE_NOT_FOUND", "That photo is no longer stored");

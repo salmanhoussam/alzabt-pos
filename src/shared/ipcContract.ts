@@ -321,8 +321,18 @@ export interface AdminProductDto {
   readonly descriptionAr: string | null;
   readonly descriptionEn: string | null;
   readonly isOnlineVisible: boolean;
-  /** Whether a primary photo exists. Deliberately a flag, not an image. */
+  // ── The product's photo, as STATE rather than as an image ────────────────────────────────────
+  //
+  // 🔴 EXACTLY ENOUGH TO DRAW A LIST AND THEN ASK FOR WHAT IS ON SCREEN. `hasImage` decides
+  // thumbnail-or-placeholder with no further call; `primaryImageId` is what
+  // `getProductImageBytes` takes; `imageVersion` is the stored CONTENT HASH, so a renderer cache
+  // keyed on it is exact — replacing a photo changes the key, and nothing has to guess whether a
+  // cached thumbnail is stale. Three small scalars, and still not one byte of any photo.
   readonly hasImage: boolean;
+  readonly primaryImageId: string | null;
+  readonly imageMime: "image/jpeg" | "image/png" | null;
+  /** The sha256 of the stored bytes. A cache key that cannot be wrong, not a version counter. */
+  readonly imageVersion: string | null;
 }
 
 /** One category, as every surface sees it. Flat: there is no parent and no tree in V1. */

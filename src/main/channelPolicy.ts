@@ -51,10 +51,12 @@ export type Access =
  *
  *     before Product Master:  7 public · 22 session · 24 owner · 53 total
  *     after  Product Master:  7 public · 24 session · 32 owner · 63 total
+ *     after  list thumbnails: 7 public · 26 session · 30 owner · 63 total
  *
  * THE PUBLIC SET DID NOT MOVE, which is the only one of the three numbers that is a security
- * claim — the two new reads (listCategories, listBrands) are session, and all eight Product
- * Master mutations and image reads are owner. The session/owner totals are reported for the
+ * claim — the four new reads (listCategories, listBrands and, once the products list had to show
+ * thumbnails, getProductImageMeta and getProductImageBytes) are session, and all six Product
+ * Master MUTATIONS are owner. The session/owner totals are reported for the
  * reader's orientation and are NOT what any test asserts: `channelPolicy.test.ts` derives
  * everything from the table and pins the public set BY NAME, so a drift fails by naming the
  * channel that drifted rather than by a number nobody can interpret.
@@ -104,6 +106,19 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   listCategories: "session",
   listBrands: "session",
 
+  // 🔴 THE PHOTO READS ARE SESSION — A RECLASSIFICATION, AND THE OLD VALUE IS NAMED. Both were
+  // `owner`, justified as "the only V1 surface that reads a photo is the owner's Add/Edit form".
+  // That stopped being true when the products LIST was required to show thumbnails: a cashier may
+  // read that list, so either a cashier may fetch the photos on it or the feature is owner-only in
+  // practice and every cashier sees placeholders.
+  //
+  // What this exposes is the shop's own product photograph — bound for a public website — to an
+  // operator already looking at that product's name, SKU and price on the same row. The list gives
+  // out no bytes at all: it carries `hasImage`, `primaryImageId` and a content hash, and the
+  // renderer asks for the few photos actually on screen.
+  getProductImageMeta: "session",
+  getProductImageBytes: "session",
+
   // The invoice workflow a cashier needs for daily selling. A finalized invoice IS a sale
   // (migration 7), so this is selling, not administration — while the shop's IDENTITY and its
   // numbering stay owner-only below.
@@ -152,17 +167,11 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   resolveUpdateCatalog: "owner",
   // Product Master (migration 9). Master data and the shop's own photographs.
   //
-  // 🔴 THE IMAGE READS ARE OWNER TOO, and that is a decision rather than an oversight. The only
-  // V1 surface that reads a photo is the owner's own Add/Edit Product form; the products list
-  // needs no bytes (the list carries a `hasImage` flag) and the Sell screen shows no photo. If a
-  // cashier-facing surface ever wants a thumbnail, these get reclassified deliberately, with the
-  // reason written here — the same way `listCategories` above carries its own.
+  // 🔴 THE MUTATIONS ARE OWNER. Changing a product's photo is a master-data act, like its price.
   createCategory: "owner",
   renameCategory: "owner",
   setCategoryActive: "owner",
   deleteCategory: "owner",
-  getProductImageMeta: "owner",
-  getProductImageBytes: "owner",
   setProductImage: "owner",
   removeProductImage: "owner",
   // Operator management. An owner must not be demotable by an employee.

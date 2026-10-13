@@ -524,11 +524,23 @@ describe("product photos — the boundary, with no producer yet", () => {
     withApp("owner", ({ h, ipc }) => {
       const withPhoto = newProduct(ipc, { sku: "A" });
       const without = newProduct(ipc, { sku: "B" });
-      store(h, withPhoto.id);
+      const stored = store(h, withPhoto.id);
 
       const rows = data<Array<Record<string, unknown>>>(ipc.listProducts(undefined));
-      expect(rows.find((r) => r.id === withPhoto.id)!.hasImage).toBe(true);
-      expect(rows.find((r) => r.id === without.id)!.hasImage).toBe(false);
+      const shot = rows.find((r) => r.id === withPhoto.id)!;
+      const bare = rows.find((r) => r.id === without.id)!;
+
+      // 🔴 ENOUGH TO DRAW A THUMBNAIL AND ASK FOR THE RIGHT PHOTO — and no more than that.
+      expect(shot).toMatchObject({
+        hasImage: true,
+        imageMime: "image/png",
+        imageVersion: createHash("sha256").update(PNG).digest("hex"),
+      });
+      expect(shot.primaryImageId).toBe(stored.id);
+      // 🔴 `imageVersion` IS THE CONTENT HASH, which is what makes a renderer cache exact rather
+      // than a guess: replacing the photo changes this string, and nothing else has to.
+      expect(shot.imageVersion).toBe(stored.sha256_hex);
+      expect(bare).toMatchObject({ hasImage: false, primaryImageId: null, imageMime: null, imageVersion: null });
 
       // 🔴 NO VALUE IN ANY ROW IS BINARY. Stricter than checking for a column called `bytes`,
       // because a future mapper could leak a blob under any name at all.
@@ -609,6 +621,50 @@ describe("product photos — the boundary, with no producer yet", () => {
     });
   });
 
+  it("🔴 hasImage and primaryImageId can never disagree — both derive from ONE metadata row", () => {
+    withApp("owner", ({ h, ipc }) => {
+      const a = newProduct(ipc, { sku: "A" });
+      newProduct(ipc, { sku: "B" });
+      store(h, a.id);
+      // A list told "there is a photo" with no id to ask for would show a row that never settles.
+      for (const row of data<Array<Record<string, unknown>>>(ipc.listProducts(undefined))) {
+        expect(row.hasImage, `${row.id as string}`).toBe(row.primaryImageId !== null);
+        expect(row.hasImage).toBe(row.imageVersion !== null);
+        expect(row.hasImage).toBe(row.imageMime !== null);
+      }
+    });
+  });
+
+  it("🔴 REPLACING a photo changes imageVersion on the list — that is the cache invalidation", () => {
+    withApp("owner", ({ h, ipc }) => {
+      const product = newProduct(ipc);
+      store(h, product.id);
+      const first = data<Array<Record<string, unknown>>>(ipc.listProducts(undefined))[0]!;
+
+      store(h, product.id, Buffer.from("89504e470d0a1a0a" + "33".repeat(40), "hex"));
+      const second = data<Array<Record<string, unknown>>>(ipc.listProducts(undefined))[0]!;
+
+      expect(second.imageVersion).not.toBe(first.imageVersion);
+      expect(second.primaryImageId).not.toBe(first.primaryImageId);
+      expect(second.hasImage).toBe(true);
+    });
+  });
+
+  it("🔴 REMOVING a photo clears all four fields on the list — no stale thumbnail state", () => {
+    withApp("owner", ({ h, ipc }) => {
+      const product = newProduct(ipc);
+      store(h, product.id);
+      expect(data<Array<Record<string, unknown>>>(ipc.listProducts(undefined))[0]!.hasImage).toBe(true);
+      ipc.removeProductImage({ productId: product.id });
+      expect(data<Array<Record<string, unknown>>>(ipc.listProducts(undefined))[0]).toMatchObject({
+        hasImage: false,
+        primaryImageId: null,
+        imageMime: null,
+        imageVersion: null,
+      });
+    });
+  });
+
   it("remove is idempotent and reports whether there was anything to remove", () => {
     withApp("owner", ({ h, ipc }) => {
       const product = newProduct(ipc);
@@ -656,25 +712,30 @@ describe("product photos — the boundary, with no producer yet", () => {
     });
   });
 
-  it("🔴 every photo channel is refused to a CASHIER, reads included", () => {
+  it("🔴 a CASHIER may READ a photo and may not CHANGE one — and the old value was 'neither'", () => {
     withApp("owner", ({ h, ipc }) => {
       const product = newProduct(ipc);
       const meta = store(h, product.id);
       ipc.logout(undefined);
       ipc.login({ cashierId: "cashier-02", pin: "2222" });
 
+      // 🔴 TRANSITION. Both reads were `owner`, justified as "the only V1 surface that reads a
+      // photo is the owner's Add/Edit form". Requiring thumbnails on the products LIST — which a
+      // cashier reads — made that false, so they are session now. The reason is written in
+      // channelPolicy.ts beside the entries, not inferred from here.
+      expect((ipc.getProductImageMeta({ productId: product.id }) as Res).ok).toBe(true);
+      const got = data<{ bytes: Uint8Array }>(ipc.getProductImageBytes({ imageId: meta.id }));
+      expect(Buffer.from(got.bytes).equals(PNG)).toBe(true);
+
+      // The MUTATIONS are still refused — changing a photo is a master-data act.
       for (const [channel, payload] of [
-        ["getProductImageMeta", { productId: product.id }],
-        ["getProductImageBytes", { imageId: meta.id }],
         ["setProductImage", { productId: product.id }],
         ["removeProductImage", { productId: product.id }],
       ] as const) {
         expect(code(ipc[channel](payload)), channel).toBe("NOT_AUTHORIZED");
       }
-      // The photo is still there after all four attempts.
+      // The photo is untouched after both attempts.
       expect(h.db.prepare("SELECT count(*) AS n FROM catalog_product_images").get()).toEqual({ n: 1n });
-      // ...and the cashier CAN still see that a photo exists, which is all the list needs.
-      expect(data<Array<Record<string, unknown>>>(ipc.listProducts(undefined))[0]!.hasImage).toBe(true);
     });
   });
 
@@ -736,14 +797,19 @@ describe("the new channels are classified, and the bridge forwards them", () => 
     }
   });
 
-  it("🔴 exactly the two READS are session; every mutation and every photo read is owner", () => {
+  it("🔴 the four READS are session; every MUTATION is owner", () => {
     const byAccess = (level: string) => PRODUCT_MASTER_CHANNELS.filter((n) => CHANNEL_POLICY[n] === level).sort();
-    expect(byAccess("session")).toEqual(["listBrands", "listCategories"]);
+    // 🔴 TRANSITION — the two photo READS moved from owner to session when the products list had
+    // to show thumbnails. Was: session = [listBrands, listCategories] and the other eight owner.
+    expect(byAccess("session")).toEqual([
+      "getProductImageBytes",
+      "getProductImageMeta",
+      "listBrands",
+      "listCategories",
+    ]);
     expect(byAccess("owner")).toEqual([
       "createCategory",
       "deleteCategory",
-      "getProductImageBytes",
-      "getProductImageMeta",
       "removeProductImage",
       "renameCategory",
       "setCategoryActive",

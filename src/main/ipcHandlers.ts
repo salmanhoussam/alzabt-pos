@@ -588,11 +588,12 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     // ── Product administration ──────────────────────────────────────────────────────────────────
     listProducts: wrap("listProducts", (p) => {
       noPayload(p);
-      // 🔴 TWO SMALL READS, NEVER A JOIN THAT CARRIES BLOBS. `productIdsWithPhoto` is one query
-      // over an index returning ids; reading the image row alongside each product would load the
-      // shop's entire photo library to render a list that displays none of it.
-      const withPhoto = new Set(service.productIdsWithPhoto());
-      return service.listProducts().map((row) => toAdminProductDto(row, withPhoto.has(row.id)));
+      // 🔴 TWO SMALL READS, NEVER A JOIN THAT CARRIES BLOBS. `primaryPhotoIndex` is one query over
+      // an index returning metadata — an id, a MIME and a content hash per photographed product.
+      // Reading the image row itself alongside each product would load the shop's entire photo
+      // library to render a list that shows each one at forty pixels.
+      const photos = service.primaryPhotoIndex();
+      return service.listProducts().map((row) => toAdminProductDto(row, photos.get(row.id) ?? null));
     }),
     createProduct: wrap("createProduct", (p) => {
       const o = exactObject(p, ["draft"]);
