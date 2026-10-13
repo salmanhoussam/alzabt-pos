@@ -40,6 +40,10 @@ export type DomainErrorCode =
   | "CATEGORY_INACTIVE"
   | "CATEGORY_IN_USE"
   | "DUPLICATE_CATEGORY"
+  // The product's photo. Separate from PRODUCT_NOT_FOUND because the two mean different things to
+  // the UI: the product is there and simply has no photo yet, which is an empty state, not an error
+  // the operator has to recover from.
+  | "IMAGE_NOT_FOUND"
   | "UNSUPPORTED_UNIT"
   // migration 4 — exact quantities
   | "FRACTION_NOT_ALLOWED"

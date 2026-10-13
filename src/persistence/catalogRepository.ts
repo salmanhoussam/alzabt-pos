@@ -470,6 +470,36 @@ export class CatalogRepository {
   }
 
   /**
+   * Every brand this shop has already typed, once each.
+   *
+   * 🔴 THIS IS THE WHOLE OF "BRAND MANAGEMENT", AND DELIBERATELY SO. The approved architecture
+   * (study §I) chose free text with suggestions over a normalized brand table, because a hardware
+   * shop carries hundreds of brands arriving as supplier spellings, and normalizing them would mean
+   * building category management twice plus a merge tool to fix a problem the first online shop
+   * will not have. So there is no brand table, no brand id, and no row to manage — there is this
+   * query, and a datalist.
+   *
+   * What it does NOT return, each for a reason: no product ids and no counts, because a suggestion
+   * list needs neither and either one would leak how the catalog is shaped to any signed-in
+   * operator; and nothing blank, because `brand` is stored already-trimmed-or-null by
+   * `validateProductMaster`, so a blank here would mean a hand-edited database and a blank
+   * suggestion is noise either way.
+   *
+   * Ordered by the database, in one place, so two surfaces cannot disagree about the order.
+   */
+  distinctBrands(): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT brand FROM catalog_products
+            WHERE brand IS NOT NULL AND trim(brand) <> ''
+            ORDER BY brand`,
+        )
+        .all() as Array<{ brand: string }>
+    ).map((r) => r.brand);
+  }
+
+  /**
    * The next manual key, zero-padded so that `CAST(source_key AS INTEGER)` and a plain string sort
    * agree — the existing catalog queries order by both, and a key of "10" must not sort before "9".
    */

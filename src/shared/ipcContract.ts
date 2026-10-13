@@ -34,6 +34,21 @@ export const CHANNELS = {
   createProduct: "pos:createProduct",
   updateProduct: "pos:updateProduct",
   setProductActive: "pos:setProductActive",
+  // ── Product Master (migration 9) ─────────────────────────────────────────────────────────────
+  //
+  // 🔴 THERE IS NO CHANNEL THAT CARRIES IMAGE BYTES INTO MAIN. `setProductImage` names a product
+  // and nothing else; main runs the picker, decodes and normalizes, exactly as `pickInvoiceLogo`
+  // already does for the invoice logo. The renderer never supplies a path or a buffer.
+  listCategories: "pos:listCategories",
+  listBrands: "pos:listBrands",
+  createCategory: "pos:createCategory",
+  renameCategory: "pos:renameCategory",
+  setCategoryActive: "pos:setCategoryActive",
+  deleteCategory: "pos:deleteCategory",
+  getProductImageMeta: "pos:getProductImageMeta",
+  getProductImageBytes: "pos:getProductImageBytes",
+  setProductImage: "pos:setProductImage",
+  removeProductImage: "pos:removeProductImage",
   getSettings: "pos:getSettings",
   setTerminalLanguage: "pos:setTerminalLanguage",
   // ── Manual invoices (migration 6) ────────────────────────────────────────────────────────────
@@ -292,15 +307,76 @@ export interface AdminProductDto {
   readonly priceNeedsReview: boolean;
   readonly isActive: boolean;
   readonly updatedAt: string;
+  // ── Product Master (migration 9) ─────────────────────────────────────────────────────────────
+  //
+  // 🔴 EVERY ONE OF THESE IS OPTIONAL FOR SELLING, and they travel on the ordinary list because
+  // they are small: an id, a code and some text. What does NOT travel is the photo — `hasImage` is
+  // a boolean computed from one small query over the image table, never the bytes. The products
+  // screen renders every product, and a blob here would load the shop's whole photo library to
+  // draw a list that shows none of them.
+  readonly categoryId: string | null;
+  /** Canonical form only — a 12-digit UPC-A is already its 13-digit EAN-13 here. */
+  readonly barcode: string | null;
+  readonly brand: string | null;
+  readonly descriptionAr: string | null;
+  readonly descriptionEn: string | null;
+  readonly isOnlineVisible: boolean;
+  /** Whether a primary photo exists. Deliberately a flag, not an image. */
+  readonly hasImage: boolean;
 }
 
-/** What the operator typed. Optional fields are null when not given — never an empty string. */
+/** One category, as every surface sees it. Flat: there is no parent and no tree in V1. */
+export interface CategoryDto {
+  readonly id: string;
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+  readonly isActive: boolean;
+  readonly sortOrder: number;
+  readonly updatedAt: string;
+}
+
+/**
+ * A product photo's metadata. There is no `bytes` field, in the DTO as in the repository row.
+ *
+ * 🔴 The absence is the contract, not an omission: a screen holding this object cannot reach the
+ * image data, so it must ask for it by name through `getProductImageBytes`.
+ */
+export interface ProductImageMetaDto {
+  readonly id: string;
+  readonly productId: string;
+  readonly mime: "image/jpeg" | "image/png";
+  readonly sha256Hex: string;
+  readonly byteSize: number;
+  readonly widthPx: number;
+  readonly heightPx: number;
+  readonly origin: "desktop" | "phone";
+  readonly updatedAt: string;
+}
+
+/**
+ * The bytes of one named photo, with the metadata to interpret them.
+ *
+ * A `Uint8Array` rather than a Buffer: that is what a structured clone delivers to the renderer,
+ * and naming it honestly stops a caller assuming Buffer methods that will not be there.
+ */
+export interface ProductImageBytesDto {
+  readonly meta: ProductImageMetaDto;
+  readonly bytes: Uint8Array;
+}
+
+/**
+ * What the operator typed. Optional fields are null when not given — never an empty string.
+ *
+ * `master` is OPTIONAL AS A WHOLE. Omitting it means this caller does not deal in enrichment, which
+ * is what the import path and invoice reconciliation mean; it never means "clear those fields".
+ */
 export interface ProductDraftRequest {
   readonly nameAr: string;
   readonly nameEn: string | null;
   readonly sku: string | null;
   readonly price: string;
   readonly baseUnit: string;
+  readonly master?: ProductMasterPatch;
 }
 
 export interface CreateProductRequest {
@@ -316,6 +392,71 @@ export interface UpdateProductRequest {
 export interface SetProductActiveRequest {
   readonly id: string;
   readonly isActive: boolean;
+}
+
+/**
+ * The Product Master enrichment group, as a PATCH.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 EVERY KEY IS OPTIONAL, AND ABSENT IS NOT NULL. An absent key means "this caller is not
+ * touching that field"; `null` means "clear it". They are different on the wire, in the handler, in
+ * the domain and in the repository, and the whole chain exists so that the import path and invoice
+ * reconciliation — neither of which knows what a category is — cannot erase a category, a brand or
+ * a description the owner typed simply by saving a product.
+ *
+ * This is why it is a patch and not six more fields on `ProductDraftRequest`: an exact-shape object
+ * would force every caller to send all six, and a caller that does not know them would send nulls.
+ * The invoice header patch (`InvoiceHeaderPatch`) is the same shape for the same reason.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export interface ProductMasterPatch {
+  readonly categoryId?: string | null;
+  /** Raw, as typed or as a decoder returned it. Main canonicalizes; a screen never pre-processes. */
+  readonly barcode?: string | null;
+  readonly brand?: string | null;
+  readonly descriptionAr?: string | null;
+  readonly descriptionEn?: string | null;
+  readonly isOnlineVisible?: boolean;
+}
+
+/** The patch keys, as data, so the preload bridge and the handler cannot drift from this list. */
+export const PRODUCT_MASTER_PATCH_KEYS = [
+  "categoryId",
+  "barcode",
+  "brand",
+  "descriptionAr",
+  "descriptionEn",
+  "isOnlineVisible",
+] as const satisfies ReadonlyArray<keyof ProductMasterPatch>;
+
+export type ProductMasterPatchKey = (typeof PRODUCT_MASTER_PATCH_KEYS)[number];
+
+export interface CreateCategoryRequest {
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+}
+
+export interface RenameCategoryRequest {
+  readonly categoryId: string;
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+}
+
+export interface SetCategoryActiveRequest {
+  readonly categoryId: string;
+  readonly isActive: boolean;
+}
+
+export interface CategoryIdRequest {
+  readonly categoryId: string;
+}
+
+export interface ProductIdRequest {
+  readonly productId: string;
+}
+
+export interface ImageIdRequest {
+  readonly imageId: string;
 }
 
 export interface SetTerminalLanguageRequest {
@@ -718,6 +859,26 @@ export interface PosApi {
   createProduct(req: CreateProductRequest): Promise<IpcResult<AdminProductDto>>;
   updateProduct(req: UpdateProductRequest): Promise<IpcResult<AdminProductDto>>;
   setProductActive(req: SetProductActiveRequest): Promise<IpcResult<AdminProductDto>>;
+
+  // ── Product Master (migration 9) ─────────────────────────────────────────────────────────────
+  //
+  // `listCategories` returns ACTIVE AND INACTIVE rows, deliberately: the form must still display
+  // the retired category a product already carries, and it filters the chooser itself. A second
+  // "active only" channel would invite a screen to pick the wrong one and lose a product's label.
+  listCategories(): Promise<IpcResult<CategoryDto[]>>;
+  listBrands(): Promise<IpcResult<string[]>>;
+  createCategory(req: CreateCategoryRequest): Promise<IpcResult<CategoryDto>>;
+  renameCategory(req: RenameCategoryRequest): Promise<IpcResult<CategoryDto>>;
+  setCategoryActive(req: SetCategoryActiveRequest): Promise<IpcResult<CategoryDto>>;
+  deleteCategory(req: CategoryIdRequest): Promise<IpcResult<{ readonly deletedId: string }>>;
+
+  getProductImageMeta(req: ProductIdRequest): Promise<IpcResult<ProductImageMetaDto | null>>;
+  /** Bytes, by image id, asked for on purpose. The only route to them. */
+  getProductImageBytes(req: ImageIdRequest): Promise<IpcResult<ProductImageBytesDto>>;
+  /** Names a product; MAIN runs the picker and owns the file. No bytes cross this bridge. */
+  setProductImage(req: ProductIdRequest): Promise<IpcResult<ProductImageMetaDto | null>>;
+  removeProductImage(req: ProductIdRequest): Promise<IpcResult<{ readonly removed: boolean }>>;
+
   getSettings(): Promise<IpcResult<TerminalSettings>>;
   setTerminalLanguage(req: SetTerminalLanguageRequest): Promise<IpcResult<TerminalSettings>>;
 

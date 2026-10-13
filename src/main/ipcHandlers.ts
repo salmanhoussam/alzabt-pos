@@ -20,10 +20,21 @@ import { assertPaymentMethod } from "../domain/sale";
 import type { SaleRecord } from "../domain/sale";
 import { isLanguage } from "../shared/i18n";
 import type { TerminalSettings } from "../shared/i18n";
-import { MAX_PRODUCT_NAME, MAX_SKU, type ProductDraft } from "../domain/productDraft";
+import {
+  MAX_BRAND,
+  MAX_DESCRIPTION as MAX_PRODUCT_DESCRIPTION,
+  MAX_PRODUCT_NAME,
+  MAX_SKU,
+  type ProductDraft,
+  type ProductMasterDraft,
+} from "../domain/productDraft";
+import { MAX_CATEGORY_NAME } from "../domain/category";
+import { MAX_BARCODE } from "../domain/barcode";
 import {
   parseMinor,
   toAdminProductDto,
+  toCategoryDto,
+  toProductImageMetaDto,
   toCatalogDto,
   toCompanyProfileDto,
   toInvoiceDto,
@@ -45,6 +56,8 @@ import {
   type InvoiceHeaderPatchKey,
   type IpcError,
   type IpcResult,
+  PRODUCT_MASTER_PATCH_KEYS,
+  type ProductMasterPatchKey,
 } from "../shared/ipcContract";
 import { type Logger, nullLogger } from "./logger";
 import { accessFor } from "./channelPolicy";
@@ -66,6 +79,22 @@ export interface PickedFile {
 /** Result of a main-process save dialog + write; null when the cashier cancelled. */
 export interface SavedFile {
   readonly fileName: string;
+}
+
+/**
+ * A photo main has already read AND normalized, on its way to the service.
+ *
+ * No path and no original filename: the shop owns these bytes from here on, and the file the
+ * operator picked may be deleted, renamed or on a USB stick that is gone by tomorrow. Storing
+ * where it came from would be storing a promise the product cannot keep — the same reason the
+ * invoice logo is copied into the app's own folder rather than referenced where it was found.
+ */
+export interface PickedPhoto {
+  readonly bytes: Buffer;
+  readonly mime: "image/jpeg" | "image/png";
+  readonly widthPx: number;
+  readonly heightPx: number;
+  readonly origin: "desktop" | "phone";
 }
 
 export interface IpcHandlerOptions {
@@ -99,6 +128,16 @@ export interface IpcHandlerOptions {
    * BARE FILE NAME; the renderer never sees or supplies a path.
    */
   readonly pickInvoiceLogo?: () => string | null;
+  /**
+   * Native photo picker for a product. Main shows the dialog, reads the file and NORMALIZES it
+   * (decode, re-encode, bound the dimensions), then returns the bytes it produced — so the only
+   * thing that crosses the IPC bridge in the other direction is a product id.
+   *
+   * 🔴 ABSENT UNTIL SLICE F. Product Master's authorization, channel and service boundary land
+   * first (slice D); the `nativeImage` pipeline that can actually prove a file is an image is its
+   * own slice. While this is absent, `setProductImage` answers NOT_AVAILABLE.
+   */
+  readonly pickProductPhoto?: (productId: string) => PickedPhoto | null;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -115,6 +154,30 @@ function exactObject(payload: unknown, keys: readonly string[]): Record<string, 
   const actual = Object.keys(payload);
   const extra = actual.filter((k) => !keys.includes(k));
   const missing = keys.filter((k) => !actual.includes(k));
+  if (extra.length || missing.length) {
+    invalid(`Unexpected fields [${extra.join(", ")}] / missing fields [${missing.join(", ")}]`);
+  }
+  return payload as Record<string, unknown>;
+}
+
+/**
+ * An object whose `required` keys must all be present and whose `optional` keys may be absent.
+ * Unknown keys are refused, exactly as `exactObject` refuses them.
+ *
+ * 🔴 Why this exists rather than widening `exactObject`'s key list: a product draft's five
+ * selling fields are genuinely required — a payload missing a price is malformed — while the
+ * enrichment group must be omittable, because omitting it is what every caller that predates
+ * Product Master means. One function cannot express both with a single flat key list.
+ */
+function objectWithOptional(
+  payload: unknown,
+  required: readonly string[],
+  optional: readonly string[],
+): Record<string, unknown> {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) invalid("Expected an object");
+  const actual = Object.keys(payload);
+  const extra = actual.filter((k) => !required.includes(k) && !optional.includes(k));
+  const missing = required.filter((k) => !actual.includes(k));
   if (extra.length || missing.length) {
     invalid(`Unexpected fields [${extra.join(", ")}] / missing fields [${missing.join(", ")}]`);
   }
@@ -169,14 +232,64 @@ function bool(value: unknown, field: string): boolean {
  * payload that is not the right shape, so a malformed IPC call never reaches the service.
  */
 function productDraft(value: unknown): ProductDraft {
-  const d = exactObject(value, ["nameAr", "nameEn", "sku", "price", "baseUnit"]);
-  return {
+  // 🔴 `master` IS OPTIONAL AND EVERY OTHER KEY IS REQUIRED, which is why this is not a plain
+  // `exactObject`. An exact object would refuse a legacy caller that omits `master` (the import
+  // path, invoice reconciliation) and force it to invent one — and a caller that invents an
+  // enrichment group sends nulls, which CLEAR fields. The optional key is what keeps absence
+  // expressible all the way from the renderer to `keep()` in the repository.
+  const d = objectWithOptional(value, ["nameAr", "nameEn", "sku", "price", "baseUnit"], ["master"]);
+  const base = {
     nameAr: str(d.nameAr, "nameAr", MAX_PRODUCT_NAME),
     nameEn: optionalStr(d.nameEn, "nameEn", MAX_PRODUCT_NAME),
     sku: optionalStr(d.sku, "sku", MAX_SKU),
     price: str(d.price, "price", 32),
     baseUnit: str(d.baseUnit, "baseUnit", 32),
   };
+  return d.master === undefined ? base : { ...base, master: productMasterPatch(d.master) };
+}
+
+/**
+ * The Product Master enrichment patch.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 BUILT KEY BY KEY, AND ABSENCE IS CARRIED, NOT NORMALIZED AWAY. A key the caller did not send
+ * must still be MISSING from the object this returns — not present holding `undefined`, and
+ * certainly not present holding `null`. Spreading, defaulting with `??`, or listing the six keys
+ * unconditionally would each turn "I am not touching the description" into "clear the
+ * description", and a re-import would silently wipe what the owner typed.
+ *
+ * 🔴 A key present with `undefined` is treated as ABSENT. Electron's structured clone preserves a
+ * property whose value is `undefined`, so `{ brand: undefined }` arrives with the key present — and
+ * a renderer building an object from optional React state produces exactly that. The `in` test
+ * alone would read it as "clear the brand".
+ *
+ * MEANING is still the domain's job: `validateProductMaster` canonicalizes the barcode and trims
+ * the text. This refuses a payload that is the wrong SHAPE, so a malformed call never gets that far.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+function productMasterPatch(value: unknown): ProductMasterDraft {
+  const m = patchObject(value, PRODUCT_MASTER_PATCH_KEYS);
+  const out: {
+    categoryId?: string | null;
+    barcode?: string | null;
+    brand?: string | null;
+    descriptionAr?: string | null;
+    descriptionEn?: string | null;
+    isOnlineVisible?: boolean;
+  } = {};
+  const sent = (key: ProductMasterPatchKey) => key in m && m[key] !== undefined;
+
+  if (sent("categoryId")) out.categoryId = optionalStr(m.categoryId, "categoryId", MAX_PRODUCT_ID_LENGTH);
+  if (sent("barcode")) out.barcode = optionalStr(m.barcode, "barcode", MAX_BARCODE);
+  if (sent("brand")) out.brand = optionalStr(m.brand, "brand", MAX_BRAND);
+  if (sent("descriptionAr")) {
+    out.descriptionAr = optionalStr(m.descriptionAr, "descriptionAr", MAX_PRODUCT_DESCRIPTION);
+  }
+  if (sent("descriptionEn")) {
+    out.descriptionEn = optionalStr(m.descriptionEn, "descriptionEn", MAX_PRODUCT_DESCRIPTION);
+  }
+  if (sent("isOnlineVisible")) out.isOnlineVisible = bool(m.isOnlineVisible, "isOnlineVisible");
+  return out;
 }
 
 function noPayload(payload: unknown): void {
@@ -475,7 +588,11 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     // ── Product administration ──────────────────────────────────────────────────────────────────
     listProducts: wrap("listProducts", (p) => {
       noPayload(p);
-      return service.listProducts().map(toAdminProductDto);
+      // 🔴 TWO SMALL READS, NEVER A JOIN THAT CARRIES BLOBS. `productIdsWithPhoto` is one query
+      // over an index returning ids; reading the image row alongside each product would load the
+      // shop's entire photo library to render a list that displays none of it.
+      const withPhoto = new Set(service.productIdsWithPhoto());
+      return service.listProducts().map((row) => toAdminProductDto(row, withPhoto.has(row.id)));
     }),
     createProduct: wrap("createProduct", (p) => {
       const o = exactObject(p, ["draft"]);
@@ -498,6 +615,104 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       );
       log.info("product-active-changed", { id: row.id, isActive: row.isActive });
       return row;
+    }),
+
+    // ── Product Master: categories, brands and photos (migration 9) ─────────────────────────────
+    listCategories: wrap("listCategories", (p) => {
+      noPayload(p);
+      return service.listCategories().map(toCategoryDto);
+    }),
+    listBrands: wrap("listBrands", (p) => {
+      noPayload(p);
+      return service.listBrands();
+    }),
+    createCategory: wrap("createCategory", (p) => {
+      const o = exactObject(p, ["nameAr", "nameEn"]);
+      const row = toCategoryDto(
+        service.createCategory(str(o.nameAr, "nameAr", MAX_CATEGORY_NAME), optionalStr(o.nameEn, "nameEn", MAX_CATEGORY_NAME)),
+      );
+      log.info("category-created", { id: row.id });
+      return row;
+    }),
+    renameCategory: wrap("renameCategory", (p) => {
+      const o = exactObject(p, ["categoryId", "nameAr", "nameEn"]);
+      const row = toCategoryDto(
+        service.renameCategory(
+          str(o.categoryId, "categoryId", MAX_PRODUCT_ID_LENGTH),
+          str(o.nameAr, "nameAr", MAX_CATEGORY_NAME),
+          optionalStr(o.nameEn, "nameEn", MAX_CATEGORY_NAME),
+        ),
+      );
+      log.info("category-renamed", { id: row.id });
+      return row;
+    }),
+    setCategoryActive: wrap("setCategoryActive", (p) => {
+      const o = exactObject(p, ["categoryId", "isActive"]);
+      const row = toCategoryDto(
+        service.setCategoryActive(str(o.categoryId, "categoryId", MAX_PRODUCT_ID_LENGTH), bool(o.isActive, "isActive")),
+      );
+      log.info("category-active-changed", { id: row.id, isActive: row.isActive });
+      return row;
+    }),
+    deleteCategory: wrap("deleteCategory", (p) => {
+      const o = exactObject(p, ["categoryId"]);
+      const result = service.deleteCategoryIfUnused(str(o.categoryId, "categoryId", MAX_PRODUCT_ID_LENGTH));
+      log.info("category-deleted", { id: result.deletedId });
+      return result;
+    }),
+
+    getProductImageMeta: wrap("getProductImageMeta", (p) => {
+      const o = exactObject(p, ["productId"]);
+      const meta = service.productImageMeta(str(o.productId, "productId", MAX_PRODUCT_ID_LENGTH));
+      return meta === null ? null : toProductImageMetaDto(meta);
+    }),
+    getProductImageBytes: wrap("getProductImageBytes", (p) => {
+      const o = exactObject(p, ["imageId"]);
+      const { meta, bytes } = service.productImageBytes(str(o.imageId, "imageId", MAX_PRODUCT_ID_LENGTH));
+      // A fresh Uint8Array over a COPY: handing the renderer a view onto the Buffer better-sqlite3
+      // returned would share memory with whatever that row is backed by.
+      return { meta: toProductImageMetaDto(meta), bytes: new Uint8Array(bytes) };
+    }),
+    /**
+     * 🔴 THIS CHANNEL ACCEPTS NO IMAGE DATA — only which product the owner means. Main runs the
+     * picker, reads the file, decodes and normalizes it, and hands the service the result; the
+     * renderer never supplies a path or a buffer. That is the same shape `pickInvoiceLogo` has
+     * used since migration 6, for the same reason: a renderer-supplied path is a filesystem read
+     * primitive, and renderer-supplied bytes are an unvalidated blob straight into the ledger.
+     *
+     * 🔴 AND THE PRODUCER DOES NOT EXIST YET. `pickProductPhoto` is slice F's `nativeImage`
+     * pipeline. Until it is wired this answers NOT_AVAILABLE — the same fail-closed shape every
+     * other optional main-process capability here uses, rather than a channel that half-works.
+     */
+    setProductImage: wrap("setProductImage", (p) => {
+      const o = exactObject(p, ["productId"]);
+      const productId = str(o.productId, "productId", MAX_PRODUCT_ID_LENGTH);
+      const pick = options.pickProductPhoto;
+      if (!pick) {
+        throw new DomainError("NOT_AVAILABLE", "Adding a product photo is not available on this terminal yet");
+      }
+      const picked = pick(productId);
+      // The operator cancelled the dialog. Not an error, and nothing was written.
+      if (picked === null) return null;
+      const meta = toProductImageMetaDto(
+        service.setProductPrimaryImage({
+          productId,
+          bytes: picked.bytes,
+          mime: picked.mime,
+          widthPx: picked.widthPx,
+          heightPx: picked.heightPx,
+          origin: picked.origin,
+        }),
+      );
+      log.info("product-photo-set", { productId, byteSize: meta.byteSize, origin: meta.origin });
+      return meta;
+    }),
+    removeProductImage: wrap("removeProductImage", (p) => {
+      const o = exactObject(p, ["productId"]);
+      const productId = str(o.productId, "productId", MAX_PRODUCT_ID_LENGTH);
+      const result = service.removeProductPrimaryImage(productId);
+      log.info("product-photo-removed", { productId, removed: result.removed });
+      return result;
     }),
 
     // ── Operator settings ───────────────────────────────────────────────────────────────────────

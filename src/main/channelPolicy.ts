@@ -45,7 +45,19 @@ export type Access =
  * 🔴 This prose said SIX while PUBLIC_REASON held seven entries, and an independent review caught
  * it. A wrong count matters more here than it normally would: this list IS the control for the
  * category, so a reader who trusts the number would be auditing a set one smaller than the real one.
- * Verified mechanically at the same time: 7 public, 22 session, 24 owner, 53 total.
+ *
+ * 🔴 TOTALS, MEASURED — AND ONLY ONE OF THESE THREE NUMBERS IS A SECURITY CLAIM.
+ * Product Master (migration 9) added ten channels, so the table grew:
+ *
+ *     before Product Master:  7 public · 22 session · 24 owner · 53 total
+ *     after  Product Master:  7 public · 24 session · 32 owner · 63 total
+ *
+ * THE PUBLIC SET DID NOT MOVE, which is the only one of the three numbers that is a security
+ * claim — the two new reads (listCategories, listBrands) are session, and all eight Product
+ * Master mutations and image reads are owner. The session/owner totals are reported for the
+ * reader's orientation and are NOT what any test asserts: `channelPolicy.test.ts` derives
+ * everything from the table and pins the public set BY NAME, so a drift fails by naming the
+ * channel that drifted rather than by a number nobody can interpret.
  */
 export const PUBLIC_REASON: Readonly<Record<string, string>> = Object.freeze({
   listCashiers: "the login screen must offer who to sign in as; returns {id, name} and nothing else",
@@ -81,6 +93,16 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   getSaleHistory: "session",
   listProducts: "session",
   getAppInfo: "session",
+
+  // Product Master READS a cashier needs to make sense of the products list: a product shows the
+  // NAME of its category, not its id, and the Brand field offers what the shop has already typed.
+  // Both are read-only, both return the minimum read model, and neither can change anything.
+  //
+  // 🔴 Why these two and not the rest: every other Product Master channel either MUTATES master
+  // data or returns a photo, and both are owner acts. "A cashier can see it on the list" is the
+  // whole of the justification, and it does not extend to anything below.
+  listCategories: "session",
+  listBrands: "session",
 
   // The invoice workflow a cashier needs for daily selling. A finalized invoice IS a sale
   // (migration 7), so this is selling, not administration — while the shop's IDENTITY and its
@@ -128,6 +150,21 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   resolveLinkProduct: "owner",
   resolveCreateProduct: "owner",
   resolveUpdateCatalog: "owner",
+  // Product Master (migration 9). Master data and the shop's own photographs.
+  //
+  // 🔴 THE IMAGE READS ARE OWNER TOO, and that is a decision rather than an oversight. The only
+  // V1 surface that reads a photo is the owner's own Add/Edit Product form; the products list
+  // needs no bytes (the list carries a `hasImage` flag) and the Sell screen shows no photo. If a
+  // cashier-facing surface ever wants a thumbnail, these get reclassified deliberately, with the
+  // reason written here — the same way `listCategories` above carries its own.
+  createCategory: "owner",
+  renameCategory: "owner",
+  setCategoryActive: "owner",
+  deleteCategory: "owner",
+  getProductImageMeta: "owner",
+  getProductImageBytes: "owner",
+  setProductImage: "owner",
+  removeProductImage: "owner",
   // Operator management. An owner must not be demotable by an employee.
   listOperators: "owner",
   createOperator: "owner",

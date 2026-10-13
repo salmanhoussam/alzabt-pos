@@ -14,7 +14,15 @@ import { decodeUtf8Strict, toImportCsv, validateImport, type ImportRejection } f
 import { DomainError } from "../domain/errors";
 import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
-import type { CategoryRepository } from "../persistence/categoryRepository";
+import { categoryNameAr, categoryNameEn } from "../domain/category";
+import { imageBytes, imageEdge, imageMime, imageOrigin } from "../domain/productImage";
+import type { CategoryRepository, CategoryRow } from "../persistence/categoryRepository";
+import type {
+  ImageMime,
+  ImageOrigin,
+  ProductImageMeta,
+  ProductImageRepository,
+} from "../persistence/productImageRepository";
 import {
   type PaymentMethod,
   type SaleRecord,
@@ -80,6 +88,12 @@ export interface PosServiceDeps {
    * reach the foreign key and abort a transaction the operator cannot diagnose.
    */
   readonly categories?: CategoryRepository;
+  /**
+   * Migration 9's product photos. OPTIONAL for the same reason as `categories` above, and it fails
+   * closed the same way: every image operation answers NOT_AVAILABLE rather than pretending a
+   * terminal with no image table has no photos.
+   */
+  readonly productImages?: ProductImageRepository;
   /**
    * The compiled-in TEST cashiers. Still here for tests and for a terminal with no `operators`
    * service wired; once `operators` is present it is the authority and this is ignored.
@@ -676,7 +690,7 @@ export class PosService {
    * `undefined` means the caller is not touching the category, so there is nothing to check —
    * which is what keeps invoice reconciliation and the import path working unchanged.
    */
-  private assertCategoryUsable(categoryId: string | null | undefined): void {
+  private assertCategoryUsable(categoryId: string | null | undefined, currentCategoryId: string | null): void {
     if (categoryId === undefined || categoryId === null) return;
     const categories = this.deps.categories;
     if (!categories) {
@@ -684,6 +698,15 @@ export class PosService {
     }
     const row = categories.findById(categoryId);
     if (!row) throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
+    // 🔴 NOT A NEW ASSIGNMENT, SO NOT REFUSED. The product already carries this exact category;
+    // the form simply sent back what it was showing. Refusing here would make a product with a
+    // retired category UNEDITABLE — the owner could not fix its price without first reactivating a
+    // category they deliberately retired — and the approved contract says the opposite: a
+    // deactivated category STAYS on the products that already use it.
+    //
+    // This is the same asymmetry one step further in. Existence is still required always: a
+    // category that was DELETED is gone, and a product cannot keep pointing at nothing.
+    if (currentCategoryId !== null && categoryId === currentCategoryId) return;
     if (row.is_active !== 1) {
       throw new DomainError(
         "CATEGORY_INACTIVE",
@@ -736,7 +759,8 @@ export class PosService {
       // outside the transaction, two near-simultaneous creates could both pass and only the index
       // would catch the second — and a category could be deleted between the check and the write.
       this.assertBarcodeFree(store, valid.master?.barcode ?? null, null);
-      this.assertCategoryUsable(valid.master?.categoryId);
+      // A create has no current category, so every assignment here is a new one.
+      this.assertCategoryUsable(valid.master?.categoryId, null);
       const created = store.createManual(
         {
           nameAr: valid.nameAr,
@@ -802,7 +826,7 @@ export class PosService {
         }
       }
       this.assertBarcodeFree(store, valid.master?.barcode ?? null, id);
-      this.assertCategoryUsable(valid.master?.categoryId);
+      this.assertCategoryUsable(valid.master?.categoryId, before.category_id);
       const updated = store.updateProduct(
         id,
         {
@@ -896,6 +920,331 @@ export class PosService {
     this.refreshCatalogFromStore(store);
     this.mirror(written);
     return after;
+  }
+
+  // ── Categories, brands and photos (migration 9, Product Master) ─────────────────────────────────
+  //
+  // ════════════════════════════════════════════════════════════════════════════════════════════════
+  // 🔴 THE OWNER CHECK IS HERE, IN THE SERVICE, AND NOT ONLY IN THE CHANNEL POLICY.
+  //
+  // `channelPolicy.ts` already refuses a cashier on every one of these channels, and that is tested
+  // by calling the real handlers. This second guard is not belt-and-braces for its own sake: the
+  // approved mobile LAN bridge (slice H) answers HTTP requests inside the MAIN process and calls
+  // this service DIRECTLY — it never goes through `ipcMain`, so it never passes through
+  // `channelPolicy`. A service whose authorization lived only in the IPC table would be wide open
+  // the moment that listener exists.
+  //
+  // So the rule is: a restricted operation is restricted by the SERVICE. The channel policy is the
+  // outer door, enforced before a payload is even examined; this is the lock on the thing itself.
+  // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+  /** The live owner, or a refusal. Re-reads the durable role, exactly as `requireLiveRole` does. */
+  private requireOwner(): Cashier {
+    const live = this.liveSession();
+    if (live.role !== "owner") {
+      // The SAME code and the SAME sentence the channel guard uses, so an operator cannot tell
+      // which of the two layers refused them — and so there is one message to translate.
+      throw new DomainError("NOT_AUTHORIZED", "Only the shop owner can do that");
+    }
+    return { id: live.id, name: live.name };
+  }
+
+  private requireCategories(): CategoryRepository {
+    const categories = this.deps.categories;
+    if (!categories) {
+      throw new DomainError("NOT_AVAILABLE", "Categories are not available on this terminal");
+    }
+    return categories;
+  }
+
+  private requireImages(): ProductImageRepository {
+    const images = this.deps.productImages;
+    if (!images) {
+      throw new DomainError("NOT_AVAILABLE", "Product photos are not available on this terminal");
+    }
+    return images;
+  }
+
+  /**
+   * Every category, active and inactive — the owner's management list AND the product form's
+   * dropdown source.
+   *
+   * ONE read for both, rather than a separate `listActiveCategories`: the form must still be able
+   * to DISPLAY the inactive category a product already carries (that is the approved contract), so
+   * it needs the inactive rows too and filters the chooser itself. A second channel returning a
+   * subset would invite the form to use the wrong one and silently lose a product's category label.
+   *
+   * SESSION, not owner: the products list shows a category name, and a cashier may read the
+   * products list.
+   */
+  listCategories(): CategoryRow[] {
+    this.requireCashier();
+    return this.requireCategories().listAll();
+  }
+
+  /**
+   * The brands this shop has already typed, for the Brand field's suggestions.
+   *
+   * SESSION for the same reason as `listCategories`. There is no brand table and no brand row —
+   * see `CatalogRepository.distinctBrands`, which is the whole of brand "management" by decision.
+   */
+  listBrands(): string[] {
+    this.requireCashier();
+    return this.requireStore().distinctBrands();
+  }
+
+  /**
+   * Creates a category. The name is the owner's, and the duplicate check asks the question the
+   * UNIQUE INDEX will ask.
+   *
+   * 🔴 INSIDE ONE TRANSACTION, for the reason every other check in this file moved inside one: two
+   * near-simultaneous creates would both pass a check made outside it, and only the index would
+   * catch the second — as a raw constraint failure the owner cannot act on.
+   */
+  createCategory(nameAr: string, nameEn: string | null): CategoryRow {
+    this.requireOwner();
+    const categories = this.requireCategories();
+    const transact = this.requireTransact();
+    const now = this.now().toISOString();
+    const name = categoryNameAr(nameAr);
+    const en = categoryNameEn(nameEn);
+    return transact((): CategoryRow => {
+      const clash = categories.findByNameAr(name);
+      if (clash) {
+        throw new DomainError("DUPLICATE_CATEGORY", `'${clash.name_ar}' already exists`);
+      }
+      return categories.insert({
+        id: this.newId(),
+        nameAr: name,
+        nameEn: en,
+        sortOrder: categories.nextSortOrder(),
+        now,
+      });
+    });
+  }
+
+  /** Renames a category. The id is the identity, so every product keeps its link. */
+  renameCategory(id: string, nameAr: string, nameEn: string | null): CategoryRow {
+    this.requireOwner();
+    const categories = this.requireCategories();
+    const transact = this.requireTransact();
+    const now = this.now().toISOString();
+    const name = categoryNameAr(nameAr);
+    const en = categoryNameEn(nameEn);
+    return transact((): CategoryRow => {
+      if (!categories.findById(id)) {
+        throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
+      }
+      const clash = categories.findByNameAr(name);
+      // Renaming a category to the name it already has is not a clash with itself.
+      if (clash && clash.id !== id) {
+        throw new DomainError("DUPLICATE_CATEGORY", `'${clash.name_ar}' already exists`);
+      }
+      return categories.rename(id, name, en, now);
+    });
+  }
+
+  /**
+   * Retires a category, or brings it back.
+   *
+   * 🔴 DEACTIVATING CHANGES NO PRODUCT. Every product that already carries this category keeps it —
+   * that is the approved contract and the reason `assertCategoryUsable` is asymmetric. What
+   * deactivating does is remove it from the chooser for NEW assignments.
+   */
+  setCategoryActive(id: string, active: boolean): CategoryRow {
+    this.requireOwner();
+    const categories = this.requireCategories();
+    const transact = this.requireTransact();
+    const now = this.now().toISOString();
+    return transact((): CategoryRow => {
+      if (!categories.findById(id)) {
+        throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
+      }
+      return categories.setActive(id, active, now);
+    });
+  }
+
+  /**
+   * Deletes a category, and ONLY when nothing uses it.
+   *
+   * 🔴 THE SCHEMA WOULD HAPPILY DO SOMETHING ELSE, WHICH IS EXACTLY WHY THIS EXISTS.
+   * `catalog_products.category_id` carries `ON DELETE SET NULL`, so deleting a used category would
+   * succeed and silently blank the category on every product that had it — no error, no audit, and
+   * the owner discovers it later as missing data. The referential action is the floor under a
+   * mistake, never the behaviour: the count and the delete run in ONE transaction, so a product
+   * cannot be assigned to this category between the two.
+   *
+   * The count includes INACTIVE products, by `countProductsUsing`'s own contract.
+   */
+  deleteCategoryIfUnused(id: string): { readonly deletedId: string } {
+    this.requireOwner();
+    const categories = this.requireCategories();
+    const transact = this.requireTransact();
+    return transact((): { readonly deletedId: string } => {
+      const row = categories.findById(id);
+      if (!row) throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
+      const used = categories.countProductsUsing(id);
+      if (used > 0) {
+        throw new DomainError(
+          "CATEGORY_IN_USE",
+          `'${row.name_ar}' is used by ${used} product(s) — move them to another category first, or just deactivate it`,
+        );
+      }
+      categories.delete(id);
+      return { deletedId: id };
+    });
+  }
+
+  /**
+   * WHICH products have a photo. One small read for the whole table.
+   *
+   * 🔴 THIS IS WHAT KEEPS BYTES OFF THE LIST. The products list wants to show a thumbnail
+   * placeholder or a "has photo" mark, and the obvious way to get that — read the image row with
+   * the product — would load every photo in the catalog into memory to render a screen that shows
+   * none of them. This returns ids only.
+   */
+  productIdsWithPhoto(): string[] {
+    this.requireCashier();
+    const images = this.deps.productImages;
+    // 🔴 DELIBERATELY TOLERANT, AND ONLY THIS ONE IS. Every other image operation fails closed with
+    // NOT_AVAILABLE, because refusing is the safe answer for a mutation and for a byte read. Here
+    // the question is "should the list draw a photo placeholder", and migration 9 creates
+    // `catalog_product_images` unconditionally — so a terminal without this repository wired is a
+    // test harness that opted out, not a shop with hidden photos, and the empty set is the literal
+    // truth about what this service can see. A refusal here would instead take down the whole
+    // products list over a decoration.
+    if (!images) return [];
+    return [...images.productIdsWithPrimary()];
+  }
+
+  /**
+   * The metadata of a product's current photo — never its bytes.
+   *
+   * OWNER, matching the one surface that reads it in V1: the owner's Product Master form. The
+   * products list does not need it (`productIdsWithPhoto` answers "is there one?"), and the Sell
+   * screen shows no photo in V1. When a cashier-facing surface does want a thumbnail, this becomes
+   * a deliberate reclassification with its own reason — not a quiet widening.
+   */
+  productImageMeta(productId: string): ProductImageMeta | null {
+    this.requireOwner();
+    const images = this.requireImages();
+    if (!this.requireStore().findById(productId)) {
+      throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
+    }
+    return images.findPrimaryMeta(productId);
+  }
+
+  /**
+   * The bytes of ONE named image — the only route to them, and it has to be asked for by name.
+   *
+   * 🔴 IT VERIFIES WHAT IT READ. `sha256_hex` was computed when the image was stored; re-hashing on
+   * the way out costs microseconds on a photo and turns silent bit-rot in a copied-around SQLite
+   * file into a refusal instead of a corrupt picture on a website. The online catalog export
+   * (slice G) depends on this guarantee rather than re-deriving it.
+   */
+  productImageBytes(imageId: string): { readonly meta: ProductImageMeta; readonly bytes: Buffer } {
+    this.requireOwner();
+    const images = this.requireImages();
+    const bytes = images.readBytes(imageId);
+    if (bytes === null) throw new DomainError("IMAGE_NOT_FOUND", "That photo is no longer stored");
+    const meta = images.findMetaById(imageId);
+    if (!meta) throw new DomainError("IMAGE_NOT_FOUND", "That photo is no longer stored");
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== meta.sha256_hex) {
+      throw new DomainError(
+        "LEDGER_INTEGRITY",
+        "This photo does not match its stored checksum and was not returned",
+      );
+    }
+    return { meta, bytes };
+  }
+
+  /**
+   * Stores a product's photo, replacing whatever it had.
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 THE BYTES NEVER COME FROM THE RENDERER, AND THERE IS NO IPC CHANNEL THAT ACCEPTS THEM.
+   *
+   * Every caller of this method lives in the MAIN process: slice F's native photo picker, which
+   * decodes and normalizes with Electron's `nativeImage`, and slice H's LAN listener, which receives
+   * the phone's upload. That is the same shape `pickInvoiceLogo` already uses — main owns the
+   * dialog, main owns the file, and the renderer only ever says WHICH product it means.
+   *
+   * 🔴 AND THIS METHOD IS NOT THE VALIDATOR. It checks what it can cheaply prove — a known MIME, a
+   * non-empty buffer under the cap, positive dimensions, and that the product exists — and it
+   * computes the checksum ITSELF so no caller can supply a wrong one. What it cannot do is decode
+   * the image; proving these bytes really are a JPEG of these dimensions is the producer's job, and
+   * until slice F exists there is no producer. The cap is a backstop against a 50 MB phone photo
+   * reaching SQLite, not a substitute for decoding.
+   * ════════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  setProductPrimaryImage(input: {
+    readonly productId: string;
+    readonly bytes: Buffer;
+    readonly mime: ImageMime;
+    readonly widthPx: number;
+    readonly heightPx: number;
+    readonly origin: ImageOrigin;
+  }): ProductImageMeta {
+    this.requireOwner();
+    const images = this.requireImages();
+    const store = this.requireStore();
+    const transact = this.requireTransact();
+    // The cheap, provable checks, from the one module that owns them. None of them decodes the
+    // image; see src/domain/productImage.ts for why that is stated rather than implied.
+    const mime = imageMime(input.mime);
+    const origin = imageOrigin(input.origin);
+    const bytes = imageBytes(input.bytes);
+    const widthPx = imageEdge(input.widthPx, "width");
+    const heightPx = imageEdge(input.heightPx, "height");
+    const now = this.now().toISOString();
+    // 🔴 COMPUTED HERE, FROM THESE BYTES. A checksum a caller passes in is a claim; this is the
+    // fact, and it is what `productImageBytes` and the online export later verify against.
+    const sha256Hex = createHash("sha256").update(bytes).digest("hex");
+    return transact((): ProductImageMeta => {
+      if (!store.findById(input.productId)) {
+        throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
+      }
+      return images.putPrimary({
+        id: this.newId(),
+        productId: input.productId,
+        bytes,
+        mime,
+        sha256Hex,
+        widthPx,
+        heightPx,
+        origin,
+        now,
+      });
+    });
+  }
+
+  /**
+   * Removes a product's photo. Returns whether there was one.
+   *
+   * Idempotent on purpose: removing a photo that is already gone is not an error the owner needs to
+   * see, and reporting one would make a double click look like a failure.
+   */
+  removeProductPrimaryImage(productId: string): { readonly removed: boolean } {
+    this.requireOwner();
+    const images = this.requireImages();
+    const store = this.requireStore();
+    const transact = this.requireTransact();
+    return transact((): { readonly removed: boolean } => {
+      if (!store.findById(productId)) {
+        throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
+      }
+      return { removed: images.removePrimary(productId) };
+    });
+  }
+
+  /** The transaction provider, or a refusal — the same fail-closed shape as `requireStore`. */
+  private requireTransact(): <T>(fn: () => T) => T {
+    const transact = this.deps.transact;
+    if (!transact) {
+      throw new DomainError("NOT_AVAILABLE", "This terminal cannot write atomically; the operation was refused");
+    }
+    return transact;
   }
 
   // ── Sales ───────────────────────────────────────────────────────────────────────────────────────

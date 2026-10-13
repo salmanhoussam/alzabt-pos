@@ -106,6 +106,21 @@ export class ProductImageRepository {
     return new Set(rows.map((r) => r.product_id));
   }
 
+  /**
+   * One image's metadata by its OWN id, with no bytes.
+   *
+   * The companion to `readBytes`, which names the same image: a caller that wants the bytes also
+   * wants the MIME and the stored checksum to verify them against, and asking for both separately
+   * is what keeps the bytes out of every read that does not need them.
+   */
+  findMetaById(imageId: string): ProductImageMeta | null {
+    return normalise(
+      this.db.prepare(`SELECT ${META} FROM catalog_product_images WHERE id = ?`).get(imageId) as
+        | Record<string, unknown>
+        | undefined,
+    );
+  }
+
   /** Metadata for every image of one product, newest first. V1 only ever stores one. */
   listMetaForProduct(productId: string): ProductImageMeta[] {
     return (

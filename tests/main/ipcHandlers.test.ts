@@ -34,7 +34,17 @@ describe("IPC surface", () => {
   // The surface grew from THIRTEEN channels to NINETEEN when offline product management landed:
   // listProducts, createProduct, updateProduct, setProductActive, getSettings, setTerminalLanguage.
   // It then grew from NINETEEN to FORTY-FOUR with manual invoices (migration 6) — the twenty-five
-  // channels listed below the blank line.
+  // channels listed below the blank line. Operator accounts (migration 8) took it to FIFTY-THREE.
+  //
+  // 🔴 TRANSITION — FIFTY-THREE to SIXTY-THREE with Product Master (migration 9). The ten added:
+  // listCategories, listBrands, createCategory, renameCategory, setCategoryActive, deleteCategory,
+  // getProductImageMeta, getProductImageBytes, setProductImage, removeProductImage.
+  //
+  // 🔴 AND WHAT IS STILL ABSENT IS THE POINT OF THE TRANSITION. Product Master stores PHOTOS, and
+  // the obvious channel to add — one that takes image bytes from the renderer — is NOT here.
+  // `setProductImage` names a product and nothing else; main runs the picker, reads the file and
+  // normalizes it, exactly as `pickInvoiceLogo` does. So the rule below still holds unbroken: no
+  // channel accepts a filesystem path, and none accepts a blob.
   //
   // The old values are named here on purpose — this assertion is the record of what the renderer
   // may ask for, so every addition has to be written down, and the shape rule below still holds:
@@ -45,6 +55,7 @@ describe("IPC surface", () => {
   it("exposes only the fixed business channels — no SQL, query, file or generic invoke", () => {
     expect(CHANNEL_NAMES.sort()).toEqual(
       [
+        "createCategory",
         "createSale",
         "currentCashier",
         "exportBackup",
@@ -52,15 +63,21 @@ describe("IPC surface", () => {
         "getAppInfo",
         "getCatalog",
         "getSaleHistory",
+        "getProductImageBytes",
+        "getProductImageMeta",
         "getSettings",
         "getTodaySales",
         "importCatalog",
+        "listBrands",
         "listCashiers",
+        "listCategories",
         "listProducts",
         "login",
         "logout",
         "createProduct",
+        "setCategoryActive",
         "setProductActive",
+        "setProductImage",
         "setTerminalLanguage",
         "updateProduct",
         "voidSale",
@@ -83,12 +100,15 @@ describe("IPC surface", () => {
         "completeBootstrapSetup",
         "createOperator",
         "listOperators",
+        "renameCategory",
         "renameOperator",
         "resetOperatorPin",
         "setOperatorActive",
         "setOperatorRole",
         "updateInvoiceLine",
         "removeInvoiceLine",
+        "removeProductImage",
+        "deleteCategory",
         "discardInvoiceDraft",
         "finalizeInvoice",
         "listInvoices",
@@ -108,7 +128,8 @@ describe("IPC surface", () => {
         "saveInvoicePdf",
       ].sort(),
     );
-    expect(CHANNEL_NAMES).toHaveLength(53); // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8)
+    // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master, migration 9)
+    expect(CHANNEL_NAMES).toHaveLength(63);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

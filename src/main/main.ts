@@ -22,6 +22,8 @@ import { FIXTURE_CATALOG } from "../fixtures/catalog";
 import { FIXTURE_TERMINAL } from "../fixtures/terminal";
 import { BACKUP_DIR_NAME, createPreMigrationBackup, ensureDailyBackup, snapshotDatabase } from "../persistence/backup";
 import { CatalogRepository } from "../persistence/catalogRepository";
+import { CategoryRepository } from "../persistence/categoryRepository";
+import { ProductImageRepository } from "../persistence/productImageRepository";
 import { type Db, openDatabase, schemaVersion } from "../persistence/db";
 import { MIGRATIONS } from "../persistence/migrations";
 import { AuditRepository } from "../persistence/auditRepository";
@@ -508,6 +510,13 @@ function startTill(): void {
   maybeDailyBackup();
 
   const catalogStore = new CatalogRepository(db);
+  // 🔴 MIGRATION 9'S TWO NEW TABLES, WIRED HERE — and until this line existed they were not.
+  // Both dependencies are optional on PosService and both fail CLOSED, so a terminal without
+  // them refused every category assignment with NOT_AVAILABLE rather than corrupting anything:
+  // safe, and completely unusable. ON THE SAME `db` and the same transaction provider as
+  // everything else, because a second connection would not be atomic with the product write.
+  const categoryStore = new CategoryRepository(db);
+  const productImageStore = new ProductImageRepository(db);
   const start = startupCatalog(catalogStore, loadCatalog(FIXTURE_CATALOG), FIXTURE_TERMINAL.currency);
   console.info(`[pos] catalog: ${start.origin}, ${start.catalog.products.length} products`);
   diag("catalog", { origin: start.origin, products: start.catalog.products.length });
@@ -532,6 +541,8 @@ function startTill(): void {
     pinStates: new PinStateRepository(db),
     catalog: start.catalog,
     catalogStore,
+    categories: categoryStore,
+    productImages: productImageStore,
     // 🔴 THE FIXTURE IS NO LONGER THE AUTHORITY. Migration 8 created real `operators` rows — both
     // fixture accounts preserved BY ID so every historical sales.cashier_id still resolves — and
     // `operators` below is what `login` and `listCashiers` read. The array stays only because a
