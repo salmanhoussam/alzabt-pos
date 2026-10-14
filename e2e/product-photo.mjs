@@ -191,13 +191,36 @@ async function shot(page, name) {
   log("screenshot", name);
 }
 
-/** Whatever the app put in the notice/error dialog, dismissed afterwards. */
+/**
+ * The text of the app's ERROR dialog, dismissed afterwards.
+ *
+ * 🔴 THE FIRST VERSION OF THIS HELPER MEASURED THE WRONG ELEMENT, AND PASSED. It waited for
+ * `.overlay .card.dialog` — which the PRODUCT FORM also matches, since the form is
+ * `<form class="card dialog product-form">` inside its own overlay. So `.last()` resolved to the
+ * form and `waitFor({visible})` succeeded instantly, before the error dialog had rendered at all.
+ * The assertions then read the FORM's text: "تعديل صنف · المعلومات الأساسيّة · الاسم بالعربية
+ * (مطلوب) …". Both refusal checks passed on it — non-empty, and containing no path — while proving
+ * nothing whatsoever about what the owner is shown. It also clicked the form's first button.
+ *
+ * The error paragraph carries `class="error"`, and nothing else in the app does. Waiting for THAT
+ * cannot be satisfied by the form, so the wait is now the assertion.
+ */
+async function readError(page) {
+  const paragraph = page.locator(".overlay .card.dialog p.error");
+  await paragraph.waitFor({ state: "visible", timeout: 15000 });
+  const text = (await paragraph.innerText()).trim();
+  // Dismiss via the card that actually holds the error, not whichever dialog happens to be last.
+  await page.locator(".overlay .card.dialog", { has: page.locator("p.error") }).locator("button").first().click();
+  await paragraph.waitFor({ state: "detached", timeout: 15000 });
+  return text;
+}
+
+/** The text of a NOTICE dialog (no error class), dismissed afterwards. */
 async function readNotice(page) {
-  const dialog = page.locator(".overlay .card.dialog").last();
-  await dialog.waitFor({ state: "visible" });
-  const text = (await dialog.innerText()).trim();
-  const ok = dialog.locator("button");
-  if (await ok.count()) await ok.first().click();
+  const card = page.locator(".overlay .card.dialog").filter({ hasNot: page.locator("form") }).last();
+  await card.waitFor({ state: "visible", timeout: 15000 });
+  const text = (await card.innerText()).trim();
+  await card.locator("button").first().click();
   return text;
 }
 
@@ -299,17 +322,24 @@ check(
 
 // ══ 4. REFUSALS ═══════════════════════════════════════════════════════════════════════════════
 
-for (const [fixture, what] of [
-  ["sample.webp", "a real WEBP (nativeImage cannot decode one)"],
-  ["corrupt.jpg", "a file with a JPEG magic that is not an image"],
+// 🔴 EACH REFUSAL IS CHECKED AGAINST ITS OWN EXPECTED SENTENCE, not one loose regex. My first
+// attempt asserted /JPEG|PNG|HEIC/ for both — which the WEBP message satisfies and the corrupt-file
+// message ("That file is not a readable image") does not. A single pattern covering two different
+// refusals is either too narrow for one of them or too loose to mean anything.
+for (const [fixture, what, expected] of [
+  ["sample.webp", "a real WEBP (nativeImage cannot decode one)", /Choose a JPEG or PNG image.*HEIC/i],
+  ["corrupt.jpg", "a file with a JPEG magic that is not an image", /not a readable image/i],
 ]) {
   await aimPicker(app, fixture);
   await page.locator('[data-testid="photo-add"]').click();
-  const text = await readNotice(page);
-  check(text.length > 0, `${what}: the owner is told something`);
+  const text = await readError(page);
+  check(text.length > 0, `${what}: the owner is told something — "${text.replace(/\s+/g, " ").slice(0, 90)}"`);
+  // 🔴 THE MESSAGE MUST BE THIS REFUSAL, not whatever dialog was on screen. The form's own text
+  // cannot satisfy this, which is exactly what the first version of these checks failed to require.
+  check(expected.test(text), `${what}: and it is THIS refusal, by its own words`);
   check(
-    !/ENOENT|Error:|nativeImage|undefined|[A-Za-z]:\\\\/.test(text),
-    `${what}: the message carries no stack, path or internal name — "${text.replace(/\s+/g, " ").slice(0, 80)}"`,
+    !/ENOENT|Error:|nativeImage|undefined|[A-Za-z]:\\\\|الاسم بالعربية/.test(text),
+    `${what}: no stack, no path, no internal name — and not the form's own labels`,
   );
   const unchanged = photoRows(product.id);
   check(
