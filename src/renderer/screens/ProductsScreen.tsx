@@ -11,19 +11,160 @@
  * no round trip. The normalisation itself is the shared domain function, so the rule the operator
  * experiences is the same one the tests assert.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BASE_UNITS, FRACTIONAL_SALE_UNITS } from "../../domain/catalog";
 import { matchesSearch } from "../../domain/arabic";
-import type { AdminProductDto, ProductDraftRequest } from "../../shared/ipcContract";
+import type { AdminProductDto, CategoryDto, ProductDraftRequest } from "../../shared/ipcContract";
 import { call, errorText, pos } from "../api";
 import { useT } from "../i18n";
+import {
+  EMPTY_MASTER_FORM,
+  type MasterForm,
+  categoryChoices,
+  masterFormOf,
+  masterPatchFrom,
+} from "../productMasterForm";
+import { type ThumbnailCache, allUrls, thumbnailsToFetch, urlsToRevoke } from "../thumbnails";
 
 type Editing = { readonly mode: "add" } | { readonly mode: "edit"; readonly product: AdminProductDto };
 
 const EMPTY: ProductDraftRequest = { nameAr: "", nameEn: null, sku: null, price: "", baseUnit: "piece" };
 
+/**
+ * The SELLING fields of an existing product.
+ *
+ * 🔴 IT CARRIES NO `master`, AND THAT IS THE CONTRACT. The enrichment group is built separately, as
+ * a DIFF of what the owner actually changed (`masterPatchFrom`) — so a save that touched no
+ * enrichment field sends no enrichment group at all. Putting the six fields here would resend them
+ * on every save and silently revert anything changed elsewhere since the form opened.
+ */
 function draftOf(p: AdminProductDto): ProductDraftRequest {
   return { nameAr: p.nameAr, nameEn: p.nameEn, sku: p.sku, price: p.priceDecimal, baseUnit: p.baseUnit };
+}
+
+/**
+ * Fetches the thumbnails of the rows on screen, and nothing else.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 EVERY DECISION HERE IS MADE BY `thumbnailsToFetch`, NOT BY THIS HOOK. The six rules — no
+ * photo, offscreen, cached, replaced, in flight, failed — live in src/renderer/thumbnails.ts
+ * because this repository has no DOM harness and a rule inside an effect is a rule nothing can
+ * test. This hook is the wiring: it asks what to fetch, fetches it, and revokes what is no longer
+ * reachable.
+ *
+ * 🔴 AND IT REVOKES. `URL.createObjectURL` pins its blob until `revokeObjectURL`, so a shop left on
+ * this screen all day, replacing photos, would otherwise accumulate every version it ever showed.
+ * `urlsToRevoke` names the ones nothing can reach after a cache update; `allUrls` is what unmount
+ * releases.
+ *
+ * 🔴 A BROKEN PHOTO COSTS ONE FAILED READ. A corrupt blob is refused by `productImageBytes`'s
+ * checksum guard — by design — and the row records `failed` at that version, which rule 6 then
+ * never retries. Without that, one bad photo would re-request on every render for as long as the
+ * screen is open and the row would never settle.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+function useThumbnails(visible: readonly AdminProductDto[]): ThumbnailCache {
+  const [cache, setCache] = useState<ThumbnailCache>(new Map());
+  // Read inside the effect without making it a dependency: re-running on every cache change is
+  // exactly the render loop the `loading`/`failed` states exist to prevent.
+  const latest = useRef(cache);
+  latest.current = cache;
+
+  useEffect(() => {
+    // Every row handed to this hook is on screen. A virtualised list would pass only the rendered
+    // window; today the table renders what it filters, so `shown` IS the visible set.
+    const wanted = thumbnailsToFetch(visible, new Set(visible.map((p) => p.id)), latest.current);
+    if (wanted.length === 0) return;
+    let live = true;
+
+    // Mark them loading in one update, so a second render cannot start the same fetch again.
+    setCache((prev) => {
+      const next = new Map(prev);
+      for (const r of wanted) next.set(r.productId, { kind: "loading", version: r.version });
+      return next;
+    });
+
+    for (const request of wanted) {
+      void (async () => {
+        try {
+          const got = await call(pos().getProductImageBytes({ imageId: request.imageId }));
+          if (!live) return;
+          // A copy into a fresh buffer: `Uint8Array<ArrayBufferLike>` is what crosses the bridge,
+          // and `BlobPart` wants a plain ArrayBuffer view. The copy is a few tens of kilobytes and
+          // it also decouples the blob from whatever backed the IPC payload.
+          const url = URL.createObjectURL(new Blob([new Uint8Array(got.bytes).slice()], { type: got.meta.mime }));
+          setCache((prev) => {
+            const next = new Map(prev);
+            next.set(request.productId, { kind: "ready", version: request.version, url });
+            for (const stale of urlsToRevoke(prev, next)) URL.revokeObjectURL(stale);
+            return next;
+          });
+        } catch {
+          if (!live) return;
+          // 🔴 The placeholder, remembered. Not rethrown: one unreadable photo must not take down
+          // the products screen, and the row below falls back to the ordinary empty state.
+          setCache((prev) => {
+            const next = new Map(prev);
+            next.set(request.productId, { kind: "failed", version: request.version });
+            for (const stale of urlsToRevoke(prev, next)) URL.revokeObjectURL(stale);
+            return next;
+          });
+        }
+      })();
+    }
+
+    return () => {
+      live = false;
+    };
+  }, [visible]);
+
+  // On unmount, release everything this screen created.
+  useEffect(
+    () => () => {
+      for (const url of allUrls(latest.current)) URL.revokeObjectURL(url);
+    },
+    [],
+  );
+
+  return cache;
+}
+
+/** One product's photo cell: a thumbnail, or the neutral placeholder every other state falls back to. */
+function Thumb(props: { product: AdminProductDto; cache: ThumbnailCache; label: (k: string) => string }) {
+  const state = props.cache.get(props.product.id);
+  if (!props.product.hasImage) {
+    return <span className="thumb thumb-empty" aria-label={props.label("products.noPhoto")} title={props.label("products.noPhoto")} data-testid="thumb-empty" />;
+  }
+  if (state?.kind === "ready") {
+    return (
+      <img
+        className="thumb"
+        src={state.url}
+        alt={props.product.nameAr}
+        loading="lazy"
+        data-testid="thumb-image"
+        // 🔴 Even a photo that LOADED can fail to decode in the browser. The fallback is the same
+        // placeholder, applied by swapping the class rather than removing the element, so the row
+        // height does not jump as the list renders.
+        onError={(e) => {
+          e.currentTarget.classList.add("thumb-broken");
+          e.currentTarget.removeAttribute("src");
+        }}
+      />
+    );
+  }
+  if (state?.kind === "failed") {
+    return (
+      <span
+        className="thumb thumb-broken"
+        aria-label={props.label("products.photoBroken")}
+        title={props.label("products.photoBroken")}
+        data-testid="thumb-failed"
+      />
+    );
+  }
+  // No state yet, or loading. The same box, so nothing reflows when the bytes arrive.
+  return <span className="thumb thumb-loading" aria-hidden="true" data-testid="thumb-loading" />;
 }
 
 export function ProductsScreen() {
@@ -33,6 +174,9 @@ export function ProductsScreen() {
   const [editing, setEditing] = useState<Editing | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [categories, setCategories] = useState<CategoryDto[]>([]);
+  const [brands, setBrands] = useState<string[]>([]);
+  const [managing, setManaging] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -41,16 +185,39 @@ export function ProductsScreen() {
       setProducts([]);
       setError(errorText(e));
     }
+    // 🔴 The two support reads are SEPARATE and non-fatal. A terminal that cannot answer them still
+    // shows the products list: the Category chooser falls back to "no category" and the Brand field
+    // to a plain text box, which is exactly what they are without suggestions.
+    try {
+      setCategories(await call(pos().listCategories()));
+    } catch {
+      setCategories([]);
+    }
+    try {
+      setBrands(await call(pos().listBrands()));
+    } catch {
+      setBrands([]);
+    }
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
 
+  const categoryName = useCallback(
+    (id: string | null) => (id === null ? null : (categories.find((c) => c.id === id)?.nameAr ?? null)),
+    [categories],
+  );
+
   const shown = useMemo(() => {
     if (!products) return [];
-    return products.filter((p) => matchesSearch([p.nameAr, p.nameEn, p.sku], query));
+    // 🔴 THE BARCODE IS SEARCHABLE, and it is the canonical stored form that is matched — a cashier
+    // scanning a box types/scans 13 digits and finds the product. `matchesSearch` is the shared
+    // domain function, so the rule the operator experiences is the one the tests assert.
+    return products.filter((p) => matchesSearch([p.nameAr, p.nameEn, p.sku, p.barcode], query));
   }, [products, query]);
+
+  const thumbs = useThumbnails(shown);
 
   if (products === null) return <div className="center muted">{t("common.loading")}</div>;
 
@@ -67,12 +234,16 @@ export function ProductsScreen() {
           aria-label={t("products.search")}
           data-testid="product-search"
         />
+        <button className="btn" onClick={() => setManaging(true)} data-testid="manage-categories">
+          {t("form.categoryManage")}
+        </button>
         <button className="btn primary" onClick={() => setEditing({ mode: "add" })} data-testid="add-product">
           {t("action.add")}
         </button>
       </header>
 
       <p className="muted small">{t("products.searchHint")}</p>
+      <p className="muted small">{t("products.searchBarcodeHint")}</p>
       <p className="muted small" data-testid="product-count">
         {/* 🔴 EACH NUMBER ISOLATED. Interpolated bare into RTL text, "0 … · 0 …" reordered until
             the two digits sat together and the separator was unreadable. */}
@@ -97,8 +268,13 @@ export function ProductsScreen() {
         <table className="history-table admin-table">
           <thead>
             <tr>
+              {/* 🔴 A NARROW FIXED COLUMN, not a card. This is a fast shop-management screen: the
+                  photo is there to let the owner recognise an item at a glance, and a thumbnail
+                  wide enough to admire would halve the number of rows on screen. */}
+              <th className="col-thumb">{t("products.colPhoto")}</th>
               <th>{t("products.colName")}</th>
               <th>{t("products.colSku")}</th>
+              <th>{t("products.colCategory")}</th>
               <th className="num">{t("products.colPrice")}</th>
               <th>{t("products.colUnit")}</th>
               <th>{t("products.colState")}</th>
@@ -108,6 +284,12 @@ export function ProductsScreen() {
           <tbody>
             {shown.map((p) => (
               <tr key={p.id} className={p.isActive ? undefined : "row-inactive"} data-testid="product-row">
+                <td className="col-thumb">
+                  {/* An INACTIVE product keeps its thumbnail: it is still on this screen and still
+                      identifiable by its photo. `row-inactive` dims the whole row, which is the
+                      state the operator needs to read, not the absence of a picture. */}
+                  <Thumb product={p} cache={thumbs} label={t} />
+                </td>
                 <td>
                   <span dir="auto">{p.nameAr}</span>
                   {p.nameEn && (
@@ -122,7 +304,27 @@ export function ProductsScreen() {
                     {t(p.source === "manual" ? "products.source.manual" : "products.source.import")}
                   </span>
                 </td>
-                <td>{p.sku ? <bdi dir="ltr">{p.sku}</bdi> : "—"}</td>
+                <td>
+                  {/* SKU and barcode are separate identifiers and both stay LTR-isolated: a bare
+                      digit run next to Arabic reorders, which is how a 13-digit code becomes
+                      unreadable. SKU first because it is the shop's own key. */}
+                  {p.sku ? <bdi dir="ltr">{p.sku}</bdi> : <span className="muted">—</span>}
+                  {p.barcode && (
+                    <>
+                      <br />
+                      <bdi dir="ltr" className="muted small" data-testid="row-barcode">
+                        {p.barcode}
+                      </bdi>
+                    </>
+                  )}
+                </td>
+                <td>
+                  {categoryName(p.categoryId) ? (
+                    <span dir="auto">{categoryName(p.categoryId)}</span>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
                 <td className="num">
                   {/* One isolated run: amount and currency together, never split. */}
                   <bdi dir="ltr">{`${p.priceDecimal} ${p.price.currency}`}</bdi>
@@ -141,6 +343,13 @@ export function ProductsScreen() {
                   <span className={p.isActive ? "badge ok" : "badge state"}>
                     {t(p.isActive ? "products.active" : "products.inactive")}
                   </span>
+                  {/* Only when true. A column that said "not online" on every row would be noise on
+                      a screen whose default is a local-only product. */}
+                  {p.isOnlineVisible && (
+                    <span className="badge faint" data-testid="badge-online">
+                      {t("products.online")}
+                    </span>
+                  )}
                 </td>
                 <td className="admin-actions">
                   <button className="btn small" onClick={() => setEditing({ mode: "edit", product: p })}>
@@ -168,9 +377,23 @@ export function ProductsScreen() {
         </table>
       )}
 
+      {managing && (
+        <CategoryManager
+          categories={categories}
+          onClose={() => setManaging(false)}
+          onChanged={async (message) => {
+            setNotice(message);
+            await reload();
+          }}
+          onError={setError}
+        />
+      )}
+
       {editing && (
         <ProductForm
           editing={editing}
+          categories={categories}
+          brands={brands}
           onClose={() => setEditing(null)}
           onSaved={async (message) => {
             setEditing(null);
@@ -210,6 +433,8 @@ export function ProductsScreen() {
  */
 function ProductForm(props: {
   editing: Editing;
+  categories: readonly CategoryDto[];
+  brands: readonly string[];
   onClose: () => void;
   onSaved: (message: string) => void | Promise<void>;
   onError: (message: string) => void;
@@ -221,24 +446,59 @@ function ProductForm(props: {
   );
   const [isActive, setIsActive] = useState(props.editing.mode === "edit" ? props.editing.product.isActive : true);
   const [busy, setBusy] = useState(false);
+  /**
+   * 🔴 THE ORIGINAL IS KEPT, NOT JUST THE CURRENT VALUES, because the patch is a DIFF. Holding only
+   * the edited state would leave no way to tell "the owner typed this brand" from "the brand was
+   * already this" — and the first produces a patch key while the second must produce nothing.
+   */
+  const original = useMemo(
+    () => (props.editing.mode === "edit" ? masterFormOf(props.editing.product) : EMPTY_MASTER_FORM),
+    [props.editing],
+  );
+  const [master, setMaster] = useState<MasterForm>(original);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoGone, setPhotoGone] = useState(false);
 
   const set = (patch: Partial<ProductDraftRequest>) => setDraft((d) => ({ ...d, ...patch }));
+  const setM = (patch: Partial<MasterForm>) => setMaster((m) => ({ ...m, ...patch }));
+
+  const product = props.editing.mode === "edit" ? props.editing.product : null;
+  const hasPhoto = product !== null && product.hasImage && !photoGone;
 
   const submit = async () => {
     if (busy) return;
     setBusy(true);
     try {
+      // 🔴 ONLY WHAT CHANGED. `masterPatchFrom` returns undefined when the owner touched no
+      // enrichment field, and the optional key then carries nothing at all — so this save is
+      // indistinguishable from an import's, and every stored enrichment value is left exactly as
+      // it is. See src/renderer/productMasterForm.ts for why a snapshot would be wrong.
+      const patch = masterPatchFrom(original, master);
+      const body: ProductDraftRequest = patch === undefined ? draft : { ...draft, master: patch };
       if (props.editing.mode === "edit") {
-        await call(pos().updateProduct({ id: props.editing.product.id, draft, isActive }));
+        await call(pos().updateProduct({ id: props.editing.product.id, draft: body, isActive }));
         await props.onSaved(t("msg.updated"));
       } else {
-        await call(pos().createProduct({ draft }));
+        await call(pos().createProduct({ draft: body }));
         await props.onSaved(t("msg.created"));
       }
     } catch (e) {
       props.onError(errorText(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const removePhoto = async () => {
+    if (product === null || photoBusy) return;
+    setPhotoBusy(true);
+    try {
+      await call(pos().removeProductImage({ productId: product.id }));
+      setPhotoGone(true);
+    } catch (e) {
+      props.onError(errorText(e));
+    } finally {
+      setPhotoBusy(false);
     }
   };
 
@@ -252,6 +512,11 @@ function ProductForm(props: {
         }}
       >
         <h2>{t(isEdit ? "form.editTitle" : "form.addTitle")}</h2>
+
+        {/* 🔴 THREE SECTIONS, NOT A WALL OF FIELDS. What a merchant adding a product needs is at
+            the top; what only the website needs is below, clearly labelled as such. The note says
+            so in words, because a field being optional is not visible from a form. */}
+        <h3 className="form-section">{t("form.secBasic")}</h3>
 
         <label className="field">
           <span>
@@ -275,6 +540,65 @@ function ProductForm(props: {
         <label className="field">
           <span>{t("form.sku")}</span>
           <input dir="ltr" value={draft.sku ?? ""} onChange={(e) => set({ sku: e.target.value })} />
+        </label>
+
+        {/* 🔴 SEPARATE FROM SKU, by decision. The SKU is the shop's own key; the barcode is the
+            manufacturer's. `dir="ltr"` because a digit run inside an RTL form reorders, and
+            `inputMode="numeric"` without forbidding letters, because Code 128 payloads are not all
+            digits and their case is significant. Normalisation belongs to the one barcode module in
+            main — a screen must never pre-process a barcode, or a typed UPC-A and a scanned EAN-13
+            would reach storage as two products. */}
+        <label className="field">
+          <span>{t("form.barcode")}</span>
+          <input
+            dir="ltr"
+            inputMode="numeric"
+            value={master.barcode}
+            onChange={(e) => setM({ barcode: e.target.value })}
+            data-testid="field-barcode"
+          />
+          <em className="muted small">{t("form.barcodeHint")}</em>
+        </label>
+
+        <label className="field">
+          <span>{t("form.category")}</span>
+          <select
+            value={master.categoryId}
+            onChange={(e) => setM({ categoryId: e.target.value })}
+            data-testid="field-category"
+          >
+            <option value="">{t("form.categoryNone")}</option>
+            {/* 🔴 ACTIVE CATEGORIES, PLUS THIS PRODUCT'S OWN EVEN IF RETIRED — see
+                `categoryChoices`. Offering only active ones would show a product's retired category
+                as blank, and the first save would silently move it to "no category". */}
+            {categoryChoices(props.categories, master.categoryId).map(({ category, retired }) => (
+              <option key={category.id} value={category.id}>
+                {category.nameAr}
+                {retired ? ` — ${t("form.categoryRetired")}` : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {/* 🔴 FREE TEXT WITH SUGGESTIONS, which is the approved architecture and not a shortcut: a
+            hardware shop carries hundreds of brands arriving as supplier spellings, and normalising
+            them would mean building category management twice plus a merge tool. A `datalist`
+            suggests without constraining, so a brand nobody has typed yet is still typable. */}
+        <label className="field">
+          <span>{t("form.brand")}</span>
+          <input
+            list="brand-suggestions"
+            dir="auto"
+            value={master.brand}
+            onChange={(e) => setM({ brand: e.target.value })}
+            data-testid="field-brand"
+          />
+          <datalist id="brand-suggestions">
+            {props.brands.map((b) => (
+              <option key={b} value={b} />
+            ))}
+          </datalist>
+          <em className="muted small">{t("form.brandHint")}</em>
         </label>
 
         <label className="field">
@@ -317,6 +641,89 @@ function ProductForm(props: {
           </label>
         )}
 
+        <h3 className="form-section">{t("form.secOnline")}</h3>
+        <p className="muted small">{t("form.localOnly")}</p>
+
+        {/* A description is PROSE, so it is a textarea and its line breaks survive to the website —
+            `validateProductMaster` trims only the ends for exactly this reason. */}
+        <label className="field">
+          <span>{t("form.descAr")}</span>
+          <textarea
+            dir="rtl"
+            lang="ar"
+            rows={3}
+            value={master.descriptionAr}
+            onChange={(e) => setM({ descriptionAr: e.target.value })}
+            data-testid="field-descAr"
+          />
+        </label>
+
+        <label className="field">
+          <span>{t("form.descEn")}</span>
+          <textarea
+            dir="ltr"
+            lang="en"
+            rows={3}
+            value={master.descriptionEn}
+            onChange={(e) => setM({ descriptionEn: e.target.value })}
+            data-testid="field-descEn"
+          />
+        </label>
+
+        <label className="field row-field">
+          <input
+            type="checkbox"
+            checked={master.isOnlineVisible}
+            onChange={(e) => setM({ isOnlineVisible: e.target.checked })}
+            data-testid="field-online"
+          />
+          <span>{t("form.onlineVisible")}</span>
+        </label>
+        <p className="muted small">{t("form.onlineHint")}</p>
+
+        <h3 className="form-section">{t("form.secPhoto")}</h3>
+
+        {/* 🔴 THE PHOTO STATE IS VISIBLE HERE, never behind a second dialog. Opening a product that
+            has a photo must show it immediately; one that has none must show a deliberate empty
+            state rather than nothing at all.
+
+            🔴 AND THE ACTIONS TELL THE TRUTH. The desktop picker is slice F; until it exists the
+            channel answers NOT_AVAILABLE, so Add/Replace are DISABLED with the reason written
+            underneath. A button that looks available and then fails is worse than one that says it
+            is not ready. */}
+        <div className="photo-panel" data-testid="photo-panel">
+          {product === null ? (
+            <p className="muted" data-testid="photo-new-product">
+              {t("form.photoNone")}
+            </p>
+          ) : hasPhoto ? (
+            <ProductPhoto productId={product.id} alt={product.nameAr} label={t} />
+          ) : (
+            <div className="photo-empty" data-testid="photo-empty">
+              <span className="thumb thumb-empty thumb-big" aria-hidden="true" />
+              <p className="muted">{t("form.photoNone")}</p>
+            </div>
+          )}
+
+          <div className="tool-actions">
+            <button className="btn" type="button" disabled title={t("form.photoSoon")} data-testid="photo-add">
+              {t(hasPhoto ? "form.photoReplace" : "form.photoAdd")}
+            </button>
+            {hasPhoto && (
+              <button
+                className="btn danger ghost"
+                type="button"
+                disabled={photoBusy}
+                onClick={() => void removePhoto()}
+                data-testid="photo-remove"
+              >
+                {t("form.photoRemove")}
+              </button>
+            )}
+          </div>
+          <p className="muted small">{t("form.photoSoon")}</p>
+        </div>
+
         <div className="tool-actions">
           <button className="btn primary" type="submit" disabled={busy} data-testid="save-product">
             {t("action.save")}
@@ -326,6 +733,190 @@ function ProductForm(props: {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/**
+ * The full-size preview inside the Product Master form.
+ *
+ * 🔴 IT ASKS FOR THE PHOTO BY NAME, like every other read of image bytes. It cannot be handed them
+ * by the product row — `AdminProductDto` carries a flag, an id and a content hash, never a blob —
+ * so it fetches the metadata, then the bytes, then revokes its object URL on the way out.
+ *
+ * A failure shows the ordinary empty state with the reason beside it. One unreadable photo must not
+ * take the form down: the owner still needs to fix the price.
+ */
+function ProductPhoto(props: { productId: string; alt: string; label: (k: string) => string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    let created: string | null = null;
+    void (async () => {
+      try {
+        const meta = await call(pos().getProductImageMeta({ productId: props.productId }));
+        if (!live) return;
+        if (meta === null) {
+          setFailed(true);
+          return;
+        }
+        const got = await call(pos().getProductImageBytes({ imageId: meta.id }));
+        if (!live) return;
+        created = URL.createObjectURL(new Blob([new Uint8Array(got.bytes).slice()], { type: got.meta.mime }));
+        setUrl(created);
+      } catch {
+        if (live) setFailed(true);
+      }
+    })();
+    return () => {
+      live = false;
+      // 🔴 Revoked whichever way this unmounted, including mid-fetch: the blob is pinned until it is.
+      if (created !== null) URL.revokeObjectURL(created);
+    };
+  }, [props.productId]);
+
+  if (failed) {
+    return (
+      <div className="photo-empty" data-testid="photo-failed">
+        <span className="thumb thumb-broken thumb-big" aria-hidden="true" />
+        <p className="muted">{props.label("form.photoFailed")}</p>
+      </div>
+    );
+  }
+  if (url === null) {
+    return <div className="photo-empty" data-testid="photo-loading"><span className="thumb thumb-loading thumb-big" aria-hidden="true" /></div>;
+  }
+  return <img className="photo-preview" src={url} alt={props.alt} data-testid="photo-preview" />;
+}
+
+/**
+ * Category management — the owner's list.
+ *
+ * 🔴 DEACTIVATE IS THE ORDINARY ACT AND DELETE IS THE EXCEPTION, and the layout says so: Delete is
+ * ghost-danger and only appears where it can actually succeed. A category in use carries a badge
+ * instead, because the service refuses that delete and a button that always fails is a trap.
+ *
+ * There are NO seeded categories anywhere in this product. The shop's list is the shop's.
+ */
+function CategoryManager(props: {
+  categories: readonly CategoryDto[];
+  onClose: () => void;
+  onChanged: (message: string) => void | Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const { t } = useT();
+  const [nameAr, setNameAr] = useState("");
+  const [nameEn, setNameEn] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const run = async (op: () => Promise<unknown>, message: string) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await op();
+      await props.onChanged(message);
+    } catch (e) {
+      props.onError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="overlay">
+      <div className="card dialog" data-testid="category-manager">
+        <h2>{t("cat.title")}</h2>
+
+        <form
+          className="cat-add"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void run(async () => {
+              await call(pos().createCategory({ nameAr, nameEn: nameEn.trim() === "" ? null : nameEn }));
+              setNameAr("");
+              setNameEn("");
+            }, t("cat.created"));
+          }}
+        >
+          <label className="field">
+            <span>{t("cat.nameAr")}</span>
+            <input dir="rtl" lang="ar" value={nameAr} onChange={(e) => setNameAr(e.target.value)} required data-testid="cat-nameAr" />
+          </label>
+          <label className="field">
+            <span>{t("cat.nameEn")}</span>
+            <input dir="ltr" lang="en" value={nameEn} onChange={(e) => setNameEn(e.target.value)} />
+          </label>
+          <button className="btn primary" type="submit" disabled={busy} data-testid="cat-add">
+            {t("cat.add")}
+          </button>
+        </form>
+
+        {props.categories.length === 0 ? (
+          <p className="center muted" data-testid="cat-empty">
+            {t("cat.empty")}
+          </p>
+        ) : (
+          <table className="history-table admin-table">
+            <tbody>
+              {props.categories.map((c) => (
+                <tr key={c.id} className={c.isActive ? undefined : "row-inactive"} data-testid="cat-row">
+                  <td>
+                    <span dir="auto">{c.nameAr}</span>
+                    {c.nameEn && (
+                      <>
+                        {" "}
+                        <span className="muted" dir="auto">
+                          ({c.nameEn})
+                        </span>
+                      </>
+                    )}
+                    {!c.isActive && <span className="badge state">{t("form.categoryRetired")}</span>}
+                  </td>
+                  <td className="admin-actions">
+                    <button
+                      className={c.isActive ? "btn danger ghost small" : "btn small"}
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        void run(
+                          () => call(pos().setCategoryActive({ categoryId: c.id, isActive: !c.isActive })),
+                          t("cat.renamed"),
+                        )
+                      }
+                    >
+                      {t(c.isActive ? "action.deactivate" : "action.activate")}
+                    </button>
+                    {/* 🔴 Delete is offered, and the service is the authority on whether it may
+                        proceed: a category in use is refused with CATEGORY_IN_USE and the owner is
+                        told to deactivate or move its products. The renderer does not pre-judge it,
+                        because it does not know the count — and guessing would either hide a
+                        legitimate delete or promise one that cannot happen. */}
+                    <button
+                      className="btn danger ghost small"
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void run(() => call(pos().deleteCategory({ categoryId: c.id })), t("cat.deleted"))}
+                      data-testid="cat-delete"
+                    >
+                      {t("action.delete")}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <p className="muted small">{t("cat.deleteBlocked")}</p>
+
+        <div className="tool-actions">
+          <button className="btn ghost" type="button" onClick={props.onClose} data-testid="cat-close">
+            {t("action.close")}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
