@@ -378,7 +378,13 @@ export function ProductsScreen() {
                   )}
                 </td>
                 <td className="admin-actions">
-                  <button className="btn small" onClick={() => setEditing({ mode: "edit", product: p })}>
+                  {/* A testid because E2E selectors are never visible text — the terminal's
+                      default language is Arabic, and "Edit" is not what this button says. */}
+                  <button
+                    className="btn small"
+                    onClick={() => setEditing({ mode: "edit", product: p })}
+                    data-testid="product-edit"
+                  >
                     {t("action.edit")}
                   </button>
                   {/* Deactivating hides a product from sale: ghost-danger, not a twin of Edit. */}
@@ -431,6 +437,9 @@ export function ProductsScreen() {
             await reload();
           }}
           onError={setError}
+          onPhotoChanged={() => {
+            void reload();
+          }}
         />
       )}
 
@@ -468,6 +477,15 @@ function ProductForm(props: {
   onClose: () => void;
   onSaved: (message: string) => void | Promise<void>;
   onError: (message: string) => void;
+  /**
+   * A photo was added, replaced or removed.
+   *
+   * 🔴 A PHOTO IS NOT PART OF THE FORM'S DRAFT. It is an owner mutation that commits the moment the
+   * picker returns, so it is already in the ledger whether or not the owner then presses Save — and
+   * the list BEHIND this dialog is showing a stale thumbnail until something reloads it. Cancelling
+   * the form does not undo a photo, and nothing here should imply it does.
+   */
+  onPhotoChanged?: () => void;
 }) {
   const { t, unit } = useT();
   const isEdit = props.editing.mode === "edit";
@@ -488,6 +506,15 @@ function ProductForm(props: {
   const [master, setMaster] = useState<MasterForm>(original);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoGone, setPhotoGone] = useState(false);
+  /**
+   * 🔴 THE CONTENT HASH OF THE PHOTO SET IN THIS DIALOG, and it exists for cache invalidation.
+   *
+   * `ProductPhoto` fetches on its `version`, and after a REPLACE the product id is unchanged — so
+   * without a new version the effect would not re-run and the owner would be looking at the photo
+   * they just replaced, with no way to tell. `imageVersion` is the stored SHA-256 (slice E1), so a
+   * different photo is always a different version and the same photo never refetches.
+   */
+  const [setVersion, setSetVersion] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   /**
@@ -505,7 +532,10 @@ function ProductForm(props: {
   const setM = (patch: Partial<MasterForm>) => setMaster((m) => ({ ...m, ...patch }));
 
   const product = props.editing.mode === "edit" ? props.editing.product : null;
-  const hasPhoto = product !== null && product.hasImage && !photoGone;
+  // A photo just added to a product that had none counts, which is why this is not `product.hasImage`
+  // alone — the row in the list behind the dialog has not been reloaded yet.
+  const hasPhoto = product !== null && (product.hasImage || setVersion !== null) && !photoGone;
+  const photoVersion = setVersion ?? product?.imageVersion ?? null;
 
   const submit = async () => {
     if (busy) return;
@@ -531,12 +561,36 @@ function ProductForm(props: {
     }
   };
 
+  /**
+   * Add or replace the photo. MAIN runs the picker; this names a product and nothing else.
+   *
+   * A cancelled dialog answers null — not an error, and nothing was written, so the only correct
+   * response is to leave the form exactly as it was.
+   */
+  const choosePhoto = async () => {
+    if (product === null || photoBusy) return;
+    setPhotoBusy(true);
+    try {
+      const meta = await call(pos().setProductImage({ productId: product.id }));
+      if (meta === null) return;
+      setPhotoGone(false);
+      setSetVersion(meta.sha256Hex);
+      props.onPhotoChanged?.();
+    } catch (e) {
+      props.onError(errorText(e));
+    } finally {
+      setPhotoBusy(false);
+    }
+  };
+
   const removePhoto = async () => {
     if (product === null || photoBusy) return;
     setPhotoBusy(true);
     try {
       await call(pos().removeProductImage({ productId: product.id }));
       setPhotoGone(true);
+      setSetVersion(null);
+      props.onPhotoChanged?.();
     } catch (e) {
       props.onError(errorText(e));
     } finally {
@@ -734,7 +788,7 @@ function ProductForm(props: {
               <p className="muted">{t("form.photoNone")}</p>
             </div>
           ) : hasPhoto ? (
-            <ProductPhoto productId={product.id} alt={product.nameAr} label={t} />
+            <ProductPhoto productId={product.id} version={photoVersion} alt={product.nameAr} label={t} />
           ) : (
             <div className="photo-frame" data-testid="photo-empty">
               <PhotoGlyph />
@@ -743,7 +797,13 @@ function ProductForm(props: {
           )}
 
           <div className="tool-actions">
-            <button className="btn" type="button" disabled title={t("form.photoSoon")} data-testid="photo-add">
+            <button
+              className="btn"
+              type="button"
+              disabled={photoBusy || product === null}
+              onClick={() => void choosePhoto()}
+              data-testid="photo-add"
+            >
               {t(hasPhoto ? "form.photoReplace" : "form.photoAdd")}
             </button>
             {hasPhoto && (
@@ -758,7 +818,9 @@ function ProductForm(props: {
               </button>
             )}
           </div>
-          <p className="muted small">{t("form.photoSoon")}</p>
+          {/* What the picker will actually accept. Measured, not aspirational: nativeImage decodes
+              JPEG and PNG from a buffer and nothing else — not WEBP, not an iPhone's HEIC. */}
+          <p className="muted small">{t(product === null ? "form.photoAfterSave" : "form.photoFormats")}</p>
         </div>
         <h3 className="form-section">{t("form.secOnline")}</h3>
         <p className="muted small">{t("form.localOnly")}</p>
@@ -828,12 +890,16 @@ function ProductForm(props: {
  * A failure shows the ordinary empty state with the reason beside it. One unreadable photo must not
  * take the form down: the owner still needs to fix the price.
  */
-function ProductPhoto(props: { productId: string; alt: string; label: (k: string) => string }) {
+function ProductPhoto(props: { productId: string; version: string | null; alt: string; label: (k: string) => string }) {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let live = true;
+    // A new version is a new question: a photo that failed to load must not stay failed after it
+    // has been replaced with a good one.
+    setFailed(false);
+    setUrl(null);
     void (async () => {
       try {
         const meta = await call(pos().getProductImageMeta({ productId: props.productId }));
@@ -852,7 +918,9 @@ function ProductPhoto(props: { productId: string; alt: string; label: (k: string
     return () => {
       live = false;
     };
-  }, [props.productId]);
+    // 🔴 THE VERSION IS IN HERE ON PURPOSE. It is the stored content hash, so replacing a photo
+    // changes it and this refetches; re-rendering for any other reason does not.
+  }, [props.productId, props.version]);
 
   if (failed) {
     return (
