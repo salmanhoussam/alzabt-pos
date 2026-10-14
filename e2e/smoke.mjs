@@ -101,13 +101,23 @@ assert(surface.require === "undefined" && surface.process === "undefined" && sur
 // It went 19 -> 44 with manual invoices (migration 6), 45 with per-invoice tax (setInvoiceTax),
 // and 46 on 2026-10-10 with addInvoiceLines, then 53 with operator accounts (migration 8).
 //
+// 🔴 53 -> 63 with Product Master (migration 9). The ten: listCategories, listBrands,
+// createCategory, renameCategory, setCategoryActive, deleteCategory, getProductImageMeta,
+// getProductImageBytes, setProductImage, removeProductImage.
+//
+// 🔴 AND IT DID ITS JOB AGAIN. This assertion is what failed the first Windows gate of this
+// branch: the ten channels were in the contract, the handlers, the preload, the policy table and
+// three unit-level surface tests, and not here. Note what is still ABSENT from the list — no
+// channel takes image bytes or a filesystem path; setProductImage names a product and main owns
+// the file.
+//
 // 🔴 This assertion did its job. It FAILED the first Windows gate for migration 6, because the
 // channels had been added to the contract, the handlers, the preload and the unit-level surface
 // test — and not here. That is exactly why it is written by name: the one place that is not
 // derived from the contract is the one place a human has to notice.
 assert(
-  JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","addInvoiceLines","completeBootstrapSetup","createInvoiceDraft","createOperator","createProduct","createSale","currentCashier","discardInvoiceDraft","exportBackup","exportCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getInvoice","getSaleHistory","getSettings","getTodaySales","importCatalog","listCashiers","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","pickInvoiceLogo","printInvoice","removeInvoiceLine","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchInvoices","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorRole","setProductActive","setTerminalLanguage","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
-  `window.pos exposes exactly the 53 business methods, and nothing else (got ${surface.posKeys.length})`,
+  JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","addInvoiceLines","completeBootstrapSetup","createCategory","createInvoiceDraft","createOperator","createProduct","createSale","currentCashier","deleteCategory","discardInvoiceDraft","exportBackup","exportCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getInvoice","getProductImageBytes","getProductImageMeta","getSaleHistory","getSettings","getTodaySales","importCatalog","listBrands","listCashiers","listCategories","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","pickInvoiceLogo","printInvoice","removeInvoiceLine","removeProductImage","renameCategory","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchInvoices","setCategoryActive","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorRole","setProductActive","setProductImage","setTerminalLanguage","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
+  `window.pos exposes exactly the 63 business methods, and nothing else (got ${surface.posKeys.length})`,
 );
 await page.screenshot({ path: SHOTS + "01-login.png" });
 
