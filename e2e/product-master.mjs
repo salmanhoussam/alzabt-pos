@@ -149,6 +149,30 @@ async function addProduct(page, { nameAr, nameEn, sku, price, unit, barcode, bra
 
 const rows = (page) => page.locator('[data-testid="product-row"]');
 
+/**
+ * Is this element actually ON SCREEN — inside the window, with a real box?
+ *
+ * 🔴 MEASURED, NOT ASKED. `locator.isIntersectingViewport` does not exist in this playwright-core
+ * (it is an ElementHandle method), and the first run failed on exactly that. A rect against
+ * `innerWidth`/`innerHeight` is the thing being claimed anyway: an element inside a scrollable
+ * dialog always has a box, and whether that box is within the window is what "obvious on opening"
+ * means.
+ */
+const onScreen = (page, testid) =>
+  page.evaluate((id) => {
+    const el = document.querySelector(`[data-testid="${id}"]`);
+    if (el === null) return false;
+    const r = el.getBoundingClientRect();
+    return (
+      r.width > 0 &&
+      r.height > 0 &&
+      r.top >= 0 &&
+      r.left >= 0 &&
+      r.bottom <= window.innerHeight &&
+      r.right <= window.innerWidth
+    );
+  }, testid);
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 1 · Categories first — the owner's list, and a RETIRED one, which §W wants visible
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -180,11 +204,11 @@ await page.locator('[data-testid="photo-new-product"]').waitFor();
 await page.screenshot({ path: SHOTS + "PM2-add-product-sections.png" });
 // The same rule for Add: a merchant adding a product must see all three sections at once.
 assert(
-  await page.locator('[data-testid="photo-panel"]').isIntersectingViewport(),
+  await onScreen(page, "photo-panel"),
   "the photo section is visible on the Add form without scrolling",
 );
 assert(
-  await page.locator('[data-testid="save-product"]').isIntersectingViewport(),
+  await onScreen(page, "save-product"),
   "Save is visible on the Add form without scrolling",
 );
 assert(
@@ -321,17 +345,17 @@ assert(preview.box > 100, `the preview is large enough to judge (${preview.box}p
 // because the first green run was not good enough. Every selector passed while the installed
 // screenshot showed the Edit form ending at the Category field: the photo preview, the online
 // section and Save were all below the fold at the shop's real 1008x681. A DOM check cannot see
-// that; `isIntersectingViewport` can.
+// that; a measured rect can.
 assert(
-  await page.locator('[data-testid="photo-preview"]').isIntersectingViewport(),
+  await onScreen(page, "photo-preview"),
   "the photo preview is VISIBLE when Edit opens, not a scroll away",
 );
 assert(
-  await page.locator('[data-testid="save-product"]').isIntersectingViewport(),
+  await onScreen(page, "save-product"),
   "Save is visible without scrolling the dialog",
 );
 assert(
-  await page.locator('[data-testid="field-online"]').isIntersectingViewport(),
+  await onScreen(page, "field-online"),
   "the online-catalogue control is visible without scrolling",
 );
 // 🔴 Add/Replace is DISABLED and says why — the producer is slice F.
