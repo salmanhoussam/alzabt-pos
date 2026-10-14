@@ -10,8 +10,9 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { BrowserWindow, app, dialog, ipcMain, session } from "electron";
+import { BrowserWindow, app, dialog, ipcMain, nativeImage, session } from "electron";
 import { PosService, startupCatalog } from "../application/posService";
+import { PHOTO_EXTENSIONS, createProductPhotoPicker, electronCodec } from "./productPhoto";
 import { InvoiceService } from "../application/invoiceService";
 import { businessDateOf } from "../domain/businessDay";
 import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
@@ -178,6 +179,45 @@ function pickInvoiceLogo(): string | null {
   log.info("invoice-logo-chosen", { stored, bytes: statSync(path).size });
   return stored;
 }
+
+// ── The product photo producer (slice F) ───────────────────────────────────────────────────────
+//
+// 🔴 THE SAME SHAPE AS THE LOGO PICKER, FOR THE SAME REASON: the dialog runs in THIS process, the
+// renderer never names a path, and nothing but bytes crosses back. The difference is that a
+// product photo is DECODED and normalized before it is stored, because unlike the logo it goes
+// into the ledger itself and into every backup. See src/main/photoNormalize.ts for the measured
+// policy behind every number.
+
+/** Native image picker for a product photo. Returns the chosen path, or null when cancelled. */
+function chooseProductPhotoFile(): string | null {
+  if (!mainWindow) return null;
+  // Looked up on `dialog` at call time (not destructured) so the E2E test can stub it, exactly as
+  // `pickCatalogFile` does.
+  const picked = dialog.showOpenDialogSync(mainWindow, {
+    title: "Choose a product photo",
+    properties: ["openFile"],
+    filters: [{ name: "Image (JPEG, PNG)", extensions: [...PHOTO_EXTENSIONS] }],
+  });
+  return picked?.[0] ?? null;
+}
+
+const pickProductPhoto = createProductPhotoPicker({
+  chooseFile: chooseProductPhotoFile,
+  fileSize: (path) => statSync(path).size,
+  readFile: (path) => readFileSync(path),
+  codec: electronCodec(nativeImage),
+  // 🔴 FORWARDED, NOT CAPTURED. `log` is a `let` that starts as the null logger and is reassigned
+  // once the real file logger exists. Passing `log` here would bind the null one at module load,
+  // and every normalization line would vanish — the kind of silence that reads as "it worked".
+  log: {
+    info: (event, fields) => log.info(event, fields),
+    warn: (event, fields) => log.warn(event, fields),
+    error: (event, fields) => log.error(event, fields),
+    get file() {
+      return log.file;
+    },
+  },
+});
 
 /**
  * A stored logo name turned into a file URL, or null.
@@ -591,6 +631,7 @@ function startTill(): void {
   registerIpc(service, {
     invoices,
     pickInvoiceLogo,
+    pickProductPhoto,
     printInvoice: printInvoiceDocument,
     saveInvoicePdf: saveInvoicePdfFile,
     saveCatalogExport,
