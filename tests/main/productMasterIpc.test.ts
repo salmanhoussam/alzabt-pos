@@ -706,8 +706,10 @@ describe("product photos — the boundary, with no producer yet", () => {
   it("🔴 with NO producer wired, setProductImage fails CLOSED — it does not half-work", () => {
     withApp("owner", ({ ipc }) => {
       const product = newProduct(ipc);
-      // Slice D wires the authorization, the channel and the service. The `nativeImage` pipeline
-      // that can actually prove a file is an image is slice F; until then this refuses.
+      // 🔴 STILL TRUE AFTER SLICE F, and permanently so — what changed is why it matters. This is
+      // no longer "the producer does not exist yet"; it is a terminal where one is not WIRED, which
+      // every headless harness is and which slice H's LAN listener will be. A channel that
+      // half-worked without a producer would reach the service with nothing to give it.
       expect(code(ipc.setProductImage({ productId: product.id }))).toBe("NOT_AVAILABLE");
     });
   });

@@ -777,10 +777,11 @@ function ProductForm(props: {
             has a photo must show it immediately; one that has none must show a deliberate empty
             state rather than nothing at all.
 
-            🔴 AND THE ACTIONS TELL THE TRUTH. The desktop picker is slice F; until it exists the
-            channel answers NOT_AVAILABLE, so Add/Replace are DISABLED with the reason written
-            underneath. A button that looks available and then fails is worse than one that says it
-            is not ready. */}
+            🔴 AND THE ACTIONS TELL THE TRUTH. Through E2.1 that meant Add/Replace were DISABLED
+            with the reason written underneath, because the channel answered NOT_AVAILABLE and a
+            button that looks available and then fails is worse than one that admits it. Slice F
+            built the producer, so the same principle now means the opposite: the buttons work, and
+            the note under them says what the picker will actually accept. */}
         <div className="photo-panel" data-testid="photo-panel">
           {product === null ? (
             <div className="photo-frame" data-testid="photo-new-product">

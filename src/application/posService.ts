@@ -1319,9 +1319,11 @@ export class PosService {
    * 🔴 AND THIS METHOD IS NOT THE VALIDATOR. It checks what it can cheaply prove — a known MIME, a
    * non-empty buffer under the cap, positive dimensions, and that the product exists — and it
    * computes the checksum ITSELF so no caller can supply a wrong one. What it cannot do is decode
-   * the image; proving these bytes really are a JPEG of these dimensions is the producer's job, and
-   * until slice F exists there is no producer. The cap is a backstop against a 50 MB phone photo
-   * reaching SQLite, not a substitute for decoding.
+   * the image; proving these bytes really are a JPEG of these dimensions is the producer's job —
+   * `src/main/photoNormalize.ts`, which decodes through Electron's `nativeImage` and refuses
+   * anything that comes back empty. The cap here is a backstop against a 50 MB phone photo
+   * reaching SQLite, not a substitute for decoding, and it is deliberately looser than the
+   * producer's own output cap so it never fires when the producer is working.
    * ════════════════════════════════════════════════════════════════════════════════════════════════
    */
   setProductPrimaryImage(input: {

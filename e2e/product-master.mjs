@@ -492,8 +492,12 @@ await page.locator('[data-testid="field-online"]').scrollIntoViewIfNeeded();
 assert(await onScreen(page, "field-online"), "the online-catalogue control is reachable by scrolling");
 await page.screenshot({ path: SHOTS + "PM10-online-catalogue-section.png" });
 log("PM10 — the online catalogue section");
-// 🔴 Add/Replace is DISABLED and says why — the producer is slice F.
-assert(await page.locator('[data-testid="photo-add"]').isDisabled(), "Add/Replace photo is disabled, truthfully");
+// 🔴 THIS ASSERTION FLIPPED IN SLICE F, AND THE OLD VALUE IS NAMED RATHER THAN QUIETLY REPLACED.
+// Through E2.1 it read `isDisabled() === true` with the comment "the producer is slice F" — and it
+// was right then: the channel answered NOT_AVAILABLE, so the button admitted it. The producer now
+// exists, so the truthful assertion is the opposite one. A baseline cannot assert a thing's absence
+// and also survive its creation; what it can do is say which it is asserting and why.
+assert(await page.locator('[data-testid="photo-add"]').isEnabled(), "Add/Replace photo is ENABLED (was: disabled, until slice F)");
 assert((await page.locator('[data-testid="photo-remove"]').count()) === 1, "Remove photo is offered");
 
 // The retired category IS on offer here, because this product could be assigned one... it is not,
