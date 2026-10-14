@@ -24,7 +24,7 @@ import {
   masterFormOf,
   masterPatchFrom,
 } from "../productMasterForm";
-import { type ThumbnailCache, allUrls, thumbnailsToFetch, urlsToRevoke } from "../thumbnails";
+import { type ThumbnailCache, dataUrlFrom, thumbnailsToFetch } from "../thumbnails";
 
 type Editing = { readonly mode: "add" } | { readonly mode: "edit"; readonly product: AdminProductDto };
 
@@ -52,10 +52,11 @@ function draftOf(p: AdminProductDto): ProductDraftRequest {
  * test. This hook is the wiring: it asks what to fetch, fetches it, and revokes what is no longer
  * reachable.
  *
- * 🔴 AND IT REVOKES. `URL.createObjectURL` pins its blob until `revokeObjectURL`, so a shop left on
- * this screen all day, replacing photos, would otherwise accumulate every version it ever showed.
- * `urlsToRevoke` names the ones nothing can reach after a cache update; `allUrls` is what unmount
- * releases.
+ * 🔴 AND THEY ARE `data:` URLS, NOT `blob:` ONES. The renderer's CSP starts from
+ * `default-src 'none'` and admits `img-src 'self' data:`, so a blob URL is blocked and the image
+ * silently never decodes — which is how the first installed Windows run of this screen failed.
+ * Widening the CSP was rejected; see `ThumbnailState`. A data URL is a string, released with the
+ * state, so there is nothing to revoke.
  *
  * 🔴 A BROKEN PHOTO COSTS ONE FAILED READ. A corrupt blob is refused by `productImageBytes`'s
  * checksum guard — by design — and the row records `failed` at that version, which rule 6 then
@@ -89,14 +90,10 @@ function useThumbnails(visible: readonly AdminProductDto[]): ThumbnailCache {
         try {
           const got = await call(pos().getProductImageBytes({ imageId: request.imageId }));
           if (!live) return;
-          // A copy into a fresh buffer: `Uint8Array<ArrayBufferLike>` is what crosses the bridge,
-          // and `BlobPart` wants a plain ArrayBuffer view. The copy is a few tens of kilobytes and
-          // it also decouples the blob from whatever backed the IPC payload.
-          const url = URL.createObjectURL(new Blob([new Uint8Array(got.bytes).slice()], { type: got.meta.mime }));
+          const url = dataUrlFrom(new Uint8Array(got.bytes), got.meta.mime);
           setCache((prev) => {
             const next = new Map(prev);
             next.set(request.productId, { kind: "ready", version: request.version, url });
-            for (const stale of urlsToRevoke(prev, next)) URL.revokeObjectURL(stale);
             return next;
           });
         } catch {
@@ -106,7 +103,6 @@ function useThumbnails(visible: readonly AdminProductDto[]): ThumbnailCache {
           setCache((prev) => {
             const next = new Map(prev);
             next.set(request.productId, { kind: "failed", version: request.version });
-            for (const stale of urlsToRevoke(prev, next)) URL.revokeObjectURL(stale);
             return next;
           });
         }
@@ -117,14 +113,6 @@ function useThumbnails(visible: readonly AdminProductDto[]): ThumbnailCache {
       live = false;
     };
   }, [visible]);
-
-  // On unmount, release everything this screen created.
-  useEffect(
-    () => () => {
-      for (const url of allUrls(latest.current)) URL.revokeObjectURL(url);
-    },
-    [],
-  );
 
   return cache;
 }
@@ -753,7 +741,6 @@ function ProductPhoto(props: { productId: string; alt: string; label: (k: string
 
   useEffect(() => {
     let live = true;
-    let created: string | null = null;
     void (async () => {
       try {
         const meta = await call(pos().getProductImageMeta({ productId: props.productId }));
@@ -764,16 +751,13 @@ function ProductPhoto(props: { productId: string; alt: string; label: (k: string
         }
         const got = await call(pos().getProductImageBytes({ imageId: meta.id }));
         if (!live) return;
-        created = URL.createObjectURL(new Blob([new Uint8Array(got.bytes).slice()], { type: got.meta.mime }));
-        setUrl(created);
+        setUrl(dataUrlFrom(new Uint8Array(got.bytes), got.meta.mime));
       } catch {
         if (live) setFailed(true);
       }
     })();
     return () => {
       live = false;
-      // 🔴 Revoked whichever way this unmounted, including mid-fetch: the blob is pinned until it is.
-      if (created !== null) URL.revokeObjectURL(created);
     };
   }, [props.productId]);
 

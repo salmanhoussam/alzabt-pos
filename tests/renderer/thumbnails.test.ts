@@ -13,8 +13,11 @@
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 import { describe, expect, it } from "vitest";
+// 🔴 `btoa` is a browser global. It exists in Node 16+, but naming the dependency here means a
+// future Node that drops it fails by name rather than as an undefined call inside the renderer.
+if (typeof globalThis.btoa !== "function") throw new Error("this test needs btoa");
 import type { AdminProductDto } from "../../src/shared/ipcContract";
-import { allUrls, type ThumbnailCache, type ThumbnailState, thumbnailsToFetch, urlsToRevoke } from "../../src/renderer/thumbnails";
+import { type ThumbnailCache, dataUrlFrom, thumbnailsToFetch } from "../../src/renderer/thumbnails";
 
 function product(over: Partial<AdminProductDto> & { id: string }): AdminProductDto {
   return {
@@ -126,47 +129,44 @@ describe("thumbnailsToFetch", () => {
   });
 });
 
-describe("urlsToRevoke — an object URL pins its blob until it is revoked", () => {
-  const ready = (version: string, url: string): ThumbnailState => ({ kind: "ready", version, url });
-
-  it("revokes nothing while a thumbnail is unchanged", () => {
-    const cache: ThumbnailCache = new Map([["p1", ready("v1", "blob:a")]]);
-    expect(urlsToRevoke(cache, cache)).toEqual([]);
+/**
+ * 🔴 THE REVOKE SUITE THAT USED TO BE HERE IS GONE, AND THIS IS WHY — it is not a weakened
+ * assertion, it is a function that no longer exists.
+ *
+ * `urlsToRevoke` and `allUrls` managed the lifetime of `blob:` URLs. The renderer's CSP starts from
+ * `default-src 'none'` and admits `img-src 'self' data:`, so a blob URL is BLOCKED and the image
+ * silently never decodes — the first installed Windows run of this screen failed on exactly that,
+ * against a PNG an independent decoder reads fine. Widening the CSP to admit `blob:` was rejected:
+ * it is a real change to what the untrusted side of the bridge may load, and it would have been
+ * made to save a base64 encode on a 40-pixel thumbnail.
+ *
+ * Thumbnails are `data:` URLs now, which are strings released with the state that holds them. There
+ * is no lifetime to manage, so there is nothing left for those two functions to be right about.
+ * What replaces them is the encoder below, which has its own trap.
+ */
+describe("dataUrlFrom", () => {
+  it("produces a data URL the CSP admits, with the right media type", () => {
+    const url = dataUrlFrom(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), "image/png");
+    expect(url.startsWith("data:image/png;base64,")).toBe(true);
+    // Round-trips: the bytes are recoverable, so the encoding is not merely well-formed.
+    const b64 = url.slice("data:image/png;base64,".length);
+    expect([...Buffer.from(b64, "base64")]).toEqual([0x89, 0x50, 0x4e, 0x47]);
   });
 
-  it("🔴 revokes the OLD url when a photo is replaced", () => {
-    const before: ThumbnailCache = new Map([["p1", ready("v1", "blob:old")]]);
-    const after: ThumbnailCache = new Map([["p1", ready("v2", "blob:new")]]);
-    expect(urlsToRevoke(before, after)).toEqual(["blob:old"]);
+  it("🔴 survives a REAL photo's size — the spread form would throw on one", () => {
+    // `String.fromCharCode(...bytes)` passes every byte as an argument and blows the call-stack
+    // argument limit somewhere past a hundred thousand of them. A 300 KB photo is well past it, so
+    // the naive encoder works on a small fixture and throws on a real shop photo — the worst shape
+    // a bug can have. 300_000 bytes here is a realistic normalized JPEG.
+    const big = new Uint8Array(300_000);
+    for (let i = 0; i < big.length; i += 1) big[i] = i % 256;
+    const url = dataUrlFrom(big, "image/jpeg");
+    const decoded = Buffer.from(url.slice("data:image/jpeg;base64,".length), "base64");
+    expect(decoded.length).toBe(big.length);
+    expect(decoded.equals(Buffer.from(big))).toBe(true);
   });
 
-  it("🔴 revokes it when the photo is REMOVED and the entry becomes a placeholder", () => {
-    const before: ThumbnailCache = new Map([["p1", ready("v1", "blob:old")]]);
-    expect(urlsToRevoke(before, new Map())).toEqual(["blob:old"]);
-    // ...and also when the entry survives but is no longer `ready`.
-    const failedNow: ThumbnailCache = new Map([["p1", { kind: "failed", version: "v2" }]]);
-    expect(urlsToRevoke(before, failedNow)).toEqual(["blob:old"]);
-  });
-
-  it("🔴 revokes nothing that is still reachable — a wrongly revoked url is a broken image", () => {
-    const before: ThumbnailCache = new Map([
-      ["p1", ready("v1", "blob:a")],
-      ["p2", ready("v1", "blob:b")],
-    ]);
-    const after: ThumbnailCache = new Map([
-      ["p1", ready("v1", "blob:a")], // untouched
-      ["p2", ready("v2", "blob:c")], // replaced
-    ]);
-    expect(urlsToRevoke(before, after)).toEqual(["blob:b"]);
-  });
-
-  it("allUrls is what an unmount releases, and it lists only the loaded ones", () => {
-    const cache: ThumbnailCache = new Map([
-      ["p1", ready("v1", "blob:a")],
-      ["p2", { kind: "loading", version: "v1" }],
-      ["p3", { kind: "failed", version: "v1" }],
-      ["p4", ready("v1", "blob:d")],
-    ]);
-    expect(allUrls(cache).sort()).toEqual(["blob:a", "blob:d"]);
+  it("an empty array is still a valid data URL", () => {
+    expect(dataUrlFrom(new Uint8Array(), "image/png")).toBe("data:image/png;base64,");
   });
 });

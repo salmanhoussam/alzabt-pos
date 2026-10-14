@@ -20,6 +20,9 @@
  *   5. a fetch already in flight is not started twice
  *   6. a photo that failed is not retried in a loop — one attempt, then the placeholder
  *
+ * There is no seventh rule about releasing URLs: see `ThumbnailState` for why these are `data:`
+ * URLs, which the state releases by holding nothing but a string.
+ *
  * 🔴 RULE 4 IS WHY THE CACHE IS KEYED ON A CONTENT HASH. `imageVersion` is the sha256 of the
  * stored bytes, so "has this photo changed" is answered exactly rather than guessed from a
  * timestamp — and replacing a photo with one byte different invalidates it.
@@ -29,7 +32,25 @@ import type { AdminProductDto } from "../shared/ipcContract";
 
 /** What the screen holds for one product's thumbnail. Keyed by product id. */
 export type ThumbnailState =
-  /** Bytes in hand, for this exact `version`. `url` is an object URL the screen must revoke. */
+  /**
+   * Bytes in hand, for this exact `version`, as a `data:` URL.
+   *
+   * 🔴 A `data:` URL AND NOT A `blob:` ONE, AND THE WINDOWS GATE IS WHY. The renderer's CSP is
+   * `default-src 'none'; … img-src 'self' data:` (src/renderer/index.html) — deliberately minimal
+   * for an offline till — so a `blob:` URL is BLOCKED and the image silently never decodes. The
+   * first installed run of e2e/product-master.mjs failed on exactly that, with a PNG an independent
+   * decoder reads without complaint.
+   *
+   * The alternative was to add `blob:` to `img-src`. It was rejected: widening the one CSP that
+   * starts from 'none' is a real change to what the untrusted side of the bridge may load, and it
+   * would have been made to save a base64 encode on a 40-pixel thumbnail. The invoice logo already
+   * renders as a `data:` URI for the same reason, so this follows a precedent rather than setting
+   * one.
+   *
+   * The consequence is that there is nothing to revoke: a `data:` URL is a string, released with
+   * the state that holds it. Only the few photos on screen are ever fetched, so what is held is a
+   * screenful.
+   */
   | { readonly kind: "ready"; readonly version: string; readonly url: string }
   /** A fetch is in flight for this `version`. */
   | { readonly kind: "loading"; readonly version: string }
@@ -81,26 +102,18 @@ export function thumbnailsToFetch(
 }
 
 /**
- * The object URLs to revoke after a cache update — the ones nothing can reach any more.
+ * `bytes` as a `data:` URL the CSP admits.
  *
- * 🔴 AN UNREVOKED OBJECT URL IS A LEAK THAT LASTS AS LONG AS THE DOCUMENT. `URL.createObjectURL`
- * pins its blob in memory until `revokeObjectURL`, and this screen creates one per photo and
- * re-creates it every time a photo is replaced. A shop with a thousand photographed products, left
- * open on the products screen all day, would accumulate every version it ever displayed.
- *
- * "Unreachable" means: the product is gone from the list, or its entry now holds a different URL.
+ * 🔴 CHUNKED, NOT `String.fromCharCode(...bytes)`. The spread form passes every byte as an
+ * argument and blows the call-stack argument limit somewhere around a hundred thousand of them —
+ * which a normalized photo is comfortably past. It would work on a small test fixture and throw on
+ * a real shop photo, which is the worst shape a bug can have.
  */
-export function urlsToRevoke(previous: ThumbnailCache, next: ThumbnailCache): string[] {
-  const out: string[] = [];
-  for (const [productId, state] of previous) {
-    if (state.kind !== "ready") continue;
-    const now = next.get(productId);
-    if (now === undefined || now.kind !== "ready" || now.url !== state.url) out.push(state.url);
+export function dataUrlFrom(bytes: Uint8Array, mime: string): string {
+  let binary = "";
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
-  return out;
-}
-
-/** Every URL the cache currently holds — what a screen revokes when it unmounts. */
-export function allUrls(cache: ThumbnailCache): string[] {
-  return [...cache.values()].filter((s): s is ThumbnailState & { kind: "ready" } => s.kind === "ready").map((s) => s.url);
+  return `data:${mime};base64,${btoa(binary)}`;
 }
