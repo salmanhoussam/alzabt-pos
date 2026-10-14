@@ -244,6 +244,20 @@ assert((await page.locator('[data-testid="thumb-empty"]').count()) === 1, "exact
 
 // 🔴 THE THUMBNAIL IS A REAL DECODE, not a broken-image box. `naturalWidth` is 0 for an image the
 // browser could not decode, so this is the one check that distinguishes "rendered" from "present".
+//
+// 🔴 AND IT WAITS FOR THE DECODE. The first run of this script failed here with 0x0 against a PNG
+// an independent decoder reads fine: `waitFor()` resolves when the element ATTACHES, and
+// `naturalWidth` stays 0 until the browser has finished decoding. Measuring at attach time is
+// measuring a race — and it would have read as "the image is broken", which is a different and
+// much more alarming conclusion than "not yet".
+await page.waitForFunction(
+  () => {
+    const img = document.querySelector('[data-testid="thumb-image"]');
+    return img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0;
+  },
+  undefined,
+  { timeout: 15000 },
+);
 const natural = await page.locator('[data-testid="thumb-image"]').first().evaluate((img) => ({
   w: img.naturalWidth,
   h: img.naturalHeight,
@@ -273,6 +287,15 @@ log("PM3 — list with a photographed and an unphotographed product");
 // Edit the photographed product: the preview must be there immediately (§W 3).
 await rows(page).first().locator("button").first().click();
 await page.locator('[data-testid="photo-preview"]').waitFor({ timeout: 15000 });
+// Same race as the thumbnail above: attached is not decoded.
+await page.waitForFunction(
+  () => {
+    const img = document.querySelector('[data-testid="photo-preview"]');
+    return img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0;
+  },
+  undefined,
+  { timeout: 15000 },
+);
 const preview = await page.locator('[data-testid="photo-preview"]').evaluate((img) => ({
   w: img.naturalWidth,
   box: Math.round(img.getBoundingClientRect().width),
