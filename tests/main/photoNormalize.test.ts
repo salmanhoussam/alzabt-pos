@@ -279,11 +279,32 @@ describe("refusals a shop owner can act on", () => {
     expect(messageOf(() => normalizeProductPhoto(huge, codec))).toMatch(/smaller than 32 MB/);
   });
 
-  it("🔴 refuses an empty decode rather than storing a 0x0 photo", () => {
-    // The measured failure mode, modelled directly: a codec that answers an empty image for
-    // everything. A producer written around try/catch would store every one of these.
+  it("🔴 refuses an empty decode rather than storing a 0x0 photo — TRY/CATCH IS NOT SUFFICIENT", () => {
+    // 🔴 THE STANDING CONTRACT THIS TEST EXISTS TO HOLD. Measured in real Electron: invalid,
+    // corrupt and extreme input makes `nativeImage.createFromBuffer` return an EMPTY image, NOT
+    // throw — a truncated JPEG, random bytes, a bare magic number, a text file and a 676-megapixel
+    // decompression bomb all take that path. So validation must test the DECODE RESULT —
+    // `isEmpty()`, width > 0, height > 0, and the normalized output's own bounds — and a producer
+    // written around try/catch alone would store every one of them as a 0x0 "photo".
+    //
+    // The codec here is the measured failure mode modelled directly: one that answers empty for
+    // everything, handed a file that is genuinely a valid JPEG.
     const blind = { decode: () => emptyImage(), fromBitmap: () => emptyImage() };
+    expect(sniffImageFormat(fx("shelf.jpg")), "the input really is a valid JPEG").toBe("image/jpeg");
     expect(codeOf(() => normalizeProductPhoto(fx("shelf.jpg"), blind))).toBe("INVALID_INPUT");
+  });
+
+  it("🔴 and a codec that THROWS is refused too — both directions, not one", () => {
+    // The other half of the same contract. `electronCodec` converts a throw into an empty image so
+    // there is one shape to test, but the normalizer must not depend on that conversion having
+    // happened: a codec that throws must not escape as an unhandled error to the renderer.
+    const throwing = {
+      decode: () => {
+        throw new Error("decoder exploded");
+      },
+      fromBitmap: () => emptyImage(),
+    };
+    expect(() => normalizeProductPhoto(fx("shelf.jpg"), throwing)).toThrow();
   });
 
   it("refuses a decoded image beyond the pixel ceiling", () => {
