@@ -534,8 +534,13 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 /* ── Product Master: thumbnails, form sections, the photo panel ──────────────────────────────────
    🔴 EVERY SIZE HERE IS FIXED ON PURPOSE. A thumbnail that grows with its image is a row height
    that changes per row, and a products list whose rows are different heights cannot be scanned.
-   `aspect-ratio: 1` plus `object-fit: cover` means a tall photo and a wide one occupy the same box
-   and neither is stretched — the crop is centred rather than the picture distorted.
+   `aspect-ratio: 1` keeps the box identical whatever shape the photo is.
+
+   🔴 BUT THE FIT DIFFERS BETWEEN THE TWO, and this comment used to say `cover` for both. The LIST
+   thumbnail crops (`cover`): it is an identifier at 40px, and uniform rows are the whole point.
+   The FORM preview contains (`contain`): it is what the owner looks at to decide whether this is
+   the right photo, and a centred square crop of a 3:4 photo hid that it was portrait at all. Same
+   box, two jobs, two fits — neither stretches the picture.
    Colours come from the shipped tokens only; no literal appears below. */
 .col-thumb { width: 52px; }
 
@@ -569,13 +574,19 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .thumb-broken { border-style: dotted; border-color: var(--danger); }
 
 
+/* 🔴 `contain`, NOT `cover`, AND SLICE F IS WHY. This was written when the only photo that could
+   exist was a square 96x96 test seed, so a square centre-crop was invisible. Real photos are 4:3
+   and 3:4, and the crop hid exactly the thing the owner opens this panel to judge: a PORTRAIT
+   photo stored upright looked identical to a landscape one, in the screenshot AND on screen.
+   Letterboxing it inside the same square box shows the whole image and its real shape, costs no
+   layout movement, and leaves the LIST thumbnail on `cover` where uniform rows are the point. */
 .photo-preview {
   display: block;
   max-inline-size: 100%;
   inline-size: 150px;
   max-block-size: 150px;
   aspect-ratio: 1;
-  object-fit: cover;
+  object-fit: contain;
   object-position: center;
   border-radius: var(--radius);
   border: 1px solid var(--border);
