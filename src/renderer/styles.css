@@ -217,7 +217,21 @@ h1, h2 { margin: 0 0 12px; }
 .admin-table td, .admin-table th { vertical-align: top; }
 .admin-table .row-inactive { opacity: 0.55; }
 .admin-actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
-.product-form { display: flex; flex-direction: column; gap: 10px; min-width: 340px; max-width: 460px; }
+.product-form { display: flex; flex-direction: column; gap: 10px; min-width: 340px; max-width: 880px; }
+
+/* 🔴 TWO COLUMNS SO NOTHING IMPORTANT SITS BELOW THE FOLD.
+   The installed Windows capture of Edit Product, at the shop's real 1008x681, ended at the Category
+   field: the photo preview, the online section and the Save button were all off-screen. "Opening
+   Edit must make the photo state obvious" is not satisfied by something a scroll away — and the
+   E2E passed regardless, because the element was in the DOM. The screenshot is the gate.
+   One column again below 900px, where two would be worse than a scroll.
+   `.product-form`'s own max-width went 460px -> 880px for the same reason. */
+.form-grid { display: grid; grid-template-columns: 1fr; gap: var(--space-4); align-items: start; }
+.form-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+
+@media (min-width: 900px) {
+  .form-grid { grid-template-columns: 1fr 1fr; }
+}
 .product-form .field { display: flex; flex-direction: column; gap: 4px; text-align: start; }
 .product-form .field > span { font-size: 13px; }
 .product-form input, .product-form select {

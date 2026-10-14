@@ -508,6 +508,18 @@ function ProductForm(props: {
       >
         <h2>{t(isEdit ? "form.editTitle" : "form.addTitle")}</h2>
 
+        {/* 🔴 TWO COLUMNS, AND THE INSTALLED SCREENSHOT IS WHY. Stacked, the three sections are
+            taller than a 1008x681 shop screen: the Windows capture of Edit Product showed the form
+            ending at the Category field, with the PHOTO section, the online section and the Save
+            button all below the fold. The photo state was therefore not "obvious on opening" — it
+            needed scrolling — and the E2E assertion passed anyway, because the element existed in
+            the DOM. That is precisely why a screenshot is the acceptance gate and a selector is not.
+
+            Reading order is preserved: in RTL the first column is the right-hand one, so BASIC
+            INFORMATION still comes first. It collapses back to one column on a narrow window. */}
+        <div className="form-grid">
+        <div className="form-col">
+
         {/* 🔴 THREE SECTIONS, NOT A WALL OF FIELDS. What a merchant adding a product needs is at
             the top; what only the website needs is below, clearly labelled as such. The note says
             so in words, because a field being optional is not visible from a form. */}
@@ -636,6 +648,9 @@ function ProductForm(props: {
           </label>
         )}
 
+        </div>
+
+        <div className="form-col">
         <h3 className="form-section">{t("form.secOnline")}</h3>
         <p className="muted small">{t("form.localOnly")}</p>
 
@@ -717,6 +732,8 @@ function ProductForm(props: {
             )}
           </div>
           <p className="muted small">{t("form.photoSoon")}</p>
+        </div>
+        </div>
         </div>
 
         <div className="tool-actions">

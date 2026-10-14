@@ -178,6 +178,15 @@ log("PM1 — category management, one retired");
 await page.locator('[data-testid="add-product"]').click();
 await page.locator('[data-testid="photo-new-product"]').waitFor();
 await page.screenshot({ path: SHOTS + "PM2-add-product-sections.png" });
+// The same rule for Add: a merchant adding a product must see all three sections at once.
+assert(
+  await page.locator('[data-testid="photo-panel"]').isIntersectingViewport(),
+  "the photo section is visible on the Add form without scrolling",
+);
+assert(
+  await page.locator('[data-testid="save-product"]').isIntersectingViewport(),
+  "Save is visible on the Add form without scrolling",
+);
 assert(
   (await page.locator('[data-testid="field-barcode"]').count()) === 1,
   "the Add form has a barcode field (§W 6)",
@@ -307,6 +316,24 @@ const preview = await page.locator('[data-testid="photo-preview"]').evaluate((im
 }));
 assert(preview.w === 96, "the form preview is a real decode");
 assert(preview.box > 100, `the preview is large enough to judge (${preview.box}px)`);
+
+// 🔴 "OBVIOUS ON OPENING" MEANS ON SCREEN, NOT MERELY IN THE DOM — and this assertion exists
+// because the first green run was not good enough. Every selector passed while the installed
+// screenshot showed the Edit form ending at the Category field: the photo preview, the online
+// section and Save were all below the fold at the shop's real 1008x681. A DOM check cannot see
+// that; `isIntersectingViewport` can.
+assert(
+  await page.locator('[data-testid="photo-preview"]').isIntersectingViewport(),
+  "the photo preview is VISIBLE when Edit opens, not a scroll away",
+);
+assert(
+  await page.locator('[data-testid="save-product"]').isIntersectingViewport(),
+  "Save is visible without scrolling the dialog",
+);
+assert(
+  await page.locator('[data-testid="field-online"]').isIntersectingViewport(),
+  "the online-catalogue control is visible without scrolling",
+);
 // 🔴 Add/Replace is DISABLED and says why — the producer is slice F.
 assert(await page.locator('[data-testid="photo-add"]').isDisabled(), "Add/Replace photo is disabled, truthfully");
 assert((await page.locator('[data-testid="photo-remove"]').count()) === 1, "Remove photo is offered");
