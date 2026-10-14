@@ -132,30 +132,61 @@ function seedPhoto(productId) {
 
 
 /**
- * 🔴 IS ANY OF THESE COVERED BY THE ACTION BAR?
+ * 🔴 IS ANY OF THESE ACTUALLY DRAWN UNDER THE ACTION BAR?
  *
  * The real question E2.1 exists to answer, and a selector cannot answer it: an element can be in
- * the document, on screen, and still have Save and Cancel drawn across it. This compares each
- * element's rect against the footer's and reports the ones that intersect — scrolling the form the
- * whole way down first, because the overlap only appears where the content ends.
+ * the document, on screen, and still have Save and Cancel drawn across it.
  *
- * It returns the offenders by name rather than a boolean, so a failure says WHICH field was buried.
+ * 🔴 AND THE FIRST VERSION OF THIS CHECK WAS WRONG, WHICH IS WORTH KEEPING. It compared raw
+ * `getBoundingClientRect()` values — and a rect is the LAYOUT box, reported in full even when
+ * `overflow` clips the element. So a field scrolled below the visible part of the form reported
+ * coordinates beneath the footer while being invisible there, and the check failed on a layout
+ * that was correct. It was measuring where a thing WOULD be, not where it is drawn.
+ *
+ * Each element's rect is now intersected with the scroll container's own box first — its visible
+ * portion — and only that is compared against the footer. Offenders come back by name, so a
+ * failure says WHICH field was buried.
  */
 const coveredByFooter = (page, ids) =>
   page.evaluate((names) => {
     const footer = document.querySelector('[data-testid="form-footer"]');
+    const box = document.querySelector(".form-scroll");
     if (footer === null) return ["NO FOOTER FOUND"];
+    if (box === null) return ["NO SCROLL REGION FOUND"];
     const f = footer.getBoundingClientRect();
+    const b = box.getBoundingClientRect();
     const hits = [];
     for (const name of names) {
       const el = document.querySelector(`[data-testid="${name}"]`);
       if (el === null) continue;
       const r = el.getBoundingClientRect();
-      const overlaps = r.left < f.right && r.right > f.left && r.top < f.bottom && r.bottom > f.top;
-      if (overlaps) hits.push(name);
+      // The part of the element the viewer can actually see: its rect clipped to the scroll box.
+      const top = Math.max(r.top, b.top);
+      const bottom = Math.min(r.bottom, b.bottom);
+      const left = Math.max(r.left, b.left);
+      const right = Math.min(r.right, b.right);
+      if (bottom <= top || right <= left) continue; // entirely scrolled out: nothing is drawn
+      if (left < f.right && right > f.left && top < f.bottom && bottom > f.top) hits.push(name);
     }
     return hits;
   }, ids);
+
+/**
+ * 🔴 THE STRUCTURAL GUARANTEE, measured once: the scrolling region ENDS above the action bar.
+ *
+ * This is what makes the clipped check above non-vacuous. If the footer ever goes back to being
+ * `position: sticky` INSIDE the scroll box — the arrangement that caused the defect — the two
+ * boxes overlap and this fails immediately, whatever any individual field happens to be doing.
+ */
+const footerIsBelowTheScrollRegion = (page) =>
+  page.evaluate(() => {
+    const footer = document.querySelector('[data-testid="form-footer"]');
+    const box = document.querySelector(".form-scroll");
+    if (footer === null || box === null) return { ok: false, why: "missing footer or scroll region" };
+    const f = footer.getBoundingClientRect();
+    const b = box.getBoundingClientRect();
+    return { ok: b.bottom <= f.top + 1, scrollBottom: Math.round(b.bottom), footerTop: Math.round(f.top) };
+  });
 
 /** Scrolls the form's own region, not the page. */
 const scrollForm = (page, to) =>
@@ -264,10 +295,14 @@ const WATCHED = [
   "field-online",
   "photo-panel",
 ];
+{
+  const g = await footerIsBelowTheScrollRegion(page);
+  assert(g.ok, `the scroll region ends above the action bar (bottom ${g.scrollBottom} vs footer top ${g.footerTop})`);
+}
 for (const position of [0, 150, 300, "end"]) {
   await scrollForm(page, position);
   const buried = await coveredByFooter(page, WATCHED);
-  assert(buried.length === 0, `nothing is under the action bar at scroll ${position} (${buried.join(", ") || "none"})`);
+  assert(buried.length === 0, `nothing is drawn under the action bar at scroll ${position} (${buried.join(", ") || "none"})`);
 }
 await scrollForm(page, "end");
 await page.screenshot({ path: SHOTS + "E2.1-D-add-product-lower.png" });
@@ -480,7 +515,11 @@ for (const position of [0, 200, "end"]) {
     "photo-preview",
     "photo-remove",
   ]);
-  assert(buried.length === 0, `Edit: nothing under the action bar at scroll ${position} (${buried.join(", ") || "none"})`);
+  assert(buried.length === 0, `Edit: nothing drawn under the action bar at scroll ${position} (${buried.join(", ") || "none"})`);
+}
+{
+  const g = await footerIsBelowTheScrollRegion(page);
+  assert(g.ok, `Edit: the scroll region ends above the action bar (${g.scrollBottom} vs ${g.footerTop})`);
 }
 await scrollForm(page, 0);
 // 🔴 THE ONLINE CONTROL IS NOT ASSERTED ON SCREEN, AND THAT IS A STATED LIMIT RATHER THAN A
