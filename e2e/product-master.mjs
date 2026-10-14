@@ -8,14 +8,12 @@
  * whether a row's height explodes, whether a dropdown shows the retired category it is supposed to.
  * Those are answered by looking, and the screenshots below are what there is to look at.
  *
- * 🔴 ONE PHOTO IS SEEDED BY RAW SQL, WITH THE APP CLOSED, AND THAT IS DELIBERATE. The desktop photo
- * producer is slice F: there is no channel that accepts image bytes from the renderer, by design,
- * so today the only way a photo can exist is a main-process caller that does not exist yet. Writing
- * one row directly is test SETUP for a feature whose input path is not built — not a product path,
- * and it is stated here so nobody reads these screenshots as proof that importing a photo works.
- *
- * The PNG is generated, not checked in: a real, valid, decodable image with correct CRCs, so the
- * thumbnail that appears is a real decode and not a broken-image icon.
+ * 🔴 THE PHOTO IN THESE SCREENSHOTS IS NOW REAL, and the caveat that used to stand here is gone.
+ * Until slice F there was no producer, so one row was written by raw SQL and this header said so,
+ * so nobody would read a screenshot as proof that importing a photo worked. The producer exists:
+ * the photo below is a real fixture file, chosen through the real dialog, decoded and normalized by
+ * the shipped pipeline. `e2e/product-photo.mjs` proves that path in full; this script's job is
+ * still what a screenshot is for — whether the screen READS correctly.
  *
  * Selectors are data-testid, never visible text — the terminal's default language is Arabic.
  *
@@ -24,8 +22,6 @@
  */
 import { _electron as electron } from "playwright-core";
 import { signIn } from "./_signin.mjs";
-import { createHash } from "node:crypto";
-import { deflateSync } from "node:zlib";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -60,76 +56,6 @@ async function launch() {
 }
 
 /** A real PNG: solid colour, correct zlib stream, correct CRC32 per chunk. */
-function png(width, height, rgb) {
-  const table = new Int32Array(256);
-  for (let n = 0; n < 256; n += 1) {
-    let c = n;
-    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c;
-  }
-  const crc = (buf) => {
-    let c = 0xffffffff;
-    for (const b of buf) c = table[(c ^ b) & 0xff] ^ (c >>> 8);
-    return (c ^ 0xffffffff) >>> 0;
-  };
-  const chunk = (type, data) => {
-    const len = Buffer.alloc(4);
-    len.writeUInt32BE(data.length);
-    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
-    const sum = Buffer.alloc(4);
-    sum.writeUInt32BE(crc(body));
-    return Buffer.concat([len, body, sum]);
-  };
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(width, 0);
-  ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8; // bit depth
-  ihdr[9] = 2; // truecolour
-  // One filter byte per scanline, then RGB triples.
-  const raw = Buffer.alloc(height * (1 + width * 3));
-  for (let y = 0; y < height; y += 1) {
-    const row = y * (1 + width * 3);
-    raw[row] = 0;
-    for (let x = 0; x < width; x += 1) {
-      const px = row + 1 + x * 3;
-      raw[px] = rgb[0];
-      raw[px + 1] = rgb[1];
-      raw[px + 2] = rgb[2];
-    }
-  }
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk("IHDR", ihdr),
-    chunk("IDAT", deflateSync(raw)),
-    chunk("IEND", Buffer.alloc(0)),
-  ]);
-}
-
-/** Writes ONE primary photo for a product, directly. See the header for why this is legitimate. */
-function seedPhoto(productId) {
-  const bytes = png(96, 96, [31, 94, 255]);
-  const db = new Database(LEDGER);
-  try {
-    const now = new Date().toISOString().replace(/\.(\d{3})\d*Z$/, ".$1Z");
-    db.prepare(
-      `INSERT INTO catalog_product_images (id, product_id, bytes, mime, sha256_hex, byte_size,
-                                           width_px, height_px, is_primary, origin, created_at, updated_at)
-       VALUES (?, ?, ?, 'image/png', ?, ?, 96, 96, 1, 'desktop', ?, ?)`,
-    ).run(
-      "e2e-photo-1",
-      productId,
-      bytes,
-      createHash("sha256").update(bytes).digest("hex"),
-      bytes.length,
-      now,
-      now,
-    );
-  } finally {
-    db.close();
-  }
-  log("seeded one real PNG for", productId, `(${bytes.length} bytes)`);
-}
-
 
 /**
  * 🔴 IS ANY OF THESE ACTUALLY DRAWN UNDER THE ACTION BAR?
@@ -377,18 +303,43 @@ log("PM6 — barcode canonicalised and searchable");
 await app.close();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// 4 · Seed ONE photo with the app closed, then look at the list (§W 1) and the Edit form (§W 3)
+// 4 · Give ONE product a photo THROUGH THE REAL PRODUCER, then look at the list (§W 1) and the
+//     Edit form (§W 3)
+//
+// 🔴 THIS USED TO BE A RAW SQL INSERT, AND IT NO LONGER IS. Slice E had no producer — there is
+// deliberately no channel that accepts image bytes from the renderer — so the only way a photo
+// could exist was to write the row directly, and the header said so, so nobody would read these
+// screenshots as proof that importing a photo worked. Slice F built the producer, so the photo in
+// every screenshot below now arrives the way a shop's photo arrives: a real file, chosen in the
+// real dialog, decoded and normalized by the real pipeline.
+//
+// The only stub is `dialog.showOpenDialogSync`, which `main.ts` looks up at call time precisely so
+// a test can aim it. `e2e/product-photo.mjs` is where that path is proven in full.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-{
-  const db = new Database(LEDGER, { readonly: true });
-  const row = db.prepare("SELECT id FROM catalog_products WHERE sku = 'SKU-100'").get();
-  db.close();
-  assert(row !== undefined, "the photographed product is in the ledger");
-  seedPhoto(row.id);
-}
-
 ({ app, page } = await launch());
 await rows(page).first().waitFor();
+{
+  const fixture = join(APP, "tests", "fixtures", "photos", "shelf.jpg");
+  await app.evaluate(({ dialog }, f) => {
+    dialog.showOpenDialogSync = () => [f];
+  }, fixture);
+  // 🔴 THE RIGHT PRODUCT, NAMED. Everything below asserts "exactly one row has a thumbnail and
+  // exactly one has the placeholder", which an `nth(0)` would satisfy while photographing whichever
+  // product happened to sort first. The SKU is rendered in the row, so the row is found by it.
+  const target = rows(page).filter({ hasText: "SKU-100" });
+  assert((await target.count()) === 1, "exactly one row is SKU-100");
+  await target.locator('[data-testid="product-edit"]').click();
+  await page.locator('[data-testid="photo-panel"]').waitFor({ state: "visible" });
+  await page.locator('[data-testid="photo-add"]').click();
+  await page.locator('[data-testid="photo-preview"]').waitFor({ state: "visible" });
+  await page.waitForFunction(() => {
+    const img = document.querySelector('[data-testid="photo-preview"]');
+    return img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0;
+  });
+  await page.locator('.product-form [data-testid="cancel-product"]').click();
+  await page.locator('[data-testid="photo-panel"]').waitFor({ state: "detached" });
+  log("one product photographed through the REAL producer");
+}
 await page.locator('[data-testid="thumb-image"]').first().waitFor({ timeout: 15000 });
 
 assert((await page.locator('[data-testid="thumb-image"]').count()) === 1, "exactly one row shows a thumbnail");
