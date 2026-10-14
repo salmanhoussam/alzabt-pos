@@ -28,7 +28,7 @@
 import { _electron as electron } from "playwright-core";
 import { signIn } from "./_signin.mjs";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -121,6 +121,12 @@ async function aimPicker(app, fixtureName) {
     dialog.showOpenDialogSync = () => (p === null ? undefined : [p]);
   }, path);
 }
+
+/** Aims the native "save as" dialog, for the backup export. */
+const saveTo = (app, path) =>
+  app.evaluate(({ dialog }, p) => {
+    dialog.showSaveDialogSync = () => p;
+  }, path);
 
 /** Opens Edit on a product row by index. */
 async function openEdit(page, index = 0) {
@@ -362,7 +368,64 @@ rows = photoRows(product.id);
 check(rows[0].width_px === 1600 && rows[0].height_px === 1067, `a 9000x6000 source became 1600x1067 (got ${rows[0].width_px}x${rows[0].height_px})`);
 check(rows[0].byte_size < 1_200_000, `the normalized result is within the output cap (${rows[0].byte_size} bytes)`);
 
-// ══ 8. ENGLISH, then back to Arabic ═══════════════════════════════════════════════════════════
+// ══ 8. BACKUP, then RESTORE — and the RENDERER must display the restored photo ════════════════
+//
+// 🔴 THE ONE PART OF §18 A UNIT TEST CANNOT REACH. `tests/persistence/productPhotoDurability.test.ts`
+// proves the bytes and the checksum survive a snapshot and come back through the service — which is
+// the hard half. What it cannot prove is the last link: that a RESTORED ledger produces a photo the
+// renderer actually draws. There is no in-app restore (README calls it a support procedure), so the
+// restore here is what support really does: the snapshot file becomes the ledger.
+
+const BACKUP = join(home, "exported-backup.sqlite");
+const beforeBackup = photoRows(product.id)[0];
+await closeForm(page);
+await saveTo(app, BACKUP);
+await page.locator('[data-testid="tab-tools"]').click();
+await page.locator('[data-testid="export-backup"]').click();
+await readNotice(page);
+await app.close();
+
+{
+  const copy = new Database(BACKUP, { readonly: true, fileMustExist: true });
+  const row = copy
+    .prepare("SELECT sha256_hex, byte_size, width_px, height_px, mime, bytes FROM catalog_product_images WHERE product_id = ?")
+    .get(product.id);
+  const integrity = copy.pragma("integrity_check", { simple: true });
+  copy.close();
+  check(integrity === "ok", `the exported backup passes integrity_check (${integrity})`);
+  check(row !== undefined, "the exported backup carries the image row");
+  check(row.sha256_hex === beforeBackup.sha256_hex, "the backup's checksum is the live one");
+  check(
+    createHash("sha256").update(row.bytes).digest("hex") === row.sha256_hex,
+    "🔴 and the BYTES inside the backup really hash to it — a row count could not have told us this",
+  );
+}
+
+// The support procedure: the snapshot becomes the ledger. Journals go with it, or a stale WAL page
+// could survive into the restored database.
+for (const suffix of ["-wal", "-shm"]) rmSync(LEDGER + suffix, { force: true });
+copyFileSync(BACKUP, LEDGER);
+
+({ app, page } = await launch());
+await page.locator('[data-testid="thumb-image"]').first().waitFor({ state: "visible", timeout: 15000 });
+check(true, "the restored ledger's product shows a thumbnail in the list");
+await openEdit(page);
+const restored = await waitForDecodedPreview(page);
+check(
+  restored.naturalWidth > 0 && restored.naturalHeight > 0,
+  `🔴 THE RENDERER DISPLAYS THE RESTORED PHOTO — a real decode, ${restored.naturalWidth}x${restored.naturalHeight}`,
+);
+check(
+  restored.naturalWidth === beforeBackup.width_px && restored.naturalHeight === beforeBackup.height_px,
+  `the restored photo has the dimensions it was stored with (${beforeBackup.width_px}x${beforeBackup.height_px})`,
+);
+check(
+  photoRows(product.id)[0].sha256_hex === beforeBackup.sha256_hex,
+  "the restored row's checksum is unchanged end to end",
+);
+await shot(page, "F-I-restored-from-backup");
+
+// ══ 9. ENGLISH, then back to Arabic ═══════════════════════════════════════════════════════════
 
 await closeForm(page);
 // One toggle in the header, not a pair of buttons — and it flips, so the second press returns.
@@ -378,7 +441,7 @@ await openEdit(page);
 await waitForDecodedPreview(page);
 await shot(page, "F-H-edit-arabic");
 
-// ══ 9. REMOVE, and the placeholder ════════════════════════════════════════════════════════════
+// ══ 10. REMOVE, and the placeholder ═══════════════════════════════════════════════════════════
 
 await page.locator('[data-testid="photo-remove"]').click();
 await page.locator('[data-testid="photo-empty"]').waitFor({ state: "visible" });
@@ -394,7 +457,7 @@ check(
   `the last image event is PRODUCT_IMAGE_REMOVED (got ${events[events.length - 1].event_type})`,
 );
 
-// ══ 10. the removal survives a restart too ════════════════════════════════════════════════════
+// ══ 11. the removal survives a restart too ═══════════════════════════════════════════════════
 
 ({ app, page } = await launch());
 await page.locator('[data-testid="product-row"]').first().waitFor({ state: "visible" });
