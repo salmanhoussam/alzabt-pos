@@ -130,6 +130,41 @@ function seedPhoto(productId) {
   log("seeded one real PNG for", productId, `(${bytes.length} bytes)`);
 }
 
+
+/**
+ * 🔴 IS ANY OF THESE COVERED BY THE ACTION BAR?
+ *
+ * The real question E2.1 exists to answer, and a selector cannot answer it: an element can be in
+ * the document, on screen, and still have Save and Cancel drawn across it. This compares each
+ * element's rect against the footer's and reports the ones that intersect — scrolling the form the
+ * whole way down first, because the overlap only appears where the content ends.
+ *
+ * It returns the offenders by name rather than a boolean, so a failure says WHICH field was buried.
+ */
+const coveredByFooter = (page, ids) =>
+  page.evaluate((names) => {
+    const footer = document.querySelector('[data-testid="form-footer"]');
+    if (footer === null) return ["NO FOOTER FOUND"];
+    const f = footer.getBoundingClientRect();
+    const hits = [];
+    for (const name of names) {
+      const el = document.querySelector(`[data-testid="${name}"]`);
+      if (el === null) continue;
+      const r = el.getBoundingClientRect();
+      const overlaps = r.left < f.right && r.right > f.left && r.top < f.bottom && r.bottom > f.top;
+      if (overlaps) hits.push(name);
+    }
+    return hits;
+  }, ids);
+
+/** Scrolls the form's own region, not the page. */
+const scrollForm = (page, to) =>
+  page.evaluate((y) => {
+    const box = document.querySelector(".form-scroll");
+    if (box !== null) box.scrollTop = y === "end" ? box.scrollHeight : y;
+    return box === null ? -1 : box.scrollTop;
+  }, to);
+
 async function addProduct(page, { nameAr, nameEn, sku, price, unit, barcode, brand, descAr, online, category }) {
   await page.locator('[data-testid="add-product"]').click();
   await page.locator('[data-testid="field-nameAr"]').fill(nameAr);
@@ -211,6 +246,47 @@ assert(
   await onScreen(page, "save-product"),
   "Save is visible on the Add form without scrolling",
 );
+
+// 🔴 THE FORM OPENS AT THE TOP.
+assert((await scrollForm(page, 0)) === 0, "the Add form opens scrolled to the top");
+
+// 🔴 NO FIELD PASSES UNDER SAVE/CANCEL — AT ANY SCROLL POSITION. This is the defect E2.1 exists
+// to close: the footer used to be sticky INSIDE the scrolling card, so content ran beneath it.
+const WATCHED = [
+  "field-nameAr",
+  "field-barcode",
+  "field-category",
+  "field-brand",
+  "field-price",
+  "field-unit",
+  "field-descAr",
+  "field-descEn",
+  "field-online",
+  "photo-panel",
+];
+for (const position of [0, 150, 300, "end"]) {
+  await scrollForm(page, position);
+  const buried = await coveredByFooter(page, WATCHED);
+  assert(buried.length === 0, `nothing is under the action bar at scroll ${position} (${buried.join(", ") || "none"})`);
+}
+await scrollForm(page, "end");
+await page.screenshot({ path: SHOTS + "E2.1-D-add-product-lower.png" });
+await scrollForm(page, 0);
+await page.screenshot({ path: SHOTS + "E2.1-C-add-product-top.png" });
+log("C/D — Add Product top and lower, nothing under the action bar at any scroll");
+
+// 🔴 AND A NATIVE DROPDOWN OPENED AT THE BOTTOM DOES NOT COLLIDE WITH IT.
+await scrollForm(page, "end");
+await page.locator('[data-testid="field-category"]').scrollIntoViewIfNeeded();
+await page.locator('[data-testid="field-category"]').click();
+assert(
+  (await coveredByFooter(page, ["field-category"])).length === 0,
+  "the category select is not under the action bar when opened near the bottom",
+);
+await page.screenshot({ path: SHOTS + "E2.1-H-footer-with-dropdown.png" });
+log("H — the action bar with a native dropdown open");
+await page.keyboard.press("Escape");
+await scrollForm(page, 0);
 assert(
   (await page.locator('[data-testid="field-barcode"]').count()) === 1,
   "the Add form has a barcode field (§W 6)",
@@ -219,6 +295,14 @@ assert(
   (await page.locator('[data-testid="field-online"]').count()) === 1,
   "the Add form has the online-catalogue section (§W 7)",
 );
+// 🔴 The empty state is a PICTURE FRAME with a glyph, not a dashed box that reads as an input.
+assert(
+  (await page.locator('[data-testid="photo-new-product"] .photo-glyph').count()) === 1,
+  "the empty photo state draws a photo glyph, not an empty square",
+);
+await page.locator('[data-testid="photo-new-product"]').scrollIntoViewIfNeeded();
+await page.screenshot({ path: SHOTS + "E2.1-G-empty-photo-state.png" });
+log("G — the empty photo state");
 // 🔴 The chooser offers both ACTIVE categories and not the retired one — on a NEW product there is
 // no assigned category, so a retired one must not be on offer at all.
 const options = await page.locator('[data-testid="field-category"] option').allTextContents();
@@ -320,7 +404,21 @@ assert(!listShape.hasBinary, "no value in any listProducts row is binary");
 log("list photo state:", listShape.keys.join(", "));
 
 await page.screenshot({ path: SHOTS + "PM3-products-list-mixed-photos.png" });
-log("PM3 — list with a photographed and an unphotographed product");
+await page.screenshot({ path: SHOTS + "E2.1-B-products-arabic.png" });
+
+// 🔴 THE TABLE STARTS HIGHER. Two explanatory paragraphs pushed it a long way down on every visit;
+// the number is measured rather than eyeballed so a future paragraph cannot creep back in.
+const tableTop = await page.evaluate(() => {
+  const t = document.querySelector(".admin-table");
+  return t === null ? -1 : Math.round(t.getBoundingClientRect().top);
+});
+assert(tableTop > 0 && tableTop < 330, `the product table starts high on the screen (${tableTop}px from the top)`);
+// 🔴 And the technical source badge is gone from the daily list.
+assert(
+  (await page.locator('[data-testid="product-row"] .badge.faint').count()) === 0,
+  "no unexplained source badge on the products rows",
+);
+log("B — Arabic products list; table top at", tableTop, "px");
 
 // Edit the photographed product: the preview must be there immediately (§W 3).
 await rows(page).first().locator("button").first().click();
@@ -362,7 +460,29 @@ assert(
 // taken of a different moment. A passing check and a screenshot of the wrong scroll position look
 // identical in a green log.
 await page.screenshot({ path: SHOTS + "PM4-edit-product-with-photo.png" });
-log("PM4 — Edit Product with an existing photo, unscrolled");
+await page.screenshot({ path: SHOTS + "E2.1-E-edit-product-with-image.png" });
+log("PM4/E — Edit Product with an existing photo, unscrolled");
+
+// The Edit form opens at the top too, even though an Add form was opened and scrolled before it.
+assert((await scrollForm(page, 0)) === 0, "the Edit form opens at the top, not where the last one was left");
+
+// And nothing is under the action bar here either, at any scroll position.
+for (const position of [0, 200, "end"]) {
+  await scrollForm(page, position);
+  const buried = await coveredByFooter(page, [
+    "field-nameAr",
+    "field-barcode",
+    "field-category",
+    "field-brand",
+    "field-price",
+    "field-descAr",
+    "field-online",
+    "photo-preview",
+    "photo-remove",
+  ]);
+  assert(buried.length === 0, `Edit: nothing under the action bar at scroll ${position} (${buried.join(", ") || "none"})`);
+}
+await scrollForm(page, 0);
 // 🔴 THE ONLINE CONTROL IS NOT ASSERTED ON SCREEN, AND THAT IS A STATED LIMIT RATHER THAN A
 // QUIETLY DROPPED CHECK. BASIC INFORMATION alone is ~630px of controls on a 1008x681 shop screen,
 // so the dialog scrolls and SOMETHING must be below the fold. What the brief names as needing to
@@ -414,6 +534,7 @@ assert(
   retiredOptions.some((o) => o.includes("متوقّف")),
   `the product's own retired category is shown and marked: ${retiredOptions.join(" | ")}`,
 );
+await page.screenshot({ path: SHOTS + "E2.1-F-edit-retired-category.png" });
 await page.locator('[data-testid="field-category"]').click();
 await page.screenshot({ path: SHOTS + "PM7-category-dropdown-retired.png" });
 log("PM7 — the category chooser, including a retired assigned one");
@@ -473,7 +594,37 @@ const enHeights = await rows(page).evaluateAll((els) => els.map((e) => Math.roun
 assert(Math.abs(enHeights[0] - enHeights[1]) <= 2, `English rows are the same height: ${enHeights.join(" vs ")}`);
 assert(enHeights.every((h) => h < 110), `no row-height explosion in English: ${enHeights.join(", ")}`);
 await page.screenshot({ path: SHOTS + "PM9-products-english-ltr.png" });
-log("PM9 — the same screen in English/LTR");
+await page.screenshot({ path: SHOTS + "E2.1-A-products-english.png" });
+log("PM9/A — the same screen in English/LTR");
+
+// ── I · THE NARROWEST SUPPORTED WINDOW ──────────────────────────────────────────────────────────
+// main.ts pins minWidth 1024 / minHeight 640, so this is the smallest a shop can make it. The
+// layout has to hold there, not merely at the runner's default.
+await app.evaluate(({ BrowserWindow }) => {
+  const w = BrowserWindow.getAllWindows()[0];
+  w.setSize(1024, 640);
+});
+await page.waitForFunction(() => window.innerWidth <= 1024, undefined, { timeout: 10000 });
+await rows(page).first().waitFor();
+await page.screenshot({ path: SHOTS + "E2.1-I-narrowest-window-list.png" });
+const narrowHeights = await rows(page).evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().height)));
+assert(
+  Math.abs(narrowHeights[0] - narrowHeights[1]) <= 2,
+  `rows stay even at 1024x640: ${narrowHeights.join(" vs ")}`,
+);
+// 🔴 The modal still works at the minimum size: nothing under the action bar, Save reachable.
+await rows(page).first().locator("button").first().click();
+await page.locator('[data-testid="form-footer"]').waitFor();
+assert(await onScreen(page, "save-product"), "Save is on screen at 1024x640");
+for (const position of [0, "end"]) {
+  await scrollForm(page, position);
+  const buried = await coveredByFooter(page, ["field-nameAr", "field-price", "field-online", "photo-panel"]);
+  assert(buried.length === 0, `1024x640: nothing under the action bar at scroll ${position} (${buried.join(", ") || "none"})`);
+}
+await scrollForm(page, 0);
+await page.screenshot({ path: SHOTS + "E2.1-I-narrowest-window-form.png" });
+log("I — the narrowest supported window, 1024x640");
+await page.locator('[data-testid="cancel-product"]').click();
 
 await app.close();
 log("screenshots in", SHOTS);

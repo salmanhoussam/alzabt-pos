@@ -219,6 +219,46 @@ h1, h2 { margin: 0 0 12px; }
 .admin-actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
 .product-form { display: flex; flex-direction: column; gap: 10px; min-width: 340px; max-width: 880px; }
 
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   🔴 THE PRODUCT MASTER MODAL — A WORKSPACE, NOT TWO NARROW FORMS SIDE BY SIDE.
+
+   `.dialog` is 520px, and the two-column grid was being squeezed into it: each column got ~230px,
+   which is why the Windows capture looked cramped. The fix is width, not smaller type. 960px on a
+   1024px-minimum window (main.ts: minWidth 1024, minHeight 640) leaves a real gutter, and the main
+   column gets 1.6 of the 2.6 fractions because it carries nine controls to the side panel's five.
+
+   🔴 AND THE CARD NO LONGER SCROLLS. `.overlay > .card` gives every dialog `overflow-y: auto`, so
+   a footer sticky INSIDE it sits over content passing beneath — which is what the screenshot
+   showed. The card is now a flex column: title, a scroll region, and a footer that is their
+   sibling. Nothing can pass under the footer because the footer is not in the scrolling box.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+.overlay > .card.product-form {
+  width: min(960px, calc(100vw - 32px));
+  max-width: none;
+  overflow: hidden;            /* the CARD does not scroll; .form-scroll does */
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.product-form .form-scroll {
+  flex: 1 1 auto;
+  min-block-size: 0;           /* without this a flex child refuses to shrink and never scrolls */
+  overflow-y: auto;
+  padding-block: var(--space-2);
+  /* Room for a native dropdown opening against the bottom of the list, so it has somewhere to go
+     other than across the footer. */
+  padding-block-end: var(--space-4);
+}
+
+.product-form .form-footer {
+  flex: 0 0 auto;
+  margin: 0;
+  padding-block: var(--space-3);
+  border-block-start: 1px solid var(--border);
+  background: var(--surface);
+}
+
 /* 🔴 TWO COLUMNS SO NOTHING IMPORTANT SITS BELOW THE FOLD.
    The installed Windows capture of Edit Product, at the shop's real 1008x681, ended at the Category
    field: the photo preview, the online section and the Save button were all off-screen. "Opening
@@ -233,14 +273,6 @@ h1, h2 { margin: 0 0 12px; }
    reason: this form is about 630px of controls in its first column alone, so on a 1008x681 shop
    screen it scrolls — and a Save button that scrolls away is how a merchant loses what they typed.
    Measured in CI: `save-product` must be on screen when the form opens. */
-.product-form .tool-actions {
-  position: sticky;
-  inset-block-end: 0;
-  background: var(--surface);
-  padding-block: var(--space-2);
-  border-block-start: 1px solid var(--border);
-  margin-block-start: var(--space-2);
-}
 
 /* The preview is bounded tighter than a standalone image would be: it shares a column with the
    online-catalogue fields, and a 220px picture pushed the rest of them off a 681px screen. */
@@ -248,8 +280,11 @@ h1, h2 { margin: 0 0 12px; }
 .thumb-big { inline-size: 72px; }
 .form-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 
-@media (min-width: 900px) {
-  .form-grid { grid-template-columns: 1fr 1fr; }
+/* The main column carries nine controls, the side panel five — so it gets the larger share rather
+   than an even split. `minmax(0, …)` because a grid track's default `min-width: auto` refuses to
+   shrink below its content and would push the modal wider than the window. */
+@media (min-width: 820px) {
+  .form-grid { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: var(--space-4); }
 }
 .product-form .field { display: flex; flex-direction: column; gap: 4px; text-align: start; }
 .product-form .field > span { font-size: 13px; }
@@ -557,10 +592,30 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
   background: var(--surface-sunken);
 }
 
-.photo-empty {
+/* 🔴 A PICTURE FRAME, NOT AN EMPTY FIELD. The dashed square read as an empty INPUT in the Windows
+   capture — a merchant saw somewhere to type, not somewhere a photo goes. A bordered frame with a
+   picture glyph inside says what it is before anyone reads the label. */
+.photo-frame {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: var(--space-3);
+  justify-content: center;
+  gap: var(--space-2);
+  min-block-size: 150px;
+  padding: var(--space-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  text-align: center;
+}
+
+.photo-frame-broken { border-style: dotted; border-color: var(--danger); }
+
+.photo-glyph {
+  inline-size: 48px;
+  block-size: 48px;
+  color: var(--muted);
+  opacity: 0.75;
 }
 
 /* 🔴 A SECTION HEADING, NOT A SECOND CARD. The form is one dialog with three labelled parts; a

@@ -117,6 +117,27 @@ function useThumbnails(visible: readonly AdminProductDto[]): ThumbnailCache {
   return cache;
 }
 
+/**
+ * The "a photo goes here" mark.
+ *
+ * 🔴 INLINE SVG, AND NO ICON LIBRARY. A dashed empty square read as an empty INPUT in the Windows
+ * capture — the merchant saw a field, not a picture frame. What communicates "photo" is a picture,
+ * so this draws the universal one: a frame, a horizon, a sun. Twelve lines of SVG, offline, no
+ * dependency, and it inherits `currentColor` so it follows the theme like every other muted mark.
+ *
+ * `aria-hidden`: the text beside it already says what this is, and a screen reader announcing
+ * "image" here would be announcing the absence of one.
+ */
+function PhotoGlyph() {
+  return (
+    <svg className="photo-glyph" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+      <rect x="4.5" y="9.5" width="39" height="29" rx="3" fill="none" stroke="currentColor" strokeWidth="2" />
+      <circle cx="16" cy="19" r="3.5" fill="none" stroke="currentColor" strokeWidth="2" />
+      <path d="M7 34l10-10 7 7 6-5 11 9" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /** One product's photo cell: a thumbnail, or the neutral placeholder every other state falls back to. */
 function Thumb(props: { product: AdminProductDto; cache: ThumbnailCache; label: (k: string) => string }) {
   const state = props.cache.get(props.product.id);
@@ -230,8 +251,10 @@ export function ProductsScreen() {
         </button>
       </header>
 
+      {/* 🔴 ONE LINE, NOT TWO PARAGRAPHS. The two explanations together pushed the table a long way
+          down the screen on every single visit, and a merchant reads them once. The behaviour they
+          describe is unchanged; the words are merged and the table starts meaningfully higher. */}
       <p className="muted small">{t("products.searchHint")}</p>
-      <p className="muted small">{t("products.searchBarcodeHint")}</p>
       <p className="muted small" data-testid="product-count">
         {/* 🔴 EACH NUMBER ISOLATED. Interpolated bare into RTL text, "0 … · 0 …" reordered until
             the two digits sat together and the separator was unreadable. */}
@@ -288,9 +311,17 @@ export function ProductsScreen() {
                       </span>
                     </>
                   )}
-                  <span className="badge faint">
-                    {t(p.source === "manual" ? "products.source.manual" : "products.source.import")}
-                  </span>
+                  {/* 🔴 THE "يدوي / manual" BADGE IS GONE, AND IT WAS MEASURED BEFORE IT WENT.
+                      What `source` really does: `exportCatalog` calls `listForExport(CSV_SOURCE)`,
+                      so ONLY imported products are written to the merchant catalog export — a
+                      manually typed product is silently left out of it. That is a real,
+                      consequential merchant-facing difference.
+                      But "يدوي" does not say it. A merchant reading that word has no way to learn
+                      that this product will be missing from their exported price list, and the
+                      badge sat on every row of every visit saying nothing they could act on.
+                      So it is removed from the daily list, and the export's exclusion is reported
+                      as what it is: a gap in the EXPORT, to be surfaced where the export happens
+                      rather than hinted at here in a word that does not mean it. */}
                 </td>
                 <td className="col-codes">
                   {/* SKU and barcode are separate identifiers and both stay LTR-isolated: a bare
@@ -386,6 +417,10 @@ export function ProductsScreen() {
 
       {editing && (
         <ProductForm
+          /* 🔴 A fresh form per product. Without a key React reuses the instance across two Edit
+             clicks, and the second product would open showing the first one's typed-but-unsaved
+             values — the cross-section state leak the Section Editor already paid for once. */
+          key={editing.mode === "edit" ? editing.product.id : "add"}
           editing={editing}
           categories={categories}
           brands={brands}
@@ -453,6 +488,18 @@ function ProductForm(props: {
   const [master, setMaster] = useState<MasterForm>(original);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoGone, setPhotoGone] = useState(false);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 🔴 EVERY OPEN STARTS AT THE TOP. React keeps the same element when `editing` goes from one
+   * product to another — same component, same position — so without this the dialog would inherit
+   * wherever the previous one was left, and an owner clicking Edit on a second product would land
+   * mid-form with no idea which part of it they were looking at. The `key` on the mounted form
+   * handles the state; this handles the scroll position, which is DOM and survives a re-render.
+   */
+  useEffect(() => {
+    if (scrollRef.current !== null) scrollRef.current.scrollTop = 0;
+  }, [props.editing]);
 
   const set = (patch: Partial<ProductDraftRequest>) => setDraft((d) => ({ ...d, ...patch }));
   const setM = (patch: Partial<MasterForm>) => setMaster((m) => ({ ...m, ...patch }));
@@ -507,6 +554,16 @@ function ProductForm(props: {
         }}
       >
         <h2>{t(isEdit ? "form.editTitle" : "form.addTitle")}</h2>
+
+        {/* 🔴 A TRUE MODAL FOOTER NEEDS A SCROLL REGION THAT IS NOT THE CARD.
+            `.overlay > .card` gives every dialog `overflow-y: auto`, so the whole card scrolled —
+            and a footer STICKY INSIDE a scrolling card sits on top of the content passing beneath
+            it. The Windows capture showed exactly that: Save and Cancel with form fields
+            continuing underneath. Sticky was the wrong mechanism, not a wrong offset.
+            Now the card does not scroll, this region does, and the footer is its sibling — so
+            nothing can ever pass under it, and a native dropdown opening near the bottom has the
+            footer below it rather than through it. */}
+        <div className="form-scroll" ref={scrollRef}>
 
         {/* 🔴 TWO COLUMNS, AND THE INSTALLED SCREENSHOT IS WHY. Stacked, the three sections are
             taller than a 1008x681 shop screen: the Windows capture of Edit Product showed the form
@@ -672,14 +729,15 @@ function ProductForm(props: {
             is not ready. */}
         <div className="photo-panel" data-testid="photo-panel">
           {product === null ? (
-            <p className="muted" data-testid="photo-new-product">
-              {t("form.photoNone")}
-            </p>
+            <div className="photo-frame" data-testid="photo-new-product">
+              <PhotoGlyph />
+              <p className="muted">{t("form.photoNone")}</p>
+            </div>
           ) : hasPhoto ? (
             <ProductPhoto productId={product.id} alt={product.nameAr} label={t} />
           ) : (
-            <div className="photo-empty" data-testid="photo-empty">
-              <span className="thumb thumb-empty thumb-big" aria-hidden="true" />
+            <div className="photo-frame" data-testid="photo-empty">
+              <PhotoGlyph />
               <p className="muted">{t("form.photoNone")}</p>
             </div>
           )}
@@ -745,7 +803,9 @@ function ProductForm(props: {
         </div>
         </div>
 
-        <div className="tool-actions">
+        </div>
+
+        <div className="tool-actions form-footer" data-testid="form-footer">
           <button className="btn primary" type="submit" disabled={busy} data-testid="save-product">
             {t("action.save")}
           </button>
@@ -796,14 +856,18 @@ function ProductPhoto(props: { productId: string; alt: string; label: (k: string
 
   if (failed) {
     return (
-      <div className="photo-empty" data-testid="photo-failed">
-        <span className="thumb thumb-broken thumb-big" aria-hidden="true" />
+      <div className="photo-frame photo-frame-broken" data-testid="photo-failed">
+        <PhotoGlyph />
         <p className="muted">{props.label("form.photoFailed")}</p>
       </div>
     );
   }
   if (url === null) {
-    return <div className="photo-empty" data-testid="photo-loading"><span className="thumb thumb-loading thumb-big" aria-hidden="true" /></div>;
+    return (
+      <div className="photo-frame" data-testid="photo-loading">
+        <PhotoGlyph />
+      </div>
+    );
   }
   return <img className="photo-preview" src={url} alt={props.alt} data-testid="photo-preview" />;
 }
