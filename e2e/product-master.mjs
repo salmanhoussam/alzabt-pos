@@ -354,6 +354,15 @@ assert(
   await onScreen(page, "save-product"),
   "Save is visible without scrolling the dialog",
 );
+
+// 🔴 THE SCREENSHOT IS TAKEN HERE, BEFORE ANYTHING SCROLLS, and the first green run is why.
+// PM4 was captured further down — after `scrollIntoViewIfNeeded` had moved the dialog to reach the
+// online control — so the one screenshot that exists to show "Edit Product with an existing image"
+// did not contain the image. The assertions were all true at the moment they ran; the EVIDENCE was
+// taken of a different moment. A passing check and a screenshot of the wrong scroll position look
+// identical in a green log.
+await page.screenshot({ path: SHOTS + "PM4-edit-product-with-photo.png" });
+log("PM4 — Edit Product with an existing photo, unscrolled");
 // 🔴 THE ONLINE CONTROL IS NOT ASSERTED ON SCREEN, AND THAT IS A STATED LIMIT RATHER THAN A
 // QUIETLY DROPPED CHECK. BASIC INFORMATION alone is ~630px of controls on a 1008x681 shop screen,
 // so the dialog scrolls and SOMETHING must be below the fold. What the brief names as needing to
@@ -371,10 +380,10 @@ assert((await page.locator('[data-testid="photo-remove"]').count()) === 1, "Remo
 // so it must not be. Assign it an active one and confirm the brand datalist carries a suggestion.
 const brandSuggestions = await page.locator("#brand-suggestions option").allTextContents();
 log("brand suggestions:", brandSuggestions.length);
-await page.screenshot({ path: SHOTS + "PM4-edit-product-with-photo.png" });
-log("PM4 — Edit Product with an existing photo");
 
+await page.locator('[data-testid="field-brand"]').scrollIntoViewIfNeeded();
 await page.locator('[data-testid="field-brand"]').click();
+assert(await onScreen(page, "field-brand"), "the brand field is on screen for its screenshot");
 await page.screenshot({ path: SHOTS + "PM5-brand-suggestions.png" });
 log("PM5 — brand field with suggestions");
 await page.locator('[data-testid="cancel-product"]').click();
