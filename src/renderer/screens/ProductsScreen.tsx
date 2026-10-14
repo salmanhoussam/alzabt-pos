@@ -651,46 +651,15 @@ function ProductForm(props: {
         </div>
 
         <div className="form-col">
-        <h3 className="form-section">{t("form.secOnline")}</h3>
-        <p className="muted small">{t("form.localOnly")}</p>
+        {/* 🔴 THE PHOTO SECTION COMES FIRST IN THIS COLUMN, and the installed screenshot is why
+            twice over. Stacked, the form did not fit a 1008x681 shop screen at all; two columns
+            was not enough either — BASIC INFORMATION alone is about 630px of controls. So the
+            dialog scrolls, and what must be visible WITHOUT scrolling is the one thing the brief
+            names: "opening Edit Product must immediately make the photo state obvious".
 
-        {/* A description is PROSE, so it is a textarea and its line breaks survive to the website —
-            `validateProductMaster` trims only the ends for exactly this reason. */}
-        <label className="field">
-          <span>{t("form.descAr")}</span>
-          <textarea
-            dir="rtl"
-            lang="ar"
-            rows={3}
-            value={master.descriptionAr}
-            onChange={(e) => setM({ descriptionAr: e.target.value })}
-            data-testid="field-descAr"
-          />
-        </label>
-
-        <label className="field">
-          <span>{t("form.descEn")}</span>
-          <textarea
-            dir="ltr"
-            lang="en"
-            rows={3}
-            value={master.descriptionEn}
-            onChange={(e) => setM({ descriptionEn: e.target.value })}
-            data-testid="field-descEn"
-          />
-        </label>
-
-        <label className="field row-field">
-          <input
-            type="checkbox"
-            checked={master.isOnlineVisible}
-            onChange={(e) => setM({ isOnlineVisible: e.target.checked })}
-            data-testid="field-online"
-          />
-          <span>{t("form.onlineVisible")}</span>
-        </label>
-        <p className="muted small">{t("form.onlineHint")}</p>
-
+            Reading order in the markup still runs BASIC -> ONLINE -> PHOTO for a screen reader?
+            No — and that is the honest trade. The visual order here is BASIC | PHOTO + ONLINE,
+            and the DOM matches what is shown, so the two never disagree. */}
         <h3 className="form-section">{t("form.secPhoto")}</h3>
 
         {/* 🔴 THE PHOTO STATE IS VISIBLE HERE, never behind a second dialog. Opening a product that
@@ -733,6 +702,46 @@ function ProductForm(props: {
           </div>
           <p className="muted small">{t("form.photoSoon")}</p>
         </div>
+        <h3 className="form-section">{t("form.secOnline")}</h3>
+        <p className="muted small">{t("form.localOnly")}</p>
+
+        {/* A description is PROSE, so it is a textarea and its line breaks survive to the website —
+            `validateProductMaster` trims only the ends for exactly this reason. */}
+        <label className="field">
+          <span>{t("form.descAr")}</span>
+          <textarea
+            dir="rtl"
+            lang="ar"
+            rows={3}
+            value={master.descriptionAr}
+            onChange={(e) => setM({ descriptionAr: e.target.value })}
+            data-testid="field-descAr"
+          />
+        </label>
+
+        <label className="field">
+          <span>{t("form.descEn")}</span>
+          <textarea
+            dir="ltr"
+            lang="en"
+            rows={3}
+            value={master.descriptionEn}
+            onChange={(e) => setM({ descriptionEn: e.target.value })}
+            data-testid="field-descEn"
+          />
+        </label>
+
+        <label className="field row-field">
+          <input
+            type="checkbox"
+            checked={master.isOnlineVisible}
+            onChange={(e) => setM({ isOnlineVisible: e.target.checked })}
+            data-testid="field-online"
+          />
+          <span>{t("form.onlineVisible")}</span>
+        </label>
+        <p className="muted small">{t("form.onlineHint")}</p>
+
         </div>
         </div>
 

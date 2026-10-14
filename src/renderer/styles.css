@@ -227,6 +227,25 @@ h1, h2 { margin: 0 0 12px; }
    One column again below 900px, where two would be worse than a scroll.
    `.product-form`'s own max-width went 460px -> 880px for the same reason. */
 .form-grid { display: grid; grid-template-columns: 1fr; gap: var(--space-4); align-items: start; }
+
+/* 🔴 THE WAY OUT STAYS IN VIEW WHILE THE FORM SCROLLS PAST IT.
+   The same decision `.inv-actions.inv-keep` already carries for the invoice panel, and the same
+   reason: this form is about 630px of controls in its first column alone, so on a 1008x681 shop
+   screen it scrolls — and a Save button that scrolls away is how a merchant loses what they typed.
+   Measured in CI: `save-product` must be on screen when the form opens. */
+.product-form .tool-actions {
+  position: sticky;
+  inset-block-end: 0;
+  background: var(--surface);
+  padding-block: var(--space-2);
+  border-block-start: 1px solid var(--border);
+  margin-block-start: var(--space-2);
+}
+
+/* The preview is bounded tighter than a standalone image would be: it shares a column with the
+   online-catalogue fields, and a 220px picture pushed the rest of them off a 681px screen. */
+/* The empty state's icon, small because it shares a column with the online fields. */
+.thumb-big { inline-size: 72px; }
 .form-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 
 @media (min-width: 900px) {
@@ -507,15 +526,12 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .thumb-loading { opacity: 0.6; }
 .thumb-broken { border-style: dotted; border-color: var(--danger); }
 
-/* The form's preview. Bounded in BOTH directions: a 4000px photo must not push the dialog's
-   actions off screen, which is the one thing a modal cannot recover from. */
-.thumb-big { inline-size: 128px; }
 
 .photo-preview {
   display: block;
   max-inline-size: 100%;
-  inline-size: 220px;
-  max-block-size: 220px;
+  inline-size: 150px;
+  max-block-size: 150px;
   aspect-ratio: 1;
   object-fit: cover;
   object-position: center;
