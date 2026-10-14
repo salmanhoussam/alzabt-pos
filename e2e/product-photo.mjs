@@ -94,8 +94,22 @@ function auditEvents(entityId) {
   );
 }
 
-function firstProduct() {
-  return ledger((db) => db.prepare(`SELECT id, name_ar FROM catalog_products ORDER BY id LIMIT 1`).get());
+/**
+ * The product this script created, found by its SKU.
+ *
+ * 🔴 NOT `ORDER BY id LIMIT 1`, AND NOT `nth(0)` IN THE UI — both of which were wrong here, for
+ * two different reasons. A fresh profile's `catalog_products` is EMPTY: `startupCatalog` serves the
+ * fixture catalog from MEMORY when there is no local source and never writes a row, so the first
+ * version of this script asserted against `undefined`. And the admin list orders by
+ * `(source, CAST(source_key AS INTEGER), source_key)`, not by id, so even with rows present the
+ * DB's "first" and the screen's "first" are two different claims that happen to agree.
+ *
+ * So the script creates its own product and addresses it by SKU, in both places.
+ */
+const SKU = "PHOTO-001";
+
+function productBySku() {
+  return ledger((db) => db.prepare(`SELECT id, name_ar, sku FROM catalog_products WHERE sku = ?`).get(SKU));
 }
 
 // ── the app ────────────────────────────────────────────────────────────────────────────────────
@@ -128,10 +142,26 @@ const saveTo = (app, path) =>
     dialog.showSaveDialogSync = () => p;
   }, path);
 
-/** Opens Edit on a product row by index. */
-async function openEdit(page, index = 0) {
-  await page.locator('[data-testid="product-edit"]').nth(index).click();
+/** Opens Edit on OUR product's row, found by the SKU the row renders. */
+async function openEdit(page) {
+  const row = page.locator('[data-testid="product-row"]').filter({ hasText: SKU });
+  assert((await row.count()) === 1, `exactly one row is ${SKU}`);
+  await row.locator('[data-testid="product-edit"]').click();
   await page.locator('[data-testid="photo-panel"]').waitFor({ state: "visible" });
+}
+
+/** Creates the one product this script works on, through the real Add Product form. */
+async function createProduct(page) {
+  await page.locator('[data-testid="add-product"]').click();
+  await page.locator('[data-testid="field-nameAr"]').fill("صنف للصورة");
+  const inputs = page.locator(".product-form input");
+  await inputs.nth(1).fill("Photo Subject");
+  await inputs.nth(2).fill(SKU);
+  await page.locator('[data-testid="field-price"]').fill("5.00");
+  await page.locator('[data-testid="field-unit"]').selectOption("piece");
+  await page.locator('[data-testid="save-product"]').click();
+  await page.locator(".dialog .btn.primary.wide").click();
+  await page.locator('[data-testid="product-row"]').filter({ hasText: SKU }).first().waitFor();
 }
 
 async function closeForm(page) {
@@ -174,9 +204,10 @@ async function readNotice(page) {
 // ══ 1. ADD ════════════════════════════════════════════════════════════════════════════════════
 
 let { app, page } = await launch();
-const product = firstProduct();
-assert(product, "the fixture catalog has at least one product");
-log("product under test:", product.id, product.name_ar);
+await createProduct(page);
+const product = productBySku();
+assert(product, `the product ${SKU} was created and is in the ledger`);
+log("product under test:", product.id, product.name_ar, product.sku);
 
 check(photoRows(product.id).length === 0, "the product starts with no stored photo");
 
@@ -462,7 +493,11 @@ check(
 ({ app, page } = await launch());
 await page.locator('[data-testid="product-row"]').first().waitFor({ state: "visible" });
 check(
-  (await page.locator('[data-testid="thumb-image"]').count()) === 0,
+  (await page
+    .locator('[data-testid="product-row"]')
+    .filter({ hasText: SKU })
+    .locator('[data-testid="thumb-image"]')
+    .count()) === 0,
   "🔴 after a restart the removed photo is still gone — no stale thumbnail returns",
 );
 await openEdit(page);
