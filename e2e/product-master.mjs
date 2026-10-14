@@ -539,8 +539,11 @@ await page.locator('[data-testid="cancel-product"]').click();
   // half — a product that already carries one keeps it and can still be edited.
   await app.close();
   const w = new Database(LEDGER);
-  w.prepare("UPDATE catalog_products SET category_id = ? WHERE id = ?").run(retired.id, target.id);
+  // Same hazard as the corruption step below: an UPDATE matching nothing SUCCEEDS, so the one
+  // thing worth asserting about a raw setup write is that it actually hit a row.
+  const assigned = w.prepare("UPDATE catalog_products SET category_id = ? WHERE id = ?").run(retired.id, target.id);
   w.close();
+  assert(assigned.changes === 1, `the retired category was really assigned (changed ${assigned.changes})`);
 }
 
 ({ app, page } = await launch());
@@ -575,10 +578,27 @@ await page.locator(".dialog .btn.primary.wide").click();
 // 6 · A CORRUPT photo must not break the screen
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 {
+  // 🔴 THE IMAGE IS FOUND BY ITS PRODUCT, NOT BY A HARD-CODED ID — and the id this used to carry,
+  // 'e2e-photo-1', belonged to the raw-SQL seed slice F deleted. The real producer generates its
+  // own id, so the UPDATE matched ZERO ROWS: nothing was corrupted, the thumbnail loaded perfectly,
+  // and the step sat waiting for a placeholder that was never going to appear.
+  //
+  // 🔴 AND `.changes` IS ASSERTED, which is the real lesson. An UPDATE that matches nothing
+  // SUCCEEDS — a setup step that silently did nothing is indistinguishable from one that worked,
+  // and the failure then surfaces 15 seconds later as a timeout on an unrelated-looking selector.
   const db = new Database(LEDGER);
-  db.prepare("UPDATE catalog_product_images SET bytes = ? WHERE id = 'e2e-photo-1'").run(Buffer.from("not an image"));
+  const image = db
+    .prepare(
+      `SELECT i.id FROM catalog_product_images i
+         JOIN catalog_products p ON p.id = i.product_id
+        WHERE p.sku = 'SKU-100' AND i.is_primary = 1`,
+    )
+    .get();
+  assert(image !== undefined, "the photographed product has a stored primary image to corrupt");
+  const result = db.prepare("UPDATE catalog_product_images SET bytes = ? WHERE id = ?").run(Buffer.from("not an image"), image.id);
   db.close();
-  log("corrupted the stored photo behind the application's back");
+  assert(result.changes === 1, `the corruption changed exactly one row (changed ${result.changes})`);
+  log("corrupted the stored photo behind the application's back:", image.id);
 }
 
 ({ app, page } = await launch());
