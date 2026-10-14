@@ -266,8 +266,13 @@ const natural = await page.locator('[data-testid="thumb-image"]').first().evalua
 assert(natural.w === 96 && natural.h === 96, `the thumbnail decoded at 96x96, got ${natural.w}x${natural.h}`);
 assert(natural.box > 20 && natural.box < 80, `the thumbnail is small (${natural.box}px), not a catalogue card`);
 
-// 🔴 ROW HEIGHT DOES NOT EXPLODE, and the photographed and unphotographed rows match. A thumbnail
-// that grew with its image would make every row a different height and the list unscannable.
+// 🔴 ROW HEIGHT DOES NOT EXPLODE, AND EVERY ROW MATCHES. Two things could break this: a thumbnail
+// sized by its image, and a cell that grows when the data is richer.
+//
+// 🔴 THE SECOND ONE REALLY HAPPENED, and this assertion is why it was found rather than shipped:
+// the barcode started on its own line under the SKU, and the installed run measured 69px against
+// 57px — a product WITH a barcode was taller than one without. The fix was the layout (both codes
+// on one line, the cell `nowrap`), not this tolerance.
 const heights = await rows(page).evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().height)));
 assert(Math.abs(heights[0] - heights[1]) <= 2, `rows are the same height: ${heights.join(" vs ")}`);
 assert(heights.every((h) => h < 110), `no row-height explosion: ${heights.join(", ")}`);

@@ -471,6 +471,12 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
    Colours come from the shipped tokens only; no literal appears below. */
 .col-thumb { width: 52px; }
 
+/* 🔴 ONE LINE FOR BOTH CODES. The installed Windows run measured 69px and 57px rows when the
+   barcode sat on its own line: a product with a barcode was taller than one without, which gives a
+   scan-friendly list two row heights depending on its data. `nowrap` is what stops a long code
+   wrapping and bringing that back. */
+.col-codes { white-space: nowrap; }
+
 .thumb {
   display: block;
   inline-size: 40px;

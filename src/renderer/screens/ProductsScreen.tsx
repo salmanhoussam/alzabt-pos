@@ -292,14 +292,21 @@ export function ProductsScreen() {
                     {t(p.source === "manual" ? "products.source.manual" : "products.source.import")}
                   </span>
                 </td>
-                <td>
+                <td className="col-codes">
                   {/* SKU and barcode are separate identifiers and both stay LTR-isolated: a bare
                       digit run next to Arabic reorders, which is how a 13-digit code becomes
-                      unreadable. SKU first because it is the shop's own key. */}
+                      unreadable. SKU first, because it is the shop's own key.
+
+                      🔴 ONE LINE, NOT TWO, AND THE WINDOWS GATE IS WHY. The first version put the
+                      barcode on its own line under the SKU, and the installed run measured rows at
+                      69px and 57px — a product with a barcode was taller than one without, so a
+                      list meant to be scanned had two row heights depending on data. Inline with a
+                      separator keeps both codes readable and every row identical; `nowrap` on the
+                      cell stops a long code reintroducing the same problem by wrapping. */}
                   {p.sku ? <bdi dir="ltr">{p.sku}</bdi> : <span className="muted">—</span>}
                   {p.barcode && (
                     <>
-                      <br />
+                      <span className="muted" aria-hidden="true"> · </span>
                       <bdi dir="ltr" className="muted small" data-testid="row-barcode">
                         {p.barcode}
                       </bdi>
