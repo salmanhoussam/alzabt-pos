@@ -192,7 +192,7 @@ const options = await page.locator('[data-testid="field-category"] option').allT
 assert(options.length === 3, `the chooser offers 'no category' + two active ones, got ${options.length}`);
 assert(!options.join("|").includes("متوقّف"), "a retired category is NOT offered for a new product");
 log("PM2 — Add Product, three sections, empty photo state");
-await page.locator(".product-form .btn.ghost").click();
+await page.locator('[data-testid="cancel-product"]').click();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 3 · Two products: one that will have a photo, one that will not (§W 1)
@@ -321,7 +321,7 @@ log("PM4 — Edit Product with an existing photo");
 await page.locator('[data-testid="field-brand"]').click();
 await page.screenshot({ path: SHOTS + "PM5-brand-suggestions.png" });
 log("PM5 — brand field with suggestions");
-await page.locator(".product-form .btn.ghost").click();
+await page.locator('[data-testid="cancel-product"]').click();
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 5 · The retired category on a product that already carries it (§W 4)

@@ -723,7 +723,7 @@ function ProductForm(props: {
           <button className="btn primary" type="submit" disabled={busy} data-testid="save-product">
             {t("action.save")}
           </button>
-          <button className="btn ghost" type="button" onClick={props.onClose}>
+          <button className="btn ghost" type="button" onClick={props.onClose} data-testid="cancel-product">
             {t("action.cancel")}
           </button>
         </div>
