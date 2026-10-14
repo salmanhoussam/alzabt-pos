@@ -366,7 +366,17 @@ const natural = await page.locator('[data-testid="thumb-image"]').first().evalua
   h: img.naturalHeight,
   box: img.getBoundingClientRect().width,
 }));
-assert(natural.w === 96 && natural.h === 96, `the thumbnail decoded at 96x96, got ${natural.w}x${natural.h}`);
+// 🔴 THIS ASSERTION CHANGED VALUE IN SLICE F, and the old one is named. It read
+// `w === 96 && h === 96` because the photo was a generated 96x96 PNG written by raw SQL. The photo
+// now comes through the real producer, so the number is the normalization policy's output for the
+// `shelf.jpg` fixture. Both halves are kept deliberately: `> 0` is the only honest test that a
+// browser DECODED an image at all (it reports 0 for one it could not), and the exact size says the
+// real photo is behind it rather than some other image that merely decoded.
+assert(natural.w > 0 && natural.h > 0, `the thumbnail really decoded (was: exactly 96x96, got ${natural.w}x${natural.h})`);
+assert(natural.w === 1600 && natural.h === 1200, `and it is the real normalized photo (got ${natural.w}x${natural.h})`);
+// 🔴 AND THE DISPLAYED BOX IS STILL SMALL, which is the check E2.1 actually cared about: a
+// 1600px-wide source must not become a catalogue card. This is the assertion the size change above
+// could otherwise have quietly weakened.
 assert(natural.box > 20 && natural.box < 80, `the thumbnail is small (${natural.box}px), not a catalogue card`);
 
 // 🔴 ROW HEIGHT DOES NOT EXPLODE, AND EVERY ROW MATCHES. Two things could break this: a thumbnail
@@ -432,7 +442,10 @@ const preview = await page.locator('[data-testid="photo-preview"]').evaluate((im
   w: img.naturalWidth,
   box: Math.round(img.getBoundingClientRect().width),
 }));
-assert(preview.w === 96, "the form preview is a real decode");
+// Same change as the thumbnail above: was `=== 96` against the generated seed, now the real
+// normalized photo. The property is that it DECODED, which `naturalWidth > 0` is the only honest
+// test of — a browser reports 0 for an image it could not decode.
+assert(preview.w === 1600, `the form preview is a real decode of the real photo (was: 96, got ${preview.w})`);
 assert(preview.box > 100, `the preview is large enough to judge (${preview.box}px)`);
 
 // 🔴 "OBVIOUS ON OPENING" MEANS ON SCREEN, NOT MERELY IN THE DOM — and this assertion exists
