@@ -387,12 +387,18 @@ await page.screenshot({ path: SHOTS + "PM8-corrupt-photo-falls-back.png" });
 log("PM8 — a corrupt photo falls back to the placeholder and breaks nothing");
 
 // ── 7 · English / LTR, so the mirrored layout is reviewable too ──────────────────────────────────
-await page.evaluate(async () => {
-  await window.pos.setTerminalLanguage({ language: "en" });
-});
+// 🔴 THROUGH THE REAL TOGGLE, NOT THROUGH window.pos. Calling `setTerminalLanguage` directly
+// persists the choice and returns the new settings, but nothing re-reads them: the document's `dir`
+// is set by the app's own language state, so the call succeeded and the screen stayed RTL. The
+// first run of this script asserted on the document and failed — correctly. The UI toggle is the
+// path a merchant takes and the one that actually flips the document.
+await page.locator('[data-testid="lang-toggle"]').click();
+await page.waitForFunction(() => document.documentElement.dir === "ltr", undefined, { timeout: 15000 });
 await page.locator('[data-testid="tab-products"]').click();
 await rows(page).first().waitFor();
 assert((await page.evaluate(() => document.documentElement.dir)) === "ltr", "the document is ltr in English");
+const addLabel = await page.locator('[data-testid="add-product"]').innerText();
+assert(!/[\u0600-\u06ff]/.test(addLabel), `the screen is really English ("${addLabel.trim()}")`);
 await page.screenshot({ path: SHOTS + "PM9-products-english-ltr.png" });
 log("PM9 — the same screen in English/LTR");
 
