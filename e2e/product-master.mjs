@@ -448,10 +448,20 @@ const tableTop = await page.evaluate(() => {
   return t === null ? -1 : Math.round(t.getBoundingClientRect().top);
 });
 assert(tableTop > 0 && tableTop < 330, `the product table starts high on the screen (${tableTop}px from the top)`);
-// 🔴 And the technical source badge is gone from the daily list.
+// 🔴 THE TECHNICAL SOURCE BADGE IS GONE — and the check names what it allows rather than banning
+// a CSS class. `.badge.faint` is also the ONLINE badge, which is deliberate and explained, so the
+// first version of this line failed on the thing it was supposed to keep. What must be absent is
+// an UNIDENTIFIED faint badge: anything carrying that look without a testid saying what it means.
+const unexplained = await page.evaluate(() =>
+  [...document.querySelectorAll('[data-testid="product-row"] .badge.faint')]
+    .filter((b) => b.getAttribute("data-testid") === null)
+    .map((b) => b.textContent.trim()),
+);
+assert(unexplained.length === 0, `no unexplained badge on the products rows (found: ${unexplained.join(", ")})`);
+// CONTROL: the online badge IS still there, so the line above is not passing because badges vanished.
 assert(
-  (await page.locator('[data-testid="product-row"] .badge.faint').count()) === 0,
-  "no unexplained source badge on the products rows",
+  (await page.locator('[data-testid="badge-online"]').count()) === 1,
+  "the online badge survives — exactly one product is marked online",
 );
 log("B — Arabic products list; table top at", tableTop, "px");
 
