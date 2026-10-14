@@ -464,6 +464,14 @@ await rows(page).first().waitFor();
 assert((await page.evaluate(() => document.documentElement.dir)) === "ltr", "the document is ltr in English");
 const addLabel = await page.locator('[data-testid="add-product"]').innerText();
 assert(!/[\u0600-\u06ff]/.test(addLabel), `the screen is really English ("${addLabel.trim()}")`);
+
+// 🔴 ROW HEIGHTS IN ENGLISH TOO — and this check exists because the Arabic one could not see it.
+// The English capture showed "23.00 USD" wrapping across two lines while "7.50 USD" did not, so
+// the rows were uneven again in the other language. A layout measured in one direction is measured
+// in one direction.
+const enHeights = await rows(page).evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().height)));
+assert(Math.abs(enHeights[0] - enHeights[1]) <= 2, `English rows are the same height: ${enHeights.join(" vs ")}`);
+assert(enHeights.every((h) => h < 110), `no row-height explosion in English: ${enHeights.join(", ")}`);
 await page.screenshot({ path: SHOTS + "PM9-products-english-ltr.png" });
 log("PM9 — the same screen in English/LTR");
 

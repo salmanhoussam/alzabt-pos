@@ -510,6 +510,13 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
    wrapping and bringing that back. */
 .col-codes { white-space: nowrap; }
 
+/* 🔴 AND THE PRICE DOES NOT WRAP EITHER, for the same reason and found the same way. The English
+   capture showed "23.00 USD" breaking across two lines while "7.50 USD" did not, so the two rows
+   were different heights again — in the OTHER language, which the Arabic measurement could not
+   see. An amount and its currency are one isolated run (`<bdi dir="ltr">`); this stops the column
+   splitting that run when the label words are longer. */
+.admin-table td.num { white-space: nowrap; }
+
 .thumb {
   display: block;
   inline-size: 40px;
