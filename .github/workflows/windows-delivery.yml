@@ -154,6 +154,11 @@ jobs:
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
           node e2e/product-management.mjs
 
+      - name: Product Master against the INSTALLED app (thumbnails, sections, categories, barcode, screenshots)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/product-master.mjs
+
       - name: Manual invoice against the INSTALLED app (draft -> finalize -> review -> PDF -> restart)
         run: |
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
