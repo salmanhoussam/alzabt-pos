@@ -18,7 +18,17 @@
  * platforms in a way the policy can tolerate, it is PRINTED rather than asserted, and labelled, so
  * a real difference shows up in the log instead of being hidden by a loose assertion.
  *
+ * 🔴 NOTHING INSIDE `app.evaluate` MAY USE `require`. The function is serialized and eval'd in the
+ * main process, so the module scope it was written in — and its `require` — is gone. The first
+ * version of this script called `require("node:fs")` there and died with "require is not defined"
+ * on the Windows gate, which read like a platform difference and was not one: it reproduces on
+ * Linux against a minimal app. `Buffer`, `process` and the destructured `nativeImage` ARE
+ * available, so every input below is read HERE, in Node, and passed in as base64.
+ *
  * Run: node e2e/photo-codec.mjs        (CI sets E2E_EXECUTABLE to the installed .exe)
+ *      E2E_APP_DIR=<dir> node e2e/photo-codec.mjs    — launch another app directory instead, which
+ *      is how the measurement body is verified locally: this repo's own renderer segfaults under
+ *      Playwright here, and a minimal main-only app exercises the identical `app.evaluate` body.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 import { _electron as electron } from "playwright-core";
@@ -33,7 +43,8 @@ const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURES = join(APP, "tests", "fixtures", "photos");
 const PACKAGED = process.env.E2E_EXECUTABLE;
 const ELECTRON = PACKAGED ?? createRequire(import.meta.url)("electron");
-const APP_ARGS = PACKAGED ? [] : [APP];
+const APP_DIR = process.env.E2E_APP_DIR ?? APP;
+const APP_ARGS = PACKAGED ? [] : [APP_DIR];
 const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["--no-sandbox"] : [];
 const home = mkdtempSync(join(tmpdir(), "pos-e2e-codec-"));
 const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
@@ -59,12 +70,51 @@ const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_AR
  * Paths are passed in and read there; nothing about the renderer is involved, and no product code
  * is called — this is the codec on its own.
  */
-const m = await app.evaluate(async ({ nativeImage }, { fixtures }) => {
-  const fs = require("node:fs");
-  const path = require("node:path");
-  const read = (n) => fs.readFileSync(path.join(fixtures, n));
-  const of = (n) => {
-    const img = nativeImage.createFromBuffer(read(n));
+const FIXTURE_NAMES = [
+  "shelf.jpg",
+  "portrait-exif.jpg",
+  "oversized.jpg",
+  "logo-alpha.png",
+  "table-noalpha.png",
+  "liar.png",
+  "sample.webp",
+  "corrupt.jpg",
+];
+
+// Read HERE, in Node, and handed over as base64 — see the header for why `require` is unavailable
+// on the other side.
+const files = {};
+for (const n of FIXTURE_NAMES) files[n] = readFileSync(join(FIXTURES, n)).toString("base64");
+
+/**
+ * The adversarial buffers, also built HERE.
+ *
+ * The "random" one is a fixed pseudo-random sequence rather than real entropy: a measurement that
+ * cannot be reproduced from the log is worth less, and nothing about this case needs unpredictability
+ * — it needs to not be an image.
+ */
+const adversarial = {
+  empty: Buffer.alloc(0),
+  random: Buffer.from(Array.from({ length: 1024 }, (_, i) => (i * 97 + 13) % 256)),
+  jpegMagicOnly: Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+  text: Buffer.from("product,price\nx,1\n"),
+  pngHeaderJunk: Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(200, 7),
+  ]),
+};
+const adversarialB64 = Object.fromEntries(Object.entries(adversarial).map(([k, b]) => [k, b.toString("base64")]));
+
+/**
+ * Runs in the MAIN process of the real app, where `nativeImage` lives.
+ *
+ * 🔴 ONLY GLOBALS IN HERE: `Buffer`, `process`, and the destructured `nativeImage`. No `require`,
+ * no `fs`, no `path` — see the header.
+ */
+const m = await app.evaluate(({ nativeImage }, payload) => {
+  const buf = (b64) => Buffer.from(b64, "base64");
+  const of = (b64) => {
+    const img = nativeImage.createFromBuffer(buf(b64));
     const empty = img.isEmpty();
     return { empty, size: empty ? { width: 0, height: 0 } : img.getSize() };
   };
@@ -77,34 +127,18 @@ const m = await app.evaluate(async ({ nativeImage }, { fixtures }) => {
     adversarial: {},
   };
 
-  for (const n of [
-    "shelf.jpg",
-    "portrait-exif.jpg",
-    "oversized.jpg",
-    "logo-alpha.png",
-    "table-noalpha.png",
-    "liar.png",
-    "sample.webp",
-    "corrupt.jpg",
-  ]) {
+  for (const [n, b64] of Object.entries(payload.files)) {
     try {
-      out.decoded[n] = of(n);
+      out.decoded[n] = of(b64);
     } catch (e) {
       out.threw[n] = String(e && e.message);
     }
   }
 
-  // Adversarial buffers: the measured claim is that NONE of these throws and ALL come back empty.
-  const cases = {
-    empty: Buffer.alloc(0),
-    random: require("node:crypto").randomBytes(1024),
-    jpegMagicOnly: Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
-    text: Buffer.from("product,price\nx,1\n"),
-    pngHeaderJunk: Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(200, 7)]),
-  };
-  for (const [k, b] of Object.entries(cases)) {
+  // The measured claim: NONE of these throws and ALL come back empty.
+  for (const [k, b64] of Object.entries(payload.adversarial)) {
     try {
-      const img = nativeImage.createFromBuffer(b);
+      const img = nativeImage.createFromBuffer(buf(b64));
       out.adversarial[k] = { threw: false, empty: img.isEmpty() };
     } catch (e) {
       out.adversarial[k] = { threw: true, message: String(e && e.message) };
@@ -112,7 +146,9 @@ const m = await app.evaluate(async ({ nativeImage }, { fixtures }) => {
   }
 
   // BGRA, proven with a known colour rather than assumed from documentation.
-  const onePx = nativeImage.createFromBuffer(read("logo-alpha.png")).resize({ width: 1, height: 1, quality: "best" });
+  const onePx = nativeImage
+    .createFromBuffer(buf(payload.files["logo-alpha.png"]))
+    .resize({ width: 1, height: 1, quality: "best" });
   out.bitmapBytesPerPixel = onePx.toBitmap().length;
 
   // Alpha survives a resize — the premise that lets transparency be detected on the small bitmap.
@@ -121,8 +157,8 @@ const m = await app.evaluate(async ({ nativeImage }, { fixtures }) => {
     for (let i = 3; i < b.length; i += 4) if (b[i] !== 255) return true;
     return false;
   };
-  const logo = nativeImage.createFromBuffer(read("logo-alpha.png"));
-  const flat = nativeImage.createFromBuffer(read("table-noalpha.png"));
+  const logo = nativeImage.createFromBuffer(buf(payload.files["logo-alpha.png"]));
+  const flat = nativeImage.createFromBuffer(buf(payload.files["table-noalpha.png"]));
   out.alpha = {
     logoBefore: alphaOf(logo),
     logoAfterResize: alphaOf(logo.resize({ width: 256, height: 256, quality: "best" })),
@@ -130,7 +166,7 @@ const m = await app.evaluate(async ({ nativeImage }, { fixtures }) => {
   };
 
   // The format decision's whole justification: a photograph as PNG vs as JPEG, at the real edge.
-  const shelf = nativeImage.createFromBuffer(read("shelf.jpg"));
+  const shelf = nativeImage.createFromBuffer(buf(payload.files["shelf.jpg"]));
   const s = shelf.getSize();
   const scale = 1600 / Math.max(s.width, s.height);
   const resized =
@@ -146,12 +182,12 @@ const m = await app.evaluate(async ({ nativeImage }, { fixtures }) => {
   const b = small.toBitmap();
   const rot = Buffer.alloc(b.length);
   for (let y = 0; y < 30; y++)
-    for (let x = 0; x < 40; x++) b.copy(rot, ((x * 30) + (30 - 1 - y)) * 4, (y * 40 + x) * 4, (y * 40 + x) * 4 + 4);
+    for (let x = 0; x < 40; x++) b.copy(rot, (x * 30 + (30 - 1 - y)) * 4, (y * 40 + x) * 4, (y * 40 + x) * 4 + 4);
   const rotated = nativeImage.createFromBitmap(rot, { width: 30, height: 40 });
   out.bitmapRoundTrip = { empty: rotated.isEmpty(), size: rotated.getSize(), jpeg: rotated.toJPEG(80).length };
 
   return out;
-}, { fixtures: FIXTURES });
+}, { files, adversarial: adversarialB64 });
 
 log(`Electron ${m.electron} · Chromium ${m.chrome} · ${m.platform}`);
 log(`installed executable: ${PACKAGED ?? "(dev tree)"}`);
