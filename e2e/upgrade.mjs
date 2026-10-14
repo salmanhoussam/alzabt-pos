@@ -21,6 +21,21 @@
 // E2E_EXECUTABLE is the installed exe. The script asserts the profile path it actually used and
 // prints it, and reads the ledger file directly (app closed) for schema/backup evidence.
 // Synthetic Arabic data and fake prices only.
+/**
+ * 🔴 THE SCHEMA VERSION OF *THIS* BUILD, IN ONE PLACE.
+ *
+ * It was a literal 8 in fourteen assertions and in seven pre-migration backup FILENAMES, each
+ * hand-edited per migration — which is how it came to be wrong: migration 9 (product_master)
+ * landed and this file still said v8, and nobody saw it because the gate failed at an earlier step
+ * first. One named constant makes the bump a single deliberate edit instead of twenty-one chances
+ * to miss one.
+ *
+ * Deliberately NOT derived from MIGRATIONS.length: these scripts assert what the INSTALLED app did
+ * to a real ledger, and a value read out of the source under test would agree with it by
+ * construction. 8 -> 10 (9 = product_master, 10 = product_master_audit).
+ */
+const SCHEMA = 10;
+
 import { _electron as electron } from "playwright-core";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -85,7 +100,7 @@ async function launch() {
     await page.locator('[data-testid="setup-confirm"]').fill(E2E_PIN);
     await page.locator('[data-testid="setup-submit"]').click();
     await page.waitForSelector('[data-testid="cart"], .cart');
-    log("mandatory setup completed (schema v8 build)");
+    log(`mandatory setup completed (schema v${SCHEMA} build)`);
   } else if (!(await page.locator('[data-testid="cart"], .cart').count())) {
     // 🔴 REFUSED, WHICH MEANS THIS PROFILE IS ALREADY PAST SETUP. The phases of one scenario are
     // SEPARATE PROCESSES against the SAME real profile — verify-from-v7 completes setup, and
@@ -664,7 +679,7 @@ if (PHASE === "seed-v2") {
   // Was `f.schema === 3`, then 4, 5 and 6; migration 7 made a v2 ledger land on v7, and migration 8 carries it to v8 in ONE upgrade,
   // and migration 8 (operator accounts) now carries it to v8 in that same single upgrade. The
   // version a build migrates TO is a transition, so each old value is named rather than replaced.
-  assert(f.schema === 8 && f.integrity === "ok", `migrated to schema v8, integrity ok (got ${f.schema})`);
+  assert(f.schema === SCHEMA && f.integrity === "ok", `migrated to schema v${SCHEMA}, integrity ok (got ${f.schema})`);
   // The audit table was created on the way, and starts empty — nothing is reconstructed.
   assert(f.auditBusiness === 0, `the durable BUSINESS audit trail starts empty (was \`audit === 0\`; got ${f.auditBusiness})`);
   assert(f.auditOperators === 1, `and exactly one account event, written by mandatory setup at first login (got ${f.auditOperators})`);
@@ -675,8 +690,8 @@ if (PHASE === "seed-v2") {
   const backups = backupFiles();
   log("backups:", JSON.stringify(backups));
   // The name carries the real span, and that span widened with each migration: v2→v3, v2→v4, v2→v5, now v2→v6.
-  const pre = backups.find((b) => /^pre-migration-v2-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, `a pre-migration backup was taken before v2→v8 (got ${JSON.stringify(backups)})`);
+  const pre = backups.find((b) => new RegExp(`^pre-migration-v2-to-v${SCHEMA}-\\d{8}T\\d{6}Z\\.sqlite$`).test(b));
+  assert(pre, `a pre-migration backup was taken before v2→v${SCHEMA} (got ${JSON.stringify(backups)})`);
   const copy = new Database(join(DEFAULT_PROFILE, "backups", pre), { readonly: true });
   const preSchema = Number(copy.prepare("SELECT max(version) AS n FROM schema_migrations").get().n);
   const preSales = Number(copy.prepare("SELECT count(*) AS n FROM sales").get().n);
@@ -747,8 +762,8 @@ if (PHASE === "seed-v2") {
   // 🔴 INVERTED by migration 4. This used to assert that NO pre-migration backup existed, because
   // v3→v3 migrated nothing. v3→v4 is a real migration, so the backup is now mandatory — and it must
   // hold the OLD schema, which is the only thing that makes the migration recoverable.
-  const pre3 = backupFiles().find((b) => /^pre-migration-v3-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre3, `a pre-migration backup was taken before v3→v8 (got ${JSON.stringify(backupFiles())})`);
+  const pre3 = backupFiles().find((b) => new RegExp(`^pre-migration-v3-to-v${SCHEMA}-\\d{8}T\\d{6}Z\\.sqlite$`).test(b));
+  assert(pre3, `a pre-migration backup was taken before v3→v${SCHEMA} (got ${JSON.stringify(backupFiles())})`);
   const copy3 = new Database(join(DEFAULT_PROFILE, "backups", pre3), { readonly: true });
   const preCols = copy3.prepare("PRAGMA table_info(sale_lines)").all().map((c) => c.name);
   const preSchema3 = Number(copy3.prepare("SELECT max(version) AS n FROM schema_migrations").get().n);
@@ -762,7 +777,7 @@ if (PHASE === "seed-v2") {
   // audits master data, not the sales ledger.
   const afterMigration = ledgerFacts();
   // Was 5 before migration 6.
-  assert(afterMigration.schema === 8, `migrated to schema v8 (got ${afterMigration.schema})`);
+  assert(afterMigration.schema === SCHEMA, `migrated to schema v${SCHEMA} (got ${afterMigration.schema})`);
   assert(afterMigration.auditBusiness === 0, `the durable BUSINESS audit trail starts empty (was \`audit === 0\`; got ${afterMigration.auditBusiness})`);
   assert(afterMigration.auditOperators === 1, `and exactly one account event, written by mandatory setup at first login (got ${afterMigration.auditOperators})`);
   // 🔴 TRANSITION, NEW WITH THE TERMINAL-CLAIM FIX: migration 8 lands UNCLAIMED on every path, and
@@ -792,7 +807,7 @@ if (PHASE === "seed-v2") {
   const f = ledgerFacts();
   log("final ledger:", JSON.stringify(f));
   // Was `f.schema === 3`, then 4, then 5.
-  assert(f.schema === 8 && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", `final ledger intact at v8 (got ${f.schema})`);
+  assert(f.schema === SCHEMA && JSON.stringify(f.receipts) === "[1,2,3]" && f.voids === 1 && f.catalog === 4 && f.integrity === "ok", `final ledger intact at v${SCHEMA} (got ${f.schema})`);
   // 🔴 And the export → re-import above is now AUDITED: exactly one CATALOG_IMPORTED summary and
   // ZERO product events, because the re-imported file is byte-identical and changed nothing. That
   // is the low-noise property the import audit model was chosen for, measured on the installed app.
@@ -865,13 +880,13 @@ if (PHASE === "seed-v2") {
   const f = ledgerFacts();
   log("ledger after the upgrade:", JSON.stringify(f));
   // Was 5 before migration 6.
-  assert(f.schema === 8 && f.integrity === "ok", `migrated to schema v8, integrity ok (got ${f.schema})`);
+  assert(f.schema === SCHEMA && f.integrity === "ok", `migrated to schema v${SCHEMA}, integrity ok (got ${f.schema})`);
   assert(f.auditBusiness === 0, `the durable BUSINESS audit trail starts empty (was \`audit === 0\`; got ${f.auditBusiness})`);
   assert(f.auditOperators === 1, `and exactly one account event, written by mandatory setup at first login (got ${f.auditOperators})`);
   assert(f.quantities.every((q) => q % 1000 === 0), `migrated quantities are whole: ${JSON.stringify(f.quantities)}`);
   assert(f.unknownUnits === 2, `both pre-migration lines keep an UNKNOWN unit (got ${f.unknownUnits})`);
   assert(productUnit("SYN-ROPE") === "kg", `the product's unit survived as kg (got ${productUnit("SYN-ROPE")})`);
-  const pre = backupFiles().find((b) => /^pre-migration-v3-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  const pre = backupFiles().find((b) => new RegExp(`^pre-migration-v3-to-v${SCHEMA}-\\d{8}T\\d{6}Z\\.sqlite$`).test(b));
   assert(pre, `a pre-migration backup exists (got ${JSON.stringify(backupFiles())})`);
 
   // 🔴 And the point of the whole migration: a FRACTIONAL sale of that same product now works.
@@ -970,10 +985,10 @@ if (PHASE === "seed-v2") {
   await app.close();
 
   const f = ledgerFacts();
-  log("ledger after the v4 -> v8 upgrade:", JSON.stringify(f));
+  log(`ledger after the v4 -> v${SCHEMA} upgrade:`, JSON.stringify(f));
   // Was 5 before migration 6, 6 before migration 7, and 7 before migration 8: a v4 ledger now
   // lands on v8 in ONE upgrade.
-  assert(f.schema === 8 && f.integrity === "ok", `migrated to schema v8, integrity ok (got ${f.schema})`);
+  assert(f.schema === SCHEMA && f.integrity === "ok", `migrated to schema v${SCHEMA}, integrity ok (got ${f.schema})`);
   assert(f.sales === 2 && f.voids === 1, "sales and voids untouched by migrations 5 and 6");
   // 🔴 Migration 4's behaviour is unchanged: the fractional quantity is still exactly 2500.
   assert(JSON.stringify(f.quantities) === "[2500,1000]", `quantities untouched: ${JSON.stringify(f.quantities)}`);
@@ -982,8 +997,8 @@ if (PHASE === "seed-v2") {
   // 🔴 The trail starts EMPTY. No pre-v5 history is invented out of the rotating logfile.
   assert(f.auditBusiness === 0, `the BUSINESS audit trail starts empty (was \`audit === 0\`; got ${f.auditBusiness})`);
   assert(f.auditOperators === 1, `and exactly one account event, written by mandatory setup at first login (got ${f.auditOperators})`);
-  const pre = backupFiles().find((b) => /^pre-migration-v4-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, `a verified pre-migration v4->v8 backup exists (got ${JSON.stringify(backupFiles())})`);
+  const pre = backupFiles().find((b) => new RegExp(`^pre-migration-v4-to-v${SCHEMA}-\\d{8}T\\d{6}Z\\.sqlite$`).test(b));
+  assert(pre, `a verified pre-migration v4->v${SCHEMA} backup exists (got ${JSON.stringify(backupFiles())})`);
 
   // ── A real product mutation on the new build must leave a durable audit row ────────────────────
   ({ app, page } = await launch());
@@ -1080,7 +1095,7 @@ if (PHASE === "seed-v2") {
   const f2 = ledgerFacts();
   log("final ledger:", JSON.stringify(f2));
   // Was 5 before migration 6.
-  assert(f2.integrity === "ok" && f2.schema === 8, "the ledger is sound and still at v8");
+  assert(f2.integrity === "ok" && f2.schema === SCHEMA, `the ledger is sound and still at v${SCHEMA}`);
   assert(JSON.stringify(f2.quantities) === "[2500,1000]", "no sale was disturbed by any of this");
 } else if (PHASE === "seed-v5") {
   // ── Scenario E, part 1 — the REAL legal v5 main build (69f1a22, schema v5: durable audit, and
@@ -1144,7 +1159,7 @@ if (PHASE === "seed-v2") {
 
   const m = ledgerFacts();
   log("after migration:", JSON.stringify(m));
-  assert(m.schema === 8, `the schema moved to v8 (got ${m.schema})`);
+  assert(m.schema === SCHEMA, `the schema moved to v${SCHEMA} (got ${m.schema})`);
   assert(m.integrity === "ok", "integrity_check is ok");
   assert(m.foreignKeys === "[]", `foreign_key_check is empty (got ${m.foreignKeys})`);
   // Old business data survived, byte for byte.
@@ -1523,7 +1538,7 @@ if (PHASE === "seed-v2") {
         voids: f.voids,
       }),
     );
-    assert(f.schema === 8 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v8");
+    assert(f.schema === SCHEMA && f.integrity === "ok" && f.foreignKeys === "[]", `the ledger is sound at v${SCHEMA}`);
     assert(f.invoices === 1 && f.invoiceLines === 4 && f.reconciliation === 4, "the invoice, its lines and its review rows persist");
     assert(f.invoiceNumber === 61, "the invoice number is unchanged after every restart");
     assert(
@@ -1625,7 +1640,7 @@ if (PHASE === "seed-v2") {
 
   const m = ledgerFacts();
   log("after migration:", JSON.stringify(m));
-  assert(m.schema === 8, `the schema moved to v8 (got ${m.schema})`);
+  assert(m.schema === SCHEMA, `the schema moved to v${SCHEMA} (got ${m.schema})`);
   assert(m.integrity === "ok", "integrity_check is ok");
   assert(m.foreignKeys === "[]", `foreign_key_check is empty (got ${m.foreignKeys})`);
 
@@ -1723,7 +1738,7 @@ if (PHASE === "seed-v2") {
 
   const g = ledgerFacts();
   log("after the new invoice:", JSON.stringify(g));
-  assert(g.schema === 8 && g.integrity === "ok" && g.foreignKeys === "[]", "the ledger is sound at v8");
+  assert(g.schema === SCHEMA && g.integrity === "ok" && g.foreignKeys === "[]", `the ledger is sound at v${SCHEMA}`);
   assert(g.invoices === 2, `two invoices now exist (got ${g.invoices})`);
   assert(g.invoiceLines === 3, `one line from v6 plus two new ones (got ${g.invoiceLines})`);
   // 🔴 EXACTLY ONE new sale: the new invoice's. The v6 one still has none.
@@ -1736,8 +1751,8 @@ if (PHASE === "seed-v2") {
   assert(g.methodlessSales === 1, "and it records no payment method");
   assert(JSON.stringify(g.receipts) === "[1,2,3]", `the receipt sequence continued (got ${JSON.stringify(g.receipts)})`);
   // A pre-migration backup of the v6 file was taken, named for the span it crossed.
-  const pre = backupFiles().find((b) => /^pre-migration-v6-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, `a pre-migration v6->v8 backup exists (got ${JSON.stringify(backupFiles())})`);
+  const pre = backupFiles().find((b) => new RegExp(`^pre-migration-v6-to-v${SCHEMA}-\\d{8}T\\d{6}Z\\.sqlite$`).test(b));
+  assert(pre, `a pre-migration v6->v${SCHEMA} backup exists (got ${JSON.stringify(backupFiles())})`);
   const snap = new Database(join(DEFAULT_PROFILE, "backups", pre), { readonly: true, fileMustExist: true });
   try {
     assert(Number(snap.prepare("SELECT max(version) AS n FROM schema_migrations").get().n) === 6, "the snapshot is at v6");
@@ -1764,7 +1779,7 @@ if (PHASE === "seed-v2") {
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   // Scenario G, part 1 — the REAL released v7 main build (b18b5b4, schema v7).
   //
-  // 🔴 THIS IS THE BUILD THE SHOP IS RUNNING TODAY, and v7 -> v8 is therefore the ONLY upgrade path
+  // 🔴 THIS IS THE BUILD THE SHOP IS RUNNING TODAY, and v7 -> v${SCHEMA} is therefore the ONLY upgrade path
   // a real field installation will take for operator accounts. It is seeded by driving that build's
   // own UI, not by writing a database that looks like v7.
   //
@@ -1876,7 +1891,7 @@ if (PHASE === "seed-v2") {
 
   const m = ledgerFacts();
   log("after migration:", JSON.stringify(m));
-  assert(m.schema === 8, `the schema moved to v8 (got ${m.schema})`);
+  assert(m.schema === SCHEMA, `the schema moved to v${SCHEMA} (got ${m.schema})`);
   assert(m.integrity === "ok", "integrity_check is ok");
   assert(m.foreignKeys === "[]", `foreign_key_check is empty (got ${m.foreignKeys})`);
 
@@ -1991,8 +2006,8 @@ if (PHASE === "seed-v2") {
   }
 
   // ── The pre-migration backup, which is the ONLY coherent rollback boundary ───────────────────
-  const pre = backupFiles().find((b) => /^pre-migration-v7-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
-  assert(pre, `a pre-migration v7->v8 backup exists (got ${JSON.stringify(backupFiles())})`);
+  const pre = backupFiles().find((b) => new RegExp(`^pre-migration-v7-to-v${SCHEMA}-\\d{8}T\\d{6}Z\\.sqlite$`).test(b));
+  assert(pre, `a pre-migration v7->v${SCHEMA} backup exists (got ${JSON.stringify(backupFiles())})`);
   const snap = new Database(join(DEFAULT_PROFILE, "backups", pre), { readonly: true, fileMustExist: true });
   try {
     assert(Number(snap.prepare("SELECT max(version) AS n FROM schema_migrations").get().n) === 7, "the snapshot is at v7");
@@ -2031,7 +2046,7 @@ if (PHASE === "seed-v2") {
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   assert(existsSync(LEDGER), "the migrated v8 ledger is there");
   const start = ledgerFacts();
-  assert(start.schema === 8, `this phase runs on the v8 build (got ${start.schema})`);
+  assert(start.schema === SCHEMA, `this phase runs on the v${SCHEMA} build (got ${start.schema})`);
 
   const { app, page } = await launch();
   await tab(page, "Tools");
@@ -2093,7 +2108,7 @@ if (PHASE === "seed-v2") {
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   assert(existsSync(LEDGER), "the v8 ledger is there");
   const before = ledgerFacts();
-  assert(before.schema === 8, `the active database really is v8 (got ${before.schema})`);
+  assert(before.schema === SCHEMA, `the active database really is v${SCHEMA} (got ${before.schema})`);
   const shaBefore = sha256(LEDGER);
   const backupsBefore = backupFiles();
 
@@ -2102,7 +2117,7 @@ if (PHASE === "seed-v2") {
   // 🔴 NOTHING WAS TOUCHED. Byte-for-byte, not "looks the same".
   assert(sha256(LEDGER) === shaBefore, "🔴 the v8 database is byte-for-byte unchanged");
   const after = ledgerFacts();
-  assert(after.schema === 8, `no silent downgrade — the schema is still v8 (got ${after.schema})`);
+  assert(after.schema === SCHEMA, `no silent downgrade — the schema is still v${SCHEMA} (got ${after.schema})`);
   assert(after.operators === before.operators, `and the operators table is intact (${after.operators})`);
   assert(after.operatorRows === before.operatorRows, "including every operator's role and flags");
   assert(after.sales === before.sales && after.voids === before.voids, "no destructive reset — every sale and void is there");
@@ -2123,7 +2138,7 @@ if (PHASE === "seed-v2") {
   const baseline = loadFacts("v7-baseline.json");
   const v8changes = loadFacts("v8-changes.json");
 
-  const snapName = backupFiles().find((b) => /^pre-migration-v7-to-v8-\d{8}T\d{6}Z\.sqlite$/.test(b));
+  const snapName = backupFiles().find((b) => new RegExp(`^pre-migration-v7-to-v${SCHEMA}-\\d{8}T\\d{6}Z\\.sqlite$`).test(b));
   assert(snapName, `the automatic pre-migration snapshot is still there (${JSON.stringify(backupFiles())})`);
   const snapPath = join(DEFAULT_PROFILE, "backups", snapName);
 
