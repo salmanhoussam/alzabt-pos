@@ -11,6 +11,8 @@ import { describe, expect, it } from "vitest";
 import {
   AUDITED_PRODUCT_FIELDS,
   AUDIT_ACTOR_TIERS,
+  AUDIT_ENTITY_TYPES,
+  AUDIT_EVENTS_BY_ENTITY,
   AUDIT_EVENT_TYPES,
   AuditContractError,
   CURRENT_ACTOR_TIER,
@@ -40,11 +42,15 @@ const build = (changes: Record<string, unknown>, metadata: Record<string, unknow
   });
 
 describe("the registry is bounded", () => {
-  // 🔴 TRANSITION, 2026-10-10. This named exactly FIVE types; migration 8 added the six
-  // OPERATOR_* ones. The assertion's point is unchanged and is NOT weakened: the registry is
-  // exhaustive and bounded, and PRICE_CHANGED / UNIT_CHANGED are still absent — a price changed
-  // during reconciliation is a PRODUCT_UPDATED, exactly as before.
-  it("names exactly eleven event types — PRICE_CHANGED and UNIT_CHANGED are NOT among them", () => {
+  // 🔴 TRANSITION, 2026-10-10: this named exactly FIVE types; migration 8 added the six
+  // OPERATOR_* ones. 🔴 TRANSITION, 2026-10-14: eleven became NINETEEN — migration 10 added five
+  // CATEGORY_* and three PRODUCT_IMAGE_* types, because migration 9 gave the shop categories and
+  // photos that the trail had no vocabulary for.
+  //
+  // The assertion's point is unchanged and is NOT weakened: the registry is exhaustive and
+  // bounded, and PRICE_CHANGED / UNIT_CHANGED are still absent — a price changed during
+  // reconciliation is a PRODUCT_UPDATED, exactly as before.
+  it("names exactly nineteen event types — PRICE_CHANGED and UNIT_CHANGED are NOT among them", () => {
     expect([...AUDIT_EVENT_TYPES]).toEqual([
       "PRODUCT_CREATED",
       "PRODUCT_UPDATED",
@@ -57,9 +63,33 @@ describe("the registry is bounded", () => {
       "OPERATOR_ACTIVATED",
       "OPERATOR_DEACTIVATED",
       "OPERATOR_ROLE_CHANGED",
+      "CATEGORY_CREATED",
+      "CATEGORY_RENAMED",
+      "CATEGORY_ACTIVATED",
+      "CATEGORY_DEACTIVATED",
+      "CATEGORY_DELETED",
+      "PRODUCT_IMAGE_SET",
+      "PRODUCT_IMAGE_REPLACED",
+      "PRODUCT_IMAGE_REMOVED",
     ]);
     expect(AUDIT_EVENT_TYPES).not.toContain("PRICE_CHANGED");
     expect(AUDIT_EVENT_TYPES).not.toContain("UNIT_CHANGED");
+    // 🔴 And no event type names a photo's CONTENT. PRODUCT_IMAGE_* describes that a photo was
+    // set, replaced or removed; the bytes are not in the trail and could not be put there —
+    // `AuditScalar` admits no object, and a key matching /hash/i is refused outright.
+    expect(AUDIT_EVENT_TYPES.filter((t) => /BYTES|BLOB|UPLOAD|FILE|PATH/i.test(t))).toEqual([]);
+  });
+
+  it("🔴 the entity types are exactly five, and each event belongs to exactly one", () => {
+    // Was three until migration 10. The pairing is enforced in three places — this list, the
+    // AUDIT_EVENTS_BY_ENTITY map, and audit_events' own pairing CHECK — so a row that got past the
+    // code still cannot land.
+    expect([...AUDIT_ENTITY_TYPES]).toEqual(["product", "catalog", "operator", "category", "product_image"]);
+    const owners = AUDIT_EVENT_TYPES.map(
+      (t) => AUDIT_ENTITY_TYPES.filter((e) => AUDIT_EVENTS_BY_ENTITY[e].includes(t)),
+    );
+    // Exactly one owner each: no orphan, and nothing claimed by two entities.
+    expect(owners.filter((o) => o.length !== 1)).toEqual([]);
   });
 
   it("the current actor tier is 'unspecified', because this build cannot know one", () => {

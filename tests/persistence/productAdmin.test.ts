@@ -64,6 +64,9 @@ describe("schema is unchanged by this feature", () => {
       [7, "invoice_sales_integration"],
       [8, "operator_accounts"],
       [9, "product_master"],
+      // 🔴 TRANSITION — migration 10 widened audit_events' enumerated CHECKs so a CATEGORY_* or
+      // PRODUCT_IMAGE_* row can exist at all. Migrations 1-9 are byte-identical after it.
+      [10, "product_master_audit"],
     ]);
   });
 

@@ -1168,4 +1168,108 @@ CREATE UNIQUE INDEX catalog_product_images_primary
 CREATE INDEX catalog_product_images_product ON catalog_product_images (product_id);
 `,
   },
+  {
+    version: 10,
+    name: "product_master_audit",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 10 — the durable trail learns about categories and product photos.
+    //
+    // 🔴 WHY A WHOLE MIGRATION FOR AN AUDIT VOCABULARY. Migration 9 gave the shop categories and
+    // product photos, and migration 9 could not audit them: three of audit_events' CHECKs
+    // ENUMERATE the event and entity types, so a CATEGORY_RENAMED row is refused by the database
+    // itself, not by a missing feature. Widening an enumerated CHECK in SQLite means rebuilding the
+    // table — ALTER TABLE cannot change one — and migration 9 is purely additive by assertion
+    // (migration9.test.ts asserts it contains no DROP TABLE, no INSERT INTO, and never names
+    // audit_events at all). So this is its own migration, and migrations 8 and 9 are untouched.
+    //
+    // 🔴 NOTHING ELSE IS IN HERE. No new table, no new column on any business table, no backfill.
+    // Slice D shipped the category and photo channels WITHOUT audit rows precisely so that this
+    // decision could be taken deliberately rather than smuggled into migration 9's fingerprint.
+    //
+    // THIS IS MIGRATION 8'S REBUILD, REUSED — the same table, the same reasoning, the same order:
+    //
+    //   audit_events is a LEAF table. Nothing references it, so DROP TABLE costs no dependent rows
+    //   and no deferred constraint — which is what made migration 7's rebuild expensive and makes
+    //   this one cheap.
+    //
+    //   DROP TABLE does not fire a BEFORE DELETE trigger, so the append-only trigger does not block
+    //   it. The copy is one INSERT ... SELECT * in seq order, with no expression anywhere in it:
+    //   every historical row keeps its id, its seq, its actor, its timestamps, its changed_json and
+    //   its app_version and schema_version EXACTLY. Nothing is normalised on the way through.
+    //
+    //   The triggers are recreated AFTER the copy, so audit_events_seq_monotonic does not fire once
+    //   per copied row and refuse the whole migration.
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    sql: `
+CREATE TABLE audit_events_v10 (
+  id             TEXT    PRIMARY KEY,
+  seq            INTEGER NOT NULL UNIQUE CHECK (seq > 0),
+  event_type     TEXT    NOT NULL CHECK (event_type IN
+                   ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED',
+                    'PRODUCT_DEACTIVATED', 'CATALOG_IMPORTED',
+                    'OPERATOR_CREATED', 'OPERATOR_RENAMED', 'OPERATOR_PIN_RESET',
+                    'OPERATOR_ACTIVATED', 'OPERATOR_DEACTIVATED', 'OPERATOR_ROLE_CHANGED',
+                    'CATEGORY_CREATED', 'CATEGORY_RENAMED', 'CATEGORY_ACTIVATED',
+                    'CATEGORY_DEACTIVATED', 'CATEGORY_DELETED',
+                    'PRODUCT_IMAGE_SET', 'PRODUCT_IMAGE_REPLACED', 'PRODUCT_IMAGE_REMOVED')),
+  entity_type    TEXT    NOT NULL CHECK (entity_type IN
+                   ('product', 'catalog', 'operator', 'category', 'product_image')),
+  entity_id      TEXT    NOT NULL CHECK (length(entity_id) > 0),
+  actor_id       TEXT    NOT NULL CHECK (length(actor_id) > 0),
+  actor_name     TEXT    NOT NULL CHECK (length(trim(actor_name)) > 0),
+  actor_tier     TEXT    NOT NULL CHECK (actor_tier IN
+                   ('owner', 'admin', 'cashier', 'system', 'unspecified')),
+  occurred_at    TEXT    NOT NULL CHECK (occurred_at GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date  TEXT    NOT NULL CHECK (business_date GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  changed_json   TEXT    NOT NULL CHECK (json_valid(changed_json)
+                                         AND json_type(changed_json) = 'object'),
+  metadata_json  TEXT             CHECK (metadata_json IS NULL
+                                         OR (json_valid(metadata_json)
+                                             AND json_type(metadata_json) = 'object')),
+  app_version    TEXT    NOT NULL CHECK (length(app_version) > 0),
+  schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+  -- The pairing, extended with two branches. A category event may only describe a category and a
+  -- photo event only a product's photo. The same pairing is enforced in src/domain/audit.ts; this
+  -- is the backstop no code path can talk past.
+  --
+  -- Note which entity a PRODUCT_IMAGE_* event names: the PRODUCT, not the image row. What an owner
+  -- asks months later is "what happened to this product's photo", and an image id that has since
+  -- been replaced is not something anyone can look up. The image ids travel inside changed_json.
+  CHECK (
+    (entity_type = 'product' AND event_type IN
+       ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED', 'PRODUCT_DEACTIVATED'))
+    OR (entity_type = 'catalog' AND event_type = 'CATALOG_IMPORTED')
+    OR (entity_type = 'operator' AND event_type IN
+       ('OPERATOR_CREATED', 'OPERATOR_RENAMED', 'OPERATOR_PIN_RESET',
+        'OPERATOR_ACTIVATED', 'OPERATOR_DEACTIVATED', 'OPERATOR_ROLE_CHANGED'))
+    OR (entity_type = 'category' AND event_type IN
+       ('CATEGORY_CREATED', 'CATEGORY_RENAMED', 'CATEGORY_ACTIVATED',
+        'CATEGORY_DEACTIVATED', 'CATEGORY_DELETED'))
+    OR (entity_type = 'product_image' AND event_type IN
+       ('PRODUCT_IMAGE_SET', 'PRODUCT_IMAGE_REPLACED', 'PRODUCT_IMAGE_REMOVED'))
+  )
+) STRICT;
+
+-- Byte for byte, in seq order. No expression, nothing invented, nothing dropped.
+INSERT INTO audit_events_v10 SELECT * FROM audit_events ORDER BY seq;
+
+DROP TABLE audit_events;
+ALTER TABLE audit_events_v10 RENAME TO audit_events;
+
+CREATE INDEX audit_events_entity ON audit_events (entity_type, entity_id, seq DESC);
+CREATE INDEX audit_events_type   ON audit_events (event_type, seq DESC);
+CREATE INDEX audit_events_actor  ON audit_events (actor_id, seq DESC);
+CREATE INDEX audit_events_date   ON audit_events (business_date, seq DESC);
+
+CREATE TRIGGER audit_events_immutable_update BEFORE UPDATE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: the audit trail is append-only'); END;
+CREATE TRIGGER audit_events_immutable_delete BEFORE DELETE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: audit events cannot be deleted'); END;
+CREATE TRIGGER audit_events_seq_monotonic BEFORE INSERT ON audit_events
+WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
+BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
+`,
+  },
 ];

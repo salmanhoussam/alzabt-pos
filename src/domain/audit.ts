@@ -38,10 +38,24 @@ export const AUDIT_EVENT_TYPES = [
   "OPERATOR_ACTIVATED",
   "OPERATOR_DEACTIVATED",
   "OPERATOR_ROLE_CHANGED",
+  // Migration 10 — Product Master. Five category types, because "a category changed" would not say
+  // which of five different things happened, and the one a reader cares about most (a DELETE, which
+  // destroys a row) would be indistinguishable from a rename.
+  "CATEGORY_CREATED",
+  "CATEGORY_RENAMED",
+  "CATEGORY_ACTIVATED",
+  "CATEGORY_DEACTIVATED",
+  "CATEGORY_DELETED",
+  // Three photo types. SET and REPLACED are one call in the service and two different facts: the
+  // second destroyed an image the shop had, and a reader asking "when did we lose the old photo"
+  // must not have to infer it from the absence of an earlier SET.
+  "PRODUCT_IMAGE_SET",
+  "PRODUCT_IMAGE_REPLACED",
+  "PRODUCT_IMAGE_REMOVED",
 ] as const;
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 
-export const AUDIT_ENTITY_TYPES = ["product", "catalog", "operator"] as const;
+export const AUDIT_ENTITY_TYPES = ["product", "catalog", "operator", "category", "product_image"] as const;
 export type AuditEntityType = (typeof AUDIT_ENTITY_TYPES)[number];
 
 /**
@@ -64,6 +78,21 @@ export const AUDIT_EVENTS_BY_ENTITY: Readonly<Record<AuditEntityType, ReadonlyAr
       "OPERATOR_ACTIVATED",
       "OPERATOR_DEACTIVATED",
       "OPERATOR_ROLE_CHANGED",
+    ]) as ReadonlyArray<AuditEventType>,
+    category: Object.freeze([
+      "CATEGORY_CREATED",
+      "CATEGORY_RENAMED",
+      "CATEGORY_ACTIVATED",
+      "CATEGORY_DEACTIVATED",
+      "CATEGORY_DELETED",
+    ]) as ReadonlyArray<AuditEventType>,
+    // 🔴 The entity is the PRODUCT, not the image row. What an owner asks months later is "what
+    // happened to this product's photo"; an image id that has since been replaced is not something
+    // anyone can look up, and the row it named is gone. The image ids travel in changed_json.
+    product_image: Object.freeze([
+      "PRODUCT_IMAGE_SET",
+      "PRODUCT_IMAGE_REPLACED",
+      "PRODUCT_IMAGE_REMOVED",
     ]) as ReadonlyArray<AuditEventType>,
   });
 
@@ -103,6 +132,61 @@ export const CURRENT_ACTOR_TIER: AuditActorTier = "unspecified";
  */
 export const AUDITED_OPERATOR_FIELDS = ["is_active", "name", "role"] as const;
 export type AuditedOperatorField = (typeof AUDITED_OPERATOR_FIELDS)[number];
+
+/**
+ * The fields a CATEGORY_* event may describe.
+ *
+ * Three, and they are the whole of a category: its two names and whether it is offered. `id` is
+ * the identity and is already `entity_id`; `sort_order` is presentation the owner drags around and
+ * would be noise in every diff; `created_at`/`updated_at` are derivable bookkeeping.
+ *
+ * 🔴 NO PRODUCT DATA. A category event describes the category, never the products that point at
+ * it — a rename touches no product row, and a delete is REFUSED while any product does. Recording
+ * "which products were affected" would be recording a number that is always zero on a successful
+ * delete and irrelevant on every other event.
+ */
+export const AUDITED_CATEGORY_FIELDS = ["is_active", "name_ar", "name_en"] as const;
+export type AuditedCategoryField = (typeof AUDITED_CATEGORY_FIELDS)[number];
+
+/**
+ * The fields a PRODUCT_IMAGE_* event may describe.
+ *
+ * 🔴 WHAT IS STRUCTURALLY ABSENT, AND WHY IT COULD NOT BE ADDED EVEN BY MISTAKE. There is no bytes
+ * field, no base64, no data URI and no source path. `AuditScalar` admits no object and no array, so
+ * a blob cannot be nested; `SECRET_KEY` rejects any key matching /hash/i, so a field called
+ * `image_hash` would THROW and roll back the photo write — which is why the checksum field is
+ * named `sha256_hex`, as it is in the table.
+ *
+ * And no filesystem path, ever: the operator's Desktop or Pictures path is not product data, the
+ * file may be gone tomorrow, and a path in an append-only trail is a permanent record of one
+ * person's folder layout.
+ *
+ * `image_id` before/after is what makes SET, REPLACED and REMOVED readable as one sequence:
+ * null -> x, x -> y, y -> null.
+ */
+export const AUDITED_PRODUCT_IMAGE_FIELDS = [
+  "byte_size",
+  "height_px",
+  "image_id",
+  "mime",
+  "sha256_hex",
+  "width_px",
+] as const;
+export type AuditedProductImageField = (typeof AUDITED_PRODUCT_IMAGE_FIELDS)[number];
+
+/**
+ * Metadata a PRODUCT_IMAGE_* event may carry: where the photo came from.
+ *
+ * 🔴 `photo_origin`, NOT `origin`. The existing `origin` key carries a vocabulary of its own —
+ * `manual_entry` / `catalog_import` / `bootstrap_setup`, how an EDIT reached the system — and a
+ * photo's origin answers a different question with different values (`desktop` / `phone`). Reusing
+ * the key because the English word fits would make a reader six months from now believe the two
+ * were the same fact. A key's name is part of the contract.
+ */
+export const AUDIT_PRODUCT_IMAGE_METADATA_KEYS = ["photo_origin"] as const;
+
+/** A category event carries no metadata. The event type and the diff are the whole fact. */
+export const AUDIT_CATEGORY_METADATA_KEYS = [] as const;
 
 /**
  * Metadata an OPERATOR_* event may carry.
@@ -346,8 +430,28 @@ export function allowlistsFor(eventType: AuditEventType): {
   if (eventType.startsWith("OPERATOR_")) {
     return { changes: AUDITED_OPERATOR_FIELDS, metadata: AUDIT_OPERATOR_METADATA_KEYS };
   }
+  // 🔴 THIS BRANCH MUST COME BEFORE THE PRODUCT FALLTHROUGH, AND THE REASON IS A PREFIX COLLISION.
+  // Every PRODUCT_IMAGE_* type also begins with "PRODUCT_", and the last line of this function is
+  // an unconditional product fallthrough — so without this branch a PRODUCT_IMAGE_SET would be
+  // validated against AUDITED_PRODUCT_FIELDS and its `image_id` would be refused as an unknown
+  // field, rolling back the photo write with a message about a product column. The pairing CHECK
+  // would never see it.
+  if (eventType.startsWith("PRODUCT_IMAGE_")) {
+    return { changes: AUDITED_PRODUCT_IMAGE_FIELDS, metadata: AUDIT_PRODUCT_IMAGE_METADATA_KEYS };
+  }
+  if (eventType.startsWith("CATEGORY_")) {
+    return { changes: AUDITED_CATEGORY_FIELDS, metadata: AUDIT_CATEGORY_METADATA_KEYS };
+  }
   return { changes: AUDITED_PRODUCT_FIELDS, metadata: AUDIT_PRODUCT_METADATA_KEYS };
 }
+
+/**
+ * The entity types whose events must describe at least one change.
+ *
+ * `catalog` and `operator` are deliberately absent — see the guard that reads this for which of
+ * their events are legitimately empty and why.
+ */
+const DIFF_REQUIRED_ENTITIES: ReadonlyArray<AuditEntityType> = ["product", "category", "product_image"];
 
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const BUSINESS_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -395,9 +499,27 @@ export function buildAuditRow(
 
   const lists = allowlistsFor(draft.eventType);
   const changed_json = serializeChanges(draft.changes, lists.changes);
-  // A product event with an empty diff is not an event. The caller must not have built one; this is
-  // the backstop, and `PosService.updateProduct` checks it before it gets here.
-  if (draft.entityType === "product" && changed_json === "{}") {
+  // An event with an empty diff is not an event. The caller must not have built one; this is the
+  // backstop, and `PosService.updateProduct` checks it before it gets here.
+  //
+  // 🔴 TRANSITION — this read `entityType === "product"` and now names three. Migration 10 added
+  // `category` and `product_image`, and an empty CATEGORY_RENAMED or PRODUCT_IMAGE_REMOVED would
+  // be exactly the lie the product rule exists to prevent.
+  //
+  // 🔴 AND IT IS AN ALLOWLIST, NOT `!== "catalog"`, BECAUSE THAT VERSION WAS WRONG AND THE SUITE
+  // SAID SO IMMEDIATELY. Two entity types have legitimately EMPTY diffs:
+  //
+  //   catalog  — CATALOG_IMPORTED's change allowlist is empty by design; an import's whole fact
+  //              lives in its metadata summary, so its changed_json is always "{}".
+  //   operator — OPERATOR_PIN_RESET records THAT a reset happened, by whom and to whom. There is
+  //              nothing about a credential to record and no way to record it if there were: the
+  //              SECRET_KEY guard above rejects any pin-shaped key outright. The event type IS the
+  //              fact, and `AUDITED_OPERATOR_FIELDS` is three fields long for that reason.
+  //
+  // Excluding only `catalog` therefore broke the mandatory first-run ceremony — 45 tests failed at
+  // once — and would have made every PIN reset impossible in a real shop. An allowlist states which
+  // entities OWE a diff instead of guessing which ones do not.
+  if (DIFF_REQUIRED_ENTITIES.includes(draft.entityType) && changed_json === "{}") {
     throw new AuditContractError(
       "AUDIT_EMPTY_DIFF",
       `${draft.eventType} on '${draft.entityId}' describes no change; it is not an event`,

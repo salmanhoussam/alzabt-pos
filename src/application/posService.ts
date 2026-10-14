@@ -42,8 +42,12 @@ import type { CashierFixture } from "../fixtures/cashiers";
 import type { TerminalConfig } from "../fixtures/terminal";
 import { validateProductDraft, type ProductDraft } from "../domain/productDraft";
 import {
+  AUDITED_CATEGORY_FIELDS,
   AUDITED_PRODUCT_FIELDS,
+  AUDITED_PRODUCT_IMAGE_FIELDS,
+  type AuditChange,
   type AuditDraft,
+  type AuditScalar,
   type AuditEventType,
   type AuditRow,
   CURRENT_ACTOR_TIER,
@@ -63,6 +67,72 @@ import type { SaleRepository } from "../persistence/saleRepository";
 import { type Cashier, pinMatches } from "./cashierAuth";
 import type { LoginOutcome as OperatorLoginOutcome, OperatorService } from "./operatorService";
 import type { OperatorRole } from "../persistence/operatorRepository";
+
+/**
+ * A category's audited state — its two names and whether it is offered, and nothing else.
+ *
+ * 🔴 NO PRODUCT DATA, by `AUDITED_CATEGORY_FIELDS`' own contract. A category event describes the
+ * category; a rename touches no product row, and a delete is REFUSED while any product points at
+ * one, so "how many products were affected" is always zero on a successful delete and irrelevant
+ * otherwise.
+ *
+ * `is_active` is reported as a BOOLEAN, matching how PRODUCT_* events report theirs, so a reader
+ * does not meet 1 here and true there for the same fact.
+ */
+function categoryState(row: CategoryRow): Record<string, AuditScalar> {
+  return { is_active: row.is_active === 1, name_ar: row.name_ar, name_en: row.name_en };
+}
+
+/**
+ * A photo's audited state. Metadata only — there is no bytes field in the row to copy, and
+ * `AuditScalar` admits no object, so a blob cannot be nested even by mistake.
+ */
+function imageState(meta: ProductImageMeta): Record<string, AuditScalar> {
+  return {
+    byte_size: meta.byte_size,
+    height_px: meta.height_px,
+    image_id: meta.id,
+    mime: meta.mime,
+    sha256_hex: meta.sha256_hex,
+    width_px: meta.width_px,
+  };
+}
+
+/**
+ * The diff for a thing that was DESTROYED: every audited field, from its last value to null.
+ *
+ * 🔴 WHY `diffAuditedFields` CANNOT DO THIS. Its `after` is non-nullable — it describes a row that
+ * still exists — and passing `{}` would produce an EMPTY diff for a delete, which the empty-diff
+ * backstop then refuses, rolling back the deletion. A destruction is the one case where the facts
+ * only exist on the `before` side, so it gets its own shape rather than a cast.
+ */
+function epitaph(state: Record<string, AuditScalar>): Record<string, AuditChange> {
+  const out: Record<string, AuditChange> = {};
+  for (const key of Object.keys(state).sort()) out[key] = { before: state[key]!, after: null };
+  return out;
+}
+
+/** A category create (`before` null), an edit, or a delete (`after` null). */
+function categoryDiff(before: CategoryRow | null, after: CategoryRow | null): Record<string, AuditChange> {
+  if (after === null) {
+    if (before === null) throw new Error("categoryDiff: a category event must describe a category");
+    return epitaph(categoryState(before));
+  }
+  return diffAuditedFields(before === null ? null : categoryState(before), categoryState(after), AUDITED_CATEGORY_FIELDS);
+}
+
+/** A first photo (`before` null), a replacement, or a removal (`after` null). */
+function imageDiff(before: ProductImageMeta | null, after: ProductImageMeta | null): Record<string, AuditChange> {
+  if (after === null) {
+    if (before === null) throw new Error("imageDiff: a photo event must describe a photo");
+    return epitaph(imageState(before));
+  }
+  return diffAuditedFields(
+    before === null ? null : imageState(before),
+    imageState(after),
+    AUDITED_PRODUCT_IMAGE_FIELDS,
+  );
+}
 
 /**
  * What a login attempt produces.
@@ -608,7 +678,7 @@ export class PosService {
   private auditDraft(
     cashier: Cashier,
     eventType: AuditEventType,
-    entityType: "product" | "catalog",
+    entityType: "product" | "catalog" | "category" | "product_image",
     entityId: string,
     instant: Date,
     changes: AuditDraft["changes"],
@@ -1002,37 +1072,53 @@ export class PosService {
    * catch the second — as a raw constraint failure the owner cannot act on.
    */
   createCategory(nameAr: string, nameEn: string | null): CategoryRow {
-    this.requireOwner();
+    const owner = this.requireOwner();
     const categories = this.requireCategories();
-    const transact = this.requireTransact();
-    const now = this.now().toISOString();
+    const { auditStore, transact } = this.requireAuditedStack();
+    const instant = this.now();
+    const now = instant.toISOString();
     const name = categoryNameAr(nameAr);
     const en = categoryNameEn(nameEn);
-    return transact((): CategoryRow => {
+    const written: AuditRow[] = [];
+    const row = transact((): CategoryRow => {
       const clash = categories.findByNameAr(name);
       if (clash) {
         throw new DomainError("DUPLICATE_CATEGORY", `'${clash.name_ar}' already exists`);
       }
-      return categories.insert({
+      const created = categories.insert({
         id: this.newId(),
         nameAr: name,
         nameEn: en,
         sortOrder: categories.nextSortOrder(),
         now,
       });
+      // A creation records its whole audited state with every `before` null — the same
+      // representation an edit uses, so there is one format and not two.
+      written.push(
+        auditStore.append(
+          this.auditDraft(owner, "CATEGORY_CREATED", "category", created.id, instant, categoryDiff(null, created), {}),
+          this.newId(),
+        ),
+      );
+      return created;
     });
+    this.mirror(written);
+    return row;
   }
 
   /** Renames a category. The id is the identity, so every product keeps its link. */
   renameCategory(id: string, nameAr: string, nameEn: string | null): CategoryRow {
-    this.requireOwner();
+    const owner = this.requireOwner();
     const categories = this.requireCategories();
-    const transact = this.requireTransact();
-    const now = this.now().toISOString();
+    const { auditStore, transact } = this.requireAuditedStack();
+    const instant = this.now();
+    const now = instant.toISOString();
     const name = categoryNameAr(nameAr);
     const en = categoryNameEn(nameEn);
-    return transact((): CategoryRow => {
-      if (!categories.findById(id)) {
+    const written: AuditRow[] = [];
+    const row = transact((): CategoryRow => {
+      const before = categories.findById(id);
+      if (!before) {
         throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
       }
       const clash = categories.findByNameAr(name);
@@ -1040,8 +1126,22 @@ export class PosService {
       if (clash && clash.id !== id) {
         throw new DomainError("DUPLICATE_CATEGORY", `'${clash.name_ar}' already exists`);
       }
-      return categories.rename(id, name, en, now);
+      const after = categories.rename(id, name, en, now);
+      const changes = categoryDiff(before, after);
+      // Renaming to the identical name changed nothing, and nothing is not an event — the same
+      // rule setProductActive follows, and the one the empty-diff backstop would enforce anyway.
+      if (Object.keys(changes).length > 0) {
+        written.push(
+          auditStore.append(
+            this.auditDraft(owner, "CATEGORY_RENAMED", "category", id, instant, changes, {}),
+            this.newId(),
+          ),
+        );
+      }
+      return after;
     });
+    this.mirror(written);
+    return row;
   }
 
   /**
@@ -1052,16 +1152,40 @@ export class PosService {
    * deactivating does is remove it from the chooser for NEW assignments.
    */
   setCategoryActive(id: string, active: boolean): CategoryRow {
-    this.requireOwner();
+    const owner = this.requireOwner();
     const categories = this.requireCategories();
-    const transact = this.requireTransact();
-    const now = this.now().toISOString();
-    return transact((): CategoryRow => {
-      if (!categories.findById(id)) {
+    const { auditStore, transact } = this.requireAuditedStack();
+    const instant = this.now();
+    const now = instant.toISOString();
+    const written: AuditRow[] = [];
+    const row = transact((): CategoryRow => {
+      const before = categories.findById(id);
+      if (!before) {
         throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
       }
-      return categories.setActive(id, active, now);
+      const after = categories.setActive(id, active, now);
+      const changes = categoryDiff(before, after);
+      // Toggling a category to the state it is already in changed nothing.
+      if (Object.keys(changes).length > 0) {
+        written.push(
+          auditStore.append(
+            this.auditDraft(
+              owner,
+              active ? "CATEGORY_ACTIVATED" : "CATEGORY_DEACTIVATED",
+              "category",
+              id,
+              instant,
+              changes,
+              {},
+            ),
+            this.newId(),
+          ),
+        );
+      }
+      return after;
     });
+    this.mirror(written);
+    return row;
   }
 
   /**
@@ -1077,22 +1201,38 @@ export class PosService {
    * The count includes INACTIVE products, by `countProductsUsing`'s own contract.
    */
   deleteCategoryIfUnused(id: string): { readonly deletedId: string } {
-    this.requireOwner();
+    const owner = this.requireOwner();
     const categories = this.requireCategories();
-    const transact = this.requireTransact();
-    return transact((): { readonly deletedId: string } => {
+    const { auditStore, transact } = this.requireAuditedStack();
+    const instant = this.now();
+    const written: AuditRow[] = [];
+    const result = transact((): { readonly deletedId: string } => {
       const row = categories.findById(id);
       if (!row) throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
       const used = categories.countProductsUsing(id);
       if (used > 0) {
+        // 🔴 THE REFUSAL THROWS BEFORE ANYTHING IS APPENDED, so a refused delete emits NO audit
+        // event. An audit trail that records attempts as if they succeeded is worse than none.
         throw new DomainError(
           "CATEGORY_IN_USE",
           `'${row.name_ar}' is used by ${used} product(s) — move them to another category first, or just deactivate it`,
         );
       }
+      // 🔴 THE FACTS ARE CAPTURED BEFORE THE ROW IS DESTROYED, inside this transaction. After the
+      // DELETE there is nothing left to read, so "what was this category called" would be
+      // unanswerable — which is precisely the question a deletion makes someone ask later.
+      const epitaph = categoryDiff(row, null);
       categories.delete(id);
+      written.push(
+        auditStore.append(
+          this.auditDraft(owner, "CATEGORY_DELETED", "category", id, instant, epitaph, {}),
+          this.newId(),
+        ),
+      );
       return { deletedId: id };
     });
+    this.mirror(written);
+    return result;
   }
 
   /**
@@ -1192,10 +1332,10 @@ export class PosService {
     readonly heightPx: number;
     readonly origin: ImageOrigin;
   }): ProductImageMeta {
-    this.requireOwner();
+    const owner = this.requireOwner();
     const images = this.requireImages();
     const store = this.requireStore();
-    const transact = this.requireTransact();
+    const { auditStore, transact } = this.requireAuditedStack();
     // The cheap, provable checks, from the one module that owns them. None of them decodes the
     // image; see src/domain/productImage.ts for why that is stated rather than implied.
     const mime = imageMime(input.mime);
@@ -1203,15 +1343,23 @@ export class PosService {
     const bytes = imageBytes(input.bytes);
     const widthPx = imageEdge(input.widthPx, "width");
     const heightPx = imageEdge(input.heightPx, "height");
-    const now = this.now().toISOString();
+    // ONE instant for the row's timestamps and for its audit event, so the two cannot disagree
+    // about when the photo was stored.
+    const instant = this.now();
+    const now = instant.toISOString();
     // 🔴 COMPUTED HERE, FROM THESE BYTES. A checksum a caller passes in is a claim; this is the
     // fact, and it is what `productImageBytes` and the online export later verify against.
     const sha256Hex = createHash("sha256").update(bytes).digest("hex");
-    return transact((): ProductImageMeta => {
+    const written: AuditRow[] = [];
+    const meta = transact((): ProductImageMeta => {
       if (!store.findById(input.productId)) {
         throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
       }
-      return images.putPrimary({
+      // 🔴 READ BEFORE WRITE, INSIDE THE TRANSACTION. `putPrimary` deletes the old primary row
+      // before inserting the new one, so after it runs there is no way to tell a first photo from
+      // a replacement — and "when did we lose the old photo" is exactly what someone asks later.
+      const previous = images.findPrimaryMeta(input.productId);
+      const stored = images.putPrimary({
         id: this.newId(),
         productId: input.productId,
         bytes,
@@ -1222,7 +1370,24 @@ export class PosService {
         origin,
         now,
       });
+      written.push(
+        auditStore.append(
+          this.auditDraft(
+            owner,
+            previous === null ? "PRODUCT_IMAGE_SET" : "PRODUCT_IMAGE_REPLACED",
+            "product_image",
+            input.productId,
+            instant,
+            imageDiff(previous, stored),
+            { photo_origin: stored.origin },
+          ),
+          this.newId(),
+        ),
+      );
+      return stored;
     });
+    this.mirror(written);
+    return meta;
   }
 
   /**
@@ -1232,25 +1397,64 @@ export class PosService {
    * see, and reporting one would make a double click look like a failure.
    */
   removeProductPrimaryImage(productId: string): { readonly removed: boolean } {
-    this.requireOwner();
+    const owner = this.requireOwner();
     const images = this.requireImages();
     const store = this.requireStore();
-    const transact = this.requireTransact();
-    return transact((): { readonly removed: boolean } => {
+    const { auditStore, transact } = this.requireAuditedStack();
+    const instant = this.now();
+    const written: AuditRow[] = [];
+    const result = transact((): { readonly removed: boolean } => {
       if (!store.findById(productId)) {
         throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
       }
-      return { removed: images.removePrimary(productId) };
+      // Same reason as above: the facts of the photo being destroyed are only readable before it is.
+      const previous = images.findPrimaryMeta(productId);
+      const removed = images.removePrimary(productId);
+      // 🔴 NO EVENT WHEN NOTHING WAS REMOVED. Removing a photo that is already gone is idempotent
+      // by design (a double click must not look like a failure) and it is not a fact about the shop.
+      if (removed && previous !== null) {
+        written.push(
+          auditStore.append(
+            this.auditDraft(
+              owner,
+              "PRODUCT_IMAGE_REMOVED",
+              "product_image",
+              productId,
+              instant,
+              imageDiff(previous, null),
+              { photo_origin: previous.origin },
+            ),
+            this.newId(),
+          ),
+        );
+      }
+      return { removed };
     });
+    this.mirror(written);
+    return result;
   }
 
-  /** The transaction provider, or a refusal — the same fail-closed shape as `requireStore`. */
-  private requireTransact(): <T>(fn: () => T) => T {
+  /**
+   * The audit trail AND the transaction that binds it to a mutation — both, or neither.
+   *
+   * 🔴 FAIL CLOSED ON THE AUDIT TRAIL, NOT JUST ON THE TRANSACTION. A terminal that can write but
+   * cannot record refuses the write. `requireProductStack` above says the same thing for products;
+   * this is that rule applied to categories and photos, and it is the reason there is no
+   * "unaudited fallback path" for a category rename.
+   */
+  private requireAuditedStack(): {
+    readonly auditStore: AuditRepository;
+    readonly transact: <T>(fn: () => T) => T;
+  } {
+    const auditStore = this.deps.auditStore;
     const transact = this.deps.transact;
-    if (!transact) {
-      throw new DomainError("NOT_AVAILABLE", "This terminal cannot write atomically; the operation was refused");
+    if (!auditStore || !transact) {
+      throw new DomainError(
+        "NOT_AVAILABLE",
+        "This operation is unavailable: the durable audit trail is not wired on this terminal",
+      );
     }
-    return transact;
+    return { auditStore, transact };
   }
 
   // ── Sales ───────────────────────────────────────────────────────────────────────────────────────
