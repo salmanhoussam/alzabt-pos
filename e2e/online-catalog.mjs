@@ -322,14 +322,22 @@ const reconciliationDone = await (async () => {
 
 if (reconciliationDone) {
   // Publish it, so origin C is eligible too.
+  //
+  // 🔴 THIS BLOCK USED TO BE `if (count === 1) { … }` AND THAT WAS THE BUG. When the row was not
+  // found it did nothing, silently, and the only symptom was the product missing from the
+  // catalogue two hundred lines later — a silent skip of exactly the kind this project keeps
+  // paying for. It now waits for the row and says so if it never arrives.
   await testid(page, "tab-products").click();
-  const row = page.locator('[data-testid="product-row"]').filter({ hasText: "صنف من فاتورة" });
-  if ((await row.count()) === 1) {
-    await row.locator('[data-testid="product-edit"]').click();
-    await testid(page, "field-online").check();
-    await testid(page, "save-product").click();
-    await page.locator(".dialog .btn.primary.wide").click();
-  }
+  const row = page.locator('[data-testid="product-row"]').filter({ hasText: "فاتورة" });
+  await row.first().waitFor({ state: "visible", timeout: 20000 });
+  const found = await row.count();
+  log(`    reconciliation product rows matching "فاتورة": ${found}`);
+  await row.first().locator('[data-testid="product-edit"]').click();
+  await testid(page, "field-online").check();
+  await testid(page, "save-product").click();
+  await page.locator(".dialog .btn.primary.wide").click();
+  // And confirm the publish actually took, rather than trusting the click.
+  await page.waitForTimeout(800);
 }
 await app.close();
 
