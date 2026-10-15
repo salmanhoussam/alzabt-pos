@@ -193,6 +193,14 @@ const reconciliationDone = await (async () => {
     await testid(page, "add-row").click();
     await testid(page, "new-line-description").fill("صنف من فاتورة");
     await testid(page, "new-line-quantity").fill("1");
+    // The unit is chosen explicitly rather than relying on a default: `UnitCell` holds its own
+    // state and this script must not depend on what it happens to start with.
+    {
+      const select = page.locator('[data-testid="sheet-draft-row"]').last().locator('[data-testid^="unit-select-"]').first();
+      const options = await select.evaluate((el) => Array.from(el.options).map((o) => o.value));
+      const known = options.find((v) => v && v !== "other");
+      if (known !== undefined) await select.selectOption(known);
+    }
     await testid(page, "new-line-price").fill("9.00");
     await testid(page, "save-draft").click();
     await page.locator('[data-testid="sheet-draft-row"]').waitFor({ state: "detached", timeout: 15000 });
