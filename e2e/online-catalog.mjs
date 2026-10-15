@@ -221,14 +221,32 @@ const reconciliationDone = await (async () => {
       await field.waitFor({ timeout: 15000 });
       await field.fill("زبون الكاتالوج");
       await field.press("Tab");
+      // Wait for the value to hold, the way the invoice E2E's own `commit` helper does: Tab starts
+      // a save, and the next interaction must not race the re-render it causes.
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="sheet-customer"]')?.value === "زبون الكاتالوج",
+        undefined,
+        { timeout: 15000 },
+      );
     });
     await at("open a new line", async () => {
+      // 🔴 THE CLICK IS RETRIED, AND THE SCREEN DUMP IS WHY. The previous run showed `add-row`
+      // present and visible with NO `sheet-draft-row` and NO `new-line-description` anywhere —
+      // the click landed and produced nothing. The customer field commits on Tab, which
+      // re-renders the sheet, and a click during that re-render hits a stale element and is
+      // swallowed. Clicking again after the render settles is the fix; three attempts is enough
+      // to distinguish "the render ate it" from "this button does not work".
       await testid(page, "add-row").waitFor({ timeout: 15000 });
-      await testid(page, "add-row").click();
-      // 🔴 WAIT FOR THE FIELD, do not race the render. The previous run failed on `fill` while the
-      // step name still said "open a new line", because the fill was outside the named step — the
-      // log pointed one step behind the truth.
-      await testid(page, "new-line-description").waitFor({ state: "visible", timeout: 20000 });
+      let opened = false;
+      for (let attempt = 1; attempt <= 3 && !opened; attempt += 1) {
+        await testid(page, "add-row").click();
+        opened = await testid(page, "new-line-description")
+          .waitFor({ state: "visible", timeout: 7000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!opened) log(`    add-row attempt ${attempt} produced no draft row; retrying`);
+      }
+      if (!opened) throw new Error("add-row never produced a draft row after 3 attempts");
     });
     await at("fill the line", async () => {
       await testid(page, "new-line-description").fill("صنف من فاتورة");
