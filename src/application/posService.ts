@@ -16,6 +16,13 @@ import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
 import { categoryNameAr, categoryNameEn } from "../domain/category";
 import { imageBytes, imageEdge, imageMime, imageOrigin } from "../domain/productImage";
+import {
+  isEligibleForOnlineCatalog,
+  onlineCatalogDocument,
+  onlineCatalogImageFile,
+  onlineCatalogProduct,
+  type OnlineCatalogDocument,
+} from "../domain/onlineCatalog";
 import type { CategoryRepository, CategoryRow } from "../persistence/categoryRepository";
 import type {
   ImageMime,
@@ -289,6 +296,19 @@ function provenanceMetadata(
   const meta: Record<string, string> = { origin: provenance.origin, source };
   if (provenance.invoiceId !== undefined) meta.invoice_id = provenance.invoiceId;
   return meta;
+}
+
+/**
+ * What slice G2's package writer is handed.
+ *
+ * 🔴 `document` IS EXACTLY WHAT `catalog.json` WILL CONTAIN — nothing is added to it on the way to
+ * disk. `images` is main-process plumbing and is NEVER serialized: it carries internal image ids
+ * so the writer can fetch bytes through the verifying read path, and an id in a published file
+ * would be internal state the website has no use for.
+ */
+export interface OnlineCatalogSnapshot {
+  readonly document: OnlineCatalogDocument;
+  readonly images: ReadonlyArray<{ readonly file: string; readonly imageId: string; readonly sha256: string }>;
 }
 
 export class PosService {
@@ -634,6 +654,93 @@ export class PosService {
       throw new DomainError("NOT_AVAILABLE", "There is no imported catalog to export yet");
     }
     return { csv: toImportCsv(rows), productCount: rows.length };
+  }
+
+  /**
+   * The authoritative Online Catalog, ready to be written to disk by slice G2.
+   *
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 THIS IS NOT `exportCatalogCsv` AND MUST NEVER BECOME IT. That one reads
+   * `listForExport(CSV_SOURCE)` — only products whose `source` is the merchant CSV — which is the
+   * measured gap where a hand-typed product silently disappears from a shop's own export. This
+   * reads the authoritative Product Master through `listAll()`, where origin is not part of the
+   * question. The legacy 7-column contract is untouched, still round-trips with
+   * `importCatalogCsv`, and is not routed through here.
+   *
+   * 🔴 OWNER ONLY, IN THE SERVICE. The channel guard refuses a cashier too, but a guard that lives
+   * only in `channelPolicy` is one slice H's LAN listener would walk straight past — it calls the
+   * service directly and never touches `ipcMain`. The same reasoning as every other owner
+   * operation in this file.
+   *
+   * 🔴 IT RETURNS NO IMAGE BYTES. `images` carries the image IDS the writer will fetch one at a
+   * time through `productImageBytes`, which re-hashes what it read and refuses a mismatch. Loading
+   * every photo here would put the whole catalogue in memory for a function whose job is to
+   * describe it, and would duplicate a verification path that already exists.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  onlineCatalogSnapshot(): OnlineCatalogSnapshot {
+    const owner = this.requireOwner();
+    const store = this.requireStore();
+    const categories = this.requireCategories();
+    const images = this.requireImages();
+
+    // One read of each, rather than a query per product: a shop with 400 products would otherwise
+    // issue 800 statements to build one file.
+    const categoryById = new Map(categories.listAll().map((c) => [c.id, c]));
+    const photoByProduct = images.primaryMetaByProduct();
+
+    const products = [];
+    const imageRefs: Array<{ file: string; imageId: string; sha256: string }> = [];
+    for (const row of store.listAll()) {
+      if (!isEligibleForOnlineCatalog(row)) continue;
+      const photo = photoByProduct.get(row.id) ?? null;
+      let image = null;
+      if (photo !== null) {
+        const file = onlineCatalogImageFile(row.id, photo.mime);
+        image = {
+          file,
+          mime: photo.mime,
+          sha256: photo.sha256_hex,
+          width: Number(photo.width_px),
+          height: Number(photo.height_px),
+        };
+        imageRefs.push({ file, imageId: photo.id, sha256: photo.sha256_hex });
+      }
+      const category = categoryById.get(row.category_id ?? "") ?? null;
+      products.push(
+        onlineCatalogProduct({
+          row: {
+            id: row.id,
+            sku: row.sku,
+            barcode: row.barcode,
+            name_ar: row.name_ar,
+            name_en: row.name_en,
+            brand: row.brand,
+            selling_price_minor: row.selling_price_minor,
+            currency: row.currency,
+            base_unit: row.base_unit,
+            description_ar: row.description_ar,
+            description_en: row.description_en,
+            updated_at: row.updated_at,
+          },
+          // 🔴 A RETIRED CATEGORY IS STILL EXPORTED. See the domain module: the product genuinely
+          // carries it, and `is_active` governs what may be chosen NEXT, not what is true now.
+          category:
+            category === null
+              ? null
+              : { id: category.id, name_ar: category.name_ar, name_en: category.name_en },
+          image,
+        }),
+      );
+    }
+
+    // The service has no logger dependency, and this is not worth adding one for: the IPC handler
+    // logs the export it actually performed, where the outcome is known.
+    void owner;
+    return {
+      document: onlineCatalogDocument(this.now().toISOString(), products),
+      images: imageRefs,
+    };
   }
 
   // ── Product administration ──────────────────────────────────────────────────────────────────────
