@@ -648,3 +648,25 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
   gap: var(--space-3);
   margin-block-end: var(--space-3);
 }
+
+/* ── Phone pairing dialog (slice H2) ───────────────────────────────────────────────────────────
+   🔴 THE SYMBOL IS SIZED IN CSS, NOT IN THE ENCODER. zxing-wasm emits a 45x45 SVG — one unit per
+   module — which would render as a postage stamp at its intrinsic size. `width:100%` on the SVG
+   with a fixed box scales it losslessly (it is a vector), and `image-rendering: pixelated` keeps
+   the module edges crisp instead of letting the browser blur them, which is what makes it
+   scannable from a phone held at arm's length in front of a till.
+
+   The white plate is deliberate and NOT theming: a QR needs a light quiet zone around a dark
+   symbol to decode, so it stays white in dark mode too rather than inheriting the card. */
+.phone-qr {
+  width: 260px; height: 260px; margin: 12px auto; padding: 12px;
+  background: #ffffff; border-radius: 12px; display: grid; place-items: center;
+}
+.phone-qr svg { width: 100%; height: 100%; image-rendering: pixelated; shape-rendering: crispEdges; }
+.phone-dialog { text-align: center; }
+.phone-dialog ul { text-align: start; margin: 4px 0 0; padding-inline-start: 1.2em; }
+/* 🔴 REUSES `.actions`, WHICH ALREADY DOES THIS. A new `.dialog-actions` class was written first
+   and then removed: `.actions` has provided the flex row and the 8px gap since the history table,
+   and a second class for the same job is how two spacings drift apart. Only the top margin, which
+   is specific to sitting under a QR, is added here. */
+.phone-dialog .phone-actions { margin-top: 16px; justify-content: center; }

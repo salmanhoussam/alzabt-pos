@@ -47,6 +47,20 @@ export interface PhoneSessionServerDeps {
    * whether a product is being edited — so a template cannot leak the token or the operator.
    */
   readonly renderPage: (view: PhonePageView) => string;
+  /**
+   * THE ONE NAMED OPERATION THIS SURFACE MAY PERFORM. Slice H2.
+   *
+   * 🔴 IT IS A SINGLE CALLBACK, NOT A SERVICE AND NOT A DISPATCHER, and that is the whole
+   * containment story. The listener cannot name a method, cannot reach a repository and cannot be
+   * made to call anything else by what arrives in a request: the only thing it can do with a POST
+   * body is hand those bytes to `save`. A `(channel, payload)` seam here would have turned an HTTP
+   * endpoint into a remote IPC proxy, which the approved design forbids explicitly.
+   *
+   * It takes the RAW body. Parsing, validation, authorization and persistence all happen behind
+   * it, in the domain and the service. Absent means saving is unavailable and a POST is refused —
+   * which is what every H1-era test gets, so none of them can write a product by accident.
+   */
+  readonly save?: (body: Buffer) => PhoneSaveOutcome;
   readonly now?: () => number;
   readonly logger?: Logger;
   /** Called once, when the session ends for any reason. The desktop refreshes on this. */
@@ -60,6 +74,17 @@ export interface PhonePageView {
   readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
   readonly editing: boolean;
 }
+
+/**
+ * What a save attempt produced.
+ *
+ * 🔴 A REFUSAL CARRIES A MESSAGE FOR THE MERCHANT AND NOTHING ELSE. No stack, no SQL, no column
+ * name, no internal code beyond the DomainError code the UI already shows at the till. An
+ * unexpected fault becomes a generic sentence, exactly as `wrap` does for the IPC bridge.
+ */
+export type PhoneSaveOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly code: string; readonly message: string };
 
 export interface RunningPhoneSessionServer {
   readonly host: string;
@@ -79,6 +104,19 @@ export interface RunningPhoneSessionServer {
  * which a hostile client simply lies about.
  */
 export const PHONE_REQUEST_BODY_CAP_BYTES = 12 * 1024 * 1024;
+
+/**
+ * The Arabic sentences the phone sees when a save cannot proceed.
+ *
+ * 🔴 EACH ONE BELONGS TO ITS OWN SITUATION, which this project learned the hard way: a text written
+ * for one operation and reused because it is "close" reads to the merchant as a fault. "The code
+ * expired" and "this was already saved" are different facts and must not share a sentence. None of
+ * them names an internal code, a table or a path.
+ */
+const SESSION_CLOSED_AR = "انتهت صلاحية هذا الرمز. اطلب رمزاً جديداً من الصندوق.";
+const ALREADY_SAVED_AR = "تم حفظ هذا الصنف مسبقاً. لا حاجة لإعادة الحفظ.";
+const SAVE_UNAVAILABLE_AR = "الحفظ من الهاتف غير متاح على هذا الصندوق.";
+const SAVE_FAILED_AR = "تعذّر الحفظ. حاول مرة أخرى أو أكمل من الصندوق.";
 
 /** Headers on every response. The phone page is self-contained; nothing external may load. */
 const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
@@ -118,21 +156,18 @@ export async function startPhoneSessionServer(
     res.end("Not found\n");
   }
 
-  function handle(req: IncomingMessage, res: ServerResponse): void {
-    // Drain-and-cap first. A request with a body is already outside H1's surface, but it must be
-    // read or destroyed rather than left to buffer.
-    let received = 0;
-    let destroyed = false;
-    req.on("data", (chunk: Buffer) => {
-      received += chunk.length;
-      if (received > PHONE_REQUEST_BODY_CAP_BYTES && !destroyed) {
-        destroyed = true;
-        log?.warn("phone-session-body-cap", { received });
-        req.destroy();
-        res.destroy();
-      }
+  /** A JSON answer for the form's own fetch. Only ever `{ok}` or `{ok,code,message}`. */
+  function json(res: ServerResponse, status: number, payload: unknown): void {
+    const body = Buffer.from(JSON.stringify(payload), "utf8");
+    res.writeHead(status, {
+      ...SECURITY_HEADERS,
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Length": String(body.byteLength),
     });
+    res.end(body);
+  }
 
+  function handle(req: IncomingMessage, res: ServerResponse): void {
     const route = parseRoute(req.url ?? "");
     const client = {
       remoteAddress: req.socket.remoteAddress ?? "",
@@ -142,14 +177,19 @@ export async function startPhoneSessionServer(
     // 🔴 AN UNKNOWN PATH IS NOT "MALFORMED". A phone requests /favicon.ico unprompted, and a
     // browser's speculative fetches would otherwise spend the session's three-strike budget before
     // the merchant typed anything. Unknown paths get a plain 404 and cost nothing.
+    //
+    // The body is still drained so the socket can close cleanly.
     if (route.kind === "unknown") {
+      drain(req);
       refuse(res);
       return;
     }
 
-    // Only GET exists in H1. Anything else against a REAL route is a genuine protocol violation
-    // and spends budget — this is where a probe that found the path lands.
-    if (req.method !== "GET" && req.method !== "HEAD") {
+    const method = req.method ?? "";
+    // GET/HEAD serve the form; POST saves. Anything else against a REAL route is a genuine
+    // protocol violation and spends budget — this is where a probe that found the path lands.
+    if (method !== "GET" && method !== "HEAD" && method !== "POST") {
+      drain(req);
       spendMalformed(res, "method");
       return;
     }
@@ -159,11 +199,17 @@ export async function startPhoneSessionServer(
       // A wrong token on a real-looking path is a probe. An "other_client" or stale attempt is
       // not: the second phone and the replay-after-end cases are honest refusals that must NOT
       // let an attacker burn down a live session by replaying a URL they photographed.
+      drain(req);
       if (verdict.refusal === "unknown_token") {
         spendMalformed(res, "token");
         return;
       }
-      refuse(res);
+      // 🔴 A POST gets JSON, not HTML, because the form's own handler parses the answer — and an
+      // expired session must produce a sentence the merchant can read rather than a silent 404
+      // that looks like a network fault. The STATUS is still 404 and the body still says nothing
+      // about which refusal it was.
+      if (method === "POST") json(res, 404, { ok: false, code: "SESSION_CLOSED", message: SESSION_CLOSED_AR });
+      else refuse(res);
       return;
     }
 
@@ -172,6 +218,12 @@ export async function startPhoneSessionServer(
       log?.info("phone-session-claimed", { action: session.action, editing: session.productId !== null });
     }
 
+    if (method === "POST") {
+      handleSave(req, res);
+      return;
+    }
+
+    drain(req);
     const html = deps.renderPage({ action: session.action, editing: session.productId !== null });
     const body = Buffer.from(html, "utf8");
     res.writeHead(200, {
@@ -179,8 +231,94 @@ export async function startPhoneSessionServer(
       "Content-Type": "text/html; charset=utf-8",
       "Content-Length": String(body.byteLength),
     });
-    if (req.method === "HEAD") res.end();
+    if (method === "HEAD") res.end();
     else res.end(body);
+  }
+
+  /**
+   * Read the body, hand it to `save`, and report.
+   *
+   * 🔴 BYTES ARE COUNTED AS THEY ARRIVE AND THE SOCKET IS DESTROYED PAST THE CAP. `Content-Length`
+   * is never trusted — a hostile client simply lies about it — so the limit is enforced against
+   * what actually turned up.
+   *
+   * 🔴 THE SESSION IS SPENT ON SUCCESS, BEFORE ANYTHING ELSE CAN ARRIVE. `savedCount` is
+   * incremented and the session ended, so a retry, a double-tap or a replayed request is refused
+   * by `checkAccess` on the way in rather than by a database constraint on the way out.
+   */
+  function handleSave(req: IncomingMessage, res: ServerResponse): void {
+    const save = deps.save;
+    if (!save) {
+      drain(req);
+      json(res, 503, { ok: false, code: "NOT_AVAILABLE", message: SAVE_UNAVAILABLE_AR });
+      return;
+    }
+
+    // 🔴 ONE SAVE PER SESSION, CHECKED BEFORE THE BODY IS EVEN READ. The session is ended on the
+    // first success, so this is belt-and-braces for a request that was already in flight when
+    // that happened — two taps on a slow connection genuinely produce this race.
+    if (session.savedCount > 0) {
+      drain(req);
+      json(res, 409, { ok: false, code: "ALREADY_SAVED", message: ALREADY_SAVED_AR });
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let received = 0;
+    let aborted = false;
+
+    req.on("data", (chunk: Buffer) => {
+      if (aborted) return;
+      received += chunk.length;
+      if (received > PHONE_REQUEST_BODY_CAP_BYTES) {
+        aborted = true;
+        log?.warn("phone-session-body-cap", { received });
+        req.destroy();
+        res.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("aborted", () => {
+      aborted = true;
+    });
+
+    req.on("end", () => {
+      if (aborted) return;
+      let outcome: PhoneSaveOutcome;
+      try {
+        outcome = save(Buffer.concat(chunks));
+      } catch (err) {
+        // `save` is written to return a refusal rather than throw; this is the backstop, and it
+        // deliberately tells the phone nothing about what went wrong internally.
+        log?.error("phone-session-save-fault", { error: err });
+        json(res, 500, { ok: false, code: "INTERNAL", message: SAVE_FAILED_AR });
+        return;
+      }
+
+      if (!outcome.ok) {
+        // 🔴 A REFUSED SAVE LEAVES THE SESSION LIVE. The merchant fixes the price and saves again;
+        // ending the session on a validation error would force them back to the till for a new QR
+        // and lose everything they typed. Nothing durable was written, which is the invariant that
+        // makes keeping it open safe.
+        log?.info("phone-session-save-refused", { code: outcome.code });
+        json(res, 422, { ok: false, code: outcome.code, message: outcome.message });
+        return;
+      }
+
+      session.savedCount += 1;
+      log?.info("phone-session-saved", { action: session.action, editing: session.productId !== null });
+      json(res, 200, { ok: true });
+      // The surface closes behind a successful save: the token is spent, the listener shuts, and a
+      // replay cannot even connect.
+      void stop("completed");
+    });
+  }
+
+  /** Consume a body we are not going to use, so the socket closes instead of stalling. */
+  function drain(req: IncomingMessage): void {
+    req.resume();
   }
 
   function spendMalformed(res: ServerResponse, kind: string): void {

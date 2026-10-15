@@ -76,7 +76,21 @@ let log: Logger = nullLogger;
  * session writing to `nullLogger` — so every diagnostic about the one network surface in the
  * product would be silently discarded.
  */
+/**
+ * The live service, so the phone bridge can reach it.
+ *
+ * 🔴 A MODULE-LEVEL BINDING READ THROUGH A GETTER, not a constructor argument, because the two
+ * have different lifetimes: the bridge must exist before `will-quit` is registered, and the
+ * service cannot exist until the ledger has opened. The getter is read when a session STARTS, by
+ * which point `startTill` has long since run — and if it somehow has not, `service` is undefined
+ * and the phone can pair but not save, which fails closed rather than crashing.
+ */
+let posService: PosService | null = null;
+
 const phoneSessions = new PhoneSessionBridge({
+  get service() {
+    return posService ?? undefined;
+  },
   logger: {
     info: (event, fields) => log.info(event, fields),
     warn: (event, fields) => log.warn(event, fields),
@@ -736,6 +750,9 @@ function startTill(): void {
     },
     terminal: FIXTURE_TERMINAL,
   });
+
+  // The phone bridge reads this through its getter when a session starts.
+  posService = service;
 
   registerIpc(service, {
     invoices,

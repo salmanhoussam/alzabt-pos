@@ -139,12 +139,15 @@ describe("IPC surface", () => {
         "saveInvoicePdf",
         "startPhoneSession",
         "cancelPhoneSession",
+        "phoneSessionState",
       ].sort(),
     );
     // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
     // migration 9) -> 64 (exportOnlineCatalog, slice G3 — the old value is named, not replaced)
     // -> 66 (slice H1: startPhoneSession, cancelPhoneSession)
-    expect(CHANNEL_NAMES).toHaveLength(66);
+    // -> 67 (slice H2: phoneSessionState — the dialog's poll; see ipcContract for why it is not
+    //        named "...Status", which invoiceIpc.test.ts forbids on purpose)
+    expect(CHANNEL_NAMES).toHaveLength(67);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

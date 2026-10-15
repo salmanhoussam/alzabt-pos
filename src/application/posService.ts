@@ -9,7 +9,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { businessDateOf } from "../domain/businessDay";
 import { type CartLine, priceCart } from "../domain/cart";
-import { type Catalog, loadCatalog } from "../domain/catalog";
+import { BASE_UNITS, type Catalog, loadCatalog } from "../domain/catalog";
 import { decodeUtf8Strict, toImportCsv, validateImport, type ImportRejection } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
 import { money } from "../domain/money";
@@ -17,6 +17,14 @@ import { type TodaySalesReport, buildTodaySales } from "../domain/report";
 import { categoryNameAr, categoryNameEn } from "../domain/category";
 import { imageBytes, imageEdge, imageMime, imageOrigin } from "../domain/productImage";
 import type { PhoneSessionAction, PhoneSessionSpec } from "../domain/phoneSession";
+import type { PhoneSubmission } from "../domain/phoneSubmission";
+import { toAdminProductDto } from "../shared/dto";
+import {
+  EMPTY_MASTER_FORM,
+  type MasterForm,
+  masterFormOf,
+  masterPatchFrom,
+} from "../shared/productMasterForm";
 import {
   isEligibleForOnlineCatalog,
   onlineCatalogDocument,
@@ -288,6 +296,50 @@ export interface ProductWriteProvenance {
 }
 
 const MANUAL_PROVENANCE: ProductWriteProvenance = Object.freeze({ origin: "manual_entry" });
+
+/**
+ * Slice H2. A product entered on a phone over the shop LAN.
+ *
+ * 🔴 IT IS ITS OWN ORIGIN, NOT `manual_entry`. The audit trail should be able to answer "where did
+ * this product come from" truthfully, and "an owner typed it on a phone in the aisle" is a
+ * different answer from "an owner typed it at the till". Nothing branches on it; it is recorded so
+ * a later question can be asked at all. The photo table's `origin` column already made the same
+ * distinction ('desktop' vs 'phone') before any phone existed.
+ */
+const PHONE_PROVENANCE: ProductWriteProvenance = Object.freeze({ origin: "phone_entry" });
+
+/**
+ * What the phone form needs in order to render. Slice H2.
+ *
+ * 🔴 IT CARRIES THE AUTHORITATIVE VOCABULARIES, so the served page restates none of them: `units`
+ * is `BASE_UNITS` itself, `categories` is every category (active and retired, so the caller can
+ * apply `categoryChoices` exactly as the desktop does) and `brands` is what the shop has already
+ * typed. A phone that hard-coded a unit list would be a second contract the moment `BASE_UNITS`
+ * changed.
+ */
+export interface PhoneFormData {
+  readonly action: PhoneSessionAction;
+  readonly units: readonly string[];
+  readonly currency: string;
+  readonly categories: readonly {
+    readonly id: string;
+    readonly nameAr: string;
+    readonly nameEn: string | null;
+    readonly isActive: boolean;
+  }[];
+  readonly brands: readonly string[];
+  /** The selling fields of the product being edited, or null for a new one. */
+  readonly product: {
+    readonly nameAr: string;
+    readonly nameEn: string | null;
+    readonly sku: string | null;
+    readonly priceDecimal: string;
+    readonly baseUnit: string;
+    readonly isActive: boolean;
+  } | null;
+  /** The enrichment fields as a form holds them — and the snapshot a later save diffs against. */
+  readonly master: MasterForm;
+}
 
 /** The audit metadata a product write carries — bounded scalars only, per the audit contract. */
 function provenanceMetadata(
@@ -1212,6 +1264,158 @@ export class PosService {
     const existing = this.requireStore().findById(productId);
     if (!existing) throw new DomainError("PRODUCT_NOT_FOUND", "That product no longer exists");
     return { action, productId: existing.id, operatorId: owner.id };
+  }
+
+  /**
+   * What the phone form is shown. Slice H2.
+   *
+   * 🔴 THE AUTHORITATIVE DATA, READ AT SERVE TIME — never a copy the desktop held. The units come
+   * from `BASE_UNITS`, the categories from the category table, the brands from what the shop has
+   * already typed, and for an edit the product's own current values. A phone that restated any of
+   * these would be a second vocabulary.
+   *
+   * 🔴 OWNER ONLY, for the same reason as every other method in this section: the LAN listener
+   * calls this directly and never passes through `channelPolicy`.
+   */
+  phoneSessionForm(spec: PhoneSessionSpec): PhoneFormData {
+    this.requirePhoneOperator(spec);
+    const store = this.requireStore();
+    const categories = this.requireCategories();
+
+    // 🔴 ACTIVE CATEGORIES, PLUS THE PRODUCT'S OWN EVEN IF RETIRED — `categoryChoices` is not
+    // reimplemented here; the caller applies it to this list exactly as the desktop form does.
+    // Returning every category (not only active ones) is what makes that possible, and is the
+    // same deliberate decision `listCategories` documents.
+    const product = spec.productId === null ? null : store.findById(spec.productId);
+    if (spec.productId !== null && !product) {
+      throw new DomainError("PRODUCT_NOT_FOUND", "That product no longer exists");
+    }
+
+    // 🔴 ONE DTO MAPPER, NOT A SECOND HAND-BUILT SHAPE. `toAdminProductDto` already converts the
+    // row — including the exact decimal price and the bigint flags, which a hand-written mapper
+    // here would have got wrong (`is_active === 1` is false for `1n`).
+    const dto = product === null ? null : toAdminProductDto(product);
+
+    return {
+      action: spec.action,
+      units: [...BASE_UNITS],
+      currency: this.deps.terminal.currency,
+      categories: categories.listAll().map((c) => ({
+        id: c.id,
+        nameAr: c.name_ar,
+        nameEn: c.name_en,
+        isActive: c.is_active === 1,
+      })),
+      brands: store.distinctBrands(),
+      product:
+        dto === null
+          ? null
+          : {
+              nameAr: dto.nameAr,
+              nameEn: dto.nameEn,
+              sku: dto.sku,
+              priceDecimal: dto.priceDecimal,
+              baseUnit: dto.baseUnit,
+              isActive: dto.isActive,
+            },
+      // 🔴 THE SERVED SNAPSHOT, which the caller must remember and hand back at save time. It is
+      // what the diff is taken against — see `savePhoneProduct`.
+      master: dto === null ? EMPTY_MASTER_FORM : masterFormOf(dto),
+    };
+  }
+
+  /**
+   * Save what the phone submitted. Slice H2. THE ONLY write path the LAN surface has.
+   *
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 IT DELEGATES TO `createProduct` / `updateProduct` AND ADDS NO PERSISTENCE OF ITS OWN. There
+   * is no phone product table, no second validation schema and no SQL here. Everything that makes
+   * a product valid — the required Arabic name, the exact price, the unit vocabulary, the barcode
+   * canonicalization, the duplicate-SKU and duplicate-barcode checks, the category's existence and
+   * the inactive-category asymmetry, and the audit row — happens inside those two methods, in their
+   * transaction, exactly as it does for the desktop.
+   *
+   * 🔴 THE PRODUCT ID COMES FROM `spec`, WHICH CAME FROM THE SESSION. It is never read from the
+   * submission; `parsePhoneSubmission` refuses a payload that even mentions one. Wrong-product
+   * substitution is therefore not a check that could be forgotten — there is no parameter to
+   * substitute.
+   *
+   * 🔴 AND THE OWNER CHECK HAPPENS AGAIN, HERE, AT SAVE TIME. This is the one that is easy to miss:
+   * `createProduct` requires only a logged-in operator (`requireCashier`), because its owner gate
+   * has always been the channel table — and the channel table is exactly what this path skips. So
+   * an owner could open a phone session, log out, a CASHIER could log in, and the phone's save
+   * would have written a product under the cashier's session. `requirePhoneOperator` closes that:
+   * the live session must still be an owner AND still be the same operator who opened it.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  savePhoneProduct(
+    spec: PhoneSessionSpec,
+    submission: PhoneSubmission,
+    servedMaster: MasterForm | null,
+  ): AdminProductRow {
+    this.requirePhoneOperator(spec);
+
+    if (spec.action === "NEW_PRODUCT") {
+      if (spec.productId !== null) {
+        throw new DomainError("INVALID_INPUT", "A new product cannot name an existing product");
+      }
+      // A create has no "before", so every enrichment field the form holds is a new value. The
+      // diff is taken against an EMPTY form, which is what the desktop's Add dialog also does.
+      const master = masterPatchFrom(EMPTY_MASTER_FORM, submission.master);
+      return this.createProduct(
+        master === undefined ? submission.draft : { ...submission.draft, master },
+        PHONE_PROVENANCE,
+      );
+    }
+
+    const productId = spec.productId;
+    if (productId === null) {
+      throw new DomainError("INVALID_INPUT", "Editing on the phone needs the product it is editing");
+    }
+    const before = this.requireStore().findById(productId);
+    if (!before) throw new DomainError("PRODUCT_NOT_FOUND", "That product no longer exists");
+
+    // 🔴 THE DIFF IS AGAINST WHAT THE FORM WAS SERVED, NOT AGAINST STORAGE AS IT IS NOW.
+    //
+    // `spec.servedMaster` is the snapshot this service handed the phone when the form was opened.
+    // Diffing against the CURRENT row instead would reintroduce the exact failure the desktop's
+    // own patch builder documents: a field changed elsewhere while the phone was open would be
+    // reverted to what the phone happened to be showing. Diffing against what was served means an
+    // untouched field is ABSENT from the patch, and `keep()` preserves whatever storage now holds.
+    // A null `servedMaster` means the caller never served a form (it cannot happen through the
+    // listener, which always serves before it accepts a POST) — falling back to the stored row is
+    // the conservative reading: the diff then describes only what the submission really changes.
+    const served = servedMaster ?? masterFormOf(toAdminProductDto(before));
+    const master = masterPatchFrom(served, submission.master);
+
+    // 🔴 `isActive` IS CARRIED THROUGH FROM STORAGE, NEVER FROM THE FORM. The phone has no active
+    // toggle in V1, and `updateProduct` takes the flag positionally — so passing anything else
+    // here would silently deactivate a product on every phone save.
+    return this.updateProduct(
+      productId,
+      master === undefined ? submission.draft : { ...submission.draft, master },
+      before.is_active === 1n,
+      PHONE_PROVENANCE,
+    );
+  }
+
+  /**
+   * The live operator must be an owner, and the SAME owner who opened the phone session.
+   *
+   * 🔴 WHY SAME-OPERATOR AND NOT MERELY OWNER. "Still an owner" already closes the escalation
+   * (a cashier cannot inherit a session an owner opened). Requiring the same person closes a
+   * smaller one that is still real: in a shop with two owners, one could open a session and the
+   * other's signed-in till would carry the write and the audit actor. A ten-minute session belongs
+   * to the person who started it, and the audit row should name them.
+   */
+  private requirePhoneOperator(spec: PhoneSessionSpec): void {
+    const owner = this.requireOwner();
+    if (owner.id !== spec.operatorId) {
+      throw new DomainError(
+        "NOT_AUTHORIZED",
+        "This phone session was opened by a different operator; ask for a new code",
+      );
+    }
   }
 
   /**

@@ -57,6 +57,7 @@ export const CHANNELS = {
   // the DTO, so a renderer (or a screenshot of one) cannot leak a reusable credential.
   startPhoneSession: "pos:startPhoneSession",
   cancelPhoneSession: "pos:cancelPhoneSession",
+  phoneSessionState: "pos:phoneSessionState",
   getSettings: "pos:getSettings",
   setTerminalLanguage: "pos:setTerminalLanguage",
   // ── Manual invoices (migration 6) ────────────────────────────────────────────────────────────
@@ -418,6 +419,38 @@ export interface PhoneSessionDto {
   readonly addressAmbiguous: boolean;
   /** Every plausible address, when ambiguous — so a retry path exists without re-measuring. */
   readonly addressCandidates: readonly LanCandidateDto[];
+}
+
+/**
+ * The live state of the phone session, for the desktop dialog.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WHY POLLING RATHER THAN A PUSH EVENT. This bridge has no main→renderer event channel and
+ * never has: every one of the 60-odd channels is a request the renderer makes. Adding a push
+ * channel for one dialog would be a new direction of travel across the contextIsolation boundary,
+ * and the thing it would carry — "the phone saved" — is checkable in a poll the dialog is already
+ * running to count down the expiry. So the smaller change is the honest one.
+ *
+ * 🔴 `saved` IS REPORTED EXACTLY ONCE. The bridge clears it on read, so a dialog that keeps
+ * polling does not re-announce a save the owner has already been shown.
+ *
+ * 🔴 AND THERE IS NO TOKEN HERE EITHER. The states are what the owner needs to see; the credential
+ * stays inside the QR symbol.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export interface PhoneSessionState {
+  /**
+   * `waiting` — open, no phone has scanned yet.
+   * `claimed` — a phone has the form open.
+   * `saved`   — a product was saved; `savedProductId` names it. Reported once.
+   * `closed`  — nothing open (cancelled, expired, or never started).
+   */
+  readonly state: "waiting" | "claimed" | "saved" | "closed";
+  readonly savedProductId: string | null;
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | null;
+  /** ISO-8601 while the session is live, so the dialog counts down from the real deadline. */
+  readonly expiresAt: string | null;
+  readonly claimed: boolean;
 }
 
 export interface ProductImageMetaDto {
@@ -972,6 +1005,17 @@ export interface PosApi {
   startPhoneSession(req: StartPhoneSessionRequest): Promise<IpcResult<PhoneSessionDto>>;
   /** Owner only. Closes whatever session is open; answers honestly when there was none. */
   cancelPhoneSession(): Promise<IpcResult<{ readonly closed: boolean }>>;
+  /**
+   * Owner only. What the open dialog polls: waiting / claimed / saved / closed. No token.
+   *
+   * 🔴 NAMED `...State`, NOT `...Status`, AND THE RENAME WAS FORCED BY A REAL ASSERTION.
+   * `invoiceIpc.test.ts` requires that NO channel name matches `/status|setReconcil|markResolved|
+   * setPrice|writeCatalog/i`, guarding against the renderer ever being able to set a
+   * reconciliation status. `phoneSessionStatus` tripped it. The choice was to weaken a protective
+   * assertion or to pick a more precise name; the name was wrong anyway, since the DTO's own field
+   * is `state`.
+   */
+  phoneSessionState(): Promise<IpcResult<PhoneSessionState>>;
 
   getSettings(): Promise<IpcResult<TerminalSettings>>;
   setTerminalLanguage(req: SetTerminalLanguageRequest): Promise<IpcResult<TerminalSettings>>;

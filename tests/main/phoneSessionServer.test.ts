@@ -256,12 +256,37 @@ describe("refusals", () => {
     }
   });
 
-  it("a POST to a real route is malformed in H1 — there is no write surface yet", async () => {
+  /**
+   * 🔴 THIS TEST'S MEANING CHANGED IN H2, AND THE OLD VALUE IS NAMED. In H1 a POST was a protocol
+   * violation: there was no write surface, so it answered **404 and spent one malformed strike**.
+   * H2 makes POST the save route, so a POST is now a legitimate request — and on a server wired
+   * WITHOUT a `save` callback (every pairing-only test, and a mis-wired terminal) the honest answer
+   * is 503 NOT_AVAILABLE, costing nothing from the budget.
+   *
+   * The assertion that matters is unchanged in spirit: a POST still cannot write anything here.
+   * What changed is that it is refused as unavailable rather than as malformed.
+   */
+  it("a POST without a save callback is NOT_AVAILABLE — and costs no malformed strike", async () => {
     const s = session();
     await withServer(s, async (r) => {
       const res = await raw(
         r.port,
         `POST /m/${TOKEN} HTTP/1.1\r\nHost: ${HOST}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`,
+      );
+      expect(res.status).toBe(503);
+      expect(JSON.parse(res.body).code).toBe("NOT_AVAILABLE");
+      // Was 1 in H1, when a POST was treated as a protocol violation.
+      expect(s.malformedCount).toBe(0);
+      expect(s.savedCount).toBe(0);
+    });
+  });
+
+  it("a method that is neither GET, HEAD nor POST is still malformed", async () => {
+    const s = session();
+    await withServer(s, async (r) => {
+      const res = await raw(
+        r.port,
+        `DELETE /m/${TOKEN} HTTP/1.1\r\nHost: ${HOST}\r\nConnection: close\r\n\r\n`,
       );
       expect(res.status).toBe(404);
       expect(s.malformedCount).toBe(1);

@@ -151,6 +151,7 @@ const CH = {
   removeProductImage: "pos:removeProductImage",
   startPhoneSession: "pos:startPhoneSession",
   cancelPhoneSession: "pos:cancelPhoneSession",
+  phoneSessionState: "pos:phoneSessionState",
   getSettings: "pos:getSettings",
   setTerminalLanguage: "pos:setTerminalLanguage",
   getCompanyProfile: "pos:getCompanyProfile",
@@ -248,6 +249,7 @@ const api: PosApi = {
       "productId" in req ? { action: req.action, productId: req.productId } : { action: req.action },
     ),
   cancelPhoneSession: () => ipcRenderer.invoke(CH.cancelPhoneSession),
+  phoneSessionState: () => ipcRenderer.invoke(CH.phoneSessionState),
   getSettings: () => ipcRenderer.invoke(CH.getSettings),
   setTerminalLanguage: (req) => ipcRenderer.invoke(CH.setTerminalLanguage, { language: req.language }),
 

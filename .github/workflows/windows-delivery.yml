@@ -179,6 +179,11 @@ jobs:
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
           node e2e/online-catalog.mjs
 
+      - name: Phone entry against the INSTALLED app (QR decoded from the screen, LAN save, screenshots)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/phone-entry.mjs
+
       - name: Manual invoice against the INSTALLED app (draft -> finalize -> review -> PDF -> restart)
         run: |
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE

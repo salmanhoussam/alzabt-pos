@@ -21,7 +21,7 @@ import {
   categoryChoices,
   masterFormOf,
   masterPatchFrom,
-} from "../../src/renderer/productMasterForm";
+} from "../../src/shared/productMasterForm";
 
 const PRODUCT: AdminProductDto = {
   id: "manual:000001",

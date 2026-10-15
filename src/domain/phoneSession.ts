@@ -83,6 +83,15 @@ export interface PhoneSession {
   malformedCount: number;
   /** Set once the session is finished. A live session has `endedBy === null`. */
   endedBy: PhoneSessionEndReason | null;
+  /**
+   * How many times a save has been ACCEPTED on this session. Slice H2.
+   *
+   * 🔴 THE IDEMPOTENCY GUARD, AND IT IS A COUNT RATHER THAN A FLAG so a test can prove the second
+   * save was refused rather than merely that one product exists. A phone with a flaky connection
+   * retries; a merchant double-taps. Either must not create two products, and the session — not
+   * the database — is the right place to say so, because the token is single-use by design.
+   */
+  savedCount: number;
 }
 
 /** Enough to tell one phone from another, and deliberately nothing more. */
@@ -135,6 +144,7 @@ export function createSession(
     boundClient: null,
     malformedCount: 0,
     endedBy: null,
+    savedCount: 0,
   };
 }
 

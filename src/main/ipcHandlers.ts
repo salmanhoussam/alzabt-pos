@@ -62,6 +62,7 @@ import {
   type ProductMasterPatchKey,
   OnlineCatalogExportDto,
   type PhoneSessionDto,
+  type PhoneSessionState,
 } from "../shared/ipcContract";
 import { type Logger, nullLogger } from "./logger";
 import { accessFor } from "./channelPolicy";
@@ -111,6 +112,8 @@ export interface PhoneSessionBridge {
   readonly start: (spec: PhoneSessionSpec) => Promise<PhoneSessionDto>;
   /** True when something was actually closed; false when nothing was open. */
   readonly cancel: () => Promise<boolean>;
+  /** Slice H2. What the desktop dialog polls. Reports a save exactly once. */
+  readonly status: () => PhoneSessionState;
 }
 
 export interface IpcHandlerOptions {
@@ -821,6 +824,19 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         ambiguous: dto.addressAmbiguous,
       });
       return dto;
+    }),
+    /**
+     * 🔴 SYNCHRONOUS AND READ-ONLY. It touches no socket and performs no save — it reports state
+     * the bridge already holds, so the dialog can poll it every second or two without queuing work
+     * behind a server operation.
+     */
+    phoneSessionState: wrap("phoneSessionState", (p) => {
+      noPayload(p);
+      const open = options.phoneSessions;
+      if (!open) {
+        return { state: "closed", savedProductId: null, action: null, expiresAt: null, claimed: false };
+      }
+      return open.status();
     }),
     cancelPhoneSession: wrapAsync("cancelPhoneSession", async (p) => {
       noPayload(p);

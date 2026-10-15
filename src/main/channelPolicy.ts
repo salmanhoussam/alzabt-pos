@@ -54,6 +54,7 @@ export type Access =
  *     after  list thumbnails: 7 public · 26 session · 30 owner · 63 total
  *     after  online catalog: 7 public · 26 session · 31 owner · 64 total   (slice G3)
  *     after  phone sessions: 7 public · 26 session · 33 owner · 66 total   (slice H1)
+ *     after  the phone form: 7 public · 26 session · 34 owner · 67 total   (slice H2)
  *
  * THE PUBLIC SET DID NOT MOVE, which is the only one of the three numbers that is a security
  * claim — the four new reads (listCategories, listBrands and, once the products list had to show
@@ -191,6 +192,9 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // and expiry already guarantees the surface closes without anyone's help.
   startPhoneSession: "owner",
   cancelPhoneSession: "owner",
+  // Owner too. It reports whether a phone has claimed the code and which product was just saved —
+  // the shape of an owner's in-flight administrative act, and nothing a cashier has a use for.
+  phoneSessionState: "owner",
   // Operator management. An owner must not be demotable by an employee.
   listOperators: "owner",
   createOperator: "owner",

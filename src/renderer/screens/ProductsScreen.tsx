@@ -14,7 +14,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BASE_UNITS, FRACTIONAL_SALE_UNITS } from "../../domain/catalog";
 import { matchesSearch } from "../../domain/arabic";
-import type { AdminProductDto, CategoryDto, ProductDraftRequest } from "../../shared/ipcContract";
+import type {
+  AdminProductDto,
+  CategoryDto,
+  PhoneSessionDto,
+  PhoneSessionState,
+  ProductDraftRequest,
+} from "../../shared/ipcContract";
 import { call, errorText, pos } from "../api";
 import { useT } from "../i18n";
 import {
@@ -23,7 +29,7 @@ import {
   categoryChoices,
   masterFormOf,
   masterPatchFrom,
-} from "../productMasterForm";
+} from "../../shared/productMasterForm";
 import { type ThumbnailCache, dataUrlFrom, thumbnailsToFetch } from "../thumbnails";
 
 type Editing = { readonly mode: "add" } | { readonly mode: "edit"; readonly product: AdminProductDto };
@@ -186,6 +192,9 @@ export function ProductsScreen() {
   const [categories, setCategories] = useState<CategoryDto[]>([]);
   const [brands, setBrands] = useState<string[]>([]);
   const [managing, setManaging] = useState(false);
+  /** The open phone-pairing session, or null. One at a time, matching the bridge's own contract. */
+  const [phone, setPhone] = useState<PhoneSessionDto | null>(null);
+  const [phoneBusy, setPhoneBusy] = useState(false);
 
   const [exporting, setExporting] = useState(false);
 
@@ -255,6 +264,36 @@ export function ProductsScreen() {
     [categories],
   );
 
+  /**
+   * Open a phone session.
+   *
+   * 🔴 IT PASSES AN ACTION AND, FOR AN EDIT, A PRODUCT ID — and nothing else. The renderer cannot
+   * choose the port, the address, the token or the expiry; all four are main's. A failure here is
+   * shown as an ordinary error (no network, no owner, a product that has since gone) rather than
+   * leaving a dialog open over a session that does not exist.
+   */
+  const openPhone = useCallback(
+    async (action: "NEW_PRODUCT" | "EDIT_PRODUCT", productId: string | null) => {
+      if (phoneBusy) return;
+      setPhoneBusy(true);
+      setError("");
+      setNotice("");
+      try {
+        const session = await call(
+          productId === null
+            ? pos().startPhoneSession({ action })
+            : pos().startPhoneSession({ action, productId }),
+        );
+        setPhone(session);
+      } catch (e) {
+        setError(errorText(e));
+      } finally {
+        setPhoneBusy(false);
+      }
+    },
+    [phoneBusy],
+  );
+
   const shown = useMemo(() => {
     if (!products) return [];
     // 🔴 THE BARCODE IS SEARCHABLE, and it is the canonical stored form that is matched — a cashier
@@ -295,6 +334,18 @@ export function ProductsScreen() {
           data-testid="export-online-catalog"
         >
           {t("products.exportOnline")}
+        </button>
+        {/* 🔴 "FROM THE PHONE", NEVER "UPLOAD". The till serves the page over the shop's own
+            network and nothing leaves the building — the same honesty the export button's wording
+            is held to. The button is owner-only by the channel policy, not by being hidden: a
+            cashier who reached `window.pos.startPhoneSession` is refused by main. */}
+        <button
+          className="btn"
+          onClick={() => void openPhone("NEW_PRODUCT", null)}
+          disabled={phoneBusy}
+          data-testid="add-product-phone"
+        >
+          {t("phone.add")}
         </button>
         <button className="btn primary" onClick={() => setEditing({ mode: "add" })} data-testid="add-product">
           {t("action.add")}
@@ -437,6 +488,18 @@ export function ProductsScreen() {
                   >
                     {t("action.edit")}
                   </button>
+                  {/* 🔴 THE PRODUCT IS NAMED HERE AND NOWHERE ELSE AFTERWARDS. This id goes to
+                      main, which resolves it once and binds the SESSION to it; the phone never
+                      sends a product id and could not change which product it edits if it tried. */}
+                  <button
+                    className="btn small"
+                    onClick={() => void openPhone("EDIT_PRODUCT", p.id)}
+                    disabled={phoneBusy}
+                    title={t("phone.editHint")}
+                    data-testid="product-edit-phone"
+                  >
+                    {t("phone.edit")}
+                  </button>
                   {/* Deactivating hides a product from sale: ghost-danger, not a twin of Edit. */}
                   <button
                     className={p.isActive ? "btn danger ghost small" : "btn small"}
@@ -457,6 +520,20 @@ export function ProductsScreen() {
             ))}
           </tbody>
         </table>
+      )}
+
+      {phone && (
+        <PhoneSessionDialog
+          session={phone}
+          onClose={() => setPhone(null)}
+          onSaved={async (_productId, action) => {
+            // 🔴 THE LIST REFRESHES FROM THE LEDGER, not from anything the phone sent. The saved
+            // product is read back through the ordinary `listProducts` path, so what the owner
+            // then sees on the till is storage, not a hopeful local copy.
+            setNotice(t(action === "EDIT_PRODUCT" ? "phone.savedEdit" : "phone.savedNew"));
+            await reload();
+          }}
+        />
       )}
 
       {managing && (
@@ -598,7 +675,7 @@ function ProductForm(props: {
       // 🔴 ONLY WHAT CHANGED. `masterPatchFrom` returns undefined when the owner touched no
       // enrichment field, and the optional key then carries nothing at all — so this save is
       // indistinguishable from an import's, and every stored enrichment value is left exactly as
-      // it is. See src/renderer/productMasterForm.ts for why a snapshot would be wrong.
+      // it is. See src/shared/productMasterForm.ts for why a snapshot would be wrong.
       const patch = masterPatchFrom(original, master);
       const body: ProductDraftRequest = patch === undefined ? draft : { ...draft, master: patch };
       if (props.editing.mode === "edit") {
@@ -1119,6 +1196,168 @@ function CategoryManager(props: {
           <button className="btn ghost" type="button" onClick={props.onClose} data-testid="cat-close">
             {t("action.close")}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The pairing dialog: a QR, the address, a countdown, and what the phone is doing.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 THE QR IS INJECTED AS SVG MARKUP, AND `dangerouslySetInnerHTML` IS THE RIGHT TOOL HERE RATHER
+ * THAN A SHORTCUT. The alternatives were measured and rejected: a `blob:` URL is refused by this
+ * renderer's CSP (`default-src 'none'; img-src 'self' data:` — migration 10's Windows gate caught
+ * exactly that), and a `data:` URL would mean base64-encoding a vector that is already text. The
+ * markup is produced by `zxing-wasm` inside the main process from a URL main itself built; no part
+ * of it comes from a merchant, a file or a network, so there is no untrusted text in the string.
+ *
+ * 🔴 IT POLLS RATHER THAN LISTENING. There is no main→renderer event channel in this product and
+ * this dialog is already running a timer to count the expiry down, so the state ride along with it.
+ * `phoneSessionState` reports a save exactly once, which is what makes "saved" a terminal state
+ * here instead of something that re-fires every second.
+ *
+ * 🔴 AND IT NEVER SHOWS THE TOKEN. The DTO does not carry one. What is displayed is the address and
+ * the port, deliberately, so a merchant whose phone cannot connect can read them out to whoever is
+ * helping — an address is not a secret; the token is, and it lives only inside the symbol.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+function PhoneSessionDialog(props: {
+  readonly session: PhoneSessionDto;
+  readonly onClose: () => void;
+  readonly onSaved: (productId: string, action: "NEW_PRODUCT" | "EDIT_PRODUCT") => void | Promise<void>;
+}) {
+  const { t } = useT();
+  const [state, setState] = useState<PhoneSessionState["state"]>("waiting");
+  const [remainingMs, setRemainingMs] = useState(() =>
+    Math.max(0, new Date(props.session.expiresAt).getTime() - Date.now()),
+  );
+  const saved = useRef(false);
+  /**
+   * 🔴 THE SUCCESS IS LATCHED, AND THE FIRST VERSION OF THIS DIALOG GOT IT WRONG.
+   *
+   * `phoneSessionState` reports `saved` EXACTLY ONCE — that is its contract, so a dialog polling
+   * every second cannot re-announce a save. But it means the very next tick returns `closed`, and
+   * a render that branched on the live poll value alone would show the success banner for one
+   * second and then fall through to... the QR again, for a session that no longer exists. The
+   * merchant would see "saved" blink and be handed a dead code to scan.
+   *
+   * So the terminal state is held here rather than re-read. Found by reasoning about the
+   * once-only contract, not by a test — which is why the E2E photographs the banner and the unit
+   * test asserts the second poll returns `closed`.
+   */
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      setRemainingMs(Math.max(0, new Date(props.session.expiresAt).getTime() - Date.now()));
+      try {
+        const next = await call(pos().phoneSessionState());
+        if (cancelled) return;
+        setState(next.state);
+        // 🔴 GUARDED, because the poll can only report `saved` once but a slow render could land
+        // two ticks: the refresh must not run twice and the dialog must not flicker.
+        if (next.state === "saved" && next.savedProductId && !saved.current) {
+          saved.current = true;
+          setDone(true);
+          await props.onSaved(next.savedProductId, next.action ?? props.session.action);
+        }
+      } catch {
+        // A failed poll is not a failed session; the next tick tries again. Swallowing it here is
+        // deliberate — showing an error because one poll missed would be a lie about the phone.
+      }
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.session.expiresAt]);
+
+  // `done` wins over everything: a saved session is closed and expired too, and neither of those
+  // is what the owner needs to be told about it.
+  const expired = !done && (remainingMs <= 0 || state === "closed");
+  const mins = String(Math.floor(remainingMs / 60000));
+  const secs = String(Math.floor((remainingMs % 60000) / 1000)).padStart(2, "0");
+
+  const cancel = async () => {
+    try {
+      await call(pos().cancelPhoneSession());
+    } catch {
+      // Closing the dialog matters more than reporting that a session was already gone.
+    }
+    props.onClose();
+  };
+
+  return (
+    <div className="overlay">
+      <div className="card dialog phone-dialog" data-testid="phone-dialog">
+        <h2>{t("phone.title")}</h2>
+
+        {done ? (
+          <p className="ok" data-testid="phone-dialog-saved">
+            {props.session.action === "EDIT_PRODUCT" ? t("phone.savedEdit") : t("phone.savedNew")}
+          </p>
+        ) : expired ? (
+          <p className="error" data-testid="phone-dialog-expired">
+            {t("phone.expired")}
+          </p>
+        ) : (
+          <>
+            {/* The symbol itself. Sized in CSS so it stays scannable on a small till screen. */}
+            <div
+              className="phone-qr"
+              data-testid="phone-qr"
+              aria-label={t("phone.title")}
+              dangerouslySetInnerHTML={{ __html: props.session.qrSvg }}
+            />
+            <p className="muted small">{t("phone.explain")}</p>
+            <p className="small" data-testid="phone-address">
+              {t("phone.address")}: <bdi>{props.session.host}</bdi>:<bdi>{props.session.port}</bdi>
+            </p>
+            <p className="small" data-testid="phone-countdown">
+              {t("phone.expiresIn").replace("{mins}", mins).replace("{secs}", secs)}
+            </p>
+            <p className="muted small" data-testid="phone-progress">
+              {state === "claimed" ? t("phone.claimed") : t("phone.waiting")}
+            </p>
+            {/* 🔴 ONLY WHEN GENUINELY AMBIGUOUS. A machine with one real adapter and a Hyper-V one
+                is not a question for the merchant, and a prompt that fires every time is a prompt
+                nobody reads. */}
+            {props.session.addressAmbiguous && (
+              <div className="muted small" data-testid="phone-ambiguous">
+                <p>{t("phone.ambiguous")}</p>
+                <ul>
+                  {props.session.addressCandidates.map((c) => (
+                    <li key={`${c.interfaceName}-${c.address}`}>
+                      <bdi>{c.address}</bdi> — {c.interfaceName}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {/* The honest firewall note the approved design asks for, rather than a silent failure. */}
+            <p className="muted small" data-testid="phone-firewall">
+              {t("phone.firewall")}
+            </p>
+          </>
+        )}
+
+        <div className="actions phone-actions">
+          {done || expired ? (
+            <button className="btn primary" onClick={() => void cancel()} data-testid="phone-dialog-close">
+              {t("phone.close")}
+            </button>
+          ) : (
+            <button className="btn" onClick={() => void cancel()} data-testid="phone-dialog-cancel">
+              {t("phone.cancel")}
+            </button>
+          )}
         </div>
       </div>
     </div>

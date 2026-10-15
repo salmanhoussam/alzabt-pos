@@ -21,9 +21,17 @@
  * paid for: this repository has no DOM harness, and the last rendering decision that lived inside a
  * component shipped a defect 717 tests passed through. The component holds strings; this decides
  * what they mean.
+ *
+ * 🔴 IT LIVES IN `src/shared/` RATHER THAN `src/renderer/`, MOVED THERE BY SLICE H2 — and the move
+ * is the whole point rather than tidying. The phone form produces the same six fields and owes the
+ * same patch semantics, but `tsconfig.main.json` does not include `src/renderer`, so main could
+ * not import this. The alternative was a second diff implementation for the phone, which is
+ * exactly how "absent is not null" dies: two copies, one of which eventually sends a snapshot.
+ * There is ONE implementation, and both surfaces call it. Nothing about the logic changed in the
+ * move — only the path and the `./ipcContract` import.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
-import type { AdminProductDto, ProductMasterPatch } from "../shared/ipcContract";
+import type { AdminProductDto, ProductMasterPatch } from "./ipcContract";
 
 /**
  * The enrichment fields as the form holds them: strings, because that is what an input gives back,
