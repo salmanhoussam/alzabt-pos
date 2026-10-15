@@ -551,7 +551,7 @@ const EN: Dict = {
   "products.exportOnlineIncomplete": "{count} products exported with incomplete online information.",
   // ── Phone entry over the LAN (slice H2) ──────────────────────────────────────────────────────
   "phone.add": "Add Product from Phone",
-  "phone.edit": "Continue on Phone",
+  "phone.edit": "Edit on Phone",
   "phone.editHint": "Carry on editing this product on a phone",
   "phone.title": "Scan the code with the phone camera",
   "phone.explain": "Open the phone camera and point it at the code. The phone must be on the same shop network. No Internet is needed.",

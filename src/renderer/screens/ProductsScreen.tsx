@@ -390,7 +390,11 @@ export function ProductsScreen() {
               <th className="num">{t("products.colPrice")}</th>
               <th>{t("products.colUnit")}</th>
               <th>{t("products.colState")}</th>
-              <th />
+              {/* 🔴 `col-actions`, NOT `admin-actions`. The width rule has to reach the header or
+                  the column is still negotiated from it — but `.admin-actions` is `display: flex`,
+                  and a `<th>` with `display: flex` stops being a table cell and takes the header
+                  row with it. So the width lives on its own class, carried by both. */}
+              <th className="col-actions" />
             </tr>
           </thead>
           <tbody>
@@ -478,7 +482,7 @@ export function ProductsScreen() {
                     </span>
                   )}
                 </td>
-                <td className="admin-actions">
+                <td className="admin-actions col-actions">
                   {/* A testid because E2E selectors are never visible text — the terminal's
                       default language is Arabic, and "Edit" is not what this button says. */}
                   <button
@@ -1167,7 +1171,7 @@ function CategoryManager(props: {
                     )}
                     {!c.isActive && <span className="badge state">{t("form.categoryRetired")}</span>}
                   </td>
-                  <td className="admin-actions">
+                  <td className="admin-actions col-actions">
                     <button
                       className={c.isActive ? "btn danger ghost small" : "btn small"}
                       type="button"

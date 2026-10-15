@@ -217,6 +217,31 @@ h1, h2 { margin: 0 0 12px; }
 .admin-table td, .admin-table th { vertical-align: top; }
 .admin-table .row-inactive { opacity: 0.55; }
 .admin-actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   🔴 THE ACTIONS COLUMN IS SHRINK-TO-FIT, AND THIS IS A ROW-HEIGHT FIX, NOT A TIDY-UP.
+
+   `.history-table` is `width: 100%`, so the table always fills its container and the columns
+   negotiate for that fixed width. Slice H2 added a third row action, the actions column grew, and
+   the NAME column lost the pixels — so on the English screen one product's name wrapped to a
+   second line and its neighbour's did not. The Windows gate measured 66px against 89px, against a
+   ±2px tolerance. Arabic passed at 69 vs 69 the same run, because `تعديل · أكمل من الهاتف · إيقاف`
+   is far narrower than `Edit · Edit on Phone · Deactivate`.
+
+   `width: 1%` on a `white-space: nowrap` cell is the standard table idiom for "take exactly your
+   content width and leave the rest to the flexible columns". With the tighter button padding
+   below and the shorter English label, the name column gets its pixels back.
+
+   🔴 THE ASSERTION WAS NOT TOUCHED. The ±2px tolerance is correct and caught a real regression —
+   this is the second time this project has been told to fix the layout rather than the tolerance
+   (migration 10's gate found 69 vs 57 and the answer then was the same).
+
+   Nothing is clipped, hidden or shrunk below a readable size: the labels stay whole and the
+   buttons keep `--text-small`, which every other small control on the screen already uses.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+.admin-table td.col-actions, .admin-table th.col-actions { width: 1%; }
+/* 12px -> 10px per side. Three buttons, two sides each, on every row. */
+.admin-actions .btn.small { padding: 0 10px; }
 .product-form { display: flex; flex-direction: column; gap: 10px; min-width: 340px; max-width: 880px; }
 
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
