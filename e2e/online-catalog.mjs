@@ -278,9 +278,18 @@ const reconciliationDone = await (async () => {
       await testid(page, "review-now").waitFor({ timeout: 20000 });
       await testid(page, "review-now").click();
     });
-    await at("find the PRODUCT_NOT_FOUND item", async () => {
-      const row = page.locator('[data-classification="PRODUCT_NOT_FOUND"]').first();
+    await at("open the first review item", async () => {
+      // 🔴 NOT PINNED TO A CLASSIFICATION. The screen dump showed a real `review-row` and
+      // `review-resolve` present while `[data-classification="PRODUCT_NOT_FOUND"]` matched
+      // nothing: the invoice line fuzzy-matched an existing product, so the queue classified it as
+      // something else. What this script needs is a product created THROUGH the reconciliation
+      // resolve path — and "create anyway" is offered for AMBIGUOUS_MATCH too, deliberately, so
+      // the operator is never forced to accept a suggested match. Which classification the engine
+      // chose is `manual-invoice.mjs`'s subject, not this script's.
+      const row = page.locator('[data-testid="review-row"]').first();
       await row.waitFor({ timeout: 20000 });
+      const classification = await row.getAttribute("data-classification");
+      log("    review item classified as:", classification);
       await row.locator('[data-testid="review-resolve"]').click();
       await page.waitForSelector('[data-testid="resolve-panel"]', { timeout: 20000 });
     });
