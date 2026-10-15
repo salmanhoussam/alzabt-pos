@@ -271,7 +271,13 @@ const reconciliationDone = await (async () => {
       await testid(page, "finalize-confirm-yes").click();
       await page.waitForSelector('[data-testid="finalized-notice"]', { timeout: 30000 });
     });
-    await at("open the review queue", () => testid(page, "inv-tab-review").click());
+    await at("open the review queue", async () => {
+      // 🔴 AFTER FINALIZING YOU ARE STILL ON THE SHEET, which offers "review now" — not the
+      // `inv-tab-review` nav button, which belongs to the invoice LIST. The screen dump showed
+      // `finalized-notice`, `review-now`, `review-later` and `sheet-close` and no nav at all.
+      await testid(page, "review-now").waitFor({ timeout: 20000 });
+      await testid(page, "review-now").click();
+    });
     await at("find the PRODUCT_NOT_FOUND item", async () => {
       const row = page.locator('[data-classification="PRODUCT_NOT_FOUND"]').first();
       await row.waitFor({ timeout: 20000 });
