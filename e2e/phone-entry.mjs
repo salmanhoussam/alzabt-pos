@@ -370,12 +370,25 @@ try {
   await signIn(page, "Cashier Two", "2222");
   await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
 
+  // A session really exists, so the refusals below mean something rather than passing because
+  // nobody is signed in — which is the only thing this needs to establish.
+  //
+  // 🔴 IT DOES NOT READ A ROLE, AND THE REMOVED CHECK IS NAMED. There used to be a second
+  // assertion here, `who?.role === "cashier"`, and it FAILED the gate against a perfectly correct
+  // app: `currentCashier` returns `service.currentCashier()` raw (`ipcHandlers.ts:544`), so it
+  // carries `{id, name}` and no role. Only `login` goes through `cashierDto()`, which attaches
+  // one; `CashierDto.role` is declared optional and documented "Present on a SESSION". The test
+  // was asserting a field the channel never promised.
+  //
+  // It was also redundant. The five checks below prove the operator is a cashier the way that
+  // actually matters — the main process REFUSES every owner channel — and a behavioural refusal
+  // is stronger evidence than a label read back from a session object. So it is deleted rather
+  // than repaired, and no contract was widened to satisfy a test.
   const who = await page.evaluate(async () => {
     const r = await window.pos.currentCashier();
     return r?.data ?? null;
   });
-  check(who !== null, `(a real cashier session exists — ${who?.name ?? "none"} / ${who?.role ?? "?"})`);
-  check(who?.role === "cashier", "the signed-in operator really is a CASHIER, not the owner");
+  check(who !== null, `(a real session exists — ${who?.name ?? "none"})`);
 
   // Each payload is a shape the handler would ACCEPT, so a missing guard makes these go green for
   // the right reason rather than tripping payload validation and looking refused either way.
