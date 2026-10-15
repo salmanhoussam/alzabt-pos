@@ -153,9 +153,15 @@ await readNotice(page);
 log("catalog imported");
 
 // The imported product must be marked online-visible through the real form.
+//
+// 🔴 FOUND BY ROW NAME, NOT BY "IMP-77". The import header is
+// `source_id,name_ar,name_en,price,currency,base_unit,price_needs_review` — there is no SKU column,
+// so `source_id` lands in `source_key` and the product's `sku` stays NULL. The Products row renders
+// the SKU, so it never contains "IMP-77"; an earlier version waited 30s for a row that could not
+// exist.
 await testid(page, "tab-products").click();
 {
-  const row = page.locator('[data-testid="product-row"]').filter({ hasText: "IMP-77" });
+  const row = page.locator('[data-testid="product-row"]').filter({ hasText: "دهان أبيض مستورد" });
   await row.first().waitFor();
   await row.locator('[data-testid="product-edit"]').click();
   await testid(page, "field-online").check();
@@ -174,7 +180,7 @@ log("one online-visible product deactivated");
 
 // Photos: JPEG on the manual one, transparent PNG on the imported one, none on the third.
 await attachPhoto(app, page, "G-MANUAL", "shelf.jpg");
-await attachPhoto(app, page, "IMP-77", "logo-alpha.png");
+await attachPhoto(app, page, "دهان أبيض مستورد", "logo-alpha.png");
 log("photos attached (JPEG + transparent PNG)");
 
 await app.close();
@@ -183,14 +189,33 @@ await app.close();
 // Driven through the real invoice flow, because that is the path a shop uses.
 ({ app, page } = await launch());
 await testid(page, "tab-invoices").click();
+// 🔴 EVERY SUB-STEP IS NAMED. This flow is a HARD check, and its first failure arrived as a bare
+// 30-second locator timeout that said nothing about which of eleven steps had not happened. Each
+// step now logs before it runs, so one gate run identifies the step instead of three.
+let reconciliationStep = "not started";
+const at = async (name, fn) => {
+  reconciliationStep = name;
+  log("  reconciliation:", name);
+  await fn();
+};
 const reconciliationDone = await (async () => {
   try {
     // Outgoing is the only mode this build implements; `mode-incoming` is deliberately disabled.
-    await testid(page, "new-invoice").click();
-    await testid(page, "mode-outgoing").waitFor({ timeout: 15000 });
-    await testid(page, "mode-outgoing").click();
-    await testid(page, "add-row").waitFor({ timeout: 15000 });
-    await testid(page, "add-row").click();
+    await at("open the mode chooser", () => testid(page, "new-invoice").click());
+    await at("choose outgoing", async () => {
+      await testid(page, "mode-outgoing").waitFor({ timeout: 15000 });
+      await testid(page, "mode-outgoing").click();
+    });
+    await at("name a customer", async () => {
+      const field = testid(page, "sheet-customer");
+      await field.waitFor({ timeout: 15000 });
+      await field.fill("زبون الكاتالوج");
+      await field.press("Tab");
+    });
+    await at("open a new line", async () => {
+      await testid(page, "add-row").waitFor({ timeout: 15000 });
+      await testid(page, "add-row").click();
+    });
     await testid(page, "new-line-description").fill("صنف من فاتورة");
     await testid(page, "new-line-quantity").fill("1");
     // The unit is chosen explicitly rather than relying on a default: `UnitCell` holds its own
@@ -202,22 +227,31 @@ const reconciliationDone = await (async () => {
       if (known !== undefined) await select.selectOption(known);
     }
     await testid(page, "new-line-price").fill("9.00");
-    await testid(page, "save-draft").click();
-    await page.locator('[data-testid="sheet-draft-row"]').waitFor({ state: "detached", timeout: 15000 });
-    await testid(page, "finalize").click();
-    await page.waitForSelector('[data-testid="finalize-confirm"]', { timeout: 15000 });
-    await testid(page, "finalize-confirm-yes").click();
-    await page.waitForSelector('[data-testid="finalized-notice"]', { timeout: 20000 });
-    await testid(page, "inv-tab-review").click();
-    const row = page.locator('[data-classification="PRODUCT_NOT_FOUND"]').first();
-    await row.waitFor({ timeout: 15000 });
-    await row.locator('[data-testid="review-resolve"]').click();
-    await page.waitForSelector('[data-testid="resolve-panel"]', { timeout: 15000 });
-    await testid(page, "resolve-create").first().click();
-    await page.waitForTimeout(1500);
+    await at("save the draft line", async () => {
+      await testid(page, "save-draft").click();
+      await page.locator('[data-testid="sheet-draft-row"]').waitFor({ state: "detached", timeout: 20000 });
+    });
+    await at("finalize", async () => {
+      await testid(page, "finalize").click();
+      await page.waitForSelector('[data-testid="finalize-confirm"]', { timeout: 20000 });
+      await testid(page, "finalize-confirm-yes").click();
+      await page.waitForSelector('[data-testid="finalized-notice"]', { timeout: 30000 });
+    });
+    await at("open the review queue", () => testid(page, "inv-tab-review").click());
+    await at("find the PRODUCT_NOT_FOUND item", async () => {
+      const row = page.locator('[data-classification="PRODUCT_NOT_FOUND"]').first();
+      await row.waitFor({ timeout: 20000 });
+      await row.locator('[data-testid="review-resolve"]').click();
+      await page.waitForSelector('[data-testid="resolve-panel"]', { timeout: 20000 });
+    });
+    await at("create the product from the invoice line", async () => {
+      await testid(page, "resolve-create").first().click();
+      // The queue item leaves the unresolved list once the product exists.
+      await page.waitForTimeout(2500);
+    });
     return true;
   } catch (e) {
-    log("reconciliation flow could not be driven:", String(e).split("\n")[0]);
+    log(`reconciliation flow stopped at "${reconciliationStep}":`, String(e).split("\n")[0]);
     return false;
   }
 })();
