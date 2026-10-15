@@ -193,7 +193,10 @@ log("imported product published");
 // Deactivate E, which stays online-visible — it must still be excluded.
 {
   const row = page.locator('[data-testid="product-row"]').filter({ hasText: "G-INACTIVE" });
-  await row.locator("button").nth(1).click();
+  // 🔴 BY NAME, NOT BY POSITION — the same correction as `product-management.mjs`. This was
+  // `.nth(1)`, which H2's new "Continue on Phone" button would have taken over. This script never
+  // got the chance to fail: the identical break in product-management stopped the gate first.
+  await row.locator('[data-testid="product-deactivate"]').click();
   await readNotice(page);
 }
 log("one online-visible product deactivated");

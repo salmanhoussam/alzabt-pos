@@ -500,9 +500,21 @@ export function ProductsScreen() {
                   >
                     {t("phone.edit")}
                   </button>
-                  {/* Deactivating hides a product from sale: ghost-danger, not a twin of Edit. */}
+                  {/* Deactivating hides a product from sale: ghost-danger, not a twin of Edit.
+
+                      🔴 THE TESTID IS LOAD-BEARING, ADDED IN H2 AFTER A REAL GATE FAILURE. Two
+                      installed-app scripts selected this button BY POSITION
+                      (`getByRole("button").nth(1)`), because it had no testid to ask for. H2 added
+                      "Continue on Phone" above it, index 1 became that button, and
+                      `product-management.mjs` clicked the phone action and then waited 30s for an
+                      OK dialog that never came. `online-catalog.mjs` held the same selector and
+                      would have broken next; it only escaped because the first failure skipped it.
+
+                      Reordering the new button below this one would have "fixed" it by moving the
+                      same trap one slot along. A name cannot be displaced. */}
                   <button
                     className={p.isActive ? "btn danger ghost small" : "btn small"}
+                    data-testid="product-deactivate"
                     onClick={async () => {
                       try {
                         await call(pos().setProductActive({ id: p.id, isActive: !p.isActive }));

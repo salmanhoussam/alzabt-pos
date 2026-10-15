@@ -236,7 +236,11 @@ await page.screenshot({ path: SHOTS + "P5-products-english-ltr.png" });
 assert((await rows(page).first().innerText()).includes("مفتاح أحمر"), "the Arabic product name is unchanged in the English UI");
 
 // ── 6 · Deactivate, and the restart ─────────────────────────────────────────────────────────────
-await page.locator('[data-testid="product-row"]').first().getByRole("button").nth(1).click();
+// 🔴 BY NAME, NOT BY POSITION. This was `getByRole("button").nth(1)` and it broke the moment
+// slice H2 added "Continue on Phone" to the row: index 1 became the phone button, this script
+// clicked it, and the wait for OK/حسناً below timed out after 30 seconds against a pairing dialog.
+// The button now carries `product-deactivate`, which no future control can displace.
+await page.locator('[data-testid="product-row"]').first().locator('[data-testid="product-deactivate"]').click();
 await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 await page.waitForFunction(() => document.querySelectorAll(".row-inactive").length === 1);
 await page.screenshot({ path: SHOTS + "P6-deactivated.png" });
