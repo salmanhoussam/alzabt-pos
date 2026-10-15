@@ -230,39 +230,102 @@ describe("barcode, price, currency and unit come from the authoritative row", ()
   });
 });
 
-describe("image file names are stable, Windows-safe and collision-proof", () => {
-  it("🔴 strips the COLON out of a real product id — NTFS would read it as a data stream", () => {
+describe("image file names — a digest, and nothing else", () => {
+  const HEX64 = /^images\/product-[0-9a-f]{64}\.(jpg|png)$/;
+
+  it("🔴 contains NO user text at all — only a full SHA-256 of the stable id", () => {
     const file = onlineCatalogImageFile("manual:000001", "image/jpeg");
+    expect(file).toMatch(HEX64);
+    expect(file).not.toContain("manual");
+    expect(file).not.toContain("000001");
     expect(file).not.toContain(":");
-    expect(file).toMatch(/^images\/product-manual_000001-[0-9a-f]{12}\.jpg$/);
+    expect(file).toBe(
+      `images/product-${createHash("sha256").update("manual:000001", "utf8").digest("hex")}.jpg`,
+    );
   });
 
-  it("🔴 two ids that SANITIZE the same still get different names", () => {
-    // `merchant-csv:a:b` and `merchant-csv:a_b` both sanitize to `merchant-csv_a_b`. `source_key`
-    // comes from the import file, so this is user-controlled text, not a theoretical case.
-    const a = onlineCatalogImageFile("merchant-csv:a:b", "image/jpeg");
-    const b = onlineCatalogImageFile("merchant-csv:a_b", "image/jpeg");
-    expect(a).not.toBe(b);
-  });
-
-  it("refuses path traversal, reserved device names and Arabic in the path", () => {
-    for (const id of ["../../etc/passwd", "..\\..\\windows", "CON", "nul", "صنف", "   ", "."]) {
+  it("🔴 every Windows-hostile id shape produces a plain hex name", () => {
+    // Each of these would be a different kind of disaster if any part of it reached a path: a
+    // colon is an NTFS data stream, `..` escapes the folder, a separator redirects the write, a
+    // reserved device name is refused outright, and a trailing dot or space is silently stripped
+    // by the Windows API so two names become one.
+    const hostile = [
+      "manual:000001",
+      "src/a",
+      "src\\a",
+      "../../etc/passwd",
+      "..\\..\\windows\\system32",
+      "with spaces",
+      "صنف عربي",
+      "CON",
+      "nul",
+      "LPT1",
+      "trailing.",
+      "trailing ",
+      " leading",
+      ".",
+      "..",
+      "",
+      "x".repeat(4096),
+    ];
+    for (const id of hostile) {
       const file = onlineCatalogImageFile(id, "image/png");
-      expect(file.startsWith("images/product-"), `${id} -> ${file}`).toBe(true);
-      expect(file).not.toContain("..");
-      expect(file).not.toContain("/etc");
+      expect(file, `id ${JSON.stringify(id.slice(0, 24))}`).toMatch(HEX64);
       expect(file.split("/")).toHaveLength(2);
-      expect(file).toMatch(/^images\/[A-Za-z0-9._-]+\.png$/);
+      expect(file).not.toContain("..");
+      expect(file).not.toContain("\\");
     }
+  });
+
+  it("🔴 ids that would COLLIDE under naive sanitization get different names", () => {
+    // `source:a:b` and `source:a_b` both reduce to `source_a_b` under any replace-unsafe-with-_
+    // scheme, and the second image would overwrite the first. `source_key` is user text from an
+    // import file, so this is a real input, not a theoretical one.
+    const a = onlineCatalogImageFile("source:a:b", "image/jpeg");
+    const b = onlineCatalogImageFile("source:a_b", "image/jpeg");
+    expect(a).not.toBe(b);
+    for (const pair of [
+      ["source:a:b", "source:a_b"],
+      ["source:a b", "source:a-b"],
+      ["a:b:c", "a_b_c"],
+      ["x..y", "x__y"],
+    ]) {
+      expect(
+        onlineCatalogImageFile(pair[0]!, "image/png"),
+        `${pair[0]} vs ${pair[1]}`,
+      ).not.toBe(onlineCatalogImageFile(pair[1]!, "image/png"));
+    }
+  });
+
+  it("🔴 differs by CASE, which a case-insensitive filesystem would otherwise merge", () => {
+    expect(onlineCatalogImageFile("Manual:1", "image/png")).not.toBe(
+      onlineCatalogImageFile("manual:1", "image/png"),
+    );
   });
 
   it("is stable: the same id and mime always produce the same name", () => {
     expect(onlineCatalogImageFile("manual:7", "image/png")).toBe(onlineCatalogImageFile("manual:7", "image/png"));
   });
 
-  it("uses the extension of the STORED mime, not a guess", () => {
-    expect(onlineCatalogImageFile("manual:7", "image/jpeg").endsWith(".jpg")).toBe(true);
-    expect(onlineCatalogImageFile("manual:7", "image/png").endsWith(".png")).toBe(true);
+  it("takes the extension from the STORED mime, never from a source file", () => {
+    const id = "manual:7";
+    expect(onlineCatalogImageFile(id, "image/jpeg").endsWith(".jpg")).toBe(true);
+    expect(onlineCatalogImageFile(id, "image/png").endsWith(".png")).toBe(true);
+    // The digest is the same for both — only the extension differs, so a replaced photo that
+    // changes format cannot leave the old file behind under the same name.
+    const jpg = onlineCatalogImageFile(id, "image/jpeg").replace(/\.jpg$/, "");
+    const png = onlineCatalogImageFile(id, "image/png").replace(/\.png$/, "");
+    expect(jpg).toBe(png);
+  });
+
+  it("🔴 refuses a stored MIME outside the two the schema admits", () => {
+    let code: string | null = null;
+    try {
+      onlineCatalogImageFile("manual:1", "image/webp" as never);
+    } catch (e) {
+      code = e instanceof DomainError ? e.code : "not-a-DomainError";
+    }
+    expect(code).toBe("INVALID_INPUT");
   });
 });
 

@@ -21,6 +21,7 @@
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 import { createHash } from "node:crypto";
+import { DomainError } from "./errors";
 import { formatDecimal, money } from "./money";
 import type { ImageMimeValue } from "./productImage";
 
@@ -110,32 +111,42 @@ export function isEligibleForOnlineCatalog(row: {
 
 const EXTENSION: Record<ImageMimeValue, string> = { "image/jpeg": "jpg", "image/png": "png" };
 
-/** Names Windows refuses outright, whatever extension follows them. */
-const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
-
 /**
  * A stable, Windows-safe, traversal-proof file name for a product's photo.
  *
- * 🔴 THE PRODUCT ID CANNOT GO INTO A PATH VERBATIM, AND THIS WAS MEASURED, NOT ASSUMED. Ids are
- * `<source>:<source_key>` — a real one is `manual:000001`. A colon is illegal in a Windows file
- * name, and worse than illegal: NTFS reads `product-manual:000001.jpg` as an alternate data stream
- * named `000001.jpg` on a file called `product-manual`, so the write would APPEAR to succeed and
- * the image would be invisible to every normal tool, including the merchant's upload.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 THE NAME IS A DIGEST AND NOTHING ELSE — NO USER TEXT REACHES THE FILESYSTEM.
  *
- * 🔴 AND SANITIZING ALONE IS NOT ENOUGH, because `source_key` carries user text: a CSV whose
- * `source_id` is `a:b` and another whose `source_id` is `a_b` both sanitize to `merchant-csv_a_b`,
- * and the second image would overwrite the first. So the name ends with a short digest of the FULL
- * original id. Two different products cannot collide; the same product always gets the same name.
+ * An earlier version embedded a sanitized form of the product id. That was measurably unsafe, and
+ * the measurement is why this is a pure hash now:
+ *
+ *   · Ids are `<source>:<source_key>` — a real one is `manual:000001`. A COLON is illegal in a
+ *     Windows file name, and NTFS reads `product-manual:000001.jpg` as an ALTERNATE DATA STREAM
+ *     named `000001.jpg` on a file called `product-manual`. The write appears to succeed and the
+ *     image is invisible to every normal tool, the merchant's upload included.
+ *   · `source_key` is user text from an import file, so sanitizing merges distinct ids:
+ *     `source:a:b` and `source:a_b` both reduce to `source_a_b`.
+ *   · A sanitized remnant could still land on a reserved device name (CON, NUL, LPT1), a trailing
+ *     dot or space, a path separator, or `..`.
+ *
+ * A hex digest has none of those shapes by construction: `[0-9a-f]{64}`, one fixed length, no
+ * separators, no reserved words, no case ambiguity on a case-insensitive filesystem, and no way
+ * for an operator's Arabic product name or SKU to influence a path at all.
+ *
+ * 🔴 THE FULL 64-HEX DIGEST IS KEPT, NOT TRUNCATED. Truncation would need a collision argument,
+ * and there is nothing to buy with one: the website never types this name, it follows
+ * `image.file` out of catalog.json. The true stable id stays in catalog.json, where it belongs.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 export function onlineCatalogImageFile(productId: string, mime: ImageMimeValue): string {
-  const digest = createHash("sha256").update(productId, "utf8").digest("hex").slice(0, 12);
-  let safe = productId
-    .normalize("NFC")
-    .replace(/[^A-Za-z0-9._-]+/g, "_")
-    .replace(/^[._]+|[._]+$/g, "")
-    .slice(0, 48);
-  if (safe.length === 0 || RESERVED.test(safe)) safe = "product";
-  return `images/product-${safe}-${digest}.${EXTENSION[mime]}`;
+  const extension = EXTENSION[mime];
+  if (extension === undefined) {
+    // Unreachable through the type, reachable through a database row. An image whose stored MIME
+    // is outside the two the schema admits is corruption, and corruption must not be given a name.
+    throw new DomainError("INVALID_INPUT", "That photo has an unsupported stored format");
+  }
+  const digest = createHash("sha256").update(productId, "utf8").digest("hex");
+  return `images/product-${digest}.${extension}`;
 }
 
 // ── Building one product, field by field ───────────────────────────────────────────────────────
