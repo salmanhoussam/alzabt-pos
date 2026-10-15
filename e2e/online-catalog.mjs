@@ -42,7 +42,11 @@ const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
 const Database = createRequire(import.meta.url)("better-sqlite3");
 const LEDGER = join(home, "userData", "alzabt-pos-ledger.sqlite");
 const DEST = join(home, "exports");
+// A second destination for the English-language export, so the first folder stays the subject of
+// the package assertions below and the two exports cannot be confused for one.
+const DEST_EN = join(home, "exports-en");
 mkdirSync(DEST, { recursive: true });
+mkdirSync(DEST_EN, { recursive: true });
 
 const log = (...a) => console.log("•", ...a);
 let step = 0;
@@ -73,6 +77,22 @@ async function aimPicker(app, path) {
   await app.evaluate(({ dialog }, p) => {
     dialog.showOpenDialogSync = () => (p === null ? undefined : [p]);
   }, path);
+}
+
+/**
+ * Photographs the notice dialog, then dismisses it and returns its text.
+ *
+ * 🔴 THE PICTURE IS TAKEN BEFORE THE DISMISS, and the first version of this script got that
+ * backwards: it called `readNotice` (which clicks OK) and screenshotted afterwards, so
+ * `G2-export-summary-arabic.png` showed the Products list with no dialog at all. The file name
+ * said "export summary", the gate was green, and the one image whose job was to show the summary
+ * did not contain it.
+ */
+async function shotNotice(page, name) {
+  const card = page.locator(".overlay .card.dialog").filter({ hasNot: page.locator("form") }).last();
+  await card.waitFor({ state: "visible", timeout: 20000 });
+  await page.screenshot({ path: SHOTS + name + ".png" });
+  return readNotice(page);
 }
 
 /** Dismisses whatever notice dialog is showing and returns its text. */
@@ -386,14 +406,13 @@ check(readdirSync(DEST).length === 0, "🔴 a cancelled destination picker creat
 // The real export.
 await aimPicker(app, DEST);
 await testid(page, "export-online-catalog").click();
-const summary = await readNotice(page);
+const summary = await shotNotice(page, "G2-export-summary-arabic");
 log("summary:", summary.replace(/\s+/g, " ").slice(0, 160));
 check(/export|تصدير|صُدِّر|تمّ/i.test(summary), "the owner is told the package was exported");
 check(
   !/website|upload|sync|publish|الموقع|رفع|نشر/i.test(summary),
   `🔴 the wording claims no upload or website sync — "${summary.replace(/\s+/g, " ").slice(0, 90)}"`,
 );
-await page.screenshot({ path: SHOTS + "G2-export-summary-arabic.png" });
 
 // English, for the layout review.
 await testid(page, "lang-toggle").click();
@@ -401,6 +420,16 @@ await page.waitForFunction(() => document.documentElement.dir === "ltr", undefin
 await testid(page, "tab-products").click();
 await page.locator('[data-testid="product-row"]').first().waitFor();
 await page.screenshot({ path: SHOTS + "G3-products-english.png" });
+
+// A second real export, in English, so the summary wording is reviewable in both directions.
+await aimPicker(app, DEST_EN);
+await testid(page, "export-online-catalog").click();
+const englishSummary = await shotNotice(page, "G4-export-summary-english");
+check(
+  !/website|upload|sync|publish/i.test(englishSummary),
+  `🔴 the English wording claims no upload or sync — "${englishSummary.replace(/\s+/g, " ").slice(0, 90)}"`,
+);
+check(readdirSync(DEST_EN).length === 1, "the English export produced its own package");
 await app.close();
 
 // ══ 3 · The package on disk — the actual evidence ═════════════════════════════════════════════
