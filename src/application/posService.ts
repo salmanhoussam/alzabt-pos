@@ -16,6 +16,7 @@ import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
 import { categoryNameAr, categoryNameEn } from "../domain/category";
 import { imageBytes, imageEdge, imageMime, imageOrigin } from "../domain/productImage";
+import type { PhoneSessionAction, PhoneSessionSpec } from "../domain/phoneSession";
 import {
   isEligibleForOnlineCatalog,
   onlineCatalogDocument,
@@ -1168,6 +1169,49 @@ export class PosService {
   listBrands(): string[] {
     this.requireCashier();
     return this.requireStore().distinctBrands();
+  }
+
+  /**
+   * Authorize a temporary phone-entry session (slice H1), and resolve what it is scoped to.
+   *
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 THIS IS THE AUTHORIZATION FOR THE LAN BRIDGE, AND IT IS HERE FOR THE REASON WRITTEN AT THE
+   * TOP OF THIS SECTION. The channel policy refuses a cashier on `startPhoneSession` too — but the
+   * listener this method opens answers HTTP inside the main process and calls service methods
+   * DIRECTLY, never through `ipcMain`, so `channelPolicy` is not in that path at all. If the only
+   * owner check lived in the channel table, opening the surface would be a cashier-reachable act
+   * the moment anything other than the renderer could ask for it.
+   *
+   * 🔴 IT RETURNS THE SPEC, NOT A SESSION, AND OPENS NO SOCKET. The service decides WHO may do
+   * this and WHAT it may touch; main owns the listener, the port and the QR. Keeping it that way
+   * means this authorization is testable without a network, and that the service never grows a
+   * dependency on `node:http`.
+   *
+   * 🔴 THE PRODUCT IS RESOLVED NOW, NOT WHEN THE PHONE SAVES. An EDIT session names a product that
+   * must exist at the moment the owner asks, so a token can never be minted for a product id that
+   * was never real. The phone itself never sends a product id — the token IS the binding.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  authorizePhoneSession(action: PhoneSessionAction, productId: string | null): PhoneSessionSpec {
+    const owner = this.requireOwner();
+    if (action !== "NEW_PRODUCT" && action !== "EDIT_PRODUCT") {
+      throw new DomainError("INVALID_INPUT", "A phone session is either a new product or an edit");
+    }
+    if (action === "NEW_PRODUCT") {
+      if (productId !== null) {
+        throw new DomainError("INVALID_INPUT", "A new product cannot name an existing product");
+      }
+      // 🔴 The store is required even for NEW_PRODUCT: a terminal that cannot write a product has
+      // no business handing a phone a form that ends in a save it would refuse.
+      this.requireStore();
+      return { action, productId: null, operatorId: owner.id };
+    }
+    if (typeof productId !== "string" || productId.trim() === "") {
+      throw new DomainError("INVALID_INPUT", "Editing on the phone needs the product it is editing");
+    }
+    const existing = this.requireStore().findById(productId);
+    if (!existing) throw new DomainError("PRODUCT_NOT_FOUND", "That product no longer exists");
+    return { action, productId: existing.id, operatorId: owner.id };
   }
 
   /**

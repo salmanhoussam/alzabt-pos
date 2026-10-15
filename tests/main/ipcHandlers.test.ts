@@ -40,6 +40,15 @@ describe("IPC surface", () => {
   // listCategories, listBrands, createCategory, renameCategory, setCategoryActive, deleteCategory,
   // getProductImageMeta, getProductImageBytes, setProductImage, removeProductImage.
   //
+  // 🔴 TRANSITION — SIXTY-FOUR to SIXTY-SIX with the phone LAN bridge (slice H1). The two added:
+  // startPhoneSession, cancelPhoneSession. The old value was 64 and is named rather than replaced.
+  //
+  // 🔴 AND WHAT IS STILL ABSENT IS AGAIN THE POINT. H1 opens this product's first inbound network
+  // surface, and the obvious channels to add — one that returns the session TOKEN, one that lets
+  // the renderer choose a port or an address, one that proxies a request from the phone to a named
+  // service method — are NOT here. `startPhoneSession` names an action; main owns the token, the
+  // port, the address and the socket, and the phone's own surface answers exactly one route.
+  //
   // 🔴 AND WHAT IS STILL ABSENT IS THE POINT OF THE TRANSITION. Product Master stores PHOTOS, and
   // the obvious channel to add — one that takes image bytes from the renderer — is NOT here.
   // `setProductImage` names a product and nothing else; main runs the picker, reads the file and
@@ -128,11 +137,14 @@ describe("IPC surface", () => {
         "pickInvoiceLogo",
         "printInvoice",
         "saveInvoicePdf",
+        "startPhoneSession",
+        "cancelPhoneSession",
       ].sort(),
     );
     // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
     // migration 9) -> 64 (exportOnlineCatalog, slice G3 — the old value is named, not replaced)
-    expect(CHANNEL_NAMES).toHaveLength(64);
+    // -> 66 (slice H1: startPhoneSession, cancelPhoneSession)
+    expect(CHANNEL_NAMES).toHaveLength(66);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

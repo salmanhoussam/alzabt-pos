@@ -53,6 +53,7 @@ export type Access =
  *     after  Product Master:  7 public · 24 session · 32 owner · 63 total
  *     after  list thumbnails: 7 public · 26 session · 30 owner · 63 total
  *     after  online catalog: 7 public · 26 session · 31 owner · 64 total   (slice G3)
+ *     after  phone sessions: 7 public · 26 session · 33 owner · 66 total   (slice H1)
  *
  * THE PUBLIC SET DID NOT MOVE, which is the only one of the three numbers that is a security
  * claim — the four new reads (listCategories, listBrands and, once the products list had to show
@@ -178,6 +179,18 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   deleteCategory: "owner",
   setProductImage: "owner",
   removeProductImage: "owner",
+  // Phone entry over the LAN (slice H1).
+  //
+  // 🔴 OWNER, AND THE SERVICE CHECKS AGAIN. `startPhoneSession` opens this product's only inbound
+  // network surface — a strictly bigger act than editing a price, so there is no reading on which
+  // a cashier should reach it. `PosService.authorizePhoneSession` enforces owner independently,
+  // because the listener it opens calls the service directly and never passes back through here.
+  //
+  // `cancelPhoneSession` is owner too. Letting a cashier close a surface they could not open is a
+  // smaller hole than the alternative, but it is still an operator acting on an owner's session,
+  // and expiry already guarantees the surface closes without anyone's help.
+  startPhoneSession: "owner",
+  cancelPhoneSession: "owner",
   // Operator management. An owner must not be demotable by an employee.
   listOperators: "owner",
   createOperator: "owner",

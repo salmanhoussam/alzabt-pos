@@ -21,7 +21,8 @@
     "pdf:samples": "tsx scripts/invoice-pdf-samples.ts invoice-pdf-samples"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3"
+    "better-sqlite3": "^13.0.3",
+    "zxing-wasm": "3.1.5"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

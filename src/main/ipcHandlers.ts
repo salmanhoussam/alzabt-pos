@@ -31,6 +31,7 @@ import {
 } from "../domain/productDraft";
 import { MAX_CATEGORY_NAME } from "../domain/category";
 import { MAX_BARCODE } from "../domain/barcode";
+import type { PhoneSessionSpec } from "../domain/phoneSession";
 import {
   parseMinor,
   toAdminProductDto,
@@ -60,6 +61,7 @@ import {
   PRODUCT_MASTER_PATCH_KEYS,
   type ProductMasterPatchKey,
   OnlineCatalogExportDto,
+  type PhoneSessionDto,
 } from "../shared/ipcContract";
 import { type Logger, nullLogger } from "./logger";
 import { accessFor } from "./channelPolicy";
@@ -99,6 +101,18 @@ export interface PickedPhoto {
   readonly origin: "desktop" | "phone";
 }
 
+/**
+ * Opening and closing the temporary phone surface.
+ *
+ * One session at a time, by contract: `start` replaces whatever was open, because two QRs on one
+ * till is a state nobody can reason about and the desktop only ever shows one.
+ */
+export interface PhoneSessionBridge {
+  readonly start: (spec: PhoneSessionSpec) => Promise<PhoneSessionDto>;
+  /** True when something was actually closed; false when nothing was open. */
+  readonly cancel: () => Promise<boolean>;
+}
+
 export interface IpcHandlerOptions {
   /** Shows the native "open file" dialog. Absent (tests, headless) means import is unavailable. */
   readonly pickCatalogFile?: () => PickedFile | null;
@@ -115,6 +129,16 @@ export interface IpcHandlerOptions {
    * half-working.
    */
   readonly exportOnlineCatalog?: (snapshot: OnlineCatalogSnapshot) => OnlineCatalogExportDto | null;
+  /**
+   * The phone-entry LAN bridge (slice H1). Absent means this terminal cannot open one at all, and
+   * the channel answers NOT_AVAILABLE — which is what every headless test gets, so no test
+   * accidentally opens a socket.
+   *
+   * 🔴 IT TAKES AN ALREADY-AUTHORIZED SPEC. The handler calls `service.authorizePhoneSession`
+   * first; this seam is the mechanism, never the permission. Giving it the raw request would move
+   * the owner check into main, where the listener could not re-use it.
+   */
+  readonly phoneSessions?: PhoneSessionBridge;
   /** Version/build identity of this installation. */
   readonly appInfo?: () => AppInfoDto;
   /** Called after a NEW sale is committed (the daily-backup trigger). Must not throw. */
@@ -406,6 +430,20 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
    * A role from the renderer. 'admin' is refused HERE as well as in the service: it is reserved in
    * the schema so widening the CHECK later costs no rebuild, and it has no v1 behaviour.
    */
+  /**
+   * The phone session's action, from the renderer.
+   *
+   * 🔴 An enumerated check rather than a cast: the action is the ONLY thing that decides whether a
+   * token may create a product or touch an existing one, so a third value must be refused here
+   * rather than reaching the session as something `switch` quietly ignores.
+   */
+  function phoneAction(value: unknown): "NEW_PRODUCT" | "EDIT_PRODUCT" {
+    if (value !== "NEW_PRODUCT" && value !== "EDIT_PRODUCT") {
+      invalid("'action' must be NEW_PRODUCT or EDIT_PRODUCT");
+    }
+    return value;
+  }
+
   function role(value: unknown): "owner" | "cashier" {
     if (value !== "owner" && value !== "cashier") invalid("'role' must be owner or cashier");
     return value;
@@ -750,6 +788,50 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       const result = service.removeProductPrimaryImage(productId);
       log.info("product-photo-removed", { productId, removed: result.removed });
       return result;
+    }),
+
+    // ── Phone entry over the LAN (slice H1) ─────────────────────────────────────────────────────
+    //
+    // 🔴 THE AUTHORIZATION HAPPENS TWICE AND THAT IS THE DESIGN. `wrap` refuses a cashier from the
+    // channel table before the payload is examined; `service.authorizePhoneSession` refuses one
+    // again from inside the service, because the listener this opens calls the service directly.
+    //
+    // 🔴 MAIN OWNS THE SURFACE. The renderer cannot name a port, an address, a token or an expiry.
+    // It asks for an action and is handed a picture to show.
+    startPhoneSession: wrapAsync("startPhoneSession", async (p) => {
+      const o = objectWithOptional(p, ["action"], ["productId"]);
+      const action = phoneAction(o.action);
+      const productId =
+        "productId" in o && o.productId !== undefined && o.productId !== null
+          ? str(o.productId, "productId", MAX_PRODUCT_ID_LENGTH)
+          : null;
+
+      const open = options.phoneSessions;
+      if (!open) {
+        throw new DomainError("NOT_AVAILABLE", "Entering a product from a phone is not available on this terminal");
+      }
+      // The service decides WHO and WHAT. It opens nothing.
+      const spec = service.authorizePhoneSession(action, productId);
+      const dto = await open.start(spec);
+      log.info("phone-session-started", {
+        action: spec.action,
+        editing: spec.productId !== null,
+        host: dto.host,
+        port: dto.port,
+        ambiguous: dto.addressAmbiguous,
+      });
+      return dto;
+    }),
+    cancelPhoneSession: wrapAsync("cancelPhoneSession", async (p) => {
+      noPayload(p);
+      // 🔴 Cancellation is authorized but NOT gated on a session existing: answering "there was
+      // nothing open" honestly is better than an error the owner cannot act on, and a desktop that
+      // cancels twice (a click plus a navigation) must not show a failure the second time.
+      const open = options.phoneSessions;
+      if (!open) return { closed: false };
+      const closed = await open.cancel();
+      if (closed) log.info("phone-session-cancelled", {});
+      return { closed };
     }),
 
     // ── Operator settings ───────────────────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import { BrowserWindow, app, dialog, ipcMain, nativeImage, session } from "elect
 import { PosService, startupCatalog } from "../application/posService";
 import { PHOTO_EXTENSIONS, createProductPhotoPicker, electronCodec } from "./productPhoto";
 import { writeOnlineCatalogPackage, type PackageFs } from "./onlineCatalogPackage";
+import { PhoneSessionBridge } from "./phoneSessionBridge";
 import type { OnlineCatalogSnapshot } from "../application/posService";
 import type { OnlineCatalogExportDto } from "../shared/ipcContract";
 import { InvoiceService } from "../application/invoiceService";
@@ -57,6 +58,34 @@ let mainWindow: BrowserWindow | null = null;
 let db: Db | null = null;
 let invoices: InvoiceService | null = null;
 let log: Logger = nullLogger;
+
+/**
+ * The temporary phone-entry LAN bridge (slice H1).
+ *
+ * 🔴 MODULE SCOPE, AND ONE INSTANCE, because two different parts of the lifecycle must reach the
+ * SAME object: `registerIpc` hands it to the channels, and `will-quit` closes it. A bridge created
+ * inside `startTill` would be invisible to the quit hook, and the listener would then outlive the
+ * window it belongs to — which is the exact failure the shutdown contract exists to prevent.
+ *
+ * It holds no database handle and no service: opening a session is authorized by the SERVICE, and
+ * the bridge is only the mechanism. Constructing it costs nothing until a session is started — the
+ * 647 KB of WebAssembly for the QR is read lazily on first use.
+ *
+ * 🔴 The logger FORWARDS to `log` rather than capturing it. `log` is reassigned once the real file
+ * logger exists (`startTill`), and a bridge that had captured the value would spend the whole
+ * session writing to `nullLogger` — so every diagnostic about the one network surface in the
+ * product would be silently discarded.
+ */
+const phoneSessions = new PhoneSessionBridge({
+  logger: {
+    info: (event, fields) => log.info(event, fields),
+    warn: (event, fields) => log.warn(event, fields),
+    error: (event, fields) => log.error(event, fields),
+    get file() {
+      return log.file;
+    },
+  },
+});
 
 // dist/main/main/main.js → dist/build-info.json (written at build time by scripts/write-build-info.mjs).
 const BUILD_INFO = readBuildInfo(join(__dirname, "..", "..", "build-info.json"), app.getVersion());
@@ -570,6 +599,12 @@ if (!gotSingleInstanceLock) {
 
   app.on("window-all-closed", () => app.quit());
   app.on("will-quit", () => {
+    // 🔴 THE PHONE SURFACE CLOSES BEFORE THE LEDGER DOES, and explicitly rather than by the process
+    // dying. `appClosing()` ends the session and closes the socket; `void` because `will-quit`
+    // cannot await, and the close is synchronous enough that the listener is already shut by the
+    // time the event loop drains. The session is also ended in memory the instant this runs, so a
+    // request arriving in the gap is refused by `checkAccess`, not served by a dying server.
+    void phoneSessions.appClosing();
     db?.close();
     db = null;
   });
@@ -711,6 +746,10 @@ function startTill(): void {
     saveCatalogExport,
     exportBackup: () => exportBackup(plan.ledgerPath),
     exportOnlineCatalog: (snapshot) => exportOnlineCatalogPackage(service, snapshot),
+    // Slice H1. The bridge owns the listener, the port and the QR; the SERVICE owns who may open
+    // one. Created unconditionally because a till with a window can always serve a phone — the
+    // refusal, when there is no network, comes from the address selection with a real sentence.
+    phoneSessions: phoneSessions,
     appInfo: () => ({ version: BUILD_INFO.version, build: BUILD_INFO.build }),
     afterSale: maybeDailyBackup,
     logger: log,

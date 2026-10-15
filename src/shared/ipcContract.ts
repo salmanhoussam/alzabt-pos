@@ -50,6 +50,13 @@ export const CHANNELS = {
   getProductImageBytes: "pos:getProductImageBytes",
   setProductImage: "pos:setProductImage",
   removeProductImage: "pos:removeProductImage",
+  // ── Phone entry over the LAN (slice H1) ──────────────────────────────────────────────────────
+  //
+  // 🔴 NEITHER CHANNEL EVER RETURNS THE TOKEN. `startPhoneSession` answers with the QR to show and
+  // the address to read out for support — the secret is inside the encoded URL and nowhere else in
+  // the DTO, so a renderer (or a screenshot of one) cannot leak a reusable credential.
+  startPhoneSession: "pos:startPhoneSession",
+  cancelPhoneSession: "pos:cancelPhoneSession",
   getSettings: "pos:getSettings",
   setTerminalLanguage: "pos:setTerminalLanguage",
   // ── Manual invoices (migration 6) ────────────────────────────────────────────────────────────
@@ -367,6 +374,52 @@ export interface CategoryDto {
  * 🔴 The absence is the contract, not an omission: a screen holding this object cannot reach the
  * image data, so it must ask for it by name through `getProductImageBytes`.
  */
+/**
+ * Asking for a phone session. `productId` is present only for an edit.
+ *
+ * 🔴 The renderer names an ACTION and, for an edit, a product. It cannot choose the port, the
+ * address, the token or the expiry — all four are main's, so a compromised or buggy renderer
+ * cannot widen the surface or weaken the credential.
+ */
+export interface StartPhoneSessionRequest {
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  readonly productId?: string | null;
+}
+
+/** One plausible LAN address, offered when the machine has more than one real candidate. */
+export interface LanCandidateDto {
+  readonly interfaceName: string;
+  readonly address: string;
+  readonly note: string;
+}
+
+/**
+ * What the desktop needs to display a pairing QR — and deliberately not one field more.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WHAT IS ABSENT IS THE CONTRACT. There is no `token`, no `url`, no operator id, no operator
+ * name, no product name and no database path. The token exists only inside `qrSvg`'s encoded
+ * symbol, which is the one place it has to be, because that is what the phone's camera reads.
+ *
+ * `host` and `port` ARE present: the approved design requires a visible address so a merchant
+ * whose phone cannot connect can be asked to read it out, and so a future retry UI can offer the
+ * other adapter. An address is not a secret — the token is.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export interface PhoneSessionDto {
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  readonly host: string;
+  readonly port: number;
+  /** ISO-8601. The desktop counts down from this rather than inventing its own ten minutes. */
+  readonly expiresAt: string;
+  /** A self-contained SVG. No object URL, no `blob:`, nothing for the renderer's CSP to refuse. */
+  readonly qrSvg: string;
+  /** True when the machine had more than one real candidate and this one was a best guess. */
+  readonly addressAmbiguous: boolean;
+  /** Every plausible address, when ambiguous — so a retry path exists without re-measuring. */
+  readonly addressCandidates: readonly LanCandidateDto[];
+}
+
 export interface ProductImageMetaDto {
   readonly id: string;
   readonly productId: string;
@@ -913,6 +966,12 @@ export interface PosApi {
   /** Names a product; MAIN runs the picker and owns the file. No bytes cross this bridge. */
   setProductImage(req: ProductIdRequest): Promise<IpcResult<ProductImageMetaDto | null>>;
   removeProductImage(req: ProductIdRequest): Promise<IpcResult<{ readonly removed: boolean }>>;
+
+  // ── Phone entry over the LAN (slice H1) ──────────────────────────────────────────────────────
+  /** Owner only. Opens a temporary listener and returns the QR to show. Never returns the token. */
+  startPhoneSession(req: StartPhoneSessionRequest): Promise<IpcResult<PhoneSessionDto>>;
+  /** Owner only. Closes whatever session is open; answers honestly when there was none. */
+  cancelPhoneSession(): Promise<IpcResult<{ readonly closed: boolean }>>;
 
   getSettings(): Promise<IpcResult<TerminalSettings>>;
   setTerminalLanguage(req: SetTerminalLanguageRequest): Promise<IpcResult<TerminalSettings>>;

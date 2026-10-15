@@ -149,6 +149,8 @@ const CH = {
   getProductImageBytes: "pos:getProductImageBytes",
   setProductImage: "pos:setProductImage",
   removeProductImage: "pos:removeProductImage",
+  startPhoneSession: "pos:startPhoneSession",
+  cancelPhoneSession: "pos:cancelPhoneSession",
   getSettings: "pos:getSettings",
   setTerminalLanguage: "pos:setTerminalLanguage",
   getCompanyProfile: "pos:getCompanyProfile",
@@ -234,6 +236,18 @@ const api: PosApi = {
   // and no bytes ever travel in this direction.
   setProductImage: (req) => ipcRenderer.invoke(CH.setProductImage, { productId: req.productId }),
   removeProductImage: (req) => ipcRenderer.invoke(CH.removeProductImage, { productId: req.productId }),
+  // ── Phone entry over the LAN (slice H1) ──────────────────────────────────────────────────────
+  //
+  // 🔴 THE PAYLOAD IS REBUILT KEY BY KEY, like every other call here, and `productId` is forwarded
+  // ONLY when the caller actually supplied it — `in`, not `??`. An EDIT session's product is the
+  // token's whole binding, so turning an absent id into an explicit `null` (or the reverse) would
+  // change which product a phone is allowed to touch.
+  startPhoneSession: (req) =>
+    ipcRenderer.invoke(
+      CH.startPhoneSession,
+      "productId" in req ? { action: req.action, productId: req.productId } : { action: req.action },
+    ),
+  cancelPhoneSession: () => ipcRenderer.invoke(CH.cancelPhoneSession),
   getSettings: () => ipcRenderer.invoke(CH.getSettings),
   setTerminalLanguage: (req) => ipcRenderer.invoke(CH.setTerminalLanguage, { language: req.language }),
 
