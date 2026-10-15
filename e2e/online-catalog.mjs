@@ -198,6 +198,16 @@ const at = async (name, fn) => {
   log("  reconciliation:", name);
   await fn();
 };
+// 🔴 THE COMPANY PROFILE COMES FIRST, because `new-invoice` is `disabled={profile === null}` — a
+// shop cannot issue an invoice before it has said who it is. On a fresh profile that button is
+// disabled, and an earlier run spent 30 seconds clicking it. A real product rule I had not
+// accounted for, found only because each sub-step now logs its own name.
+await testid(page, "inv-tab-company").waitFor({ timeout: 20000 });
+await testid(page, "company-name-ar").fill("متجر الكاتالوج");
+await page.locator('.inv-company input[dir="ltr"]').first().fill("Catalogue Test Store");
+await testid(page, "company-save").click();
+await page.waitForSelector('[data-testid="company-notice"]', { timeout: 20000 });
+log("company profile saved — invoices are now possible");
 const reconciliationDone = await (async () => {
   try {
     // Outgoing is the only mode this build implements; `mode-incoming` is deliberately disabled.
@@ -422,7 +432,14 @@ await (async () => {
   await readNotice(l.page);
   await l.app.close();
   const legacy = readFileSync(join(home, "legacy.csv"), "utf8");
-  check(legacy.startsWith("source_id,name_ar,name_en,price,currency,base_unit,price_needs_review"), "🔴 the legacy export keeps its 7-column header");
+  // 🔴 THE BOM IS DELIBERATE AND IS ASSERTED, not stripped silently. `toImportCsv` writes a UTF-8
+  // BOM so Excel reads Arabic correctly — a documented part of that contract — so a test that
+  // quietly tolerated its absence would stop protecting it.
+  check(legacy.charCodeAt(0) === 0xfeff, "the legacy export still begins with its UTF-8 BOM (Excel reads Arabic)");
+  check(
+    legacy.replace(/^\ufeff/, "").startsWith("source_id,name_ar,name_en,price,currency,base_unit,price_needs_review"),
+    "\ud83d\udd34 the legacy export keeps its 7-column header",
+  );
   check(!legacy.includes("مفتاح أحمر يدوي"), "🔴 and still OMITS the manual product — the gap G exists to close");
   check(legacy.includes("دهان أبيض مستورد"), "while still carrying the imported one");
 })().catch((e) => check(false, `legacy export regression could not be measured: ${String(e).split("\n")[0]}`));
