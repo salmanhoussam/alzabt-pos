@@ -6,13 +6,16 @@
  * windows, every permission request denied, and every IPC call checked to come from our own
  * window's top frame.
  */
-import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, dialog, ipcMain, nativeImage, session } from "electron";
 import { PosService, startupCatalog } from "../application/posService";
 import { PHOTO_EXTENSIONS, createProductPhotoPicker, electronCodec } from "./productPhoto";
+import { writeOnlineCatalogPackage, type PackageFs } from "./onlineCatalogPackage";
+import type { OnlineCatalogSnapshot } from "../application/posService";
+import type { OnlineCatalogExportDto } from "../shared/ipcContract";
 import { InvoiceService } from "../application/invoiceService";
 import { businessDateOf } from "../domain/businessDay";
 import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
@@ -428,6 +431,77 @@ function exportBackup(ledgerPath: string): SavedFile | null {
   return { fileName: basename(path) };
 }
 
+// ── The Online Catalog export (slice G3) ───────────────────────────────────────────────────────
+//
+// 🔴 THE RENDERER NAMES NOTHING. It asks for an export; this chooses the folder, writes the
+// package and answers with a summary. The same shape as every other file operation in this
+// process, and for the same reason: a renderer that can name a destination can write anywhere.
+
+/** The real filesystem, as the package writer's narrow interface. */
+const packageFs: PackageFs = {
+  mkdir: (p) => mkdirSync(p, { recursive: true }),
+  writeFile: (p, d) => writeFileSync(p, d),
+  readFile: (p) => readFileSync(p),
+  rename: (from, to) => renameSync(from, to),
+  rm: (p) => rmSync(p, { recursive: true, force: true }),
+  exists: (p) => existsSync(p),
+  readdir: (p) => readdirSync(p),
+  join: (...parts) => join(...parts),
+};
+
+/**
+ * Chooses a destination folder and writes the package into it.
+ *
+ * Returns null when the owner dismissed the picker — nothing is created and nothing is reported as
+ * an error, the same contract `pickCatalogFile` and `pickProductPhoto` already use.
+ */
+function exportOnlineCatalogPackage(
+  service: PosService,
+  snapshot: OnlineCatalogSnapshot,
+): OnlineCatalogExportDto | null {
+  if (!mainWindow) return null;
+  // Looked up on `dialog` at call time so the E2E can stub it, like every other picker here.
+  const picked = dialog.showOpenDialogSync(mainWindow, {
+    title: "Choose where to save the online catalogue",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  const parentDir = picked?.[0];
+  if (!parentDir) return null;
+
+  const result = writeOnlineCatalogPackage({
+    parentDir,
+    document: snapshot.document,
+    images: snapshot.images,
+    // 🔴 THROUGH THE VERIFYING READ PATH. `productImageBytes` re-hashes what it read and refuses a
+    // mismatch, so a corrupt row fails the export instead of being published.
+    readImage: (imageId) => {
+      const { meta, bytes } = service.productImageBytes(imageId);
+      return { bytes, mime: meta.mime };
+    },
+    fs: packageFs,
+    suffix: () => `${stampNow()}-${randomBytes(3).toString("hex")}`,
+    log,
+  });
+
+  // Counted here rather than in the document: it is advice for the owner, not part of the
+  // published contract, and the website has no use for it.
+  const incomplete = snapshot.document.products.filter(
+    (p) =>
+      p.image === null ||
+      p.name_en === null ||
+      p.category === null ||
+      p.brand === null ||
+      (p.description_ar === null && p.description_en === null),
+  ).length;
+
+  return {
+    folderName: result.folderName,
+    products: result.products,
+    images: result.images,
+    incomplete,
+  };
+}
+
 function registerIpc(service: PosService, extra: IpcHandlerOptions): void {
   const handlers = createIpcHandlers(service, { pickCatalogFile, ...extra });
   for (const name of CHANNEL_NAMES) {
@@ -636,6 +710,7 @@ function startTill(): void {
     saveInvoicePdf: saveInvoicePdfFile,
     saveCatalogExport,
     exportBackup: () => exportBackup(plan.ledgerPath),
+    exportOnlineCatalog: (snapshot) => exportOnlineCatalogPackage(service, snapshot),
     appInfo: () => ({ version: BUILD_INFO.version, build: BUILD_INFO.build }),
     afterSale: maybeDailyBackup,
     logger: log,

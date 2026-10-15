@@ -52,6 +52,7 @@ export type Access =
  *     before Product Master:  7 public · 22 session · 24 owner · 53 total
  *     after  Product Master:  7 public · 24 session · 32 owner · 63 total
  *     after  list thumbnails: 7 public · 26 session · 30 owner · 63 total
+ *     after  online catalog: 7 public · 26 session · 31 owner · 64 total   (slice G3)
  *
  * THE PUBLIC SET DID NOT MOVE, which is the only one of the three numbers that is a security
  * claim — the four new reads (listCategories, listBrands and, once the products list had to show
@@ -149,6 +150,9 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // Replaces or exports the whole price list.
   importCatalog: "owner",
   exportCatalog: "owner",
+  // Slice G. Owner, like every other export: it reads the whole catalogue and writes files
+  // outside the application, and a cashier has no business doing either.
+  exportOnlineCatalog: "owner",
   // 🔴 The export is EVERY sale the shop ever made. A data-exfiltration surface, not a convenience.
   exportBackup: "owner",
   // The shop's legal identity and its invoice numbering.

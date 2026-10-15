@@ -187,6 +187,43 @@ export function ProductsScreen() {
   const [brands, setBrands] = useState<string[]>([]);
   const [managing, setManaging] = useState(false);
 
+  const [exporting, setExporting] = useState(false);
+
+  /**
+   * Export Online Catalogue.
+   *
+   * 🔴 THIS NAMES NO PATH AND RECEIVES NONE. Main shows the folder picker, writes the package and
+   * answers with a summary; `null` means the owner dismissed the picker, which is not an error and
+   * must not produce a success message.
+   */
+  const exportOnline = async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const result = await call(pos().exportOnlineCatalog());
+      if (result === null) return;
+      if (result.products === 0) {
+        setNotice(t("products.exportOnlineEmpty"));
+        return;
+      }
+      const lines = [
+        t("products.exportOnlineDone"),
+        t("products.exportOnlineSummary")
+          .replace("{products}", String(result.products))
+          .replace("{images}", String(result.images))
+          .replace("{folder}", result.folderName),
+      ];
+      if (result.incomplete > 0) {
+        lines.push(t("products.exportOnlineIncomplete").replace("{count}", String(result.incomplete)));
+      }
+      setNotice(lines.join("\n"));
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const reload = useCallback(async () => {
     try {
       setProducts(await call(pos().listProducts()));
@@ -245,6 +282,19 @@ export function ProductsScreen() {
         />
         <button className="btn" onClick={() => setManaging(true)} data-testid="manage-categories">
           {t("form.categoryManage")}
+        </button>
+        {/* 🔴 IN THE PRODUCT MASTER TOOLBAR, NOT BURIED IN BACKUP. What it exports is this screen's
+            data, so this is where an owner looks for it. The wording says EXPORT, never "publish"
+            or "update the website": the package is written to a folder and nothing is uploaded,
+            and a button that implies otherwise would be a lie the owner acts on. */}
+        <button
+          className="btn"
+          onClick={() => void exportOnline()}
+          disabled={exporting}
+          title={t("products.exportOnlineHint")}
+          data-testid="export-online-catalog"
+        >
+          {t("products.exportOnline")}
         </button>
         <button className="btn primary" onClick={() => setEditing({ mode: "add" })} data-testid="add-product">
           {t("action.add")}
@@ -447,7 +497,11 @@ export function ProductsScreen() {
         <div className="overlay">
           <div className="card dialog">
             <h2>{error ? t("err.title") : t("app.name")}</h2>
-            <p className={error ? "error" : undefined}>{error ?? notice}</p>
+            {/* `pre-line` because the export summary is three lines: what happened, the
+                counts, and the incomplete-data warning. Without it they run together. */}
+            <p className={error ? "error" : undefined} style={{ whiteSpace: "pre-line" }}>
+              {error ?? notice}
+            </p>
             {!error && <p className="muted small">{t("msg.historyUntouched")}</p>}
             <button
               className="btn primary wide"

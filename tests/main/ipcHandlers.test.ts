@@ -60,6 +60,8 @@ describe("IPC surface", () => {
         "currentCashier",
         "exportBackup",
         "exportCatalog",
+        // Slice G3. An OWNER channel; it names no path in either direction.
+        "exportOnlineCatalog",
         "getAppInfo",
         "getCatalog",
         "getSaleHistory",
@@ -128,8 +130,9 @@ describe("IPC surface", () => {
         "saveInvoicePdf",
       ].sort(),
     );
-    // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master, migration 9)
-    expect(CHANNEL_NAMES).toHaveLength(63);
+    // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
+    // migration 9) -> 64 (exportOnlineCatalog, slice G3 — the old value is named, not replaced)
+    expect(CHANNEL_NAMES).toHaveLength(64);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

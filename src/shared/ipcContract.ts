@@ -28,6 +28,7 @@ export const CHANNELS = {
   getSaleHistory: "pos:getSaleHistory",
   importCatalog: "pos:importCatalog",
   exportCatalog: "pos:exportCatalog",
+  exportOnlineCatalog: "pos:exportOnlineCatalog",
   exportBackup: "pos:exportBackup",
   getAppInfo: "pos:getAppInfo",
   listProducts: "pos:listProducts",
@@ -273,6 +274,21 @@ export type ImportCatalogResponse =
       readonly placeholderPrices: number;
     }
   | { readonly status: "rejected"; readonly rejected: ReadonlyArray<{ readonly line: number; readonly reason: string }> };
+
+/**
+ * What a finished Online Catalog export tells the owner.
+ *
+ * 🔴 `folderName`, NOT A PATH. The owner chose the parent folder a moment ago, so naming the
+ * package inside it is all they need — and an absolute path on screen is one that ends up in a
+ * screenshot, a support email, or a log, carrying the operator's Windows username with it.
+ */
+export interface OnlineCatalogExportDto {
+  readonly folderName: string;
+  readonly products: number;
+  readonly images: number;
+  /** Exported products missing a photo, English name, category, brand or description. */
+  readonly incomplete: number;
+}
 
 /** exportCatalog / exportBackup take NO payload: the main process shows the save dialog and writes. */
 export type ExportResponse =
@@ -863,6 +879,15 @@ export interface PosApi {
   getSaleHistory(req: HistoryRequest): Promise<IpcResult<SaleWithVoidDto[]>>;
   importCatalog(): Promise<IpcResult<ImportCatalogResponse>>;
   exportCatalog(): Promise<IpcResult<ExportResponse>>;
+  /**
+   * Writes the Online Catalog package to a folder the OWNER chooses.
+   *
+   * 🔴 NO PAYLOAD, AND NO PATH IN EITHER DIRECTION. The renderer names nothing: main shows the
+   * directory picker, main writes, and what comes back is a narrow summary. A renderer that could
+   * name a destination would be a filesystem write primitive, which is the one thing this bridge
+   * has never granted. `null` means the owner cancelled — not an error, and nothing was written.
+   */
+  exportOnlineCatalog(): Promise<IpcResult<OnlineCatalogExportDto | null>>;
   exportBackup(): Promise<IpcResult<ExportResponse>>;
   getAppInfo(): Promise<IpcResult<AppInfoDto>>;
   listProducts(): Promise<IpcResult<AdminProductDto[]>>;

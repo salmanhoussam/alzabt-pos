@@ -101,6 +101,7 @@ assert(surface.require === "undefined" && surface.process === "undefined" && sur
 // It went 19 -> 44 with manual invoices (migration 6), 45 with per-invoice tax (setInvoiceTax),
 // and 46 on 2026-10-10 with addInvoiceLines, then 53 with operator accounts (migration 8).
 //
+// 🔴 63 -> 64 with the Online Catalogue export (slice G3). The one: exportOnlineCatalog.
 // 🔴 53 -> 63 with Product Master (migration 9). The ten: listCategories, listBrands,
 // createCategory, renameCategory, setCategoryActive, deleteCategory, getProductImageMeta,
 // getProductImageBytes, setProductImage, removeProductImage.
@@ -117,7 +118,7 @@ assert(surface.require === "undefined" && surface.process === "undefined" && sur
 // derived from the contract is the one place a human has to notice.
 assert(
   JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","addInvoiceLines","completeBootstrapSetup","createCategory","createInvoiceDraft","createOperator","createProduct","createSale","currentCashier","deleteCategory","discardInvoiceDraft","exportBackup","exportCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getInvoice","getProductImageBytes","getProductImageMeta","getSaleHistory","getSettings","getTodaySales","importCatalog","listBrands","listCashiers","listCategories","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","pickInvoiceLogo","printInvoice","removeInvoiceLine","removeProductImage","renameCategory","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchInvoices","setCategoryActive","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorRole","setProductActive","setProductImage","setTerminalLanguage","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
-  `window.pos exposes exactly the 63 business methods, and nothing else (got ${surface.posKeys.length})`,
+  `window.pos exposes exactly the 64 business methods, and nothing else (got ${surface.posKeys.length})`,
 );
 await page.screenshot({ path: SHOTS + "01-login.png" });
 

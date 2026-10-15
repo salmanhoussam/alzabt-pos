@@ -15,6 +15,7 @@
 import type { PosService } from "../application/posService";
 import { MAX_PRODUCT_ID_LENGTH } from "../domain/catalog";
 import { DomainError } from "../domain/errors";
+import type { OnlineCatalogSnapshot } from "../application/posService";
 import { MAX_QUANTITY_MILLI } from "../domain/quantity";
 import { assertPaymentMethod } from "../domain/sale";
 import type { SaleRecord } from "../domain/sale";
@@ -58,6 +59,7 @@ import {
   type IpcResult,
   PRODUCT_MASTER_PATCH_KEYS,
   type ProductMasterPatchKey,
+  OnlineCatalogExportDto,
 } from "../shared/ipcContract";
 import { type Logger, nullLogger } from "./logger";
 import { accessFor } from "./channelPolicy";
@@ -104,6 +106,15 @@ export interface IpcHandlerOptions {
   readonly saveCatalogExport?: (suggestedName: string, contents: string) => SavedFile | null;
   /** Native "save as" dialog + verified consistent snapshot of the ledger. Absent means unavailable. */
   readonly exportBackup?: () => SavedFile | null;
+  /**
+   * Shows the native "choose a folder" dialog and writes the Online Catalog package into it.
+   *
+   * 🔴 THE WHOLE OPERATION LIVES IN MAIN, deliberately. The renderer cannot name a destination,
+   * cannot see a path, and cannot write a byte; it asks for an export and is told what happened.
+   * Absent (a headless test, a terminal without a window) answers NOT_AVAILABLE rather than
+   * half-working.
+   */
+  readonly exportOnlineCatalog?: (snapshot: OnlineCatalogSnapshot) => OnlineCatalogExportDto | null;
   /** Version/build identity of this installation. */
   readonly appInfo?: () => AppInfoDto;
   /** Called after a NEW sale is committed (the daily-backup trigger). Must not throw. */
@@ -572,6 +583,31 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       log.info("catalog-export", { products: productCount });
       return { status: "saved", fileName: saved.fileName, productCount };
     }),
+    /**
+     * Export Online Catalog — owner only, and the authorization is NOT merely this channel's.
+     *
+     * `onlineCatalogSnapshot()` calls `requireOwner()` itself, so a cashier is refused by the
+     * service even on a terminal where `channelPolicy` were somehow bypassed — the same
+     * belt-and-braces every other owner operation here uses, and the reason slice H's LAN listener
+     * can call the service directly without inheriting a hole.
+     */
+    exportOnlineCatalog: wrap("exportOnlineCatalog", (p) => {
+      noPayload(p);
+      const run = options.exportOnlineCatalog;
+      if (!run) throw new DomainError("NOT_AVAILABLE", "Exporting the online catalogue is not available here");
+      const snapshot = service.onlineCatalogSnapshot();
+      const result = run(snapshot);
+      // The owner cancelled the folder picker. Nothing was written, and that is not an error.
+      if (result === null) return null;
+      log.info("online-catalog-export", {
+        folder: result.folderName,
+        products: result.products,
+        images: result.images,
+        incomplete: result.incomplete,
+      });
+      return result;
+    }),
+
     exportBackup: wrap("exportBackup", (p) => {
       noPayload(p);
       if (!service.currentCashier()) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
