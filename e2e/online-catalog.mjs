@@ -225,9 +225,15 @@ const reconciliationDone = await (async () => {
     await at("open a new line", async () => {
       await testid(page, "add-row").waitFor({ timeout: 15000 });
       await testid(page, "add-row").click();
+      // 🔴 WAIT FOR THE FIELD, do not race the render. The previous run failed on `fill` while the
+      // step name still said "open a new line", because the fill was outside the named step — the
+      // log pointed one step behind the truth.
+      await testid(page, "new-line-description").waitFor({ state: "visible", timeout: 20000 });
     });
-    await testid(page, "new-line-description").fill("صنف من فاتورة");
-    await testid(page, "new-line-quantity").fill("1");
+    await at("fill the line", async () => {
+      await testid(page, "new-line-description").fill("صنف من فاتورة");
+      await testid(page, "new-line-quantity").fill("1");
+    });
     // The unit is chosen explicitly rather than relying on a default: `UnitCell` holds its own
     // state and this script must not depend on what it happens to start with.
     {
@@ -262,6 +268,21 @@ const reconciliationDone = await (async () => {
     return true;
   } catch (e) {
     log(`reconciliation flow stopped at "${reconciliationStep}":`, String(e).split("\n")[0]);
+    // 🔴 PHOTOGRAPH THE FAILURE. Four gate runs have each told me a selector name and nothing
+    // about what was actually on screen. A screenshot at the moment of the throw is the one piece
+    // of evidence a log cannot carry, and it costs nothing when the flow succeeds.
+    try {
+      await page.screenshot({ path: SHOTS + "G-FAIL-reconciliation.png" });
+      const visible = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("[data-testid]"))
+          .filter((el) => el.getBoundingClientRect().width > 0)
+          .map((el) => el.getAttribute("data-testid"))
+          .slice(0, 60),
+      );
+      log("  testids on screen when it failed:", JSON.stringify(visible));
+    } catch {
+      /* the screenshot is a courtesy, never the reason the step fails */
+    }
     return false;
   }
 })();
