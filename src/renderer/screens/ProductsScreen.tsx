@@ -542,11 +542,22 @@ export function ProductsScreen() {
         <PhoneSessionDialog
           session={phone}
           onClose={() => setPhone(null)}
-          onSaved={async (_productId, action) => {
+          onSaved={async () => {
             // 🔴 THE LIST REFRESHES FROM THE LEDGER, not from anything the phone sent. The saved
             // product is read back through the ordinary `listProducts` path, so what the owner
             // then sees on the till is storage, not a hopeful local copy.
-            setNotice(t(action === "EDIT_PRODUCT" ? "phone.savedEdit" : "phone.savedNew"));
+            //
+            // 🔴 AND IT DOES NOT RAISE A NOTICE. This used to call `setNotice(...)` as well, which
+            // was a real defect the Windows gate caught: the notice overlay renders AFTER the
+            // phone dialog in this component, so it drew a SECOND success dialog on top of the
+            // first and covered its Close button — the E2E click timed out against it. The
+            // merchant got the same news twice, and the generic notice also printed
+            // `msg.historyUntouched` ("a price change never alters an earlier invoice"), which has
+            // nothing to do with saving a product from a phone.
+            //
+            // ONE OPERATION, ONE SUCCESS SURFACE. `PhoneSessionDialog` owns the phone save's
+            // outcome and already reports it in the right words; this callback's only job is to
+            // make the list behind it true.
             await reload();
           }}
         />

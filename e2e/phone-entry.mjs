@@ -167,16 +167,39 @@ try {
     testid(page, "add-product-phone").click(),
   );
 
-  // 🔴 THE QR IS NOT MERELY PRESENT — IT IS A REAL SVG WITH REAL GEOMETRY, AND IT IS BIG ENOUGH
-  // TO SCAN. A 0x0 or 1-rect element would satisfy "an svg exists".
+  // 🔴 THE QR IS NOT MERELY PRESENT — IT CARRIES REAL MODULE GEOMETRY AND IS BIG ENOUGH TO SCAN.
+  //
+  // 🔴 AND THE FIRST VERSION OF THIS CHECK WAS WRONG ABOUT CORRECT CODE. It counted
+  // `rect, path` elements and demanded more than ten, assuming a QR is drawn as one rect per
+  // module. zxing-wasm's SVG writer does not work that way: it emits ONE background `<rect>` and
+  // ONE `<path>` whose `d` holds the entire pattern. The gate reported "2 shapes" against a
+  // perfectly good symbol that the screenshot decode (below) read without trouble.
+  //
+  // Measured on a real pairing URL: `d` is ~4,300 characters with ~310 `M` commands — one per
+  // module run. THAT is the geometry, so that is what is asserted. A blank or stub symbol has
+  // almost none, so this still fails for the reason the original was reaching for, without
+  // weakening into "an svg exists".
   const svgInfo = await page.evaluate(() => {
     const el = document.querySelector('[data-testid="phone-qr"] svg');
     if (!el) return null;
     const r = el.getBoundingClientRect();
-    return { rects: el.querySelectorAll("rect, path").length, w: Math.round(r.width), h: Math.round(r.height) };
+    const d = Array.from(el.querySelectorAll("path"))
+      .map((p) => p.getAttribute("d") ?? "")
+      .join("");
+    return {
+      ns: el.namespaceURI,
+      moves: (d.match(/M/g) ?? []).length,
+      dLen: d.length,
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+    };
   });
   check(svgInfo !== null, "the dialog contains a real <svg> element");
-  check(svgInfo !== null && svgInfo.rects > 10, `the QR has real geometry (${svgInfo?.rects} shapes)`);
+  check(svgInfo?.ns === "http://www.w3.org/2000/svg", `the element is in the SVG namespace (${svgInfo?.ns})`);
+  check(
+    (svgInfo?.moves ?? 0) >= 100,
+    `the QR carries real module geometry (${svgInfo?.moves} path moves, ${svgInfo?.dLen} chars)`,
+  );
   check(
     svgInfo !== null && svgInfo.w >= 180 && svgInfo.h >= 180,
     `the QR renders large enough to scan (${svgInfo?.w}x${svgInfo?.h} CSS px)`,
