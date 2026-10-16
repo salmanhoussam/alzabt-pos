@@ -200,6 +200,58 @@ try {
     (svgInfo?.moves ?? 0) >= 100,
     `the QR carries real module geometry (${svgInfo?.moves} path moves, ${svgInfo?.dLen} chars)`,
   );
+
+  // 🔴 THE PAINTED SYMBOL, NOT THE ELEMENT BOX — AND THIS REPLACES AN ASSERTION THAT COULD NOT
+  // SEE THE DEFECT IT WAS SUPPOSED TO CATCH.
+  //
+  // The old check measured `getBoundingClientRect()` on the <svg> and reported "236x236, large
+  // enough to scan". The ELEMENT was 236px; the drawing inside was ~45px in the top-left corner,
+  // because zxing emits no viewBox and CSS was stretching an element whose contents did not
+  // scale. The Windows screenshot showed a tiny QR floating in a big white plate while every
+  // assertion stayed green.
+  //
+  // So this measures the ink: the path's own `getBBox()` (user units) pushed through
+  // `getScreenCTM()` to real screen pixels, then compared against the plate. It fails if the
+  // viewBox fix is removed — which is the only reason to write it.
+  const painted = await page.evaluate(() => {
+    const plate = document.querySelector('[data-testid="phone-qr"]');
+    const path = plate?.querySelector("svg path");
+    if (!plate || !path) return null;
+    const bb = path.getBBox();
+    const m = path.getScreenCTM();
+    if (!m) return null;
+    const pr = plate.getBoundingClientRect();
+    // Transform the two opposite corners of the painted box into screen space.
+    const pt = (x, y) => ({ x: m.a * x + m.c * y + m.e, y: m.b * x + m.d * y + m.f });
+    const p1 = pt(bb.x, bb.y);
+    const p2 = pt(bb.x + bb.width, bb.y + bb.height);
+    return {
+      inkW: Math.round(Math.abs(p2.x - p1.x)),
+      inkH: Math.round(Math.abs(p2.y - p1.y)),
+      plateW: Math.round(pr.width),
+      plateH: Math.round(pr.height),
+      // How far the ink's top-left sits from the plate's, as a fraction of the plate.
+      offX: Math.round(((Math.min(p1.x, p2.x) - pr.left) / pr.width) * 100),
+      offY: Math.round(((Math.min(p1.y, p2.y) - pr.top) / pr.height) * 100),
+    };
+  });
+  check(painted !== null, "the painted QR geometry is measurable");
+  const fill = painted ? Math.round((painted.inkW / painted.plateW) * 100) : 0;
+  check(
+    fill >= 60,
+    `🔴 the PAINTED symbol fills the plate (${painted?.inkW}x${painted?.inkH} ink in ` +
+      `${painted?.plateW}x${painted?.plateH} plate = ${fill}%)`,
+  );
+  check(
+    painted !== null && Math.abs(painted.inkW - painted.inkH) <= 4,
+    `the painted symbol keeps its aspect ratio (${painted?.inkW}x${painted?.inkH})`,
+  );
+  // 🔴 NOT STUCK IN THE CORNER. With the viewBox missing the ink sat at ~0%,0%; a centred symbol
+  // leaves a roughly equal margin on each side.
+  check(
+    painted !== null && painted.offX >= 2 && painted.offY >= 2,
+    `the painted symbol is not jammed into the top-left (inset ${painted?.offX}%, ${painted?.offY}%)`,
+  );
   check(
     svgInfo !== null && svgInfo.w >= 180 && svgInfo.h >= 180,
     `the QR renders large enough to scan (${svgInfo?.w}x${svgInfo?.h} CSS px)`,
@@ -235,6 +287,48 @@ try {
   const host = parsed[1];
   check(!/^127\.|^0\.0\.0\.0$/.test(host), `🔴 the QR points at a LAN address, never loopback (${host})`);
   check(pairing.address.includes(host), "the address shown to the owner is the address in the QR");
+
+  // 🔴 VISUAL ORDER, NOT STRING ORDER — AND THIS IS THE ASSERTION THAT WAS MISSING.
+  //
+  // The line above uses `innerText`, which returns DOM order. It passed while the Windows
+  // screenshot showed `60310:10.1.0.75` — the address BACKWARDS, because host and port were two
+  // bidi-isolated runs with a neutral colon between them inside an RTL paragraph, so the
+  // paragraph laid them out right-to-left. A merchant reading that aloud gives the wrong address.
+  //
+  // So the proof is where the characters actually ARE on screen, the same principle
+  // `tests/renderer/lineMath.test.ts` uses for a receipt line: walk the text node character by
+  // character with a Range and read each x. The host must be painted to the LEFT of the port.
+  const addrOrder = await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="phone-address"]');
+    if (!el) return null;
+    const node = el.firstChild;
+    if (!node || node.nodeType !== 3) return null;
+    const text = node.textContent ?? "";
+    const xs = [];
+    for (let i = 0; i < text.length; i += 1) {
+      const r = document.createRange();
+      r.setStart(node, i);
+      r.setEnd(node, i + 1);
+      xs.push({ ch: text[i], x: Math.round(r.getBoundingClientRect().left) });
+    }
+    return { text, xs };
+  });
+  check(addrOrder !== null, "the endpoint is one text run that can be measured");
+  if (addrOrder) {
+    const colonIdx = addrOrder.text.indexOf(":");
+    const firstX = addrOrder.xs[0]?.x ?? 0;
+    const colonX = addrOrder.xs[colonIdx]?.x ?? 0;
+    const lastX = addrOrder.xs[addrOrder.xs.length - 1]?.x ?? 0;
+    check(
+      addrOrder.text === `${host}:${parsed[2]}`,
+      `the endpoint reads exactly host:port ("${addrOrder.text}")`,
+    );
+    check(
+      firstX < colonX && colonX < lastX,
+      `🔴 host is painted LEFT of the colon, and the colon left of the port ` +
+        `(x: ${firstX} < ${colonX} < ${lastX})`,
+    );
+  }
   check(!pairing.dialogText.includes(parsed[3]), "the token in the QR is not also printed in the dialog");
 
   // ── 3 · The phone fetches the form ───────────────────────────────────────────────────────────
@@ -261,6 +355,24 @@ try {
   await page.screenshot({ path: SHOTS + "H2-phone-saved-arabic.png" });
   const savedText = (await savedBanner.innerText()).trim();
   check(savedText.includes("تم إضافة الصنف من الهاتف"), `the dialog reports the save in Arabic ("${savedText}")`);
+
+  // 🔴 THE HEADING MOVED ON TOO. It used to keep saying «امسح الرمز بكاميرا الهاتف» — "scan the
+  // code" — above a success message, a title describing the state the owner had already left.
+  const doneTitle = (await testid(page, "phone-dialog-title").innerText()).trim();
+  check(
+    doneTitle.includes("تمّت إضافة الصنف"),
+    `the success heading describes the ADDITION, not the previous pairing state ("${doneTitle}")`,
+  );
+  check(!doneTitle.includes("امسح"), "the stale «scan the code» heading is gone from the success state");
+  // One success surface: the phone dialog and nothing stacked over it.
+  check(
+    (await page.locator(".overlay").count()) === 1,
+    `exactly ONE overlay is on screen at success (${await page.locator(".overlay").count()})`,
+  );
+  check(
+    !(await page.locator(".overlay").innerText()).includes("تعديلُ السعر"),
+    "🔴 no price-history sentence appears on a phone save",
+  );
 
   await testid(page, "phone-dialog-close").click();
   await testid(page, "phone-dialog").waitFor({ state: "detached", timeout: 30000 });
@@ -322,6 +434,11 @@ try {
   check(
     (await editBanner.innerText()).includes("تم تحديث الصنف من الهاتف"),
     "the dialog reports an UPDATE, with its own sentence — not the add message",
+  );
+  const editTitle = (await testid(page, "phone-dialog-title").innerText()).trim();
+  check(
+    editTitle.includes("تمّ تحديث الصنف"),
+    `the success heading is operation-specific — UPDATE, not addition ("${editTitle}")`,
   );
   await testid(page, "phone-dialog-close").click();
   await testid(page, "phone-dialog").waitFor({ state: "detached", timeout: 30000 });

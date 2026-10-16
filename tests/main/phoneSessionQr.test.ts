@@ -12,7 +12,13 @@
  */
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { ensureLocalWasm, localWasmInstalled, localWasmPath, renderSessionQrSvg } from "../../src/main/phoneSessionQr";
+import {
+  ensureLocalWasm,
+  localWasmInstalled,
+  localWasmPath,
+  renderSessionQrSvg,
+  withViewBox,
+} from "../../src/main/phoneSessionQr";
 
 describe("the WebAssembly is local", () => {
   /**
@@ -63,6 +69,63 @@ describe("the WebAssembly is local", () => {
 
   it("🔴 refuses an empty binary rather than letting the library fall back to the network", () => {
     expect(() => ensureLocalWasm(() => new Uint8Array(0))).toThrow(/refusing to fall back to the network/i);
+  });
+});
+
+describe("the symbol scales — viewBox", () => {
+  /**
+   * 🔴 THE DEFECT THIS PINS, FOUND IN A WINDOWS SCREENSHOT AND INVISIBLE TO EVERY ASSERTION.
+   *
+   * zxing emits `<svg width="45" height="45">` with no `viewBox`. Those set the element's
+   * intrinsic SIZE; the drawing inside uses 45 user units. CSS `width: 100%` then enlarges the
+   * ELEMENT while the ink stays 45 units wide in the top-left corner — a ~45px QR floating in a
+   * 260px plate. It still decoded, so nothing went red.
+   */
+  it("🔴 adds a viewBox derived from width/height, so CSS scaling scales the DRAWING", () => {
+    const out = withViewBox('<svg width="45" height="45" version="1.1"><path d="M0 0"/></svg>');
+    expect(out).toContain('viewBox="0 0 45 45"');
+    // The original attributes stay: they are the intrinsic size, and removing them would change
+    // how the element lays out where no CSS sizes it.
+    expect(out).toContain('width="45"');
+    expect(out).toContain('height="45"');
+    expect(out).toContain('<path d="M0 0"/>');
+  });
+
+  /**
+   * 🔴 DERIVED, NOT HARD-CODED. The symbol grows with the payload — a longer token or a longer
+   * host means more modules — so `0 0 45 45` is true today and wrong tomorrow. A hard-coded
+   * viewBox would silently crop a bigger symbol, which would still look like "a QR" and would
+   * stop decoding.
+   */
+  it("🔴 derives the box from the symbol's OWN size, not a constant", () => {
+    expect(withViewBox('<svg width="57" height="57"></svg>')).toContain('viewBox="0 0 57 57"');
+    expect(withViewBox('<svg width="33" height="33"></svg>')).toContain('viewBox="0 0 33 33"');
+    expect(withViewBox('<svg width="120" height="80"></svg>')).toContain('viewBox="0 0 120 80"');
+  });
+
+  it("leaves an svg that already has a viewBox exactly alone", () => {
+    const already = '<svg width="45" height="45" viewBox="0 0 10 10"></svg>';
+    expect(withViewBox(already)).toBe(already);
+  });
+
+  it("leaves markup it cannot measure alone rather than inventing a coordinate system", () => {
+    for (const markup of [
+      "<svg></svg>",
+      '<svg width="45"></svg>',
+      '<svg height="45"></svg>',
+      '<svg width="0" height="0"></svg>',
+      '<svg width="abc" height="abc"></svg>',
+      "<notsvg/>",
+    ]) {
+      expect(withViewBox(markup), markup).toBe(markup);
+    }
+  });
+
+  it("the real rendered QR carries a viewBox matching its own width", async () => {
+    const svg = await renderSessionQrSvg("http://192.168.1.20:7311/m/" + "d".repeat(64));
+    const w = /\bwidth="(\d+)"/.exec(svg);
+    expect(w).not.toBeNull();
+    expect(svg).toContain(`viewBox="0 0 ${w![1]} ${w![1]}"`);
   });
 });
 

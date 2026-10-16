@@ -1324,7 +1324,16 @@ function PhoneSessionDialog(props: {
   return (
     <div className="overlay">
       <div className="card dialog phone-dialog" data-testid="phone-dialog">
-        <h2>{t("phone.title")}</h2>
+        {/* 🔴 THE HEADING BELONGS TO THE MOMENT THE OWNER IS IN. It used to say
+            «امسح الرمز بكاميرا الهاتف» even after the save had happened — a title describing the
+            PREVIOUS state, sitting above a success message. The project's own text-context rule
+            says a message belongs to the operation the user is in now, and it is operation-specific
+            here too: an addition and an update get their own words, not one generic "done". */}
+        <h2 data-testid="phone-dialog-title">
+          {done
+            ? t(props.session.action === "EDIT_PRODUCT" ? "phone.doneTitleEdit" : "phone.doneTitleNew")
+            : t("phone.title")}
+        </h2>
 
         {done ? (
           <p className="ok" data-testid="phone-dialog-saved">
@@ -1344,8 +1353,19 @@ function PhoneSessionDialog(props: {
               dangerouslySetInnerHTML={{ __html: props.session.qrSvg }}
             />
             <p className="muted small">{t("phone.explain")}</p>
-            <p className="small" data-testid="phone-address">
-              {t("phone.address")}: <bdi>{props.session.host}</bdi>:<bdi>{props.session.port}</bdi>
+            {/* 🔴 ONE ISOLATED LTR RUN, NOT TWO. This was
+                `<bdi>{host}</bdi>:<bdi>{port}</bdi>`, and the Windows screenshot showed it
+                rendering as `60310:10.1.0.75` — the address backwards. Two bidi-isolated runs with
+                a neutral `:` between them are laid out by the surrounding RTL paragraph, so they
+                came out right-to-left. The merchant reading that line to whoever is helping would
+                give the wrong address, which is the only job this line has.
+
+                The endpoint is now a SINGLE element with an explicit direction, so `host:port` is
+                one unit that cannot be reordered. `dir="ltr"` on a `<bdi>` isolates it from the
+                paragraph AND fixes its internal direction. No token is shown — host and port only. */}
+            <p className="small">
+              {t("phone.address")}:{" "}
+              <bdi dir="ltr" data-testid="phone-address">{`${props.session.host}:${props.session.port}`}</bdi>
             </p>
             <p className="small" data-testid="phone-countdown">
               {t("phone.expiresIn").replace("{mins}", mins).replace("{secs}", secs)}

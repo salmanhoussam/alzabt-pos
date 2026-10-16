@@ -112,5 +112,51 @@ export async function renderSessionQrSvg(url: string): Promise<string> {
 export function inlineSafeSvg(svg: string): string {
   const start = svg.indexOf("<svg");
   if (start < 0) throw new Error("zxing-wasm returned markup with no <svg> element");
-  return svg.slice(start).trim();
+  return withViewBox(svg.slice(start).trim());
+}
+
+/**
+ * Give the symbol a `viewBox` so it SCALES with the box CSS gives it.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WITHOUT THIS THE QR RENDERS AT ~45 PIXELS INSIDE A 260-PIXEL PLATE, and the Windows
+ * screenshots are what caught it. zxing emits `<svg width="45" height="45">` with NO `viewBox`:
+ * those attributes set the element's intrinsic SIZE, and the drawing inside uses 45 user units. A
+ * stylesheet saying `width: 100%` then enlarges the ELEMENT while the ink stays 45 units wide,
+ * anchored top-left, with the rest of the plate blank.
+ *
+ * It still decoded, because zxing is tolerant of a small clean symbol — which is exactly why no
+ * assertion failed. A merchant holding a phone at arm's length in a shop is not tolerant, and
+ * making that QR easy to scan is the whole purpose of the dialog.
+ *
+ * `viewBox="0 0 45 45"` makes those 45 units the coordinate system the element maps onto itself,
+ * so CSS scaling now scales the drawing. Aspect ratio is preserved by the default
+ * `preserveAspectRatio="xMidYMid meet"`, which also centres it. The quiet zone is part of the
+ * symbol zxing drew, so it scales with everything else — nothing is cropped and nothing is
+ * re-rasterized.
+ *
+ * 🔴 IT IS DERIVED, NOT HARD-CODED. The symbol's size grows with the payload (a longer URL means
+ * more modules), so `0 0 45 45` is true for today's token length and would be wrong tomorrow.
+ * The dimensions are read from the element's own attributes, and an svg that already carries a
+ * viewBox is left exactly as it is.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export function withViewBox(svg: string): string {
+  const open = /^<svg\b[^>]*>/.exec(svg);
+  if (!open) return svg;
+  const tag = open[0];
+  if (/\bviewBox\s*=/.test(tag)) return svg;
+
+  const width = /\bwidth\s*=\s*"([\d.]+)(?:px)?"/.exec(tag);
+  const height = /\bheight\s*=\s*"([\d.]+)(?:px)?"/.exec(tag);
+  // No usable intrinsic size means there is nothing to derive a coordinate system from. Returning
+  // the markup untouched is better than inventing one and silently cropping the symbol.
+  if (!width || !height) return svg;
+
+  const w = Number(width[1]);
+  const h = Number(height[1]);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return svg;
+
+  const patched = tag.replace(/^<svg\b/, `<svg viewBox="0 0 ${w} ${h}"`);
+  return patched + svg.slice(tag.length);
 }
