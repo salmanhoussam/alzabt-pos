@@ -129,26 +129,120 @@ async function phoneUpload(url, path, file, type) {
  * no preload and no privileged bridge — exactly what a phone's browser would get.
  *
  * The window is closed again immediately; it never touches the till's own window or its session.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 THE WINDOW IS SHOWN, AND THE FIRST VERSION OF THIS HELPER DID NOT SHOW IT. That cost run
+ * 38891097239 its last twenty-one steps, and the measurement is worth recording because the
+ * failure pointed somewhere else entirely.
+ *
+ * It was created `show: false` and never shown. Every DOM operation still worked — `loadURL`,
+ * `waitForLoadState`, `setViewportSize` and every locator `waitFor` are renderer work and need no
+ * picture — so the window looked perfectly healthy right up to the moment it was photographed.
+ * `page.screenshot` is the one operation that needs a COMPOSITED FRAME, and a window the platform
+ * has never shown is not composited: the capture waited the full 30 seconds and the run died at
+ * the FIRST mobile screenshot, before any of the I2 evidence could be captured.
+ *
+ * It is created hidden and shown once the page has loaded, which avoids photographing an unpainted
+ * window, and it is shown with `showInactive()` so it never takes focus from the till — the till's
+ * own screenshots are taken from that window and must not be disturbed by this one.
+ *
+ * 🔴 AND A SHOWN WINDOW IS BETTER EVIDENCE, not merely a working one. These screenshots exist to
+ * be looked at by a human; a capture forced out of a window no compositor ever drew is not what a
+ * merchant's phone would show. This makes the picture and the thing it claims to depict the same.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 async function withPhoneWindow(app, url, body) {
   const created = app.waitForEvent("window", { timeout: 30000 });
-  await app.evaluate(async ({ BrowserWindow }, target) => {
+  const id = await app.evaluate(async ({ BrowserWindow }, target) => {
     const w = new BrowserWindow({
       width: 390,
       height: 844,
+      // Hidden only while it loads, so no unpainted frame is ever shown or photographed.
       show: false,
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
     });
     await w.loadURL(target);
+    // Shown WITHOUT stealing focus: it must be composited to be photographable, and the till
+    // window must stay the active one.
+    w.showInactive();
     return w.id;
   }, url);
   const phone = await created;
   await phone.waitForLoadState("domcontentloaded").catch(() => undefined);
   await phone.setViewportSize({ width: 390, height: 844 }).catch(() => undefined);
+
+  // 🔴 MEASURED, NOT ASSUMED. The window states it is visible and proves it has painted before
+  // anything photographs it, and both facts are asserted rather than hoped for.
+  const health = await phoneHealth(app, phone, id);
+  log("phone window before capture: " + JSON.stringify(health));
+  check(health.visible === true, `🔴 the phone window is composited before it is photographed (visible=${health.visible})`);
+  check(health.painted === true, `…and it produced a real frame — rAF advanced (painted=${health.painted})`);
+
+  const shot = (name) => phoneShot(app, phone, id, name);
   try {
-    await body(phone);
+    await body(phone, shot);
   } finally {
     await phone.close().catch(() => undefined);
+  }
+}
+
+/**
+ * What the phone window is actually doing — from BOTH sides.
+ *
+ * The main process is asked whether the window is visible and where it is; the page is asked
+ * whether it is loaded and whether a frame actually advances. `requestAnimationFrame` is the
+ * honest readiness signal here: it is the compositor answering, and it is self-limiting rather
+ * than a blind sleep, so a window that will never paint reports `painted: false` in five seconds
+ * instead of hanging.
+ */
+async function phoneHealth(app, phone, id) {
+  const main = await app
+    .evaluate(({ BrowserWindow }, wid) => {
+      const w = BrowserWindow.fromId(wid);
+      if (!w) return { visible: null, minimized: null, bounds: null };
+      return { visible: w.isVisible(), minimized: w.isMinimized(), bounds: w.getBounds() };
+    }, id)
+    .catch((e) => ({ visible: null, minimized: null, bounds: null, mainError: String(e).split("\n")[0] }));
+
+  const dom = await phone
+    .evaluate(
+      () =>
+        new Promise((resolve) => {
+          const base = {
+            readyState: document.readyState,
+            visibility: document.visibilityState,
+            bodyW: document.body?.clientWidth ?? null,
+            bodyH: document.body?.clientHeight ?? null,
+          };
+          const timer = setTimeout(() => resolve({ ...base, painted: false }), 5000);
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              clearTimeout(timer);
+              resolve({ ...base, painted: true });
+            }),
+          );
+        }),
+    )
+    .catch((e) => ({ painted: false, domError: String(e).split("\n")[0] }));
+
+  return { closed: phone.isClosed(), url: phone.url(), viewport: phone.viewportSize(), ...main, ...dom };
+}
+
+/**
+ * Photograph the phone window — and if the capture ever hangs again, SAY what the window was doing.
+ *
+ * 🔴 THE DIAGNOSTIC IS THE POINT. The previous failure reported only `Timeout 30000ms exceeded`,
+ * which named the operation and nothing about its subject — and the recorded diagnosis pointed at a
+ * completely different part of the script as a result. This dumps the window's real state at the
+ * moment of the failure, and still re-throws: evidence is added, nothing is weakened.
+ */
+async function phoneShot(app, phone, id, name) {
+  try {
+    await phone.screenshot({ path: SHOTS + name + ".png", timeout: 20000 });
+  } catch (err) {
+    console.log(`  ✗ DIAGNOSTIC ${name}: ${String(err).split("\n")[0]}`);
+    console.log("    phone window at the failed capture: " + JSON.stringify(await phoneHealth(app, phone, id)));
+    throw err;
   }
 }
 
@@ -172,6 +266,30 @@ const submission = (over = {}) =>
       ...(over.master ?? {}),
     },
   });
+
+/**
+ * The operating-system process behind a launched Electron app, and whether it has exited.
+ *
+ * Playwright exposes the real child process, so this is the actual PID rather than a proxy for
+ * one. Both are defensive: `process()` is not part of the stable surface in every version, and a
+ * diagnostic must never be the thing that fails a run.
+ */
+function pidOf(electronApp) {
+  try {
+    return electronApp.process()?.pid ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function exitOf(electronApp) {
+  try {
+    const p = electronApp.process();
+    return p ? `${p.exitCode}/${p.signalCode ?? "none"} killed=${p.killed}` : "no handle";
+  } catch (e) {
+    return "unavailable: " + String(e).split("\n")[0];
+  }
+}
 
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
@@ -584,7 +702,15 @@ try {
 
   // ── 6b · Restart durability: the phone's photo and barcode survive a real app restart ────────
   log("restarting the installed app to prove the phone's work is durable");
+  // 🔴 THE PIDs ARE RECORDED BECAUSE A PREVIOUS DIAGNOSIS BLAMED THIS SEQUENCE. `main.ts` takes
+  // `app.requestSingleInstanceLock()`, so a prior process that had not exited would make the next
+  // launch quit immediately and hand Playwright a window belonging to the OLD process. That was a
+  // hypothesis, and it was wrong — the real failure was a never-shown phone window in §7b. These
+  // lines are measurement, not a fix: nothing about the sequencing changes, and the next run says
+  // plainly whether each instance is a genuinely new process that fully exits.
+  const pid0 = pidOf(app);
   await app.close().catch(() => undefined);
+  log(`instance 1 pid=${pid0} after close: exitCode=${exitOf(app)}`);
   const restarted = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page2 = await restarted.firstWindow();
   await signIn(page2, "Cashier One", "1111");
@@ -599,10 +725,18 @@ try {
   });
   check(thumb2?.ok === true, "🔴 …and the phone-uploaded photo is still decoded and drawn after restart");
   await page2.screenshot({ path: SHOTS + "I1-desktop-after-restart.png" });
+  const pid1 = pidOf(restarted);
   await restarted.close().catch(() => undefined);
+  log(`instance 2 pid=${pid1} after close: exitCode=${exitOf(restarted)}`);
 
   // Everything below continues on a fresh window.
   const relaunched = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+  const pid2 = pidOf(relaunched);
+  log(`instance 3 pid=${pid2}`);
+  check(
+    pid2 !== null && pid2 !== pid0 && pid2 !== pid1,
+    `🔴 the relaunched app is a genuinely NEW process, not a focused survivor (${pid0} → ${pid1} → ${pid2})`,
+  );
   page = await relaunched.firstWindow();
   await signIn(page, "Cashier One", "1111");
   await page.locator('[data-testid="tab-products"]').click();
@@ -650,9 +784,9 @@ try {
   const uiUrl = await decodeQr(uiPairing.png);
   assert(uiUrl, "the UI-journey pairing QR could not be decoded");
 
-  await withPhoneWindow(app, uiUrl, async (phone) => {
+  await withPhoneWindow(app, uiUrl, async (phone, shot) => {
     await phone.locator('[data-testid="phone-photo-take"]').waitFor({ timeout: 20000 });
-    await phone.screenshot({ path: SHOTS + "I2-mobile-form-top.png" });
+    await shot("I2-mobile-form-top");
 
     const controls = await phone.evaluate(() => {
       const q = (id) => document.querySelector(`[data-testid="${id}"]`);
@@ -684,7 +818,7 @@ try {
     await phone.locator('[data-testid="phone-photo-preview"]').waitFor({ state: "visible", timeout: 30000 });
     const photoNote = (await phone.locator('[data-testid="phone-photo-status"]').innerText()).trim();
     check(photoNote.includes("جاهزة"), `the page reports the photo is ready ("${photoNote}")`);
-    await phone.screenshot({ path: SHOTS + "I2-mobile-photo-accepted.png" });
+    await shot("I2-mobile-photo-accepted");
 
     await phone.locator('[data-testid="phone-barcode-input"]').setInputFiles(
       join(APP, "tests", "fixtures", "barcodes", "ean13.png"),
@@ -696,7 +830,7 @@ try {
     );
     const bcNote = (await phone.locator('[data-testid="phone-barcode-status"]').innerText()).trim();
     check(bcNote.length > 0, `the page reports the decode ("${bcNote.slice(0, 60)}")`);
-    await phone.screenshot({ path: SHOTS + "I2-mobile-barcode-decoded.png" });
+    await shot("I2-mobile-barcode-decoded");
 
     // 🔴 STILL EDITABLE — typed over by hand, which is the common path.
     await phone.locator('[data-testid="phone-barcode"]').fill("4006381333931");
@@ -707,14 +841,14 @@ try {
 
     await phone.locator('[data-testid="phone-nameAr"]').fill("صنف من واجهة الهاتف");
     await phone.locator('[data-testid="phone-price"]').fill("8.50");
-    await phone.screenshot({ path: SHOTS + "I2-mobile-barcode-corrected.png" });
+    await shot("I2-mobile-barcode-corrected");
 
     // Save through the page's own button.
     await phone.locator('[data-testid="phone-save"]').click();
     await phone.locator('[data-testid="phone-saved"]').waitFor({ state: "visible", timeout: 30000 });
     const doneText = (await phone.locator('[data-testid="phone-saved"]').innerText()).trim();
     check(doneText.includes("تم حفظ"), `🔴 the mobile page shows its own success state ("${doneText}")`);
-    await phone.screenshot({ path: SHOTS + "I2-mobile-saved.png" });
+    await shot("I2-mobile-saved");
   });
 
   // The desktop dialog should now report the save and close cleanly.
