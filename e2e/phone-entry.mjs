@@ -244,10 +244,16 @@ async function shotShowing(phone, shot, ids, name) {
     phone
       .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))
       .catch(() => undefined);
-  // A plain name is a test id; anything starting with a CSS combinator character is a raw
-  // selector. The Product Photo heading is a <legend> with no test id, and requiring it must not
-  // mean adding a hook to the product for a screenshot's benefit.
-  const sel = (id) => (/^[[.#]/.test(id) ? id : `[data-testid="${id}"]`);
+  // A plain name is a test id; ANYTHING ELSE is a raw CSS selector. The Product Photo heading is
+  // a <legend> with no test id, and requiring it must not mean adding a hook to the product for a
+  // screenshot's benefit.
+  //
+  // 🔴 DECIDED BY WHAT A TEST ID LOOKS LIKE, NOT BY A PREFIX. The first version asked whether the
+  // string STARTED with `[`, `.` or `#`, then was handed `fieldset:has(#photoFile) legend`, which
+  // starts with none of them — so it became `[data-testid="fieldset:has(#photoFile) legend"]`,
+  // matched nothing, and `boundingBox()` waited its full thirty seconds. Run 38941276178 died
+  // there. A test id is word characters and hyphens; every other shape is a selector.
+  const sel = (id) => (/^[\w-]+$/.test(id) ? `[data-testid="${id}"]` : id);
   const boxes = async () => {
     const out = {};
     for (const id of ids) out[id] = await phone.locator(sel(id)).boundingBox();
