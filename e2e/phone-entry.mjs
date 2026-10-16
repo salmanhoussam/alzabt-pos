@@ -198,11 +198,65 @@ function recordPhone(phone) {
   return rec;
 }
 
-/** The responses the phone page really received for one route, newest last. */
-const responsesFor = (rec, suffix) => rec.responses.filter((r) => r.route.endsWith(suffix));
-const lastResponse = (rec, suffix) => responsesFor(rec, suffix).slice(-1)[0] ?? null;
-/** The Save POST goes to the page's own path, so it is matched by method rather than by suffix. */
-const lastSave = (rec) => rec.responses.filter((r) => r.method === "POST" && /\/m\/<token>$/.test(r.route)).slice(-1)[0] ?? null;
+/**
+ * Arm a wait for one of the page's POSTs BEFORE the action that causes it.
+ *
+ * 🔴 EVENT BEFORE ACTION, AND THE ALTERNATIVE LOST A GATE. Reading a recorded list straight after
+ * the DOM changed is a race: the page's own `xhr.onload` has already run and repainted, while
+ * Playwright is still delivering the `response` event to Node over CDP. Check 102 failed exactly
+ * that way in run 38925322111 — the response had plainly arrived, because the very next check read
+ * the message the page writes in `onload`, and the same recorder reported that route as 200 later.
+ *
+ * Registering the waiter first removes the race rather than papering over it: no sleep, no longer
+ * timeout, and the assertion gets STRONGER — it is now the response object itself, with its method
+ * and path checked, instead of a lookup that might not have landed yet.
+ *
+ * `kind` is "/photo", "/barcode", or "save" for the Save POST, which goes to the page's own path.
+ */
+function expectPost(phone, kind) {
+  return phone.waitForResponse(
+    (r) => {
+      if (r.request().method() !== "POST") return false;
+      const path = new URL(r.url()).pathname;
+      return kind === "save" ? /^\/m\/[0-9a-f]{16,}$/i.test(path) : path.endsWith(kind);
+    },
+    { timeout: 30000 },
+  );
+}
+
+/** Describe a response for a check message without ever printing the token. */
+const seen = (res) => (res ? `${res.request().method()} ${redact(new URL(res.url()).pathname)} → ${res.status()}` : "no response");
+
+/**
+ * Photograph a named state with the thing it claims to show ACTUALLY IN FRAME.
+ *
+ * 🔴 A FILENAME IS A CLAIM, AND ONE OF THESE WAS LYING. `I2-mobile-photo-accepted.png` showed the
+ * top of the form: the page is 1532px tall, the capture is a 844px viewport, and the photo section
+ * sits below the Catalogue section — so the one file whose whole purpose was to show an accepted
+ * photo could not contain one. Nothing failed; the evidence was simply false, which is worse than
+ * a red check because it reads as proof.
+ *
+ * So the elements are scrolled into view and their boxes are MEASURED against the viewport before
+ * the shutter. If a state cannot be framed, that is a failed check — not a quietly wrong picture.
+ */
+async function shotShowing(phone, shot, ids, name) {
+  await phone.locator(`[data-testid="${ids[0]}"]`).scrollIntoViewIfNeeded();
+  // A real frame after the scroll, not a guessed delay.
+  await phone
+    .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))
+    .catch(() => undefined);
+
+  const vp = phone.viewportSize() ?? { width: 390, height: 844 };
+  const out = [];
+  for (const id of ids) {
+    const box = await phone.locator(`[data-testid="${id}"]`).boundingBox();
+    if (!box || box.y < 0 || box.y + box.height > vp.height + 1 || box.width <= 0 || box.height <= 0) {
+      out.push(`${id}=${box ? `y${Math.round(box.y)} h${Math.round(box.height)}` : "absent"}`);
+    }
+  }
+  check(out.length === 0, `🔴 ${name}.png really shows what its name claims (off-frame: ${out.join(", ") || "none"})`);
+  await shot(name);
+}
 
 async function withPhoneWindow(app, url, body) {
   const created = app.waitForEvent("window", { timeout: 30000 });
@@ -973,8 +1027,14 @@ try {
     // 🔴 THESE RAN ONLY OVER `fetch` BEFORE, WHICH ENFORCES NO POLICY. A refusal that arrives as a
     // readable 422 over Node proves nothing about what the page DOES with it, and the page is what
     // the merchant sees. Each one is driven here through the real controls.
+    const badPhotoWait = expectPost(phone, "/photo");
     await phone.locator('[data-testid="phone-photo-input"]').setInputFiles(
       join(APP, "tests", "fixtures", "photos", "corrupt.jpg"),
+    );
+    const badPhotoRes = await badPhotoWait;
+    check(
+      badPhotoRes.status() === 422,
+      `🔴 the browser's photo POST reached the till and was refused with a real 422 (${seen(badPhotoRes)})`,
     );
     await phone.waitForFunction(
       () => {
@@ -985,17 +1045,12 @@ try {
       { timeout: 30000 },
     );
     const badPhotoState = await previewState(phone);
-    const badPhotoRes = lastResponse(rec, "/photo");
-    check(
-      badPhotoRes !== null && badPhotoRes.status === 422,
-      `🔴 the browser's photo POST reached the till and was refused with a real 422 (${badPhotoRes?.status ?? "no response"})`,
-    );
     check(
       badPhotoState.status.length > 0,
       `🔴 a corrupt photo produces a READABLE failure on the phone ("${badPhotoState.status}")`,
     );
     check(badPhotoState.wrapperHidden === true, "…and no broken preview is left on screen");
-    await shot("I2-mobile-photo-refused");
+    await shotShowing(phone, shot, ["phone-photo-status", "phone-photo-take"], "I2-mobile-photo-refused");
 
     // The draft survived the refusal.
     const draftAfterBadPhoto = await phone.evaluate(() => ({
@@ -1008,18 +1063,19 @@ try {
     );
 
     // A photograph with no barcode in it — an ordinary outcome, never a fault.
+    const missWait = expectPost(phone, "/barcode");
     await phone.locator('[data-testid="phone-barcode-input"]').setInputFiles(
       join(APP, "tests", "fixtures", "photos", "shelf.jpg"),
+    );
+    const missRes = await missWait;
+    check(
+      missRes.status() === 200,
+      `🔴 the browser's barcode POST reached the till and answered (${seen(missRes)})`,
     );
     await phone.waitForFunction(
       () => (document.querySelector('[data-testid="phone-barcode-status"]')?.textContent ?? "").trim().length > 0,
       undefined,
       { timeout: 30000 },
-    );
-    const missRes = lastResponse(rec, "/barcode");
-    check(
-      missRes !== null && missRes.status === 200,
-      `🔴 the browser's barcode POST reached the till and answered (${missRes?.status ?? "no response"})`,
     );
     const missNote = (await phone.locator('[data-testid="phone-barcode-status"]').innerText()).trim();
     check(missNote.length > 0, `a photo with no barcode reports it readably ("${missNote.slice(0, 50)}")`);
@@ -1038,9 +1094,11 @@ try {
     check(rec.failed.length === 0, `🔴 not one request from the phone page was blocked by policy (${JSON.stringify(rec.failed)})`);
 
     // The page's OWN script does the uploading — this sets a file on the real input.
+    const photoWait = expectPost(phone, "/photo");
     await phone.locator('[data-testid="phone-photo-input"]').setInputFiles(
       join(APP, "tests", "fixtures", "photos", "shelf.jpg"),
     );
+    const photoRes = await photoWait;
 
     // What the browser actually holds now — the fixture's own name, type and size, nothing else.
     const picked = await phone
@@ -1056,11 +1114,7 @@ try {
 
     // 🔴 PATH A PROVEN AT THE BROWSER: a real HTTP response, not a policy-blocked request. The
     // preview rendering is the visible half; this is the half that was invisible for three slices.
-    const photoRes = lastResponse(rec, "/photo");
-    check(
-      photoRes !== null && photoRes.status === 200,
-      `🔴 the browser's photo POST received a real 200 (${photoRes?.status ?? "no response"})`,
-    );
+    check(photoRes.status() === 200, `🔴 the browser's photo POST received a real 200 (${seen(photoRes)})`);
     const previewShown = await previewState(phone);
     check(
       previewShown.srcKind.startsWith("data:image/") && previewShown.naturalW > 0 && previewShown.rect.w > 0,
@@ -1068,24 +1122,30 @@ try {
     );
     const photoNote = (await phone.locator('[data-testid="phone-photo-status"]').innerText()).trim();
     check(photoNote.includes("جاهزة"), `the page reports the photo is ready ("${photoNote}")`);
-    await shot("I2-mobile-photo-accepted");
+    await shotShowing(
+      phone,
+      shot,
+      ["phone-photo-preview", "phone-photo-status", "phone-photo-take"],
+      "I2-mobile-photo-accepted",
+    );
+    // Supplementary only — the whole form in one frame. It does not replace the focused shots,
+    // whose point is that the state is legible at a readable size.
+    await phone.screenshot({ path: SHOTS + "I2-mobile-full-page.png", fullPage: true, timeout: 20000 });
 
+    const bcWait = expectPost(phone, "/barcode");
     await phone.locator('[data-testid="phone-barcode-input"]').setInputFiles(
       join(APP, "tests", "fixtures", "barcodes", "ean13.png"),
     );
+    const bcRes = await bcWait;
     await phone.waitForFunction(
       () => (document.querySelector('[data-testid="phone-barcode"]')?.value ?? "") === "5901234123457",
       undefined,
       { timeout: 30000 },
     );
-    const bcRes = lastResponse(rec, "/barcode");
-    check(
-      bcRes !== null && bcRes.status === 200,
-      `🔴 the browser's barcode POST received a real 200 (${bcRes?.status ?? "no response"})`,
-    );
+    check(bcRes.status() === 200, `🔴 the browser's barcode POST received a real 200 (${seen(bcRes)})`);
     const bcNote = (await phone.locator('[data-testid="phone-barcode-status"]').innerText()).trim();
     check(bcNote.length > 0, `the page reports the decode ("${bcNote.slice(0, 60)}")`);
-    await shot("I2-mobile-barcode-decoded");
+    await shotShowing(phone, shot, ["phone-barcode", "phone-barcode-status", "phone-barcode-scan"], "I2-mobile-barcode-decoded");
 
     // 🔴 STILL EDITABLE — typed over by hand, which is the common path.
     await phone.locator('[data-testid="phone-barcode"]').fill("4006381333931");
@@ -1096,19 +1156,17 @@ try {
 
     await phone.locator('[data-testid="phone-nameAr"]').fill("صنف من واجهة الهاتف");
     await phone.locator('[data-testid="phone-price"]').fill("8.50");
-    await shot("I2-mobile-barcode-corrected");
+    await shotShowing(phone, shot, ["phone-barcode", "phone-barcode-status", "phone-barcode-scan"], "I2-mobile-barcode-corrected");
 
     // Save through the page's own button.
+    const saveWait = expectPost(phone, "save");
     await phone.locator('[data-testid="phone-save"]').click();
+    const saveRes = await saveWait;
     await phone.locator('[data-testid="phone-saved"]').waitFor({ state: "visible", timeout: 30000 });
     // 🔴 PATH C — THE ONE THAT WAS NEVER PROVEN FROM A BROWSER AT ALL. H2 accepted Save on the
     // strength of a Node `fetch`, which enforces no CSP; the same missing `connect-src` that broke
     // the uploads would have broken this too, and nothing would have noticed until a merchant did.
-    const saveRes = lastSave(rec);
-    check(
-      saveRes !== null && saveRes.status === 200,
-      `🔴 the browser's SAVE POST received a real 200 (${saveRes?.status ?? "no response"})`,
-    );
+    check(saveRes.status() === 200, `🔴 the browser's SAVE POST received a real 200 (${seen(saveRes)})`);
     const doneText = (await phone.locator('[data-testid="phone-saved"]').innerText()).trim();
     check(doneText.includes("تم حفظ"), `🔴 the mobile page shows its own success state ("${doneText}")`);
     await shot("I2-mobile-saved");
