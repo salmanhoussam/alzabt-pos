@@ -240,18 +240,82 @@ const seen = (res) => (res ? `${res.request().method()} ${redact(new URL(res.url
  * the shutter. If a state cannot be framed, that is a failed check — not a quietly wrong picture.
  */
 async function shotShowing(phone, shot, ids, name) {
-  await phone.locator(`[data-testid="${ids[0]}"]`).scrollIntoViewIfNeeded();
-  // A real frame after the scroll, not a guessed delay.
-  await phone
-    .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))
-    .catch(() => undefined);
+  const settle = () =>
+    phone
+      .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))
+      .catch(() => undefined);
+  // A plain name is a test id; anything starting with a CSS combinator character is a raw
+  // selector. The Product Photo heading is a <legend> with no test id, and requiring it must not
+  // mean adding a hook to the product for a screenshot's benefit.
+  const sel = (id) => (/^[[.#]/.test(id) ? id : `[data-testid="${id}"]`);
+  const boxes = async () => {
+    const out = {};
+    for (const id of ids) out[id] = await phone.locator(sel(id)).boundingBox();
+    return out;
+  };
 
-  const vp = phone.viewportSize() ?? { width: 390, height: 844 };
+  // 🔴 SCROLL THE BOTTOM-MOST REQUIRED ELEMENT, MEASURED — NOT THE FIRST ONE LISTED. The first
+  // version scrolled `ids[0]`, which framed the photo preview and pushed the staged-state text 36
+  // pixels below an 844-pixel fold. Bringing the LOWEST one into view brings everything above it
+  // with it, and which one is lowest is read from the page rather than assumed from the argument
+  // order — the caller lists what matters, not what sits where.
+  const first = await boxes();
+  const lowest = ids
+    .filter((id) => first[id])
+    .sort((a, b) => first[a].y + first[a].height - (first[b].y + first[b].height))
+    .pop();
+  if (lowest) await phone.locator(sel(lowest)).scrollIntoViewIfNeeded();
+  await settle();
+
+  // 🔴 THE VIEWPORT'S BOTTOM IS NOT THE VISIBLE BOTTOM. The page carries a fixed Save bar pinned
+  // to the bottom edge, and it PAINTS OVER whatever is beneath it — so `bottom <= viewport.height`
+  // is satisfied by an element the merchant cannot see. In the previous run that bar is exactly
+  // what clipped the preview's lower edge in a file that otherwise looked correct.
+  //
+  // Its top edge is measured, never assumed: anything fixed or sticky that is anchored to the
+  // bottom of the viewport counts, so this keeps working if the bar is restyled or another one is
+  // added. No height is hard-coded anywhere.
+  const usableBottom = async () =>
+    await phone.evaluate(() => {
+      const vh = window.innerHeight;
+      let top = vh;
+      for (const el of document.body.getElementsByTagName("*")) {
+        const cs = getComputedStyle(el);
+        if (cs.position !== "fixed" && cs.position !== "sticky") continue;
+        if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        if (r.bottom >= vh - 2 && r.top < top) top = r.top;
+      }
+      return top;
+    });
+
+  // One MEASURED correction, not a guess: if the lowest element still sits under the bar, scroll
+  // by exactly the overlap. A page that cannot scroll further leaves the check to fail honestly
+  // rather than being retried until it passes.
+  let limit = await usableBottom();
+  const afterScroll = await boxes();
+  if (lowest && afterScroll[lowest]) {
+    const overlap = afterScroll[lowest].y + afterScroll[lowest].height - limit;
+    if (overlap > 0) {
+      await phone.evaluate((by) => window.scrollBy(0, by), Math.ceil(overlap));
+      await settle();
+      limit = await usableBottom();
+    }
+  }
+
+  const final = await boxes();
   const out = [];
   for (const id of ids) {
-    const box = await phone.locator(`[data-testid="${id}"]`).boundingBox();
-    if (!box || box.y < 0 || box.y + box.height > vp.height + 1 || box.width <= 0 || box.height <= 0) {
-      out.push(`${id}=${box ? `y${Math.round(box.y)} h${Math.round(box.height)}` : "absent"}`);
+    const box = final[id];
+    if (!box || box.width <= 0 || box.height <= 0) {
+      out.push(`${id}=absent`);
+    } else if (box.y < 0) {
+      out.push(`${id}=above-frame(y${Math.round(box.y)})`);
+    } else if (box.y + box.height > limit + 1) {
+      // Named distinctly, because "below the fold" and "behind the Save bar" need different fixes.
+      const why = limit < (phone.viewportSize()?.height ?? 844) - 1 ? "under-footer" : "below-fold";
+      out.push(`${id}=${why}(y${Math.round(box.y)} h${Math.round(box.height)} limit${Math.round(limit)})`);
     }
   }
   check(out.length === 0, `🔴 ${name}.png really shows what its name claims (off-frame: ${out.join(", ") || "none"})`);
@@ -1125,7 +1189,15 @@ try {
     await shotShowing(
       phone,
       shot,
-      ["phone-photo-preview", "phone-photo-status", "phone-photo-take"],
+      [
+        // The section heading «صورة الصنف» — a <legend>, identified by the fieldset that holds the
+        // photo input rather than by a test id added to the product for a screenshot's sake.
+        "fieldset:has(#photoFile) legend",
+        "phone-photo-take",
+        "phone-photo-choose",
+        "phone-photo-preview",
+        "phone-photo-status",
+      ],
       "I2-mobile-photo-accepted",
     );
     // Supplementary only — the whole form in one frame. It does not replace the focused shots,
