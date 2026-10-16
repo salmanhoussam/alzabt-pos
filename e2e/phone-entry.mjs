@@ -151,6 +151,53 @@ async function phoneUpload(url, path, file, type) {
  * merchant's phone would show. This makes the picture and the thing it claims to depict the same.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+/**
+ * Replace a live session token with a placeholder.
+ *
+ * 🔴 DIAGNOSTICS MUST NOT PRINT THE CREDENTIAL. The token is in every media URL, CI logs are
+ * readable by anyone who can see the run, and a diagnostic that leaks the thing the whole slice
+ * exists to protect would be a worse defect than the one it is chasing.
+ */
+const redact = (text) => String(text).replace(/\/m\/[0-9a-f]{16,}/gi, "/m/<token>");
+
+/** A bounded, sanitised record of what the phone page did. Diagnostics only — nothing asserts on it. */
+function recordPhone(phone) {
+  const rec = { console: [], errors: [], requests: [], responses: [], failed: [] };
+  const interesting = (u) => /\/m\//.test(u);
+  const cap = (a, v, n = 40) => {
+    if (a.length < n) a.push(v);
+  };
+
+  phone.on("console", (m) => cap(rec.console, `${m.type()}: ${redact(m.text()).slice(0, 200)}`));
+  phone.on("pageerror", (e) => cap(rec.errors, redact(String(e)).split("\n")[0].slice(0, 300)));
+  phone.on("request", (r) => {
+    if (interesting(r.url())) cap(rec.requests, `${r.method()} ${redact(r.url())}`);
+  });
+  phone.on("requestfailed", (r) => {
+    if (interesting(r.url()))
+      cap(rec.failed, `${r.method()} ${redact(r.url())} — ${redact(r.failure()?.errorText ?? "unknown")}`);
+  });
+  phone.on("response", (r) => {
+    if (!interesting(r.url())) return;
+    const line = { method: r.request().method(), route: redact(r.url()), status: r.status() };
+    cap(rec.responses, line);
+    // 🔴 THE BODY IS READ ONLY FOR JSON, AND ONLY A BOUNDED SLICE. The photo route's REQUEST body
+    // is image bytes and is never read; the RESPONSE is the small {ok,...} envelope.
+    const type = r.headers()["content-type"] ?? "";
+    line.contentType = type.slice(0, 60);
+    if (type.includes("application/json")) {
+      r.text()
+        .then((t) => {
+          line.body = redact(t).slice(0, 300);
+        })
+        .catch(() => {
+          line.body = "<unreadable>";
+        });
+    }
+  });
+  return rec;
+}
+
 async function withPhoneWindow(app, url, body) {
   const created = app.waitForEvent("window", { timeout: 30000 });
   const id = await app.evaluate(async ({ BrowserWindow }, target) => {
@@ -168,6 +215,8 @@ async function withPhoneWindow(app, url, body) {
     return w.id;
   }, url);
   const phone = await created;
+  // Attached before the page is driven, so nothing it does goes unrecorded.
+  const rec = recordPhone(phone);
   await phone.waitForLoadState("domcontentloaded").catch(() => undefined);
   await phone.setViewportSize({ width: 390, height: 844 }).catch(() => undefined);
 
@@ -180,9 +229,93 @@ async function withPhoneWindow(app, url, body) {
 
   const shot = (name) => phoneShot(app, phone, id, name);
   try {
-    await body(phone, shot);
+    await body(phone, shot, rec);
+  } catch (err) {
+    // 🔴 THE PHONE WINDOW IS PHOTOGRAPHED TOO. The outer catch dumps the TILL window, which says
+    // nothing about a mobile failure — that gap is why two rounds of this went undiagnosed.
+    // The original error is preserved and re-thrown either way.
+    try {
+      await phone.screenshot({ path: SHOTS + "I2-DIAGNOSTIC-phone-failure.png", timeout: 15000 });
+      console.log("  (phone window photographed to I2-DIAGNOSTIC-phone-failure.png)");
+    } catch (shotErr) {
+      console.log("  (the phone window could NOT be photographed: " + String(shotErr).split("\n")[0] + ")");
+    }
+    console.log("  phone console/errors/traffic: " + JSON.stringify(rec));
+    throw err;
   } finally {
     await phone.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Read the two paths APART.
+ *
+ * 🔴 UPLOAD AND PREVIEW ARE INDEPENDENT, AND CONFLATING THEM IS WHAT COST TWO GATES. One path is
+ * file → POST → staging; the other is file → FileReader → data: URL → <img> render. Either can
+ * fail while the other succeeds, so each is reported on its own.
+ *
+ * Only a PREFIX of the preview src is read — never the base64 payload.
+ */
+async function previewState(phone) {
+  return await phone
+    .evaluate(() => {
+      const q = (id) => document.querySelector(`[data-testid="${id}"]`);
+      const img = q("phone-photo-preview");
+      const wrap = document.getElementById("photoPreviewWrap");
+      const input = q("phone-photo-input");
+      const rect = img ? img.getBoundingClientRect() : null;
+      const raw = img ? img.getAttribute("src") : null;
+      return {
+        // PATH 1 — the upload, as the page reports it.
+        status: (q("phone-photo-status")?.textContent ?? "").trim().slice(0, 120),
+        // PATH 2 — the local preview, as the DOM actually holds it.
+        previewNote: (q("phone-photo-preview-status")?.textContent ?? "").trim().slice(0, 120),
+        wrapperHidden: wrap ? wrap.hidden : null,
+        srcKind: raw === null ? "<none>" : raw.slice(0, 24) + (raw.length > 24 ? "…" : ""),
+        srcLength: raw === null ? 0 : raw.length,
+        complete: img ? img.complete : null,
+        naturalW: img ? img.naturalWidth : null,
+        naturalH: img ? img.naturalHeight : null,
+        rect: rect ? { w: Math.round(rect.width), h: Math.round(rect.height) } : null,
+        files: input && input.files ? input.files.length : null,
+        events: globalThis.__e2eEvents ?? null,
+      };
+    })
+    .catch((e) => ({ unreadable: String(e).split("\n")[0] }));
+}
+
+/**
+ * Wait for the preview exactly as before — and if it never comes, say what the page was doing.
+ *
+ * 🔴 THE ASSERTION IS NOT WEAKENED. Same locator, same `visible` state, same 30 second budget, and
+ * the original error is re-thrown. A rendered preview is still the only thing that counts as
+ * success; everything sampled here is a diagnostic intermediate, never an acceptance criterion.
+ */
+async function waitForPreview(phone, rec) {
+  const trace = [];
+  const started = Date.now();
+  let polling = true;
+  const sampler = (async () => {
+    while (polling) {
+      trace.push({ atMs: Date.now() - started, ...(await previewState(phone)) });
+      if (!polling) break;
+      await phone.waitForTimeout(2000).catch(() => undefined);
+    }
+  })();
+
+  try {
+    await phone.locator('[data-testid="phone-photo-preview"]').waitFor({ state: "visible", timeout: 30000 });
+  } catch (err) {
+    polling = false;
+    await sampler.catch(() => undefined);
+    console.log("  ── DIAGNOSTIC: the preview never became visible ──");
+    console.log("  final state : " + JSON.stringify(await previewState(phone)));
+    console.log("  transitions : " + JSON.stringify(trace));
+    console.log("  traffic     : " + JSON.stringify(rec));
+    throw err;
+  } finally {
+    polling = false;
+    await sampler.catch(() => undefined);
   }
 }
 
@@ -784,7 +917,7 @@ try {
   const uiUrl = await decodeQr(uiPairing.png);
   assert(uiUrl, "the UI-journey pairing QR could not be decoded");
 
-  await withPhoneWindow(app, uiUrl, async (phone, shot) => {
+  await withPhoneWindow(app, uiUrl, async (phone, shot, rec) => {
     await phone.locator('[data-testid="phone-photo-take"]').waitFor({ timeout: 20000 });
     await shot("I2-mobile-form-top");
 
@@ -811,11 +944,35 @@ try {
     check(controls.dir === "rtl", `the mobile page renders RTL (${controls.dir})`);
     check(controls.overflow <= 1, `🔴 no horizontal overflow at 390px (${controls.overflow}px)`);
 
+    // 🔴 COUNT THE BROWSER'S OWN EVENTS, WITHOUT TOUCHING THE PAGE'S BEHAVIOUR. These listeners
+    // are added by the TEST and only increment counters — the page's own handler is untouched and
+    // still runs. "Did the change event fire at all?" is the first fork in the diagnosis and was
+    // pure inference in both previous rounds.
+    await phone.evaluate(() => {
+      globalThis.__e2eEvents = { input: 0, change: 0 };
+      const el = document.querySelector('[data-testid="phone-photo-input"]');
+      if (!el) return;
+      el.addEventListener("input", () => { globalThis.__e2eEvents.input += 1; });
+      el.addEventListener("change", () => { globalThis.__e2eEvents.change += 1; });
+    });
+    console.log("  before setInputFiles: " + JSON.stringify(await previewState(phone)));
+
     // The page's OWN script does the uploading — this sets a file on the real input.
     await phone.locator('[data-testid="phone-photo-input"]').setInputFiles(
       join(APP, "tests", "fixtures", "photos", "shelf.jpg"),
     );
-    await phone.locator('[data-testid="phone-photo-preview"]').waitFor({ state: "visible", timeout: 30000 });
+
+    // What the browser actually holds now — the fixture's own name, type and size, nothing else.
+    const picked = await phone
+      .evaluate(() => {
+        const el = document.querySelector('[data-testid="phone-photo-input"]');
+        const f = el && el.files && el.files[0];
+        return f ? { name: f.name, type: f.type, size: f.size, count: el.files.length } : { count: 0 };
+      })
+      .catch((e) => ({ unreadable: String(e).split("\n")[0] }));
+    console.log("  after setInputFiles : " + JSON.stringify(picked));
+
+    await waitForPreview(phone, rec);
     const photoNote = (await phone.locator('[data-testid="phone-photo-status"]').innerText()).trim();
     check(photoNote.includes("جاهزة"), `the page reports the photo is ready ("${photoNote}")`);
     await shot("I2-mobile-photo-accepted");
