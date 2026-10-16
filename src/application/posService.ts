@@ -350,6 +350,12 @@ export interface PhoneFormData {
     readonly priceDecimal: string;
     readonly baseUnit: string;
     readonly isActive: boolean;
+    /**
+     * 🔴 A BOOLEAN, NEVER THE BYTES. Slice I2 shows "this product already has a photo; leave it
+     * alone and it stays" — which needs one flag, not an image sent over the LAN to a form that
+     * would only shrink it again.
+     */
+    readonly hasPhoto: boolean;
   } | null;
   /** The enrichment fields as a form holds them — and the snapshot a later save diffs against. */
   readonly master: MasterForm;
@@ -1304,6 +1310,9 @@ export class PosService {
     if (spec.productId !== null && !product) {
       throw new DomainError("PRODUCT_NOT_FOUND", "That product no longer exists");
     }
+    // 🔴 METADATA, NOT BYTES — the same query the products list uses for its `hasImage` flag. The
+    // form needs to say "there is already a photo"; it has no use for the photo itself.
+    const photoByProduct = this.requireImages().primaryMetaByProduct();
 
     // 🔴 ONE DTO MAPPER, NOT A SECOND HAND-BUILT SHAPE. `toAdminProductDto` already converts the
     // row — including the exact decimal price and the bigint flags, which a hand-written mapper
@@ -1331,6 +1340,7 @@ export class PosService {
               priceDecimal: dto.priceDecimal,
               baseUnit: dto.baseUnit,
               isActive: dto.isActive,
+              hasPhoto: photoByProduct.has(dto.id),
             },
       // 🔴 THE SERVED SNAPSHOT, which the caller must remember and hand back at save time. It is
       // what the diff is taken against — see `savePhoneProduct`.

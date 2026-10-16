@@ -79,7 +79,18 @@ const AR = {
   save: "حفظ الصنف",
   saving: "جارٍ الحفظ…",
   required: "مطلوب",
-  photoSoon: "إضافة الصورة من الهاتف ستتوفّر في خطوة قادمة. يمكنك إضافتها من الصندوق.",
+  photoTake: "التقط صورة",
+  photoChoose: "اختر صورة",
+  photoUploading: "جارٍ إرسال الصورة…",
+  photoReady: "الصورة جاهزة وستُحفظ مع الصنف.",
+  photoCurrent: "للصنف صورة حالية. إن لم تلتقط صورة جديدة، تبقى كما هي.",
+  photoHint: "JPEG أو PNG. صور الآيفون بصيغة HEIC لازم تُحفظ JPEG أوّلاً.",
+  photoRetry: "حاول مرة أخرى",
+  barcodeScan: "صوّر الباركود",
+  barcodeScanning: "جارٍ قراءة الباركود…",
+  barcodeFound: "تمّت القراءة",
+  barcodeNotFound: "ما قدرنا نقرأ الباركود. جرّب صورة أوضح أو اكتبه بإيدك.",
+  barcodeEditable: "يمكنك تصحيح الرقم بإيدك.",
   savedNew: "تم حفظ الصنف بنجاح.",
   savedEdit: "تم تحديث الصنف بنجاح.",
   savedNote: "يمكنك إغلاق هذه الصفحة. انتهت صلاحية هذا الرمز.",
@@ -180,6 +191,18 @@ export function renderPhoneFormPage(data: PhoneFormData): string {
   .check { display:flex; align-items:center; gap:.6rem; margin-top:1rem; font-weight:500; }
   .check input { width:1.35rem; height:1.35rem; margin:0; }
   .note { color:var(--muted); font-size:.85rem; margin:.5rem 0 0; }
+  .media-row { display:flex; gap:.6rem; flex-wrap:wrap; margin-top:.6rem; }
+  .btn-file { flex:1 1 auto; min-width:8rem; text-align:center; padding:.75rem .9rem;
+              border:1px solid var(--line); border-radius:10px; background:var(--bg);
+              font-weight:500; font-size:.95rem; }
+  .preview { margin-top:.7rem; }
+  /* object-fit contain, never cover: the merchant must be able to see whether the photo is
+     portrait and whether the whole product is in frame. Slice F held the desktop preview to the
+     same rule, for the same reason. */
+  .preview img { width:100%; max-height:14rem; object-fit:contain; border-radius:10px;
+                 background:rgba(127,127,127,.12); }
+  .note.ok { color:var(--accent); font-weight:500; }
+  .note.bad { color:var(--danger); font-weight:500; }
   footer { position:fixed; inset-inline:0; bottom:0; padding:.75rem 1rem;
            padding-bottom: calc(.75rem + env(safe-area-inset-bottom));
            background:var(--card); border-top:1px solid var(--line); }
@@ -236,6 +259,14 @@ export function renderPhoneFormPage(data: PhoneFormData): string {
       <label for="barcode">${esc(AR.barcode)}</label>
       <input id="barcode" name="barcode" type="text" class="ltr" inputmode="numeric"
              data-testid="phone-barcode" value="${esc(data.master.barcode)}">
+      <!-- The field above stays editable after a decode, always: real-world recall is about two
+           in three, so a merchant will need to correct it. -->
+      <div class="media-row">
+        <label class="btn-file" for="barcodeFile" data-testid="phone-barcode-scan">📷 ${esc(AR.barcodeScan)}</label>
+        <input id="barcodeFile" type="file" accept="image/*" capture="environment"
+               data-testid="phone-barcode-input" hidden>
+      </div>
+      <p id="barcodeStatus" class="note" data-testid="phone-barcode-status"></p>
     </fieldset>
 
     <fieldset>
@@ -268,7 +299,25 @@ export function renderPhoneFormPage(data: PhoneFormData): string {
 
     <fieldset>
       <legend>${esc(AR.sectionPhoto)}</legend>
-      <p class="note" data-testid="phone-photo-soon">${esc(AR.photoSoon)}</p>
+      ${p?.hasPhoto ? `<p class="note" data-testid="phone-photo-current">${esc(AR.photoCurrent)}</p>` : ""}
+
+      <!-- A file input, not a live camera API. The capture attribute opens the camera on iOS and
+           Android and needs no secure context; the live-camera and in-browser-scanner APIs are
+           secure-context only and are undefined on a plain-HTTP LAN origin on both platforms.
+           Their names are deliberately not written here, so a test can assert this page contains
+           no reference to them. -->
+      <div class="media-row">
+        <label class="btn-file" for="photoFile" data-testid="phone-photo-take">📷 ${esc(AR.photoTake)}</label>
+        <input id="photoFile" type="file" accept="image/*" capture="environment"
+               data-testid="phone-photo-input" hidden>
+        <label class="btn-file" for="photoPick" data-testid="phone-photo-choose">🖼 ${esc(AR.photoChoose)}</label>
+        <input id="photoPick" type="file" accept="image/*" data-testid="phone-photo-pick" hidden>
+      </div>
+      <div id="photoPreviewWrap" class="preview" hidden>
+        <img id="photoPreview" alt="" data-testid="phone-photo-preview">
+      </div>
+      <p id="photoStatus" class="note" data-testid="phone-photo-status"></p>
+      <p class="note">${esc(AR.photoHint)}</p>
     </fieldset>
   </form>
 </main>
@@ -314,6 +363,93 @@ export function renderPhoneFormPage(data: PhoneFormData): string {
     btn.disabled = false;
     btn.textContent = ${jsonForScript(AR.save)};
     msg.scrollIntoView({ block: "center" });
+  }
+
+  // ── Media: the phone sends a file, the till does the work ───────────────────────────────────
+  //
+  // 🔴 THE BROWSER NEVER DECODES OR RESIZES ANYTHING. It posts the bytes the OS camera produced
+  // to the session's own scoped endpoint and shows what the till answers. No canvas, no
+  // compression, no barcode library — that is the whole point of the architecture, and it is why
+  // an old Android phone gets the same result as a new iPhone.
+
+  function setNote(el, text, cls) {
+    el.textContent = text;
+    el.className = "note" + (cls ? " " + cls : "");
+  }
+
+  function post(path, file, onDone) {
+    var xhr = new XMLHttpRequest();
+    // The session's own URL, relative — the token never appears in this script.
+    xhr.open("POST", window.location.pathname + path, true);
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.onload = function () {
+      var res = null;
+      try { res = JSON.parse(xhr.responseText); } catch (e) { res = null; }
+      onDone(xhr.status, res);
+    };
+    xhr.onerror = function () { onDone(0, null); };
+    xhr.send(file);
+  }
+
+  var photoStatus = document.getElementById("photoStatus");
+  var previewWrap = document.getElementById("photoPreviewWrap");
+  var preview = document.getElementById("photoPreview");
+
+  function sendPhoto(file) {
+    if (!file) return;
+    setNote(photoStatus, ${jsonForScript(AR.photoUploading)}, "");
+    post("/photo", file, function (status, res) {
+      if (status === 200 && res && res.ok) {
+        setNote(photoStatus, ${jsonForScript(AR.photoReady)}, "ok");
+        // 🔴 THE PREVIEW IS LOCAL-ONLY. An object URL over the file the phone already holds —
+        // no remote URL, and the till never sends bytes back just to draw a thumbnail.
+        try {
+          if (preview.src) URL.revokeObjectURL(preview.src);
+          preview.src = URL.createObjectURL(file);
+          previewWrap.hidden = false;
+        } catch (e) { /* a preview is a courtesy; the upload already succeeded */ }
+        return;
+      }
+      // 🔴 A REFUSED PHOTO COSTS THE PHOTO, NEVER THE DRAFT. The form keeps everything typed and
+      // the merchant can pick another file.
+      setNote(photoStatus, ((res && res.message) ? res.message : ${jsonForScript(AR.photoRetry)}), "bad");
+    });
+  }
+
+  ["photoFile", "photoPick"].forEach(function (id) {
+    var input = document.getElementById(id);
+    if (input) input.addEventListener("change", function () { sendPhoto(input.files && input.files[0]); });
+  });
+
+  var barcodeStatus = document.getElementById("barcodeStatus");
+  var barcodeInput = document.getElementById("barcodeFile");
+  if (barcodeInput) {
+    barcodeInput.addEventListener("change", function () {
+      var file = barcodeInput.files && barcodeInput.files[0];
+      if (!file) return;
+      setNote(barcodeStatus, ${jsonForScript(AR.barcodeScanning)}, "");
+      post("/barcode", file, function (status, res) {
+        if (status === 200 && res && res.ok && res.found) {
+          // Populate the field — and LEAVE IT EDITABLE. The merchant corrects it if the decoder
+          // misread, which it will for roughly one difficult label in three.
+          document.getElementById("barcode").value = res.value;
+          setNote(
+            barcodeStatus,
+            ${jsonForScript(AR.barcodeFound)} + (res.format ? " (" + res.format + ")" : "") +
+              " — " + ${jsonForScript(AR.barcodeEditable)},
+            "ok"
+          );
+          return;
+        }
+        if (status === 200 && res && res.ok) {
+          // 🔴 A MISS IS NOT A FAILURE. The draft, the session and manual entry all survive, and
+          // Save is never blocked by it.
+          setNote(barcodeStatus, ${jsonForScript(AR.barcodeNotFound)}, "bad");
+          return;
+        }
+        setNote(barcodeStatus, ((res && res.message) ? res.message : ${jsonForScript(AR.barcodeNotFound)}), "bad");
+      });
+    });
   }
 
   btn.addEventListener("click", function () {

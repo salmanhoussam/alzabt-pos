@@ -99,6 +99,59 @@ async function phoneRequest(url, { method = "GET", body = null } = {}) {
   return { status: res.status, text, json };
 }
 
+/** Upload a real file to one of the session's media endpoints, exactly as the phone's script does. */
+async function phoneUpload(url, path, file, type) {
+  const bytes = readFileSync(file);
+  const res = await fetch(url + path, {
+    method: "POST",
+    headers: {
+      "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+      "Content-Type": type,
+    },
+    body: bytes,
+  });
+  let json = null;
+  try {
+    json = JSON.parse(await res.text());
+  } catch {
+    json = null;
+  }
+  return { status: res.status, json };
+}
+
+/**
+ * Open the phone page in a REAL browser window and photograph it.
+ *
+ * 🔴 THE MOBILE SCREENSHOTS CANNOT COME FROM `fetch`. Everything above drives the phone surface
+ * over plain HTTP, which proves the contract but renders nothing — and slice I2 adds mobile UX
+ * whose whole claim is visual. So a second Electron BrowserWindow is pointed at the session's own
+ * URL, sized like a phone, and photographed. It is the real served page in a real Chromium, with
+ * no preload and no privileged bridge — exactly what a phone's browser would get.
+ *
+ * The window is closed again immediately; it never touches the till's own window or its session.
+ */
+async function withPhoneWindow(app, url, body) {
+  const created = app.waitForEvent("window", { timeout: 30000 });
+  await app.evaluate(async ({ BrowserWindow }, target) => {
+    const w = new BrowserWindow({
+      width: 390,
+      height: 844,
+      show: false,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+    });
+    await w.loadURL(target);
+    return w.id;
+  }, url);
+  const phone = await created;
+  await phone.waitForLoadState("domcontentloaded").catch(() => undefined);
+  await phone.setViewportSize({ width: 390, height: 844 }).catch(() => undefined);
+  try {
+    await body(phone);
+  } finally {
+    await phone.close().catch(() => undefined);
+  }
+}
+
 const submission = (over = {}) =>
   JSON.stringify({
     product: {
@@ -153,7 +206,9 @@ async function openPairing(page, shotName, opener) {
   return { dialog, qr, png, dialogText, address, box };
 }
 
-const { app, page } = await launch();
+let { app, page } = await launch();
+/** The window currently under test — reassigned after a restart, and closed in `finally`. */
+let closable = app;
 
 try {
   // ── 1 · The owner sees the action, and the dialog renders a real, scannable QR ───────────────
@@ -338,15 +393,59 @@ try {
   check(form.text.includes('data-testid="phone-save"'), "the form has a Save button");
   check(form.text.includes('dir="rtl"'), "the mobile form is RTL");
   check(form.text.includes("إضافة صنف جديد"), "the mobile form's Arabic heading is correct for a NEW product");
-  check(form.text.includes('data-testid="phone-photo-soon"'), "the photo section is a placeholder in H2, not an upload");
+  // 🔴 SLICE I2 — the placeholder is gone and real capture controls are here. The old assertion
+  // required `phone-photo-soon`, which was H2's honest "not yet"; keeping it would now fail
+  // against the feature it was waiting for.
+  for (const id of ["phone-photo-take", "phone-photo-choose", "phone-photo-input", "phone-barcode-scan", "phone-barcode-input"]) {
+    check(form.text.includes(`data-testid="${id}"`), `the mobile form offers ${id}`);
+  }
+  check(
+    (form.text.match(/capture="environment"/g) ?? []).length >= 2,
+    "photo and barcode both use a file input with capture — no live-camera API",
+  );
+  check(
+    !/getUserMedia|BarcodeDetector|mediaDevices/.test(form.text),
+    "🔴 the mobile page names no live-camera API (they are secure-context only, so unusable here)",
+  );
+  check(
+    !/data-testid="phone-barcode"[^>]*\b(readonly|disabled)\b/.test(form.text),
+    "🔴 the barcode field stays EDITABLE — manual correction is mandatory",
+  );
   check(!/https?:\/\//.test(form.text), "🔴 the mobile page references NO external URL — no CDN, no remote font");
   check(!form.text.includes(parsed[3]), "the served page does not echo the token");
   for (const u of ["piece", "box", "pack", "kg", "meter", "other"]) {
     check(form.text.includes(`value="${u}"`), `the authoritative unit '${u}' is offered by the form`);
   }
 
+  // ── 3b · I2: the phone uploads a photo and photographs a barcode ─────────────────────────────
+  log("phone uploads a product photo and a barcode image");
+  const photoUp = await phoneUpload(url, "/photo", join(APP, "tests", "fixtures", "photos", "shelf.jpg"), "image/jpeg");
+  check(photoUp.status === 200 && photoUp.json?.ok === true, "🔴 the phone's product photo is accepted and STAGED");
+  check(photoUp.json?.staged === true, "the till reports it as staged, not saved");
+  check(Number(photoUp.json?.widthPx) > 0 && Number(photoUp.json?.byteSize) > 0, "with real normalized dimensions");
+  check(
+    !JSON.stringify(photoUp.json ?? {}).match(/shelf|\.jpg|[A-Za-z]:\\\\|\/home\/|base64/i),
+    "🔴 and the answer carries no filename, path or bytes",
+  );
+
+  const scan = await phoneUpload(url, "/barcode", join(APP, "tests", "fixtures", "barcodes", "ean13.png"), "image/png");
+  check(scan.status === 200 && scan.json?.found === true, "🔴 the till DECODES the photographed barcode");
+  check(scan.json?.value === "5901234123457", `the decoded value is the fixture's (${scan.json?.value})`);
+  check(typeof scan.json?.format === "string" && scan.json.format.length > 0, `and its format is reported (${scan.json?.format})`);
+
+  const miss = await phoneUpload(url, "/barcode", join(APP, "tests", "fixtures", "photos", "shelf.jpg"), "image/jpeg");
+  check(miss.status === 200 && miss.json?.found === false, "🔴 a photo with no barcode answers found:false, not an error");
+
+  const badPhoto = await phoneUpload(url, "/photo", join(APP, "tests", "fixtures", "photos", "corrupt.jpg"), "image/jpeg");
+  check(badPhoto.status === 422, "an undecodable photo is refused with a readable message");
+  check(typeof badPhoto.json?.message === "string" && badPhoto.json.message.length > 0, "…and the message is non-empty");
+
+  // 🔴 MANUAL CORRECTION. The merchant edits what the decoder returned before saving — the
+  // decoder reads roughly two labels in three, so this is the common path, not an edge case.
+  const CORRECTED = "4006381333931";
+
   // ── 4 · The phone saves, and the till shows it ───────────────────────────────────────────────
-  const saved = await phoneRequest(url, { method: "POST", body: submission() });
+  const saved = await phoneRequest(url, { method: "POST", body: submission({ master: { barcode: CORRECTED } }) });
   check(saved.status === 200 && saved.json?.ok === true, "the phone's Save succeeds");
 
   // The dialog's own success state, photographed BEFORE it is dismissed.
@@ -382,6 +481,15 @@ try {
   const listText = await page.locator(".catalog-admin").innerText();
   check(listText.includes("مفتاح من الهاتف"), "🔴 the phone-entered product appears in the desktop list");
   check(listText.includes("17.25"), "with the price the phone submitted");
+  check(listText.includes(CORRECTED), "🔴 the CORRECTED barcode is stored, not the decoded one");
+  check(!listText.includes("5901234123457"), "…and the decoded value it replaced is not");
+  // The thumbnail the phone's photo produced, on the desktop row.
+  const thumb = await page.evaluate(() => {
+    const img = document.querySelector('[data-testid="product-row"] img');
+    return img ? { src: (img.getAttribute("src") ?? "").slice(0, 16), w: img.naturalWidth } : null;
+  });
+  check(thumb !== null, "🔴 the phone-uploaded photo appears as a thumbnail on the desktop row");
+  check(thumb !== null && thumb.src.startsWith("data:image/"), `the thumbnail is a local data URL (${thumb?.src}…)`);
   await page.screenshot({ path: SHOTS + "H3-desktop-list-after-phone-save.png" });
 
   // ── 5 · Replay is refused and the listener is gone ───────────────────────────────────────────
@@ -418,12 +526,36 @@ try {
   );
   check(prefilled !== null, "the edit form prefills the product's Arabic name");
 
+  // The edit form must say the existing photo survives an untouched save.
+  check(
+    editForm.text.includes('data-testid="phone-photo-current"'),
+    "🔴 the edit form tells the merchant the existing photo is kept unless replaced",
+  );
+
+  // I2: replace the photo from the phone, and correct a freshly decoded barcode.
+  const editPhoto = await phoneUpload(
+    editUrl,
+    "/photo",
+    join(APP, "tests", "fixtures", "photos", "logo-alpha.png"),
+    "image/png",
+  );
+  check(editPhoto.status === 200 && editPhoto.json?.ok === true, "🔴 a REPLACEMENT photo is staged from the phone");
+  const editScan = await phoneUpload(editUrl, "/barcode", join(APP, "tests", "fixtures", "barcodes", "code128.png"), "image/png");
+  check(editScan.json?.value === "Alz-7781-A", `🔴 Code 128 keeps its case through the phone (${editScan.json?.value})`);
+
   const editedName = (prefilled?.[1] ?? prefilled?.[2] ?? "") + " معدّل";
   const editSaved = await phoneRequest(editUrl, {
     method: "POST",
     body: submission({
       product: { nameAr: editedName, nameEn: "", sku: "", price: "99.00", baseUnit: "piece" },
-      master: { categoryId: "", barcode: "", brand: "", descriptionAr: "", descriptionEn: "", isOnlineVisible: false },
+      master: {
+        categoryId: "",
+        barcode: String(editScan.json?.value ?? ""),
+        brand: "",
+        descriptionAr: "",
+        descriptionEn: "",
+        isOnlineVisible: false,
+      },
     }),
   });
   check(editSaved.status === 200 && editSaved.json?.ok === true, "the phone's edit Save succeeds");
@@ -447,7 +579,39 @@ try {
   const afterEdit = await page.locator(".catalog-admin").innerText();
   check(afterEdit.includes("معدّل"), "🔴 the edited product's new name appears in the desktop list");
   check(afterEdit.includes("99.00"), "with the price the phone submitted");
+  check(afterEdit.includes("Alz-7781-A"), "🔴 the Code 128 barcode reached storage with its case intact");
   await page.screenshot({ path: SHOTS + "H6-desktop-list-after-phone-edit.png" });
+
+  // ── 6b · Restart durability: the phone's photo and barcode survive a real app restart ────────
+  log("restarting the installed app to prove the phone's work is durable");
+  await app.close().catch(() => undefined);
+  const restarted = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+  const page2 = await restarted.firstWindow();
+  await signIn(page2, "Cashier One", "1111");
+  await page2.locator('[data-testid="tab-products"]').click();
+  await page2.locator('[data-testid="product-row"]').first().waitFor({ timeout: 30000 });
+  const afterRestart = await page2.locator(".catalog-admin").innerText();
+  check(afterRestart.includes("معدّل"), "🔴 the phone-edited product survives a restart");
+  check(afterRestart.includes("Alz-7781-A"), "…with its barcode");
+  const thumb2 = await page2.evaluate(() => {
+    const img = document.querySelector('[data-testid="product-row"] img');
+    return img ? { ok: (img.getAttribute("src") ?? "").startsWith("data:image/"), w: img.naturalWidth } : null;
+  });
+  check(thumb2?.ok === true, "🔴 …and the phone-uploaded photo is still decoded and drawn after restart");
+  await page2.screenshot({ path: SHOTS + "I1-desktop-after-restart.png" });
+  await restarted.close().catch(() => undefined);
+
+  // Everything below continues on a fresh window.
+  const relaunched = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+  page = await relaunched.firstWindow();
+  await signIn(page, "Cashier One", "1111");
+  await page.locator('[data-testid="tab-products"]').click();
+  await page.locator('[data-testid="product-row"]').first().waitFor({ timeout: 30000 });
+  // 🔴 `app` IS REASSIGNED TOO, not just `closable`. Section 7b opens a browser window through
+  // this handle, and the original app was closed above — using the stale one would fail with a
+  // dead-target error that looks nothing like its cause.
+  app = relaunched;
+  closable = relaunched;
 
   // ── 7 · Cancel closes the session ────────────────────────────────────────────────────────────
   log("owner cancels a pairing session");
@@ -471,6 +635,99 @@ try {
   }
   check(closed, "🔴 Cancel really closes the surface — the URL no longer serves");
   await page.screenshot({ path: SHOTS + "H8-desktop-after-cancel.png" });
+
+  // ── 7b · The WHOLE journey in a real browser, on its own session ─────────────────────────────
+  //
+  // 🔴 A SEPARATE SESSION, AND THE ONE-PHONE RULE IS WHY. Everything above drives the phone
+  // surface with `fetch`, which CLAIMS the session for that client — a browser window arriving
+  // afterwards would be a second phone and correctly refused. So the UI journey gets its own QR,
+  // and the browser is its only claimant. That also makes this the end-to-end proof: capture,
+  // decode, correct and Save, all through the real controls.
+  log("driving the mobile form in a real browser window, end to end");
+  const uiPairing = await openPairing(page, "I2-desktop-waiting-for-phone", () =>
+    testid(page, "add-product-phone").click(),
+  );
+  const uiUrl = await decodeQr(uiPairing.png);
+  assert(uiUrl, "the UI-journey pairing QR could not be decoded");
+
+  await withPhoneWindow(app, uiUrl, async (phone) => {
+    await phone.locator('[data-testid="phone-photo-take"]').waitFor({ timeout: 20000 });
+    await phone.screenshot({ path: SHOTS + "I2-mobile-form-top.png" });
+
+    const controls = await phone.evaluate(() => {
+      const q = (id) => document.querySelector(`[data-testid="${id}"]`);
+      const bc = q("phone-barcode");
+      const photoInput = q("phone-photo-input");
+      return {
+        photoTake: Boolean(q("phone-photo-take")),
+        photoChoose: Boolean(q("phone-photo-choose")),
+        barcodeScan: Boolean(q("phone-barcode-scan")),
+        accept: photoInput?.getAttribute("accept") ?? null,
+        capture: photoInput?.getAttribute("capture") ?? null,
+        barcodeEditable: Boolean(bc) && !bc.readOnly && !bc.disabled,
+        dir: document.documentElement.dir,
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+    check(controls.photoTake && controls.photoChoose, "the rendered mobile page shows both photo actions");
+    check(controls.barcodeScan, "…and the barcode capture action");
+    check(controls.accept === "image/*", `the photo input accepts images (${controls.accept})`);
+    check(controls.capture === "environment", `…with capture=environment (${controls.capture})`);
+    check(controls.barcodeEditable, "🔴 the barcode field is editable in the rendered page");
+    check(controls.dir === "rtl", `the mobile page renders RTL (${controls.dir})`);
+    check(controls.overflow <= 1, `🔴 no horizontal overflow at 390px (${controls.overflow}px)`);
+
+    // The page's OWN script does the uploading — this sets a file on the real input.
+    await phone.locator('[data-testid="phone-photo-input"]').setInputFiles(
+      join(APP, "tests", "fixtures", "photos", "shelf.jpg"),
+    );
+    await phone.locator('[data-testid="phone-photo-preview"]').waitFor({ state: "visible", timeout: 30000 });
+    const photoNote = (await phone.locator('[data-testid="phone-photo-status"]').innerText()).trim();
+    check(photoNote.includes("جاهزة"), `the page reports the photo is ready ("${photoNote}")`);
+    await phone.screenshot({ path: SHOTS + "I2-mobile-photo-accepted.png" });
+
+    await phone.locator('[data-testid="phone-barcode-input"]').setInputFiles(
+      join(APP, "tests", "fixtures", "barcodes", "ean13.png"),
+    );
+    await phone.waitForFunction(
+      () => (document.querySelector('[data-testid="phone-barcode"]')?.value ?? "") === "5901234123457",
+      undefined,
+      { timeout: 30000 },
+    );
+    const bcNote = (await phone.locator('[data-testid="phone-barcode-status"]').innerText()).trim();
+    check(bcNote.length > 0, `the page reports the decode ("${bcNote.slice(0, 60)}")`);
+    await phone.screenshot({ path: SHOTS + "I2-mobile-barcode-decoded.png" });
+
+    // 🔴 STILL EDITABLE — typed over by hand, which is the common path.
+    await phone.locator('[data-testid="phone-barcode"]').fill("4006381333931");
+    check(
+      (await phone.locator('[data-testid="phone-barcode"]').inputValue()) === "4006381333931",
+      "🔴 the merchant can correct the decoded barcode by hand",
+    );
+
+    await phone.locator('[data-testid="phone-nameAr"]').fill("صنف من واجهة الهاتف");
+    await phone.locator('[data-testid="phone-price"]').fill("8.50");
+    await phone.screenshot({ path: SHOTS + "I2-mobile-barcode-corrected.png" });
+
+    // Save through the page's own button.
+    await phone.locator('[data-testid="phone-save"]').click();
+    await phone.locator('[data-testid="phone-saved"]').waitFor({ state: "visible", timeout: 30000 });
+    const doneText = (await phone.locator('[data-testid="phone-saved"]').innerText()).trim();
+    check(doneText.includes("تم حفظ"), `🔴 the mobile page shows its own success state ("${doneText}")`);
+    await phone.screenshot({ path: SHOTS + "I2-mobile-saved.png" });
+  });
+
+  // The desktop dialog should now report the save and close cleanly.
+  await testid(page, "phone-dialog-saved").waitFor({ state: "visible", timeout: 30000 });
+  await page.screenshot({ path: SHOTS + "I2-desktop-saved-from-ui.png" });
+  await testid(page, "phone-dialog-close").click();
+  await testid(page, "phone-dialog").waitFor({ state: "detached", timeout: 30000 });
+
+  await page.waitForTimeout(500);
+  const uiList = await page.locator(".catalog-admin").innerText();
+  check(uiList.includes("صنف من واجهة الهاتف"), "🔴 the product created through the mobile UI is on the desktop");
+  check(uiList.includes("4006381333931"), "…with the hand-corrected barcode");
+  await page.screenshot({ path: SHOTS + "I2-desktop-list-after-ui-save.png" });
 
   // ── 8 · The cashier has no mutation capability ───────────────────────────────────────────────
   //
@@ -569,7 +826,7 @@ try {
     console.log("  (could not photograph the failure)");
   }
 } finally {
-  await app.close().catch(() => undefined);
+  await closable.close().catch(() => undefined);
 }
 
 console.log("");

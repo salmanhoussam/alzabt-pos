@@ -102,6 +102,29 @@ function request(
   });
 }
 
+/** The served page's HTML — `request` keeps only the status, so this reads the body. */
+async function rawPage(host: string, port: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket: Socket = connect({ host, port }, () =>
+      socket.write(
+        `GET /m/${TOKEN} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: iPhone\r\nConnection: close\r\n\r\n`,
+      ),
+    );
+    let data = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (c) => (data += c));
+    socket.on("error", reject);
+    socket.on("close", () => {
+      const split = data.indexOf("\r\n\r\n");
+      resolve(split >= 0 ? data.slice(split + 4) : "");
+    });
+    socket.setTimeout(8000, () => {
+      socket.destroy();
+      reject(new Error("timed out reading the phone page"));
+    });
+  });
+}
+
 const submission = (over: Record<string, unknown> = {}) =>
   JSON.stringify({
     product: { nameAr: "مفتاح", nameEn: "", sku: "", price: "12.50", baseUnit: "piece", ...(over.product ?? {}) },
@@ -894,6 +917,262 @@ describe("DomainError is still what a refusal looks like", () => {
           null,
         ),
       ).toThrow(DomainError);
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
+
+describe("I2 — the mobile media controls the page actually renders", () => {
+  it("offers photo capture AND library choice, and a barcode capture", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+      const html = await rawPage(dto.host, dto.port);
+      for (const id of [
+        "phone-photo-take",
+        "phone-photo-choose",
+        "phone-photo-input",
+        "phone-photo-pick",
+        "phone-photo-status",
+        "phone-barcode-scan",
+        "phone-barcode-input",
+        "phone-barcode-status",
+      ]) {
+        expect(html, id).toContain(`data-testid="${id}"`);
+      }
+      // The barcode text field is still there and still editable — no `readonly`, no `disabled`.
+      expect(html).toContain('data-testid="phone-barcode"');
+      expect(/data-testid="phone-barcode"[^>]*\b(readonly|disabled)\b/.test(html)).toBe(false);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  /**
+   * 🔴 THE CAPTURE ATTRIBUTES ARE THE WHOLE COMPATIBILITY STORY. `accept="image/*"` with `capture`
+   * is a FILE INPUT: it opens the camera on iOS and Android and needs no secure context. The live
+   * camera and in-browser scanner APIs are secure-context only and are undefined on a plain-HTTP
+   * LAN origin on BOTH platforms, which is why this page must never reach for them.
+   */
+  it("🔴 uses file inputs with accept+capture, and names no live-camera API anywhere", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+      const html = await rawPage(dto.host, dto.port);
+      expect((html.match(/accept="image\/\*"/g) ?? []).length).toBeGreaterThanOrEqual(3);
+      expect((html.match(/capture="environment"/g) ?? []).length).toBeGreaterThanOrEqual(2);
+      expect(html).not.toMatch(/getUserMedia|BarcodeDetector|mediaDevices/);
+      // And still entirely local — no CDN, no remote font, no external anything.
+      expect(html).not.toMatch(/https?:\/\//);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("🔴 an EDIT with an existing photo SAYS it will be kept; a NEW product does not", async () => {
+    const f = fixture();
+    try {
+      f.h.service.login(OWNER.cashierId, OWNER.pin);
+      const p = f.h.service.createProduct({ nameAr: "مفتاح", nameEn: null, sku: null, price: "10.00", baseUnit: "piece" });
+      f.h.service.setProductPrimaryImage({
+        productId: p.id,
+        bytes: readFileSync(join(PHOTOS, "shelf.jpg")),
+        mime: "image/jpeg",
+        widthPx: 800,
+        heightPx: 600,
+        origin: "desktop",
+      });
+      const dto = await f.bridge.start(f.h.service.authorizePhoneSession("EDIT_PRODUCT", p.id));
+      const html = await rawPage(dto.host, dto.port);
+      // 🔴 The merchant is told the existing photo survives an untouched Save — the UI half of
+      // "absent is not null" for media.
+      expect(html).toContain('data-testid="phone-photo-current"');
+      expect(html).toContain("للصنف صورة حالية");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("a NEW product's form does not claim an existing photo", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+      const html = await rawPage(dto.host, dto.port);
+      expect(html).not.toContain('data-testid="phone-photo-current"');
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  /**
+   * 🔴 THE FULL I2 JOURNEY, THROUGH THE REAL ENDPOINTS: capture a barcode, get a decode, CORRECT
+   * it by hand, attach a photo, and save once. The correction is the point — the decoder reads
+   * roughly two labels in three, so a flow that only worked when it guessed right would fail a
+   * merchant a third of the time.
+   */
+  it("🔴 decode → MANUAL CORRECTION → save stores the corrected value, not the decoded one", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+
+      const scan = await request(dto.host, dto.port, "POST", `/m/${TOKEN}/barcode`, readFileSync(join(BARCODES, "ean13.png")));
+      expect(scan.status).toBe(200);
+      expect(scan.json().value).toBe("5901234123457");
+
+      await request(dto.host, dto.port, "POST", `/m/${TOKEN}/photo`, readFileSync(join(PHOTOS, "shelf.jpg")));
+
+      // The merchant edits the field before saving — a different, valid EAN-13.
+      const corrected = "4006381333931";
+      const saved = await request(
+        dto.host,
+        dto.port,
+        "POST",
+        `/m/${TOKEN}`,
+        submission({ master: { barcode: corrected } }),
+      );
+      expect(saved.status).toBe(200);
+
+      const row = f.h.db.prepare("SELECT barcode FROM catalog_products").get() as { barcode: string };
+      expect(row.barcode).toBe(corrected);
+      expect(row.barcode).not.toBe("5901234123457");
+      expect(countImages(f.h)).toBe(1);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("a second barcode capture replaces the first decode result", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+      const a = await request(dto.host, dto.port, "POST", `/m/${TOKEN}/barcode`, readFileSync(join(BARCODES, "ean13.png")));
+      const b = await request(dto.host, dto.port, "POST", `/m/${TOKEN}/barcode`, readFileSync(join(BARCODES, "ean8.png")));
+      expect(a.json().value).toBe("5901234123457");
+      expect(b.json().value).toBe("96385074");
+      // Whatever the form last held is what Save stores.
+      await request(dto.host, dto.port, "POST", `/m/${TOKEN}`, submission({ master: { barcode: "96385074" } }));
+      const row = f.h.db.prepare("SELECT barcode FROM catalog_products").get() as { barcode: string };
+      expect(row.barcode).toBe("96385074");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("🔴 Code 128's case survives the whole journey to storage", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+      const scan = await request(dto.host, dto.port, "POST", `/m/${TOKEN}/barcode`, readFileSync(join(BARCODES, "code128.png")));
+      expect(scan.json().value).toBe("Alz-7781-A");
+      await request(dto.host, dto.port, "POST", `/m/${TOKEN}`, submission({ master: { barcode: String(scan.json().value) } }));
+      const row = f.h.db.prepare("SELECT barcode FROM catalog_products").get() as { barcode: string };
+      expect(row.barcode).toBe("Alz-7781-A");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("🔴 a failed decode blocks nothing — the merchant types it and saves", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+      const miss = await request(dto.host, dto.port, "POST", `/m/${TOKEN}/barcode`, readFileSync(join(PHOTOS, "shelf.jpg")));
+      expect(miss.status).toBe(200);
+      expect(miss.json().found).toBe(false);
+
+      const saved = await request(dto.host, dto.port, "POST", `/m/${TOKEN}`, submission({ master: { barcode: "96385074" } }));
+      expect(saved.status).toBe(200);
+      const row = f.h.db.prepare("SELECT barcode FROM catalog_products").get() as { barcode: string };
+      expect(row.barcode).toBe("96385074");
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("🔴 a failed photo upload, then a retry, then Save — the draft survives throughout", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+      const bad = await request(dto.host, dto.port, "POST", `/m/${TOKEN}/photo`, Buffer.from("rubbish"));
+      expect(bad.status).toBe(422);
+      expect(f.bridge.hasStagedPhoto()).toBe(false);
+
+      const good = await request(dto.host, dto.port, "POST", `/m/${TOKEN}/photo`, readFileSync(join(PHOTOS, "shelf.jpg")));
+      expect(good.status).toBe(200);
+
+      const saved = await request(dto.host, dto.port, "POST", `/m/${TOKEN}`, submission({ product: { nameAr: "مفتاح أحمر" } }));
+      expect(saved.status).toBe(200);
+      const row = f.h.db.prepare("SELECT name_ar FROM catalog_products").get() as { name_ar: string };
+      expect(row.name_ar).toBe("مفتاح أحمر");
+      expect(countImages(f.h)).toBe(1);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("🔴 media actions alone create NOTHING durable", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+      await request(dto.host, dto.port, "POST", `/m/${TOKEN}/photo`, readFileSync(join(PHOTOS, "shelf.jpg")));
+      await request(dto.host, dto.port, "POST", `/m/${TOKEN}/barcode`, readFileSync(join(BARCODES, "ean13.png")));
+      expect(countProducts(f.h)).toBe(0);
+      expect(countImages(f.h)).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
+
+describe("I2 — the online catalogue still sees a phone-created product", () => {
+  /**
+   * 🔴 THE EXPORT IS THE REASON ANY OF THIS ENRICHMENT EXISTS. A product entered on a phone must
+   * reach the website package exactly like one typed at the till: its barcode, its normalized
+   * image, and a SHA the catalogue publishes and the file matches. Slice G proved the export;
+   * this proves a phone-originated product is not a special case it misses.
+   */
+  it("🔴 a phone-created product exports with its barcode, image and matching SHA — no base64", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+      await request(dto.host, dto.port, "POST", `/m/${TOKEN}/photo`, readFileSync(join(PHOTOS, "shelf.jpg")));
+      const saved = await request(
+        dto.host,
+        dto.port,
+        "POST",
+        `/m/${TOKEN}`,
+        submission({
+          product: { nameAr: "صنف من الهاتف", price: "7.25" },
+          master: { barcode: "5901234123457", isOnlineVisible: true },
+        }),
+      );
+      expect(saved.status).toBe(200);
+
+      const snapshot = f.h.service.onlineCatalogSnapshot();
+      const doc = JSON.parse(JSON.stringify(snapshot.document)) as {
+        products: Array<Record<string, unknown>>;
+      };
+      const product = doc.products.find((p) => p.name_ar === "صنف من الهاتف");
+      expect(product, "the phone-created product is in the export").toBeDefined();
+      expect(product!.barcode).toBe("5901234123457");
+      expect(product!.price).toBe("7.25");
+
+      const image = product!.image as Record<string, unknown> | null;
+      expect(image, "…and it carries its image").not.toBeNull();
+      expect(String(image!.sha256)).toMatch(/^[0-9a-f]{64}$/);
+      expect(String(image!.file)).toMatch(/^images\/product-[0-9a-f]{64}\.(jpg|png)$/);
+      expect(Number(image!.width)).toBeGreaterThan(0);
+
+      // 🔴 THE SHA THE CATALOGUE PUBLISHES IS THE SHA OF THE STORED BYTES.
+      const row = f.h.db.prepare("SELECT sha256_hex, origin FROM catalog_product_images").get() as Record<string, unknown>;
+      expect(image!.sha256).toBe(row.sha256_hex);
+      expect(row.origin).toBe("phone");
+
+      // 🔴 NO BASE64 ANYWHERE — the export carries real files, never bytes inside JSON.
+      const asText = JSON.stringify(doc);
+      expect(asText).not.toMatch(/base64|data:image/i);
+      expect(asText.length).toBeLessThan(100_000);
     } finally {
       await f.cleanup();
     }
