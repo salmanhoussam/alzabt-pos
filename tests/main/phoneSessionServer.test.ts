@@ -110,6 +110,14 @@ async function withServer(
   }
 }
 
+/** The policy as the server really sent it. */
+const cspOf = (headers: string): string =>
+  /Content-Security-Policy:\s*([^\r\n]+)/i.exec(headers)?.[1]?.trim() ?? "";
+
+/** One directive's source list, read out of the policy rather than matched across the whole string. */
+const directive = (csp: string, name: string): string =>
+  new RegExp(`(?:^|;)\\s*${name}\\s([^;]*)`, "i").exec(csp)?.[1]?.trim() ?? "";
+
 describe("the happy path", () => {
   it("serves the page to the first phone that presents the token", async () => {
     const s = session();
@@ -157,16 +165,74 @@ describe("the happy path", () => {
     const s = session();
     await withServer(s, async (r) => {
       const res = await get(r.port, `/m/${TOKEN}`);
-      const csp = /Content-Security-Policy:\s*([^\r\n]+)/i.exec(res.headers)?.[1] ?? "";
+      const csp = cspOf(res.headers);
       expect(csp).not.toBe("");
 
       // The directive itself, read out rather than matched loosely across the whole header.
-      const imgSrc = /(?:^|;)\s*img-src\s([^;]*)/i.exec(csp)?.[1]?.trim() ?? "";
-      expect(imgSrc).toBe("'self' data:");
-      expect(imgSrc).not.toMatch(/blob:/);
+      expect(directive(csp, "img-src")).toBe("'self' data:");
       // And nowhere else in the policy either — a `default-src blob:` would reach images too.
       expect(csp).not.toMatch(/blob:/);
       expect(csp).toMatch(/default-src 'none'/);
+    });
+  });
+
+  /**
+   * 🔴 `connect-src` IS THE DIRECTIVE WHOSE ABSENCE BROKE THIS PAGE IN EVERY REAL BROWSER.
+   *
+   * It has no default of its own: unset, the browser falls back to `default-src`, which is
+   * `'none'` here — so every XHR the page makes is refused before it leaves the renderer. The
+   * photo upload, the barcode upload and the Save all travel that way, so the mobile form could
+   * not do ANY of its work. Run 38917068064 caught it only because a real browser was finally
+   * driving the page; three slices of `fetch`-from-Node proofs never could, because Node enforces
+   * no policy.
+   *
+   * So it is pinned here in both directions — present and narrow — rather than merely present.
+   * A later `connect-src *`, a bare scheme, or a remote origin would re-open exactly the kind of
+   * reach this offline-first product exists to refuse.
+   */
+  it("🔴 connect-src is exactly 'self' — present, and not widened", async () => {
+    const s = session();
+    await withServer(s, async (r) => {
+      const res = await get(r.port, `/m/${TOKEN}`);
+      const csp = cspOf(res.headers);
+
+      // Present at all. Absent, it silently inherits default-src 'none' and nothing works.
+      expect(csp).toMatch(/connect-src/);
+      // And exactly same-origin — not a wildcard, not a scheme, not a host.
+      expect(directive(csp, "connect-src")).toBe("'self'");
+    });
+  });
+
+  /**
+   * 🔴 THE WHOLE POLICY, PINNED AS A SET. The two tests above guard the directives that have each
+   * already cost a Windows gate. This one guards the policy's SHAPE: that no directive anywhere in
+   * it reaches the network, whichever one a future edit touches.
+   */
+  it("🔴 no directive anywhere admits a wildcard, a bare scheme or a remote origin", async () => {
+    const s = session();
+    await withServer(s, async (r) => {
+      const res = await get(r.port, `/m/${TOKEN}`);
+      const csp = cspOf(res.headers);
+
+      expect(csp).not.toMatch(/\*/);
+      expect(csp).not.toMatch(/https?:/);
+      // `data:` is admitted for images and for nothing else — asserted per directive, because a
+      // `script-src data:` would be a code-execution channel wearing the same four characters.
+      for (const part of csp.split(";")) {
+        const name = part.trim().split(/\s+/)[0] ?? "";
+        if (name !== "img-src") expect(part, `data: outside img-src in "${part.trim()}"`).not.toMatch(/data:/);
+      }
+      expect(csp).not.toMatch(/unsafe-eval/);
+      expect(directive(csp, "default-src")).toBe("'none'");
+      expect(directive(csp, "base-uri")).toBe("'none'");
+      expect(directive(csp, "form-action")).toBe("'self'");
+
+      // Every source expression in the policy is one of the few words we intend to allow.
+      const allowed = new Set(["'none'", "'self'", "'unsafe-inline'", "data:"]);
+      for (const part of csp.split(";")) {
+        const [, ...sources] = part.trim().split(/\s+/);
+        for (const src of sources) expect(allowed.has(src), `unexpected CSP source: ${src}`).toBe(true);
+      }
     });
   });
 

@@ -140,8 +140,25 @@ const MEDIA_FAILED_AR = "تعذّرت معالجة الصورة. حاول مرة
 const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   // 🔴 The served page must be as offline as the till. `default-src 'none'` with inline style/script
   // only: no CDN, no font service, no analytics, and no way for a future edit to add one quietly.
+  //
+  // 🔴 `connect-src 'self'` IS LOAD-BEARING, AND ITS ABSENCE MADE THIS PAGE UNUSABLE IN A REAL
+  // BROWSER FOR THREE SLICES. `connect-src` has no default of its own: when it is unset the
+  // browser falls back to `default-src`, which is `'none'`, so EVERY XMLHttpRequest from this page
+  // was refused before it left the renderer. That is the photo upload, the barcode upload AND the
+  // Save — the whole point of the page. Run 38917068064 has the browser saying it outright:
+  //
+  //   Connecting to '…/m/<token>/photo' violates the following Content Security Policy directive:
+  //   "default-src 'none'". Note that 'connect-src' was not explicitly set, so 'default-src' is
+  //   used as a fallback.
+  //
+  // Nothing caught it because every earlier proof of this surface — H2's and I1's — drove it with
+  // `fetch` from Node, which has no CSP at all. A page is not proven by a client that cannot
+  // enforce the page's own policy.
+  //
+  // `'self'` and nothing else: the page may reach the session it was served from, and no other
+  // origin. It is not a wildcard, not a scheme, and it grants nothing to images.
   "Content-Security-Policy":
-    "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+    "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'",
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   // Nothing here should ever be cached on a phone — the token is in the URL.
