@@ -61,6 +61,13 @@ export interface PhoneSessionServerDeps {
    * which is what every H1-era test gets, so none of them can write a product by accident.
    */
   readonly save?: (body: Buffer) => PhoneSaveOutcome;
+  /**
+   * Slice I1. Stage a product photo for this session. NOTHING DURABLE HAPPENS HERE — the bytes are
+   * validated and normalized through F's pipeline and held against the session until Save.
+   */
+  readonly stagePhoto?: (body: Buffer) => PhoneMediaOutcome;
+  /** Slice I1. Read a barcode out of a photograph. Stores nothing at all. */
+  readonly scanBarcode?: (body: Buffer) => Promise<PhoneMediaOutcome>;
   readonly now?: () => number;
   readonly logger?: Logger;
   /** Called once, when the session ends for any reason. The desktop refreshes on this. */
@@ -84,6 +91,14 @@ export interface PhonePageView {
  */
 export type PhoneSaveOutcome =
   | { readonly ok: true }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/**
+ * What a media endpoint answers. `data` is the small contract the form reads back — never bytes,
+ * never a path, never a filename.
+ */
+export type PhoneMediaOutcome =
+  | { readonly ok: true; readonly data: Record<string, unknown> }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
 export interface RunningPhoneSessionServer {
@@ -117,6 +132,9 @@ const SESSION_CLOSED_AR = "انتهت صلاحية هذا الرمز. اطلب �
 const ALREADY_SAVED_AR = "تم حفظ هذا الصنف مسبقاً. لا حاجة لإعادة الحفظ.";
 const SAVE_UNAVAILABLE_AR = "الحفظ من الهاتف غير متاح على هذا الصندوق.";
 const SAVE_FAILED_AR = "تعذّر الحفظ. حاول مرة أخرى أو أكمل من الصندوق.";
+const TOO_LARGE_AR = "الصورة كبيرة جداً. جرّب صورة أصغر.";
+const MEDIA_UNAVAILABLE_AR = "رفع الصور من الهاتف غير متاح على هذا الصندوق.";
+const MEDIA_FAILED_AR = "تعذّرت معالجة الصورة. حاول مرة أخرى.";
 
 /** Headers on every response. The phone page is self-contained; nothing external may load. */
 const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
@@ -219,7 +237,23 @@ export async function startPhoneSessionServer(
     }
 
     if (method === "POST") {
+      if (route.kind === "photo") {
+        handleMedia(req, res, deps.stagePhoto ? (b) => deps.stagePhoto!(b) : undefined, "photo");
+        return;
+      }
+      if (route.kind === "barcode") {
+        handleMedia(req, res, deps.scanBarcode, "barcode");
+        return;
+      }
       handleSave(req, res);
+      return;
+    }
+
+    // 🔴 THE MEDIA ROUTES ARE POST-ONLY. A GET on them is not a page and must not fall through to
+    // serving the form, which would make `/m/<token>/photo` a second way to reach it.
+    if (route.kind !== "page") {
+      drain(req);
+      spendMalformed(res, "method");
       return;
     }
 
@@ -263,32 +297,12 @@ export async function startPhoneSessionServer(
       return;
     }
 
-    const chunks: Buffer[] = [];
-    let received = 0;
-    let aborted = false;
-
-    req.on("data", (chunk: Buffer) => {
-      if (aborted) return;
-      received += chunk.length;
-      if (received > PHONE_REQUEST_BODY_CAP_BYTES) {
-        aborted = true;
-        log?.warn("phone-session-body-cap", { received });
-        req.destroy();
-        res.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-
-    req.on("aborted", () => {
-      aborted = true;
-    });
-
-    req.on("end", () => {
-      if (aborted) return;
+    // 🔴 THE SAME CAPPED READER THE MEDIA ROUTES USE. This used to hand-roll its own counting
+    // loop; one implementation means one place where `Content-Length` is distrusted.
+    readCappedBody(req, res, (body) => {
       let outcome: PhoneSaveOutcome;
       try {
-        outcome = save(Buffer.concat(chunks));
+        outcome = save(body);
       } catch (err) {
         // `save` is written to return a refusal rather than throw; this is the backstop, and it
         // deliberately tells the phone nothing about what went wrong internally.
@@ -300,8 +314,8 @@ export async function startPhoneSessionServer(
       if (!outcome.ok) {
         // 🔴 A REFUSED SAVE LEAVES THE SESSION LIVE. The merchant fixes the price and saves again;
         // ending the session on a validation error would force them back to the till for a new QR
-        // and lose everything they typed. Nothing durable was written, which is the invariant that
-        // makes keeping it open safe.
+        // and lose everything they typed — including a staged photo. Nothing durable was written,
+        // which is the invariant that makes keeping it open safe.
         log?.info("phone-session-save-refused", { code: outcome.code });
         json(res, 422, { ok: false, code: outcome.code, message: outcome.message });
         return;
@@ -313,6 +327,112 @@ export async function startPhoneSessionServer(
       // The surface closes behind a successful save: the token is spent, the listener shuts, and a
       // replay cannot even connect.
       void stop("completed");
+    });
+  }
+
+  /**
+   * Read a request body with a hard cap, or destroy the socket.
+   *
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 TWO CHECKS, AND THE SECOND IS THE REAL ONE. `Content-Length` is consulted first so an
+   * obviously oversized upload is refused before a byte of it is read — but a hostile client
+   * simply lies about that header, so the bytes are ALSO counted as they arrive and the socket is
+   * destroyed the moment the real total passes the cap. Trusting the declaration alone is how an
+   * "unlimited" upload gets through a limit that looks enforced.
+   *
+   * 🔴 THE CAP IS THE TRANSPORT CAP, NOT F's SOURCE CAP. F allows a 32 MB source because a desktop
+   * picker reads a trusted local file. This is an untrusted LAN socket, so it keeps the 12 MB the
+   * phone surface has had since H1 — tighter, deliberately, and not a contradictory second limit:
+   * a body that passes here is then held to every one of F's own limits unchanged.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  function readCappedBody(
+    req: IncomingMessage,
+    res: ServerResponse,
+    then: (body: Buffer) => void,
+  ): void {
+    const declared = Number(req.headers["content-length"] ?? "");
+    if (Number.isFinite(declared) && declared > PHONE_REQUEST_BODY_CAP_BYTES) {
+      log?.warn("phone-session-body-declared-too-large", { declared });
+      drain(req);
+      json(res, 413, { ok: false, code: "TOO_LARGE", message: TOO_LARGE_AR });
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let received = 0;
+    let aborted = false;
+
+    req.on("data", (chunk: Buffer) => {
+      if (aborted) return;
+      received += chunk.length;
+      if (received > PHONE_REQUEST_BODY_CAP_BYTES) {
+        aborted = true;
+        log?.warn("phone-session-body-cap", { received });
+        // Answer before destroying, so the phone gets a sentence rather than a dead socket.
+        try {
+          json(res, 413, { ok: false, code: "TOO_LARGE", message: TOO_LARGE_AR });
+        } catch {
+          // The socket may already be gone; the destroy below is what matters.
+        }
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("aborted", () => {
+      aborted = true;
+    });
+    req.on("end", () => {
+      if (aborted) return;
+      then(Buffer.concat(chunks));
+    });
+  }
+
+  /**
+   * One shape for both media endpoints.
+   *
+   * 🔴 NEITHER OF THEM ENDS THE SESSION, on success OR on failure. A merchant photographs a label,
+   * the decoder misses (roughly one difficult photo in three does), and they take another — losing
+   * the session there would cost them everything they had already typed. Only a successful SAVE
+   * spends the session.
+   */
+  function handleMedia(
+    req: IncomingMessage,
+    res: ServerResponse,
+    run: ((body: Buffer) => PhoneMediaOutcome | Promise<PhoneMediaOutcome>) | undefined,
+    kind: string,
+  ): void {
+    if (!run) {
+      drain(req);
+      json(res, 503, { ok: false, code: "NOT_AVAILABLE", message: MEDIA_UNAVAILABLE_AR });
+      return;
+    }
+    // A session that has already saved is finished; its media routes close with it.
+    if (session.savedCount > 0) {
+      drain(req);
+      json(res, 409, { ok: false, code: "ALREADY_SAVED", message: ALREADY_SAVED_AR });
+      return;
+    }
+
+    readCappedBody(req, res, (body) => {
+      void (async () => {
+        let outcome: PhoneMediaOutcome;
+        try {
+          outcome = await run(body);
+        } catch (err) {
+          log?.error("phone-session-media-fault", { kind, error: err });
+          json(res, 500, { ok: false, code: "INTERNAL", message: MEDIA_FAILED_AR });
+          return;
+        }
+        if (!outcome.ok) {
+          log?.info("phone-session-media-refused", { kind, code: outcome.code });
+          json(res, 422, { ok: false, code: outcome.code, message: outcome.message });
+          return;
+        }
+        log?.info("phone-session-media-ok", { kind });
+        json(res, 200, { ok: true, ...outcome.data });
+      })();
     });
   }
 

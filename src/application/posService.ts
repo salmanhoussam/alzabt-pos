@@ -317,6 +317,20 @@ const PHONE_PROVENANCE: ProductWriteProvenance = Object.freeze({ origin: "phone_
  * typed. A phone that hard-coded a unit list would be a second contract the moment `BASE_UNITS`
  * changed.
  */
+/**
+ * A photo the phone uploaded and the POS has normalized, waiting for Save. Slice I1.
+ *
+ * 🔴 IT IS NOT A PRODUCT IMAGE YET. These are F's normalized bytes held in memory against one
+ * session — no row, no file, no draft table, nothing to orphan. It becomes durable only inside
+ * `savePhoneProduct`'s transaction, and it is dropped whenever the session ends for any reason.
+ */
+export interface StagedPhonePhoto {
+  readonly bytes: Buffer;
+  readonly mime: ImageMime;
+  readonly widthPx: number;
+  readonly heightPx: number;
+}
+
 export interface PhoneFormData {
   readonly action: PhoneSessionAction;
   readonly units: readonly string[];
@@ -1352,8 +1366,51 @@ export class PosService {
     spec: PhoneSessionSpec,
     submission: PhoneSubmission,
     servedMaster: MasterForm | null,
+    stagedPhoto: StagedPhonePhoto | null = null,
   ): AdminProductRow {
     this.requirePhoneOperator(spec);
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // 🔴 THE PRODUCT AND ITS PHOTO COMMIT TOGETHER OR NOT AT ALL. Slice I1.
+    //
+    // `createProduct` and `setProductPrimaryImage` each open their own transaction. Called one
+    // after the other, a failure in the second would leave a product the merchant asked to have a
+    // photo WITHOUT one, reported as a success — and on a phone, where the photo is often the
+    // whole reason they walked to the shelf.
+    //
+    // better-sqlite3 nests `db.transaction()` via SAVEPOINT, which was measured rather than
+    // assumed: an inner transaction that commits is rolled back when the outer one throws. So an
+    // outer transaction around both calls makes the pair atomic with NO architectural change, no
+    // new table and no migration.
+    //
+    // When there is no staged photo this is one empty wrapper around the write that would have
+    // happened anyway.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    const { transact } = this.requireAuditedStack();
+    return transact((): AdminProductRow => {
+      const row = this.writePhoneProduct(spec, submission, servedMaster);
+      if (stagedPhoto) {
+        this.setProductPrimaryImage({
+          productId: row.id,
+          bytes: stagedPhoto.bytes,
+          mime: stagedPhoto.mime,
+          widthPx: stagedPhoto.widthPx,
+          heightPx: stagedPhoto.heightPx,
+          // 🔴 TRUTHFULLY 'phone'. The column has admitted this value since migration 9, before
+          // any phone existed, so a support question about where a photo came from has an answer.
+          origin: "phone",
+        });
+      }
+      return row;
+    });
+  }
+
+  /** The product half of a phone save. Always runs inside `savePhoneProduct`'s transaction. */
+  private writePhoneProduct(
+    spec: PhoneSessionSpec,
+    submission: PhoneSubmission,
+    servedMaster: MasterForm | null,
+  ): AdminProductRow {
 
     if (spec.action === "NEW_PRODUCT") {
       if (spec.productId !== null) {

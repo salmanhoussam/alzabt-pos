@@ -307,15 +307,30 @@ export function isLoopbackHost(host: string): boolean {
  * request text onto a directory.
  */
 export type PhoneRoute =
+  /** The form itself: GET serves it, POST saves it. */
   | { readonly kind: "page"; readonly token: string }
+  /** Slice I1. POST an image to stage a product photo. Nothing durable happens here. */
+  | { readonly kind: "photo"; readonly token: string }
+  /** Slice I1. POST an image to be read for a barcode. Nothing is stored at all. */
+  | { readonly kind: "barcode"; readonly token: string }
   | { readonly kind: "unknown" };
 
+/**
+ * 🔴 AN ENUMERATED SUFFIX, NOT A PATH SEGMENT TAKEN FROM THE REQUEST. The three routes are matched
+ * by a literal alternation, so there is no captured fragment that could become a filename, a key
+ * or a method name downstream — `/m/<token>/../../etc/passwd` simply does not match. Slice I1 adds
+ * two media routes and NOT a generic `/upload`, `/files` or `/api/*`, for exactly this reason: a
+ * surface that names its operations cannot be asked for a different one.
+ */
 export function parseRoute(rawUrl: string): PhoneRoute {
   // Only the path matters; a query string is ignored rather than parsed, since no route takes one.
   const path = rawUrl.split("?")[0] ?? "";
-  const m = /^\/m\/([0-9a-f]{64,})$/.exec(path);
-  if (m) return { kind: "page", token: m[1]! };
-  return { kind: "unknown" };
+  const m = /^\/m\/([0-9a-f]{64,})(\/photo|\/barcode)?$/.exec(path);
+  if (!m) return { kind: "unknown" };
+  const token = m[1]!;
+  if (m[2] === "/photo") return { kind: "photo", token };
+  if (m[2] === "/barcode") return { kind: "barcode", token };
+  return { kind: "page", token };
 }
 
 /**

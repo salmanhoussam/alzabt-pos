@@ -35,7 +35,9 @@ import {
 import { renderPhoneFormPage } from "./phonePage";
 import { parsePhoneSubmission } from "../domain/phoneSubmission";
 import type { MasterForm } from "../shared/productMasterForm";
-import type { PhoneFormData, PosService } from "../application/posService";
+import type { PhoneFormData, PosService, StagedPhonePhoto } from "../application/posService";
+import type { BarcodeScan } from "./phoneBarcode";
+import type { NormalizedPhoto } from "./photoNormalize";
 import type { Logger } from "./logger";
 import type { PhoneSessionDto, PhoneSessionState } from "../shared/ipcContract";
 
@@ -74,6 +76,19 @@ export interface PhoneSessionBridgeDeps {
   readonly randomToken?: () => string;
   /** Injected so a test need not instantiate 647 KB of WebAssembly to check the lifecycle. */
   readonly renderQr?: (url: string) => Promise<string>;
+  /**
+   * Slice I1. F's pipeline, injected. Absent means this terminal cannot accept a phone photo and
+   * the route answers NOT_AVAILABLE — which is what every pairing-only test gets, so none of them
+   * can stage anything by accident.
+   *
+   * 🔴 IT IS F'S PIPELINE, NOT A SECOND ONE. `main.ts` wires
+   * `assertStorable(normalizeProductPhoto(bytes, electronCodec(nativeImage)))` — the same decode,
+   * EXIF orientation, resize policy, JPEG ladder, transparency rule and output cap the desktop
+   * picker has used since slice F. Nothing about images is reimplemented here.
+   */
+  readonly normalizePhoto?: (bytes: Buffer) => NormalizedPhoto;
+  /** Slice I1. zxing's reader, injected so a test need not load a megabyte of WebAssembly. */
+  readonly decodeBarcode?: (bytes: Buffer) => Promise<BarcodeScan>;
   /** Fixed port for tests; production passes nothing and the OS picks a free one. */
   readonly port?: number;
 }
@@ -90,6 +105,16 @@ export class PhoneSessionBridge {
    * expired. Those two need different messages, so the outcome outlives the session.
    */
   private lastSaved: { readonly id: string; readonly action: PhoneSessionAction } | null = null;
+  /**
+   * The photo this session has uploaded but not yet saved. Slice I1.
+   *
+   * 🔴 MEMORY, BOUND TO THE SESSION, AND CLEARED BY `forget()` — which every end path already runs
+   * (save, cancel, expiry, navigation, app quit, second client, malformed budget). So there is no
+   * end state in which staged bytes outlive their session, and no durable draft that could be
+   * orphaned by a merchant simply walking away. A second upload REPLACES this rather than
+   * accumulating.
+   */
+  private stagedPhoto: StagedPhonePhoto | null = null;
 
   constructor(private readonly deps: PhoneSessionBridgeDeps = {}) {}
 
@@ -147,7 +172,10 @@ export class PhoneSessionBridge {
             save: (body: Buffer): PhoneSaveOutcome => {
               try {
                 const submission = parsePhoneSubmission(body);
-                const row = service.savePhoneProduct(spec, submission, servedMaster);
+                // 🔴 THE STAGED PHOTO JOINS THE SAVE HERE, and the service commits both in ONE
+                // transaction. No staged photo means the product's existing photo is untouched —
+                // absent is not null, for media as much as for text.
+                const row = service.savePhoneProduct(spec, submission, servedMaster, this.stagedPhoto);
                 this.lastSaved = { id: row.id, action: spec.action };
                 return { ok: true };
               } catch (err) {
@@ -158,6 +186,66 @@ export class PhoneSessionBridge {
                 return { ok: false, code: "INTERNAL", message: "تعذّر الحفظ. حاول مرة أخرى." };
               }
             },
+            ...(this.deps.normalizePhoto
+              ? {
+                  stagePhoto: (body: Buffer) => {
+                    try {
+                      // F decides what a valid photo is. Everything — the magic-byte sniff, the
+                      // decode-result check, the orientation fix, the resize and the caps — is
+                      // its code, not a copy of it.
+                      const photo = this.deps.normalizePhoto!(body);
+                      this.stagedPhoto = {
+                        bytes: photo.bytes,
+                        mime: photo.mime,
+                        widthPx: photo.widthPx,
+                        heightPx: photo.heightPx,
+                      };
+                      // 🔴 THE ANSWER CARRIES NO BYTES, NO PATH AND NO FILENAME — only what the
+                      // form needs to say "a photo is ready".
+                      return {
+                        ok: true as const,
+                        data: {
+                          staged: true,
+                          mime: photo.mime,
+                          widthPx: photo.widthPx,
+                          heightPx: photo.heightPx,
+                          byteSize: photo.bytes.length,
+                        },
+                      };
+                    } catch (err) {
+                      if (err instanceof DomainError) {
+                        // 🔴 THE SESSION AND THE DRAFT SURVIVE. A refused photo costs the photo,
+                        // never the form the merchant has been filling in.
+                        return { ok: false as const, code: err.code, message: err.message };
+                      }
+                      this.deps.logger?.error("phone-photo-internal", { error: err });
+                      return { ok: false as const, code: "INTERNAL", message: "تعذّرت معالجة الصورة." };
+                    }
+                  },
+                }
+              : {}),
+            ...(this.deps.decodeBarcode
+              ? {
+                  scanBarcode: async (body: Buffer) => {
+                    try {
+                      const scan = await this.deps.decodeBarcode!(body);
+                      // 🔴 A MISS IS A RESULT, NOT A FAILURE. Roughly one difficult real photo in
+                      // three will not decode, so `found: false` is an ordinary 200 the form shows
+                      // as "type it in" — refusing it would read to the merchant as a fault.
+                      //
+                      // 🔴 AND NOTHING IS PERSISTED. The value goes back as draft text and reaches
+                      // storage only through the normal Save, where `domain/barcode.ts`
+                      // canonicalizes it exactly as a typed one.
+                      return scan.found
+                        ? { ok: true as const, data: { found: true, value: scan.value, format: scan.format } }
+                        : { ok: true as const, data: { found: false } };
+                    } catch (err) {
+                      this.deps.logger?.error("phone-barcode-internal", { error: err });
+                      return { ok: false as const, code: "INTERNAL", message: "تعذّرت قراءة الباركود." };
+                    }
+                  },
+                }
+              : {}),
           }
         : {}),
       now: this.now,
@@ -238,6 +326,13 @@ export class PhoneSessionBridge {
   private forget(_reason: PhoneSessionEndReason): void {
     this.running = null;
     this.session = null;
+    // 🔴 THE STAGED PHOTO DIES WITH THE SESSION, whatever ended it.
+    this.stagedPhoto = null;
+  }
+
+  /** Whether a photo is staged right now. For the desktop and for assertions. */
+  hasStagedPhoto(): boolean {
+    return this.stagedPhoto !== null;
   }
 
   /**

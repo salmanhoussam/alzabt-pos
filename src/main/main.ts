@@ -15,6 +15,8 @@ import { PosService, startupCatalog } from "../application/posService";
 import { PHOTO_EXTENSIONS, createProductPhotoPicker, electronCodec } from "./productPhoto";
 import { writeOnlineCatalogPackage, type PackageFs } from "./onlineCatalogPackage";
 import { PhoneSessionBridge } from "./phoneSessionBridge";
+import { decodeBarcodePhoto } from "./phoneBarcode";
+import { assertStorable, normalizeProductPhoto } from "./photoNormalize";
 import type { OnlineCatalogSnapshot } from "../application/posService";
 import type { OnlineCatalogExportDto } from "../shared/ipcContract";
 import { InvoiceService } from "../application/invoiceService";
@@ -91,6 +93,14 @@ const phoneSessions = new PhoneSessionBridge({
   get service() {
     return posService ?? undefined;
   },
+  /**
+   * 🔴 SLICE F'S PIPELINE, VERBATIM — the same two calls `createProductPhotoPicker` makes for a
+   * desktop photo. The decode, the EXIF orientation fix, the 1600px long edge, the 80→72→64 JPEG
+   * ladder, the transparent-PNG rule, the 1.2 MB output cap and the decode-RESULT validation are
+   * all F's, and a phone photo is held to every one of them. There is no second image path.
+   */
+  normalizePhoto: (bytes) => assertStorable(normalizeProductPhoto(bytes, electronCodec(nativeImage))),
+  decodeBarcode: (bytes) => decodeBarcodePhoto(bytes),
   logger: {
     info: (event, fields) => log.info(event, fields),
     warn: (event, fields) => log.warn(event, fields),
