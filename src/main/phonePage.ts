@@ -86,6 +86,9 @@ const AR = {
   photoCurrent: "للصنف صورة حالية. إن لم تلتقط صورة جديدة، تبقى كما هي.",
   photoHint: "JPEG أو PNG. صور الآيفون بصيغة HEIC لازم تُحفظ JPEG أوّلاً.",
   photoRetry: "حاول مرة أخرى",
+  // 🔴 ITS OWN SENTENCE, AND IT SAYS THE SAVE IS SAFE. A preview is a courtesy; failing to draw
+  // one must never read as "your photo was lost", because at this point the till already has it.
+  photoPreviewFailed: "تعذّر عرض المعاينة على الهاتف. الصورة وصلت الصندوق وستُحفظ مع الصنف.",
   barcodeScan: "صوّر الباركود",
   barcodeScanning: "جارٍ قراءة الباركود…",
   barcodeFound: "تمّت القراءة",
@@ -317,6 +320,10 @@ export function renderPhoneFormPage(data: PhoneFormData): string {
         <img id="photoPreview" alt="" data-testid="phone-photo-preview">
       </div>
       <p id="photoStatus" class="note" data-testid="phone-photo-status"></p>
+      <!-- Separate from photoStatus on purpose: that line reports the UPLOAD, which is the
+           authoritative fact, and this one reports only whether a local preview could be drawn.
+           One element reporting both would make a cosmetic failure look like a lost photo. -->
+      <p id="photoPreviewNote" class="note" data-testid="phone-photo-preview-status"></p>
       <p class="note">${esc(AR.photoHint)}</p>
     </fieldset>
   </form>
@@ -394,6 +401,61 @@ export function renderPhoneFormPage(data: PhoneFormData): string {
   var photoStatus = document.getElementById("photoStatus");
   var previewWrap = document.getElementById("photoPreviewWrap");
   var preview = document.getElementById("photoPreview");
+  var previewNote = document.getElementById("photoPreviewNote");
+
+  // ── The local preview ────────────────────────────────────────────────────────────────────────
+  //
+  // 🔴 A data: URL, NOT AN OBJECT URL, AND THE SERVED PAGE'S OWN CSP IS THE REASON.
+  // This page is served with  default-src 'none'; img-src 'self' data:  — and a blob: URL from
+  // URL.createObjectURL is NOT admitted by that policy, so the browser refuses to load it: the
+  // <img> stays blank at zero size, while createObjectURL itself throws nothing and the status
+  // line still says the photo is ready. The merchant photographs a product, is told it is saved,
+  // and sees no picture — silently. That is what run 38901097239 hit, and only a REAL browser
+  // could see it; every fetch-driven check before it renders nothing and passed.
+  //
+  // The CSP is not widened to fix this. data: is already admitted, costs one base64 copy of a
+  // photo the phone is holding anyway, and keeps img-src 'self' data: exactly as it is — a
+  // policy line is a poor thing to trade for a courtesy image.
+  //
+  // 🔴 AND THE PREVIEW IS NEVER THE AUTHORITY. It is drawn only after the till has answered 200,
+  // it reports its own failures on its own line, and nothing about it can lose the draft, end the
+  // session or change what was staged. A phone that cannot draw a preview can still save.
+  function previewFailed() {
+    previewWrap.hidden = true;
+    // Cleared by attribute: setting src to the empty string resolves against the page and would
+    // fetch this page again.
+    preview.removeAttribute("src");
+    setNote(previewNote, ${jsonForScript(AR.photoPreviewFailed)}, "bad");
+  }
+
+  function showPreview(file) {
+    var reader;
+    try {
+      reader = new FileReader();
+    } catch (e) {
+      previewFailed();
+      return;
+    }
+    reader.onload = function () {
+      var url = typeof reader.result === "string" ? reader.result : "";
+      // Anything that is not a data: URL is refused rather than assigned — the CSP would block it
+      // and the merchant would get a blank box with no explanation.
+      if (url.indexOf("data:image/") !== 0) {
+        previewFailed();
+        return;
+      }
+      preview.src = url;
+      previewWrap.hidden = false;
+      setNote(previewNote, "", "");
+    };
+    reader.onerror = function () { previewFailed(); };
+    reader.onabort = function () { previewFailed(); };
+    try {
+      reader.readAsDataURL(file);
+    } catch (e) {
+      previewFailed();
+    }
+  }
 
   function sendPhoto(file) {
     if (!file) return;
@@ -401,13 +463,7 @@ export function renderPhoneFormPage(data: PhoneFormData): string {
     post("/photo", file, function (status, res) {
       if (status === 200 && res && res.ok) {
         setNote(photoStatus, ${jsonForScript(AR.photoReady)}, "ok");
-        // 🔴 THE PREVIEW IS LOCAL-ONLY. An object URL over the file the phone already holds —
-        // no remote URL, and the till never sends bytes back just to draw a thumbnail.
-        try {
-          if (preview.src) URL.revokeObjectURL(preview.src);
-          preview.src = URL.createObjectURL(file);
-          previewWrap.hidden = false;
-        } catch (e) { /* a preview is a courtesy; the upload already succeeded */ }
+        showPreview(file);
         return;
       }
       // 🔴 A REFUSED PHOTO COSTS THE PHOTO, NEVER THE DRAFT. The form keeps everything typed and

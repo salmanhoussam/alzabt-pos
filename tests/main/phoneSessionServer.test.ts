@@ -141,6 +141,37 @@ describe("the happy path", () => {
   });
 
   /**
+   * 🔴 THE IMAGE POLICY, PINNED — AND IT COST A WINDOWS GATE TO LEARN WHY IT NEEDS PINNING.
+   *
+   * The mobile form draws a local preview of the photo the merchant just took. The first version
+   * used `URL.createObjectURL`, which yields a `blob:` URL — and `img-src 'self' data:` does not
+   * admit `blob:`. The browser silently refused to load it: the <img> stayed blank at zero size
+   * while the status line said the photo was ready. Run 38901097239 died waiting for a preview
+   * that the policy had forbidden.
+   *
+   * The fix was to draw the preview from a `data:` URL instead of widening this header, so the
+   * header is now asserted in BOTH directions. If someone later reaches for `blob:` because a
+   * preview is easier that way, this fails and says so, instead of the policy quietly growing.
+   */
+  it("🔴 img-src admits data: and still does NOT admit blob:", async () => {
+    const s = session();
+    await withServer(s, async (r) => {
+      const res = await get(r.port, `/m/${TOKEN}`);
+      const csp = /Content-Security-Policy:\s*([^\r\n]+)/i.exec(res.headers)?.[1] ?? "";
+      expect(csp).not.toBe("");
+
+      // The directive itself, read out rather than matched loosely across the whole header.
+      const imgSrc = /(?:^|;)\s*img-src\s([^;]*)/i.exec(csp)?.[1]?.trim() ?? "";
+      expect(imgSrc).toBe("'self' data:");
+      expect(imgSrc).not.toMatch(/blob:/);
+      // And nowhere else in the policy either — a `default-src blob:` would reach images too.
+      expect(csp).not.toMatch(/blob:/);
+      expect(csp).toMatch(/default-src 'none'/);
+    });
+  });
+
+
+  /**
    * 🔴 THE TOKEN MUST NOT COME BACK OUT. The phone already has it, so echoing it costs nothing to
    * that phone — but it would put the live credential into the page source, where a screenshot, a
    * shoulder, or a later "share this page" would carry it.
