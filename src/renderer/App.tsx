@@ -190,7 +190,7 @@ export function App() {
         {tab === "sell" && <SellScreen key={catalogVersion} />}
         {tab === "today" && <TodayScreen />}
         {tab === "history" && <HistoryScreen />}
-        {tab === "products" && <ProductsScreen />}
+        {tab === "products" && <ProductsScreen operator={cashier} />}
         {tab === "invoices" && <InvoicesScreen />}
         {tab === "tools" && (
           <ToolsScreen

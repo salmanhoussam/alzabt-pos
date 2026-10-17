@@ -115,6 +115,7 @@ describe("IPC surface", () => {
         "renameOperator",
         "resetOperatorPin",
         "setOperatorActive",
+        "setOperatorMayCreateProducts",
         "setOperatorRole",
         "updateInvoiceLine",
         "removeInvoiceLine",
@@ -147,7 +148,9 @@ describe("IPC surface", () => {
     // -> 66 (slice H1: startPhoneSession, cancelPhoneSession)
     // -> 67 (slice H2: phoneSessionState — the dialog's poll; see ipcContract for why it is not
     //        named "...Status", which invoiceIpc.test.ts forbids on purpose)
-    expect(CHANNEL_NAMES).toHaveLength(67);
+    // -> 68 (migration 11: setOperatorMayCreateProducts — the owner grants one cashier the
+    //        narrow right to add products; see channelPolicy for why it is owner-only itself)
+    expect(CHANNEL_NAMES).toHaveLength(68);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.
@@ -187,7 +190,13 @@ describe("IPC surface", () => {
     // a cashier here would now be refused with NOT_AUTHORIZED, which is the feature working.
     expect(ipc.login({ cashierId: "cashier-01", pin: "1111" })).toEqual({
       ok: true,
-      data: { status: "session", cashier: { id: "cashier-01", name: "Cashier One", role: "owner" } },
+      // 🔴 `mayCreateProducts` JOINED THE SESSION SHAPE WITH MIGRATION 11 — convenience for the
+      // Products screen, never authority. True here because this session is the owner, who may
+      // always. The old shape was { id, name, role }.
+      data: {
+        status: "session",
+        cashier: { id: "cashier-01", name: "Cashier One", role: "owner", mayCreateProducts: true },
+      },
     });
 
     const created = ipc.createSale(goodSale());

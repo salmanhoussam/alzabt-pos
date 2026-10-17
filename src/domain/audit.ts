@@ -38,6 +38,13 @@ export const AUDIT_EVENT_TYPES = [
   "OPERATOR_ACTIVATED",
   "OPERATOR_DEACTIVATED",
   "OPERATOR_ROLE_CHANGED",
+  // Migration 11 — the narrow "may create products" capability. TWO types, not one: granting and
+  // revoking a standing permission are different acts, and an owner reading the trail months later
+  // should see which one happened without opening the payload. Reusing OPERATOR_ROLE_CHANGED was
+  // rejected — the role does not change, and an audit row that misnames what happened is worse
+  // than no row, because it will be believed.
+  "OPERATOR_PRODUCT_CREATE_GRANTED",
+  "OPERATOR_PRODUCT_CREATE_REVOKED",
   // Migration 10 — Product Master. Five category types, because "a category changed" would not say
   // which of five different things happened, and the one a reader cares about most (a DELETE, which
   // destroys a row) would be indistinguishable from a rename.
@@ -78,6 +85,8 @@ export const AUDIT_EVENTS_BY_ENTITY: Readonly<Record<AuditEntityType, ReadonlyAr
       "OPERATOR_ACTIVATED",
       "OPERATOR_DEACTIVATED",
       "OPERATOR_ROLE_CHANGED",
+      "OPERATOR_PRODUCT_CREATE_GRANTED",
+      "OPERATOR_PRODUCT_CREATE_REVOKED",
     ]) as ReadonlyArray<AuditEventType>,
     category: Object.freeze([
       "CATEGORY_CREATED",
@@ -130,7 +139,7 @@ export const CURRENT_ACTOR_TIER: AuditActorTier = "unspecified";
  * THAT a reset happened, by whom, to whom and when. The event type is the whole fact; there is
  * nothing about the credential to record, and no way to record it if there were.
  */
-export const AUDITED_OPERATOR_FIELDS = ["is_active", "name", "role"] as const;
+export const AUDITED_OPERATOR_FIELDS = ["is_active", "may_create_products", "name", "role"] as const;
 export type AuditedOperatorField = (typeof AUDITED_OPERATOR_FIELDS)[number];
 
 /**

@@ -24,7 +24,20 @@ export type Access =
   /** Any signed-in operator, owner or cashier. */
   | "session"
   /** Owner only. */
-  | "owner";
+  | "owner"
+  /**
+   * Owner, OR a cashier the owner has explicitly granted "may create products" (migration 11).
+   *
+   * 🔴 THIS LEVEL CANNOT BE DECIDED FROM THE ROLE ALONE, which is why it exists as its own value
+   * rather than being folded into "session". The guard resolves it by asking the SERVICE, which
+   * re-reads the durable operator row — so this table still classifies every channel, and the
+   * per-operator half of the answer lives in the one place that owns it.
+   *
+   * It is deliberately NOT a general "cashier may do product things" level. Exactly two channels
+   * carry it, and the service refuses the half of `startPhoneSession` (EDIT_PRODUCT) that a
+   * cashier may not reach.
+   */
+  | "create-products";
 
 /**
  * Why each public channel is public.
@@ -145,8 +158,12 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // ── Owner only ────────────────────────────────────────────────────────────────────────────────
   // Reversing money.
   voidSale: "owner",
-  // Master data: a price edit is an owner act.
-  createProduct: "owner",
+  // 🔴 CREATE IS NO LONGER OWNER-ONLY, AND THE CHANNEL SAYS SO HONESTLY. An owner may always;
+  // a cashier may only with the explicit durable grant. The service decides — `createProduct`
+  // calls `requireProductCreator()` itself — so a forged call that reaches the service still
+  // fails, and this entry is the renderer-facing half of the same rule rather than the whole of
+  // it. Editing an EXISTING product stays an owner act: a price edit is not a creation.
+  createProduct: "create-products",
   updateProduct: "owner",
   setProductActive: "owner",
   // Replaces or exports the whole price list.
@@ -190,7 +207,13 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // `cancelPhoneSession` is owner too. Letting a cashier close a surface they could not open is a
   // smaller hole than the alternative, but it is still an operator acting on an owner's session,
   // and expiry already guarantees the surface closes without anyone's help.
-  startPhoneSession: "owner",
+  // 🔴 THE ACTION DECIDES, AND THE ACTION IS NOT VISIBLE HERE. A NEW_PRODUCT session may be opened
+  // by a granted cashier; an EDIT_PRODUCT session may not. A static table cannot express "it
+  // depends on the payload", so this admits the narrower set of operators and
+  // `authorizePhoneSession` refuses the EDIT half for anyone who is not an owner. Cancel and state
+  // stay owner-only: a cashier who opened a create session does not need to inspect or close
+  // anyone's, and expiry closes it without help.
+  startPhoneSession: "create-products",
   cancelPhoneSession: "owner",
   // Owner too. It reports whether a phone has claimed the code and which product was just saved —
   // the shape of an owner's in-flight administrative act, and nothing a cashier has a use for.
@@ -202,6 +225,9 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   resetOperatorPin: "owner",
   setOperatorActive: "owner",
   setOperatorRole: "owner",
+  // Granting the create capability is itself an owner act — otherwise the permission could grant
+  // itself onwards.
+  setOperatorMayCreateProducts: "owner",
 });
 
 /** The classification, or a throw. An unknown channel is REFUSED, never defaulted. */

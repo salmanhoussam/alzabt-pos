@@ -33,9 +33,12 @@ describe("every channel is classified", () => {
     expect(() => accessFor("")).toThrow(/no authorization classification/);
   });
 
-  it("uses only the three known access levels", () => {
+  it("uses only the four known access levels", () => {
+    // 🔴 THREE UNTIL MIGRATION 11. "create-products" was added when creating a product stopped
+    // being an owner-only act: an owner may always, and a cashier may when the owner has granted
+    // it on that operator's durable row. The old value was ["owner", "public", "session"].
     const levels = new Set(Object.values(CHANNEL_POLICY));
-    expect([...levels].sort()).toEqual(["owner", "public", "session"]);
+    expect([...levels].sort()).toEqual(["create-products", "owner", "public", "session"]);
   });
 });
 
@@ -92,13 +95,31 @@ describe("the public set", () => {
   });
 });
 
+describe("the create-products set", () => {
+  /**
+   * 🔴 EXACTLY TWO CHANNELS, NAMED. The new level exists to let a granted cashier create a product
+   * and open a NEW_PRODUCT phone session — nothing else. A third channel appearing here is a
+   * widening of a permission that was deliberately narrow, and it fails this test by name.
+   *
+   * `startPhoneSession` carries both actions and a static table cannot see which; the service's
+   * `authorizePhoneSession` refuses EDIT_PRODUCT to anyone who is not an owner, which
+   * `tests/main/phoneSessionAuth.test.ts` proves by execution rather than by this table.
+   */
+  it("🔴 is EXACTLY these two channels", () => {
+    const create = names.filter((n) => CHANNEL_POLICY[n] === "create-products").sort();
+    expect(create).toEqual(["createProduct", "startPhoneSession"]);
+  });
+});
+
 describe("the owner-only set", () => {
   it("🔴 contains every action Salman restricted, by name", () => {
     const ownerOnly = [
       // Reversing money.
       "voidSale",
-      // Master data.
-      "createProduct",
+      // Master data. 🔴 `createProduct` WAS IN THIS LIST AND IS NOT ANY MORE — migration 11 made
+      // it "owner, or a cashier explicitly granted it", which is asserted on its own below.
+      // Editing and retiring an EXISTING product stay owner-only, and that is the whole of the
+      // narrowing: the capability stops at the product's first save.
       "updateProduct",
       "setProductActive",
       "importCatalog",
@@ -125,6 +146,13 @@ describe("the owner-only set", () => {
       "resetOperatorPin",
       "setOperatorActive",
       "setOperatorRole",
+      // Granting the create capability is itself owner-only, or the permission could grant itself
+      // onwards.
+      "setOperatorMayCreateProducts",
+      // 🔴 STILL OWNER-ONLY EVEN THOUGH THE SESSION THAT OPENS A CREATE IS NOT. Cancelling and
+      // inspecting a phone session remain an owner's acts.
+      "cancelPhoneSession",
+      "phoneSessionState",
     ] as const;
     const wrong = ownerOnly.filter((c) => CHANNEL_POLICY[c] !== "owner");
     expect(wrong).toEqual([]);

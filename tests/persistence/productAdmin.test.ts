@@ -47,7 +47,7 @@ const wrench = {
 // below now state what changed, when, and what must STILL be absent.
 
 describe("schema is unchanged by this feature", () => {
-  it("has exactly nine migrations, and offline product management still contributed none of them", () => {
+  it("has exactly eleven migrations, and offline product management still contributed none of them", () => {
     // Was three until migration 4 (exact_sale_quantity), four until migration 5
     // (durable_local_audit), five until migration 6 (manual_invoices), and six until migration 7
     // (invoice_sales_integration), and seven until migration 8 (operator_accounts).
@@ -67,6 +67,11 @@ describe("schema is unchanged by this feature", () => {
       // 🔴 TRANSITION — migration 10 widened audit_events' enumerated CHECKs so a CATEGORY_* or
       // PRODUCT_IMAGE_* row can exist at all. Migrations 1-9 are byte-identical after it.
       [10, "product_master_audit"],
+      // 🔴 TRANSITION — migration 11 added `operators.may_create_products` and widened
+      // audit_events' event vocabulary by the two operator events that record granting and
+      // revoking it. Migrations 1-10 are byte-identical after it, which the per-migration tests
+      // check by checksum rather than by this list.
+      [11, "operator_product_create_capability"],
     ]);
   });
 

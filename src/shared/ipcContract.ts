@@ -20,6 +20,7 @@ export const CHANNELS = {
   resetOperatorPin: "pos:resetOperatorPin",
   setOperatorActive: "pos:setOperatorActive",
   setOperatorRole: "pos:setOperatorRole",
+  setOperatorMayCreateProducts: "pos:setOperatorMayCreateProducts",
   currentCashier: "pos:currentCashier",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
@@ -102,6 +103,12 @@ export interface CashierDto {
   readonly name: string;
   /** Migration 8. Present on a SESSION; the login list deliberately carries only id and name. */
   readonly role?: OperatorRoleDto;
+  /**
+   * Migration 11. Present on a SESSION only, and CONVENIENCE ONLY: it decides which buttons are
+   * worth drawing, never whether an act is allowed. The service re-reads the durable row on every
+   * create, so a stale `true` here buys a renderer nothing but a refusal.
+   */
+  readonly mayCreateProducts?: boolean;
 }
 
 export type OperatorRoleDto = "owner" | "admin" | "cashier";
@@ -113,6 +120,8 @@ export interface OperatorDto {
   readonly role: OperatorRoleDto;
   readonly isActive: boolean;
   readonly mustResetPin: boolean;
+  /** Migration 11 — the narrow "may add products" grant. Meaningless on an owner, who always may. */
+  readonly mayCreateProducts: boolean;
 }
 
 /**
@@ -157,6 +166,10 @@ export interface SetOperatorActiveRequest extends OperatorIdRequest {
 
 export interface SetOperatorRoleRequest extends OperatorIdRequest {
   readonly role: OperatorRoleDto;
+}
+
+export interface SetOperatorMayCreateProductsRequest extends OperatorIdRequest {
+  readonly mayCreateProducts: boolean;
 }
 
 export interface ProductDto {
@@ -957,6 +970,7 @@ export interface PosApi {
   resetOperatorPin(req: ResetOperatorPinRequest): Promise<IpcResult<OperatorDto>>;
   setOperatorActive(req: SetOperatorActiveRequest): Promise<IpcResult<OperatorDto>>;
   setOperatorRole(req: SetOperatorRoleRequest): Promise<IpcResult<OperatorDto>>;
+  setOperatorMayCreateProducts(req: SetOperatorMayCreateProductsRequest): Promise<IpcResult<OperatorDto>>;
   currentCashier(): Promise<IpcResult<CashierDto | null>>;
   getCatalog(): Promise<IpcResult<CatalogDto>>;
   createSale(req: CreateSaleRequest): Promise<IpcResult<CreateSaleResponse>>;

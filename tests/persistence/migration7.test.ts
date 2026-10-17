@@ -176,9 +176,9 @@ function v6Ledger(): Array<Record<string, unknown>> {
 describe("migration 7 — v6 to v7", () => {
   it("is the seventh migration, and 1-6 are byte-identical after it", () => {
     // 7 -> 8 operator accounts -> 9 product master -> 10 product master audit
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(MIGRATIONS[6]!.name).toBe("invoice_sales_integration");
-    expect(MIGRATIONS).toHaveLength(10); // was 9 before migration 10 (product_master_audit)
+    expect(MIGRATIONS).toHaveLength(11); // was 10 before migration 11 (operator_product_create_capability)
 
     // The released fingerprints of 1-6. A ledger upgraded by this build must still recognise every
     // one of them, or openDatabase refuses the file — which is what the next test proves.

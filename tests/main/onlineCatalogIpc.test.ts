@@ -108,7 +108,13 @@ describe("authorization", () => {
 
   it("🔴 a CASHIER is refused, and the exporter is never reached", () => {
     withApp("cashier", ({ h, ipc, seen }) => {
+      // 🔴 THE PRODUCT IS SEEDED AS THE OWNER, because since migration 11 a cashier without the
+      // create grant cannot create one — and this test is about the EXPORT being refused, not
+      // about who may add a product. Seeding it as the cashier would make the test pass for the
+      // wrong reason: it would fail at the setup and never reach the exporter at all.
+      ipc.login({ cashierId: "cashier-01", pin: "1111" });
       publishOne(h);
+      ipc.login({ cashierId: "cashier-02", pin: "2222" });
       expect(code(ipc.exportOnlineCatalog(undefined))).toBe("NOT_AUTHORIZED");
       // The refusal happens BEFORE anything could be written — not after a package appeared.
       expect(seen, "a refused export must not reach the writer at all").toEqual([]);

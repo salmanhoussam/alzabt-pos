@@ -16,6 +16,7 @@ import { BASE_UNITS, FRACTIONAL_SALE_UNITS } from "../../domain/catalog";
 import { matchesSearch } from "../../domain/arabic";
 import type {
   AdminProductDto,
+  CashierDto,
   CategoryDto,
   PhoneSessionDto,
   PhoneSessionState,
@@ -182,8 +183,19 @@ function Thumb(props: { product: AdminProductDto; cache: ThumbnailCache; label: 
   return <span className="thumb thumb-loading" aria-hidden="true" data-testid="thumb-loading" />;
 }
 
-export function ProductsScreen() {
+/**
+ * 🔴 WHAT THIS SCREEN SHOWS IS CONVENIENCE; WHAT IT MAY DO IS DECIDED IN MAIN. Every control here
+ * is refused by the channel guard and again by the service for an operator who may not use it, so
+ * hiding one removes a dead end rather than a defence — and a renderer that lied about the session
+ * would gain nothing but an error message.
+ */
+export function ProductsScreen(props: { readonly operator?: CashierDto | null }) {
   const { t, unit } = useT();
+  // Owner administration — editing, retiring, categories, exports — versus the narrow create
+  // capability a cashier can be granted. Absent/unknown answers "no" in both cases: a screen that
+  // cannot tell offers less rather than more.
+  const isOwner = props.operator?.role === "owner";
+  const mayCreate = isOwner || props.operator?.mayCreateProducts === true;
   const [products, setProducts] = useState<AdminProductDto[] | null>(null);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<Editing | null>(null);
@@ -319,37 +331,48 @@ export function ProductsScreen() {
           aria-label={t("products.search")}
           data-testid="product-search"
         />
-        <button className="btn" onClick={() => setManaging(true)} data-testid="manage-categories">
-          {t("form.categoryManage")}
-        </button>
+        {isOwner && (
+          <button className="btn" onClick={() => setManaging(true)} data-testid="manage-categories">
+            {t("form.categoryManage")}
+          </button>
+        )}
         {/* 🔴 IN THE PRODUCT MASTER TOOLBAR, NOT BURIED IN BACKUP. What it exports is this screen's
             data, so this is where an owner looks for it. The wording says EXPORT, never "publish"
             or "update the website": the package is written to a folder and nothing is uploaded,
             and a button that implies otherwise would be a lie the owner acts on. */}
-        <button
-          className="btn"
-          onClick={() => void exportOnline()}
-          disabled={exporting}
-          title={t("products.exportOnlineHint")}
-          data-testid="export-online-catalog"
-        >
-          {t("products.exportOnline")}
-        </button>
+        {isOwner && (
+          <button
+            className="btn"
+            onClick={() => void exportOnline()}
+            disabled={exporting}
+            title={t("products.exportOnlineHint")}
+            data-testid="export-online-catalog"
+          >
+            {t("products.exportOnline")}
+          </button>
+        )}
         {/* 🔴 "FROM THE PHONE", NEVER "UPLOAD". The till serves the page over the shop's own
             network and nothing leaves the building — the same honesty the export button's wording
-            is held to. The button is owner-only by the channel policy, not by being hidden: a
-            cashier who reached `window.pos.startPhoneSession` is refused by main. */}
-        <button
-          className="btn"
-          onClick={() => void openPhone("NEW_PRODUCT", null)}
-          disabled={phoneBusy}
-          data-testid="add-product-phone"
-        >
-          {t("phone.add")}
-        </button>
-        <button className="btn primary" onClick={() => setEditing({ mode: "add" })} data-testid="add-product">
-          {t("action.add")}
-        </button>
+            is held to.
+
+            🔴 SHOWN TO AN OWNER OR TO A CASHIER THE OWNER HAS GRANTED, and refused by main for
+            anyone else. It opens a NEW_PRODUCT session only; `authorizePhoneSession` refuses the
+            EDIT half to a cashier however they reach it. */}
+        {mayCreate && (
+          <button
+            className="btn"
+            onClick={() => void openPhone("NEW_PRODUCT", null)}
+            disabled={phoneBusy}
+            data-testid="add-product-phone"
+          >
+            {t("phone.add")}
+          </button>
+        )}
+        {mayCreate && (
+          <button className="btn primary" onClick={() => setEditing({ mode: "add" })} data-testid="add-product">
+            {t("action.add")}
+          </button>
+        )}
       </header>
 
       {/* 🔴 ONE LINE, NOT TWO PARAGRAPHS. The two explanations together pushed the table a long way
@@ -483,6 +506,13 @@ export function ProductsScreen() {
                   )}
                 </td>
                 <td className="admin-actions col-actions">
+                  {/* 🔴 EVERY CONTROL IN THIS CELL ACTS ON A PRODUCT THAT ALREADY EXISTS, so all
+                      three are owner-only — including for a cashier who may CREATE products. The
+                      create capability deliberately stops at the product's first save; editing it,
+                      editing it from a phone and retiring it are administration, and main refuses
+                      all three for a cashier however they are reached. */}
+                  {isOwner && (
+                    <>
                   {/* A testid because E2E selectors are never visible text — the terminal's
                       default language is Arabic, and "Edit" is not what this button says. */}
                   <button
@@ -531,6 +561,8 @@ export function ProductsScreen() {
                   >
                     {t(p.isActive ? "action.deactivate" : "action.activate")}
                   </button>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}

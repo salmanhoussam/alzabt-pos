@@ -61,6 +61,11 @@ function handlers(overrides: Partial<Record<string, unknown>> = {}) {
     // break the moment the guard picked the other.
     requireLiveRole: vi.fn(() => "owner"),
     currentRole: vi.fn(() => "owner"),
+    // 🔴 THE SAME LESSON AGAIN, FROM THE SAME COMMENT ABOVE. Migration 11 gave the guard a third
+    // question to ask — "may this operator create products?" — and a fake that did not answer it
+    // threw inside `authorize`, surfacing as "Unexpected error" and hiding the payload validation
+    // these tests exist to check. An owner always may, which is what this fake is.
+    canCreateProducts: vi.fn(() => true),
     ...overrides,
   } as unknown as PosService;
   return { h: syncHandlers(createIpcHandlers(service)), service };

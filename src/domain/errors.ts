@@ -70,6 +70,10 @@ export type DomainErrorCode =
   | "NOT_AUTHORIZED"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
+  // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,
+  // and a shop reading "cannot change their own role" after touching a permission switch would be
+  // told about the wrong thing.
+  | "SELF_PERMISSION_CHANGE"
   // 🔴 The install/upgrade ceremony: while the seeded bootstrap owner has not claimed this
   // terminal, nobody else gets a session OR a setup ticket. Distinct from SETUP_REQUIRED, which is
   // about one operator missing a valid ticket; this is about the TERMINAL not being claimed yet.

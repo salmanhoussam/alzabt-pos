@@ -1330,24 +1330,134 @@ try {
   // the same reason. So the claim worth proving is not that the control is absent — it is that
   // using it opens NO session and tells the operator plainly.
   //
-  // (A first draft asserted the button was hidden. It is not, and asserting that would have
-  // either failed honestly or pushed me to add role-branching the architecture argues against.)
+  // 🔴 THIS BLOCK USED TO ASSERT THE OPPOSITE, AND THE REVERSAL IS DELIBERATE. What stood here
+  // said: "A first draft asserted the button was hidden. It is not, and asserting that would have
+  // either failed honestly or pushed me to add role-branching the architecture argues against."
+  // That was correct while creating a product was owner-only and every cashier was refused
+  // identically — hiding nothing and refusing everything is the simpler, safer shape.
+  //
+  // Migration 11 changed the fact underneath it. Creating is now a PER-OPERATOR permission, so
+  // two cashiers standing at the same till legitimately see different screens, and leaving a
+  // control visible to someone who can never use it is no longer "the renderer is untrusted" — it
+  // is an invitation to press a button that always fails. Salman asked for the controls to be
+  // hidden for an operator who lacks the grant, so they are.
+  //
+  // 🔴 THE HIDING IS NOT THE PROOF, AND NEVER WAS. The bridge refusals above are: they call
+  // `window.pos` directly, exactly as a tampered renderer would, and main refuses them. This only
+  // adds that the screen does not offer what the service would refuse.
   await testid(page, "tab-products").click();
-  await page.waitForSelector('[data-testid="add-product-phone"]', { timeout: 30000 });
-  await testid(page, "add-product-phone").click();
-  await page.waitForTimeout(1200);
+  await page.waitForSelector('[data-testid="product-row"]', { timeout: 30000 });
+  const cashierSees = await page.evaluate(() => {
+    const count = (id) => document.querySelectorAll(`[data-testid="${id}"]`).length;
+    return {
+      addProduct: count("add-product"),
+      addProductPhone: count("add-product-phone"),
+      manageCategories: count("manage-categories"),
+      exportOnline: count("export-online-catalog"),
+      editProduct: count("product-edit"),
+      editOnPhone: count("product-edit-phone"),
+      deactivate: count("product-deactivate"),
+      rows: count("product-row"),
+    };
+  });
+  check(cashierSees.rows > 0, `the cashier still SEES the catalogue (${cashierSees.rows} rows)`);
   check(
-    (await testid(page, "phone-dialog").count()) === 0,
-    "🔴 a cashier pressing the phone action opens NO pairing dialog",
+    cashierSees.addProduct === 0 && cashierSees.addProductPhone === 0,
+    `🔴 a cashier WITHOUT the grant is offered neither create action (add=${cashierSees.addProduct}, phone=${cashierSees.addProductPhone})`,
   );
-  // The refusal surfaces in the screen's own notice overlay (`.overlay .card.dialog` with an
-  // `.error` paragraph) — the same place every other refused action on this screen reports.
-  const errorCard = page.locator(".overlay .card.dialog").last();
-  await errorCard.waitFor({ state: "visible", timeout: 20000 });
-  const shownError = (await errorCard.innerText()).trim();
-  check(shownError.length > 0, `and the refusal is shown to them ("${shownError.slice(0, 70).replace(/\n/g, " ")}")`);
+  check(
+    cashierSees.manageCategories === 0 && cashierSees.exportOnline === 0,
+    "🔴 …nor category administration or the online export",
+  );
+  check(
+    cashierSees.editProduct === 0 && cashierSees.editOnPhone === 0 && cashierSees.deactivate === 0,
+    "🔴 …nor any control that acts on a product that already exists",
+  );
   await page.screenshot({ path: SHOTS + "H9-cashier-refused.png" });
-  await errorCard.locator("button").first().click();
+
+  // ── 9 · The SAME cashier, once the owner grants the create capability ────────────────────────
+  //
+  // 🔴 THE GRANT IS MADE THROUGH THE REAL OWNER UI, not by writing the column. What this proves is
+  // the whole chain an owner actually uses: the switch in the operators list, the durable row, and
+  // the screen the cashier gets afterwards.
+  log("owner grants the cashier permission to add products");
+  await page.locator('[data-testid="logout"]').click();
+  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+  await signIn(page, "Cashier One", "1111");
+  await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+  await testid(page, "tab-tools").click();
+  await page.waitForSelector('[data-testid="operators-section"]', { timeout: 30000 });
+  const grantRow = page.locator('[data-testid="ops-row"][data-operator-id="cashier-02"]');
+  await grantRow.waitFor({ state: "visible", timeout: 20000 });
+  await grantRow.locator('[data-testid="ops-toggle-create"]').click();
+  await grantRow.locator('[data-testid="ops-row-may-create"]').waitFor({ state: "visible", timeout: 20000 });
+  check(true, "🔴 the owner grants «السماح بإضافة أصناف» through the operators list");
+  await page.screenshot({ path: SHOTS + "J1-owner-grants-create.png" });
+
+  await page.locator('[data-testid="logout"]').click();
+  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+  await signIn(page, "Cashier Two", "2222");
+  await page.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+  await testid(page, "tab-products").click();
+  await page.waitForSelector('[data-testid="product-row"]', { timeout: 30000 });
+
+  const grantedSees = await page.evaluate(() => {
+    const count = (id) => document.querySelectorAll(`[data-testid="${id}"]`).length;
+    return {
+      addProduct: count("add-product"),
+      addProductPhone: count("add-product-phone"),
+      editProduct: count("product-edit"),
+      editOnPhone: count("product-edit-phone"),
+      deactivate: count("product-deactivate"),
+      manageCategories: count("manage-categories"),
+    };
+  });
+  check(
+    grantedSees.addProduct === 1 && grantedSees.addProductPhone === 1,
+    `🔴 the GRANTED cashier is now offered both create actions (add=${grantedSees.addProduct}, phone=${grantedSees.addProductPhone})`,
+  );
+  check(
+    grantedSees.editProduct === 0 && grantedSees.editOnPhone === 0 && grantedSees.deactivate === 0,
+    "🔴 …and STILL no control over a product that already exists — the grant is create-only",
+  );
+  check(grantedSees.manageCategories === 0, "🔴 …and still no category administration");
+  await page.screenshot({ path: SHOTS + "J2-granted-cashier-products.png" });
+
+  // The bridge agrees with the screen, which is the half that matters.
+  const grantedBridge = await page.evaluate(async () => {
+    const start = await window.pos.startPhoneSession({ action: "NEW_PRODUCT" });
+    if (start?.ok) await window.pos.cancelPhoneSession();
+    const edit = await window.pos.startPhoneSession({ action: "EDIT_PRODUCT", productId: "manual:000001" });
+    const cat = await window.pos.createCategory({ nameAr: "ممنوع", nameEn: "Nope" });
+    return {
+      start: { ok: start?.ok, code: start?.error?.code },
+      edit: { ok: edit?.ok, code: edit?.error?.code },
+      cat: { ok: cat?.ok, code: cat?.error?.code },
+    };
+  });
+  check(grantedBridge.start.ok === true, `🔴 the granted cashier MAY open a NEW_PRODUCT session (${grantedBridge.start.code ?? "ok"})`);
+  check(
+    grantedBridge.edit.ok === false && grantedBridge.edit.code === "NOT_AUTHORIZED",
+    `🔴 …and is REFUSED an EDIT_PRODUCT session (${grantedBridge.edit.code})`,
+  );
+  check(
+    grantedBridge.cat.ok === false && grantedBridge.cat.code === "NOT_AUTHORIZED",
+    `🔴 …and refused category creation (${grantedBridge.cat.code})`,
+  );
+
+  // 🔴 AND A REAL PRODUCT, CREATED BY THE CASHIER, THROUGH THE REAL FORM.
+  await testid(page, "add-product").click();
+  await page.waitForSelector('[data-testid="field-nameAr"]', { timeout: 30000 });
+  await page.locator('[data-testid="field-nameAr"]').fill("صنف من الكاشير");
+  await page.locator('[data-testid="field-price"]').fill("3.25");
+  await page.locator('[data-testid="save-product"]').click();
+  await page.waitForTimeout(1200);
+  const listAfterCashier = await page.locator(".catalog-admin").innerText();
+  check(
+    listAfterCashier.includes("صنف من الكاشير"),
+    "🔴 the GRANTED cashier's product is really created and listed",
+  );
+  await page.screenshot({ path: SHOTS + "J3-cashier-created-product.png" });
 } catch (err) {
   failures += 1;
   console.log("  ✗ UNCAUGHT: " + String(err).split("\n")[0]);

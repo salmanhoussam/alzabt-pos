@@ -570,16 +570,33 @@ export class PosService {
    * there is no durable row to re-read, so the session is used as it was. That path cannot occur in
    * production: migration 8 always creates the table and both rows.
    */
-  private liveSession(): { readonly id: string; readonly name: string; readonly role: OperatorRole } {
+  private liveSession(): {
+    readonly id: string;
+    readonly name: string;
+    readonly role: OperatorRole;
+    /**
+     * 🔴 FAILS CLOSED ON A TERMINAL WITH NO OPERATOR STORE. Tests and pre-migration-8 databases
+     * have no durable row to read, and the safe reading of a missing permission record is "not
+     * granted" — never "granted because we could not check".
+     */
+    readonly mayCreateProducts: boolean;
+  } {
     if (!this.cashier) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
     const ops = this.deps.operators;
-    if (!ops) return { id: this.cashier.id, name: this.cashier.name, role: this.role ?? "cashier" };
+    if (!ops) {
+      return {
+        id: this.cashier.id,
+        name: this.cashier.name,
+        role: this.role ?? "cashier",
+        mayCreateProducts: false,
+      };
+    }
     const row = ops.liveRow(this.cashier.id);
     if (!row) throw new DomainError("OPERATOR_NOT_FOUND", "This account no longer exists — sign in again");
     if (!row.isActive) {
       throw new DomainError("OPERATOR_INACTIVE", "This account has been deactivated — sign in again");
     }
-    return { id: row.id, name: row.name, role: row.role };
+    return { id: row.id, name: row.name, role: row.role, mayCreateProducts: row.mayCreateProducts };
   }
 
   /** The live role, for the channel guard. Throws exactly as `liveSession` does. */
@@ -993,7 +1010,12 @@ export class PosService {
    * real price, unlike a placeholder that arrives in a file.
    */
   createProduct(draft: ProductDraft, provenance: ProductWriteProvenance = MANUAL_PROVENANCE): AdminProductRow {
-    const cashier = this.requireCashier();
+    // 🔴 THE SERVICE DECIDES, NOT THE CHANNEL. This used to be `requireCashier()` — any signed-in
+    // operator — with the owner gate living only in `channelPolicy`. That was sound while the rule
+    // was "owner only", because every caller arrived through `ipcMain`. It is not sound now: the
+    // rule is per-operator, the phone's listener calls this service directly without touching
+    // `channelPolicy` at all, and a capability that one caller can bypass is not a capability.
+    const cashier = this.requireProductCreator();
     const { store, auditStore, transact } = this.requireProductStack();
     const valid = validateProductDraft(draft, this.deps.terminal.currency);
     const instant = this.now();
@@ -1199,6 +1221,61 @@ export class PosService {
     return { id: live.id, name: live.name };
   }
 
+  /**
+   * May the operator signed in right now CREATE a product?
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 THE ONE PLACE THE QUESTION IS ANSWERED. The desktop create, the phone session that opens a
+   * create, and the phone's final Save all come here, so they cannot drift apart — and a renderer
+   * that hides a button has changed nothing about what the service will do.
+   *
+   * 🔴 IT RE-READS THE DURABLE ROW EVERY TIME. `liveSession` fetches the operator from the
+   * database, so a permission revoked while a phone session is open is refused at Save, not
+   * honoured because it was true when the QR was drawn. The same mechanism already makes a
+   * deactivated account stop working mid-session.
+   *
+   * An owner never consults the flag — their authority is the role. A cashier needs BOTH an active
+   * account (which `liveSession` guarantees, by throwing otherwise) and the explicit grant.
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  canCreateProducts(): boolean {
+    const live = this.liveSession();
+    if (live.role === "owner") return true;
+    // 🔴 NO OPERATOR DIRECTORY MEANS NO CAPABILITY MODEL AT ALL — not a cashier with nothing
+    // granted. Such a terminal predates migration 8: it has no roles, no permissions and no rows
+    // to read, and `createProduct` has always accepted any signed-in operator there. Answering
+    // "refused" would not be stricter, it would be WRONG — it would brick product entry on a
+    // database whose schema has no way to express the grant that would unbrick it.
+    //
+    // It cannot be reached in the real application: `main.ts` wires the operator service
+    // unconditionally, which `tests/main/startup.test.ts` asserts rather than assumes. Tests and
+    // pre-migration-8 databases are the whole of this branch.
+    if (!this.deps.operators) return true;
+    return live.mayCreateProducts === true;
+  }
+
+  /** Whether this terminal has a durable operator directory to read permissions from at all. */
+  private hasOperatorDirectory(): boolean {
+    return Boolean(this.deps.operators);
+  }
+
+  /**
+   * The create gate, as a refusal.
+   *
+   * 🔴 THE SAME SENTENCE THE CHANNEL GUARD USES for an owner-only act would be a lie here — this
+   * act is not owner-only any more. A cashier who has not been granted the permission is told what
+   * is actually true, and is not invited to guess which layer refused them.
+   */
+  private requireProductCreator(): Cashier {
+    const live = this.liveSession();
+    const permitted =
+      live.role === "owner" || !this.hasOperatorDirectory() || live.mayCreateProducts === true;
+    if (!permitted) {
+      throw new DomainError("NOT_AUTHORIZED", "You are not allowed to add products");
+    }
+    return { id: live.id, name: live.name };
+  }
+
   private requireCategories(): CategoryRepository {
     const categories = this.deps.categories;
     if (!categories) {
@@ -1265,19 +1342,27 @@ export class PosService {
    * ══════════════════════════════════════════════════════════════════════════════════════════════
    */
   authorizePhoneSession(action: PhoneSessionAction, productId: string | null): PhoneSessionSpec {
-    const owner = this.requireOwner();
     if (action !== "NEW_PRODUCT" && action !== "EDIT_PRODUCT") {
+      // 🔴 VALIDATED BEFORE ANYONE IS AUTHORIZED, because the two actions are authorized
+      // DIFFERENTLY now. An unknown action must never fall through to the weaker of the two gates.
       throw new DomainError("INVALID_INPUT", "A phone session is either a new product or an edit");
     }
     if (action === "NEW_PRODUCT") {
+      // 🔴 A CREATE SESSION NEEDS THE CREATE PERMISSION — not ownership. This is the only phone
+      // action a granted cashier may open, and the token it mints carries that one action.
+      const creator = this.requireProductCreator();
       if (productId !== null) {
         throw new DomainError("INVALID_INPUT", "A new product cannot name an existing product");
       }
       // 🔴 The store is required even for NEW_PRODUCT: a terminal that cannot write a product has
       // no business handing a phone a form that ends in a save it would refuse.
       this.requireStore();
-      return { action, productId: null, operatorId: owner.id };
+      return { action, productId: null, operatorId: creator.id };
     }
+    // 🔴 EDITING AN EXISTING PRODUCT REMAINS OWNER-ONLY, and the gate is here rather than at the
+    // top so that a granted cashier asking for an EDIT session is refused by the SAME rule that
+    // refuses any other cashier. The capability grants creation and nothing adjacent to it.
+    const owner = this.requireOwner();
     if (typeof productId !== "string" || productId.trim() === "") {
       throw new DomainError("INVALID_INPUT", "Editing on the phone needs the product it is editing");
     }
@@ -1397,10 +1482,19 @@ export class PosService {
     // happened anyway.
     // ══════════════════════════════════════════════════════════════════════════════════════════
     const { transact } = this.requireAuditedStack();
+    // 🔴 THE ACTOR IS RESOLVED ONCE, BY THE ACTION'S OWN RULE, and it is the same check
+    // `requirePhoneOperator` just made: a NEW_PRODUCT save needs the create permission as it
+    // stands now, an EDIT save needs an owner. Resolving it here rather than inside the photo
+    // branch means the save is refused before anything is written, not halfway through.
+    const actor = spec.action === "NEW_PRODUCT" ? this.requireProductCreator() : this.requireOwner();
     return transact((): AdminProductRow => {
       const row = this.writePhoneProduct(spec, submission, servedMaster);
       if (stagedPhoto) {
-        this.setProductPrimaryImage({
+        // 🔴 A CREATE GETS `writeInitialPhoto`, AN EDIT GETS THE OWNER-GATED PATH. On a create the
+        // product was made microseconds ago inside this very transaction, so this is its FIRST
+        // photo by construction; on an edit the product already existed and replacing its photo
+        // stays an owner's act. One branch, so the narrow power cannot be used for the broad one.
+        const write = spec.action === "NEW_PRODUCT" ? this.writeInitialPhoto(actor, {
           productId: row.id,
           bytes: stagedPhoto.bytes,
           mime: stagedPhoto.mime,
@@ -1409,7 +1503,15 @@ export class PosService {
           // 🔴 TRUTHFULLY 'phone'. The column has admitted this value since migration 9, before
           // any phone existed, so a support question about where a photo came from has an answer.
           origin: "phone",
+        }) : this.setProductPrimaryImage({
+          productId: row.id,
+          bytes: stagedPhoto.bytes,
+          mime: stagedPhoto.mime,
+          widthPx: stagedPhoto.widthPx,
+          heightPx: stagedPhoto.heightPx,
+          origin: "phone",
         });
+        void write;
       }
       return row;
     });
@@ -1476,8 +1578,13 @@ export class PosService {
    * to the person who started it, and the audit row should name them.
    */
   private requirePhoneOperator(spec: PhoneSessionSpec): void {
-    const owner = this.requireOwner();
-    if (owner.id !== spec.operatorId) {
+    // 🔴 RE-ASSERTED AT SAVE, AGAINST THE DURABLE ROW, AND SPLIT BY ACTION. A NEW_PRODUCT session
+    // needs the create permission as it stands RIGHT NOW — not as it stood when the QR was drawn —
+    // so an owner who revokes the grant while the phone is open has the save refused. An
+    // EDIT_PRODUCT session still needs an owner, so a token cannot outlive the authority that
+    // minted it either way.
+    const actor = spec.action === "NEW_PRODUCT" ? this.requireProductCreator() : this.requireOwner();
+    if (actor.id !== spec.operatorId) {
       throw new DomainError(
         "NOT_AUTHORIZED",
         "This phone session was opened by a different operator; ask for a new code",
@@ -1756,7 +1863,54 @@ export class PosService {
     readonly heightPx: number;
     readonly origin: ImageOrigin;
   }): ProductImageMeta {
-    const owner = this.requireOwner();
+    // 🔴 SETTING OR REPLACING THE PHOTO OF AN EXISTING PRODUCT IS AN OWNER ACT, STILL. A granted
+    // cashier may give a product they are creating its first photo — see `writeInitialPhoto` —
+    // and may not touch the photo of any product that already exists. The two live in different
+    // methods precisely so that widening one cannot silently widen the other.
+    return this.writeProductPrimaryImage(this.requireOwner(), input);
+  }
+
+  /**
+   * The first photo of a product being CREATED, written by whoever is permitted to create it.
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 THE NARROW HALF OF THE PHOTO AUTHORITY, AND WHY IT IS A SEPARATE ENTRY POINT. A merchant
+   * creating a product from the shelf needs its photo in the same act — on a phone that is usually
+   * the whole reason they walked over. But "may give a NEW product its first photo" and "may
+   * replace or delete the photo of ANY product" are different powers, and a cashier is granted
+   * only the first.
+   *
+   * It is private, and it takes the actor it was already authorized as rather than re-deciding:
+   * the one caller is the create transaction, which has just run `requireProductCreator()` and is
+   * holding a row it created microseconds ago. Nothing reaches this with a product id of its own
+   * choosing — the id comes from the create that is still in flight.
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  private writeInitialPhoto(
+    actor: Cashier,
+    input: {
+      readonly productId: string;
+      readonly bytes: Buffer;
+      readonly mime: ImageMime;
+      readonly widthPx: number;
+      readonly heightPx: number;
+      readonly origin: ImageOrigin;
+    },
+  ): ProductImageMeta {
+    return this.writeProductPrimaryImage(actor, input);
+  }
+
+  private writeProductPrimaryImage(
+    owner: Cashier,
+    input: {
+      readonly productId: string;
+      readonly bytes: Buffer;
+      readonly mime: ImageMime;
+      readonly widthPx: number;
+      readonly heightPx: number;
+      readonly origin: ImageOrigin;
+    },
+  ): ProductImageMeta {
     const images = this.requireImages();
     const store = this.requireStore();
     const { auditStore, transact } = this.requireAuditedStack();

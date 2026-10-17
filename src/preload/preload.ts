@@ -124,6 +124,7 @@ const CH = {
   resetOperatorPin: "pos:resetOperatorPin",
   setOperatorActive: "pos:setOperatorActive",
   setOperatorRole: "pos:setOperatorRole",
+  setOperatorMayCreateProducts: "pos:setOperatorMayCreateProducts",
   currentCashier: "pos:currentCashier",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
@@ -201,6 +202,11 @@ const api: PosApi = {
     ipcRenderer.invoke(CH.setOperatorActive, { operatorId: req.operatorId, isActive: req.isActive }),
   setOperatorRole: (req) =>
     ipcRenderer.invoke(CH.setOperatorRole, { operatorId: req.operatorId, role: req.role }),
+  setOperatorMayCreateProducts: (req) =>
+    ipcRenderer.invoke(CH.setOperatorMayCreateProducts, {
+      operatorId: req.operatorId,
+      mayCreateProducts: req.mayCreateProducts,
+    }),
   currentCashier: () => ipcRenderer.invoke(CH.currentCashier),
   getCatalog: () => ipcRenderer.invoke(CH.getCatalog),
   createSale: (req) => ipcRenderer.invoke(CH.createSale, req),

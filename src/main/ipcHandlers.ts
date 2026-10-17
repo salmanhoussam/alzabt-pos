@@ -390,6 +390,13 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       // only arrive from a hand-edited database. It is NOT an owner, and lands here.
       throw new DomainError("NOT_AUTHORIZED", "Only the shop owner can do that");
     }
+    // 🔴 ASKED OF THE SERVICE, NOT COMPUTED HERE. The per-operator half of this answer lives in
+    // the durable row, and `canCreateProducts()` is the one method that reads it — so this guard
+    // and the service's own `requireProductCreator()` cannot drift into disagreeing. The service
+    // checks again regardless: this layer stops the call early and politely, it does not decide.
+    if (access === "create-products" && !service.canCreateProducts()) {
+      throw new DomainError("NOT_AUTHORIZED", "You are not allowed to add products");
+    }
   }
 
   function wrap(channel: ChannelName, fn: (payload: unknown) => unknown, onInternal?: (payload: unknown) => IpcError): Handler {
@@ -455,7 +462,18 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   /** The login/session shape, with the role the UI uses to hide what the service would refuse. */
   function cashierDto(c: { id: string; name: string }) {
     const r = service.currentRole();
-    return r ? { id: c.id, name: c.name, role: r } : { id: c.id, name: c.name };
+    if (!r) return { id: c.id, name: c.name };
+    // 🔴 CONVENIENCE, NOT AUTHORITY. The Products screen uses this to decide whether drawing the
+    // create actions is worth it; the service re-reads the durable row on every create regardless,
+    // so a stale `true` here earns a refusal rather than a product. Read defensively: a terminal
+    // whose operator store is unavailable answers `false` and the screen simply offers less.
+    let mayCreateProducts = false;
+    try {
+      mayCreateProducts = service.canCreateProducts();
+    } catch {
+      mayCreateProducts = false;
+    }
+    return { id: c.id, name: c.name, role: r, mayCreateProducts };
   }
 
   return {
@@ -534,6 +552,15 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         service.requireOperatorSession(),
         str(o.operatorId, "operatorId", 100),
         role(o.role),
+      );
+    }),
+
+    setOperatorMayCreateProducts: wrap("setOperatorMayCreateProducts", (p) => {
+      const o = exactObject(p, ["operatorId", "mayCreateProducts"]);
+      return operators().setMayCreateProducts(
+        service.requireOperatorSession(),
+        str(o.operatorId, "operatorId", 100),
+        bool(o.mayCreateProducts, "mayCreateProducts"),
       );
     }),
     logout: wrap("logout", (p) => {

@@ -82,9 +82,26 @@ function bootstrapOwner(name = "حسين", pin = "431987") {
 
 describe("the two migrated accounts", () => {
   it("exist with the approved roles and both require a reset", () => {
+    // 🔴 `mayCreateProducts` ARRIVED WITH MIGRATION 11 AND IS FALSE ON BOTH. The seeded rows
+    // predate the capability, and an upgrade must grant nobody anything — the owner does not need
+    // it, and the cashier must be given it deliberately. The old shape carried four keys.
     expect(svc.listAll()).toEqual([
-      { id: "cashier-01", name: "Cashier One", role: "owner", isActive: true, mustResetPin: true },
-      { id: "cashier-02", name: "Cashier Two", role: "cashier", isActive: true, mustResetPin: true },
+      {
+        id: "cashier-01",
+        name: "Cashier One",
+        role: "owner",
+        isActive: true,
+        mustResetPin: true,
+        mayCreateProducts: false,
+      },
+      {
+        id: "cashier-02",
+        name: "Cashier Two",
+        role: "cashier",
+        isActive: true,
+        mustResetPin: true,
+        mayCreateProducts: false,
+      },
     ]);
   });
 

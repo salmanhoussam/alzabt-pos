@@ -50,7 +50,11 @@ describe("the registry is bounded", () => {
   // The assertion's point is unchanged and is NOT weakened: the registry is exhaustive and
   // bounded, and PRICE_CHANGED / UNIT_CHANGED are still absent — a price changed during
   // reconciliation is a PRODUCT_UPDATED, exactly as before.
-  it("names exactly nineteen event types — PRICE_CHANGED and UNIT_CHANGED are NOT among them", () => {
+  it("names exactly twenty-one event types — PRICE_CHANGED and UNIT_CHANGED are NOT among them", () => {
+    // 🔴 WAS NINETEEN until migration 11 added the two that record granting and revoking a
+    // cashier's permission to create products. A standing permission changing hands is exactly
+    // the kind of act an owner asks about months later, and reusing OPERATOR_ROLE_CHANGED for it
+    // would have been a lie: the role does not change.
     expect([...AUDIT_EVENT_TYPES]).toEqual([
       "PRODUCT_CREATED",
       "PRODUCT_UPDATED",
@@ -63,6 +67,8 @@ describe("the registry is bounded", () => {
       "OPERATOR_ACTIVATED",
       "OPERATOR_DEACTIVATED",
       "OPERATOR_ROLE_CHANGED",
+      "OPERATOR_PRODUCT_CREATE_GRANTED",
+      "OPERATOR_PRODUCT_CREATE_REVOKED",
       "CATEGORY_CREATED",
       "CATEGORY_RENAMED",
       "CATEGORY_ACTIVATED",

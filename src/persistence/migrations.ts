@@ -1272,4 +1272,122 @@ WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
 BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
 `,
   },
+  {
+    version: 11,
+    name: "operator_product_create_capability",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 11 — one cashier may be allowed to create products, durably.
+    //
+    // 🔴 WHY A COLUMN AND NOT A CHECK IN CODE. The requirement is that ONE named employee may add
+    // new products while every other cashier may not. Nothing in the schema could express that:
+    // `operators` carries id, name, role and credentials, and authorization read `role` alone. The
+    // three ways to get there without a migration were each measured and each refused:
+    //
+    //   by display name   — `renameOperator` exists, so the permission would survive until someone
+    //                       corrected a spelling. A capability that a typo can revoke is not one.
+    //   by operator id    — `cashier-02` is a literal seeded by migration 8, but every operator
+    //                       created since gets a `randomUUID`. Hard-coding it would grant the
+    //                       capability to whoever happens to hold that row in any install, and
+    //                       silently deny it to the real second cashier hired next month.
+    //   by a new role     — `role` carries a CHECK constraint, so adding a value is a table
+    //                       rebuild. That is this migration either way, and it would make the
+    //                       capability a RANK rather than a permission: every future narrow grant
+    //                       would need another role, and the role would imply authority nobody
+    //                       asked to give.
+    //
+    // So it is a per-operator boolean, defaulting to 0. An existing cashier gains nothing by
+    // upgrading — the default is the refusal, and the grant is an act an owner performs on the
+    // record, not a side effect of installing a build.
+    //
+    // 🔴 THE OWNER DOES NOT USE THIS COLUMN. An owner's authority comes from `role = 'owner'` and
+    // is unchanged by anything here; the flag is read only when deciding whether a NON-owner may
+    // create. Storing it for the owner too (rather than a separate table keyed to cashiers) keeps
+    // one row per person and no join, and an owner row's value is simply never consulted.
+    //
+    // 🔴 AND THE AUDIT LEARNS THE ACT. A permission grant is exactly the kind of thing an owner
+    // needs to be able to ask about months later — "who allowed him to add products, and when" —
+    // and `audit_events.event_type` is a CHECK, so the vocabulary has to be extended for the event
+    // to be recordable at all. Reusing OPERATOR_ROLE_CHANGED was rejected: the role did not
+    // change, and an audit row that misnames what happened is worse than no row, because it will
+    // be believed. Two events, because granting and revoking are different acts and a reader
+    // should not have to open the payload to tell them apart.
+    //
+    // The rebuild follows migration 10's own pattern exactly: new table, INSERT ... SELECT * in
+    // seq order with no expression anywhere, drop, rename, then the indexes and triggers AFTER the
+    // copy so `audit_events_seq_monotonic` does not fire once per historical row and refuse the
+    // whole migration.
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    sql: `
+-- A capability, per operator, defaulting to REFUSED. Constant default, so SQLite rewrites no row.
+ALTER TABLE operators ADD COLUMN may_create_products INTEGER NOT NULL DEFAULT 0
+  CHECK (may_create_products IN (0, 1));
+
+CREATE TABLE audit_events_v11 (
+  id             TEXT    PRIMARY KEY,
+  seq            INTEGER NOT NULL UNIQUE CHECK (seq > 0),
+  event_type     TEXT    NOT NULL CHECK (event_type IN
+                   ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED',
+                    'PRODUCT_DEACTIVATED', 'CATALOG_IMPORTED',
+                    'OPERATOR_CREATED', 'OPERATOR_RENAMED', 'OPERATOR_PIN_RESET',
+                    'OPERATOR_ACTIVATED', 'OPERATOR_DEACTIVATED', 'OPERATOR_ROLE_CHANGED',
+                    'OPERATOR_PRODUCT_CREATE_GRANTED', 'OPERATOR_PRODUCT_CREATE_REVOKED',
+                    'CATEGORY_CREATED', 'CATEGORY_RENAMED', 'CATEGORY_ACTIVATED',
+                    'CATEGORY_DEACTIVATED', 'CATEGORY_DELETED',
+                    'PRODUCT_IMAGE_SET', 'PRODUCT_IMAGE_REPLACED', 'PRODUCT_IMAGE_REMOVED')),
+  entity_type    TEXT    NOT NULL CHECK (entity_type IN
+                   ('product', 'catalog', 'operator', 'category', 'product_image')),
+  entity_id      TEXT    NOT NULL CHECK (length(entity_id) > 0),
+  actor_id       TEXT    NOT NULL CHECK (length(actor_id) > 0),
+  actor_name     TEXT    NOT NULL CHECK (length(trim(actor_name)) > 0),
+  actor_tier     TEXT    NOT NULL CHECK (actor_tier IN
+                   ('owner', 'admin', 'cashier', 'system', 'unspecified')),
+  occurred_at    TEXT    NOT NULL CHECK (occurred_at GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date  TEXT    NOT NULL CHECK (business_date GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  changed_json   TEXT    NOT NULL CHECK (json_valid(changed_json)
+                                         AND json_type(changed_json) = 'object'),
+  metadata_json  TEXT             CHECK (metadata_json IS NULL
+                                         OR (json_valid(metadata_json)
+                                             AND json_type(metadata_json) = 'object')),
+  app_version    TEXT    NOT NULL CHECK (length(app_version) > 0),
+  schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+  -- The pairing, with the two new events landing on 'operator' where they belong: the thing that
+  -- changed is the PERSON's standing permission, not a product.
+  CHECK (
+    (entity_type = 'product' AND event_type IN
+       ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED', 'PRODUCT_DEACTIVATED'))
+    OR (entity_type = 'catalog' AND event_type = 'CATALOG_IMPORTED')
+    OR (entity_type = 'operator' AND event_type IN
+       ('OPERATOR_CREATED', 'OPERATOR_RENAMED', 'OPERATOR_PIN_RESET',
+        'OPERATOR_ACTIVATED', 'OPERATOR_DEACTIVATED', 'OPERATOR_ROLE_CHANGED',
+        'OPERATOR_PRODUCT_CREATE_GRANTED', 'OPERATOR_PRODUCT_CREATE_REVOKED'))
+    OR (entity_type = 'category' AND event_type IN
+       ('CATEGORY_CREATED', 'CATEGORY_RENAMED', 'CATEGORY_ACTIVATED',
+        'CATEGORY_DEACTIVATED', 'CATEGORY_DELETED'))
+    OR (entity_type = 'product_image' AND event_type IN
+       ('PRODUCT_IMAGE_SET', 'PRODUCT_IMAGE_REPLACED', 'PRODUCT_IMAGE_REMOVED'))
+  )
+) STRICT;
+
+-- Byte for byte, in seq order. No expression, nothing invented, nothing dropped.
+INSERT INTO audit_events_v11 SELECT * FROM audit_events ORDER BY seq;
+
+DROP TABLE audit_events;
+ALTER TABLE audit_events_v11 RENAME TO audit_events;
+
+CREATE INDEX audit_events_entity ON audit_events (entity_type, entity_id, seq DESC);
+CREATE INDEX audit_events_type   ON audit_events (event_type, seq DESC);
+CREATE INDEX audit_events_actor  ON audit_events (actor_id, seq DESC);
+CREATE INDEX audit_events_date   ON audit_events (business_date, seq DESC);
+
+CREATE TRIGGER audit_events_immutable_update BEFORE UPDATE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: the audit trail is append-only'); END;
+CREATE TRIGGER audit_events_immutable_delete BEFORE DELETE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: audit events cannot be deleted'); END;
+CREATE TRIGGER audit_events_seq_monotonic BEFORE INSERT ON audit_events
+WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
+BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
+`,
+  },
 ];
