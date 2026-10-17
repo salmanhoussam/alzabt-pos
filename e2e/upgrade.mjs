@@ -32,9 +32,10 @@
  *
  * Deliberately NOT derived from MIGRATIONS.length: these scripts assert what the INSTALLED app did
  * to a real ledger, and a value read out of the source under test would agree with it by
- * construction. 8 -> 10 (9 = product_master, 10 = product_master_audit).
+ * construction. 8 -> 10 (9 = product_master, 10 = product_master_audit), -> 11
+ * (operator_product_create_capability: the per-operator right to add products).
  */
-const SCHEMA = 10;
+const SCHEMA = 11;
 
 import { _electron as electron } from "playwright-core";
 import { spawn, execFileSync } from "node:child_process";

@@ -281,7 +281,7 @@ await app.close();
     // invariant, so every old value is named here the way upgrade.mjs names its own.
     // 🔴 TRANSITION — this said 8, and it was already stale at migration 9: the gate failed at an
     // earlier step so nobody ever saw it. 9 = product_master, 10 = product_master_audit.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 10, "the installed app's ledger is at schema v10");
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 11, "the installed app's ledger is at schema v11");
 
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
     const types = rows.map((r) => r.event_type);
