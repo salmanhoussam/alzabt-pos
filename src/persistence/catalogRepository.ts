@@ -119,6 +119,22 @@ export interface AdminProductRow {
   readonly is_active: bigint;
   readonly created_at: string;
   readonly updated_at: string;
+  // ── Migration 9, Product Master ───────────────────────────────────────────────────────────────
+  //
+  // 🔴 EVERY ONE OF THESE IS OPTIONAL FOR SELLING. A product with no category, no barcode, no
+  // brand, no description and `is_online_visible = 0` is a complete, sellable product; these
+  // describe it for the website, and local trade must never wait on them.
+  //
+  // And there is NO `bytes` field, nor any image column. The product's photo lives in
+  // `catalog_product_images` and is read through `ProductImageRepository`, because `listAll()`
+  // renders every product and a blob here would load every photo with it.
+  readonly category_id: string | null;
+  /** Canonical form only — `src/domain/barcode.ts` decides what canonical means. */
+  readonly barcode: string | null;
+  readonly brand: string | null;
+  readonly description_ar: string | null;
+  readonly description_en: string | null;
+  readonly is_online_visible: bigint;
 }
 
 /** A validated new product, ready to store. Prices are already exact minor units. */
@@ -128,10 +144,47 @@ export interface NewProduct {
   readonly sku: string | null;
   readonly priceMinor: bigint;
   readonly currency: string;
+  /**
+   * Migration 9, optional at creation.
+   *
+   * Absent is the ordinary case and is what invoice reconciliation passes: a product created from
+   * an invoice line knows a name, a unit and a price, and inventing a category or a brand for it
+   * would be putting words in the merchant's mouth. The Product Master form passes what the owner
+   * actually typed.
+   */
+  readonly master?: ProductMasterEdit;
   readonly baseUnit: string;
 }
 
 /** The editable fields of an existing product. Identity (source, source_key) is not among them. */
+/**
+ * The Product Master fields, as one optional group.
+ *
+ * 🔴 ABSENT MEANS "LEAVE IT EXACTLY AS IT IS", never "clear it", and that distinction is the whole
+ * reason this is a separate interface rather than six more fields on `ProductEdit`. Three callers
+ * write products and only one of them knows about enrichment:
+ *
+ *   the import path          names none of these — an imported row must not lose its category
+ *   invoice reconciliation   names none of these — it knows a name, a unit and a price
+ *   the Product Master form  names all of them
+ *
+ * If absence meant "clear", a re-import or a reconciliation would silently erase the descriptions
+ * and the photo link the owner had typed. This is migration 4's `priceNeedsReview` lesson applied
+ * to six fields at once: the one caller that means to change a field says so.
+ *
+ * `null` is a real value here and DOES clear — "remove this product's category" is a thing an
+ * owner does. Absent and null are different, deliberately.
+ */
+export interface ProductMasterEdit {
+  readonly categoryId?: string | null;
+  /** Canonical form only. The service normalizes; this interface carries the result. */
+  readonly barcode?: string | null;
+  readonly brand?: string | null;
+  readonly descriptionAr?: string | null;
+  readonly descriptionEn?: string | null;
+  readonly isOnlineVisible?: boolean;
+}
+
 export interface ProductEdit {
   readonly nameAr: string;
   readonly nameEn: string | null;
@@ -150,6 +203,35 @@ export interface ProductEdit {
    * does so says so here.
    */
   readonly priceNeedsReview?: boolean;
+  /** Migration 9. Absent fields are carried forward unchanged — see `ProductMasterEdit`. */
+  readonly master?: ProductMasterEdit;
+}
+
+/**
+ * The admin column list, named once.
+ *
+ * 🔴 IT WAS WRITTEN OUT THREE TIMES BEFORE MIGRATION 9, in `listAll`, `findById` and `findBySku`.
+ * Six new columns would have meant three places to add them and three chances to miss one — and a
+ * read that silently omits `barcode` returns a row whose barcode is `undefined`, which is neither
+ * null nor a value and would have been noticed by nothing. One constant, four reads.
+ *
+ * It names every column explicitly rather than using `*`, deliberately: `SELECT *` here would
+ * start returning any column a future migration adds, including one holding bytes.
+ */
+const ADMIN_COLUMNS = `id, source, source_key, sku, name_ar, name_en, selling_price_minor,
+                       currency, base_unit, price_needs_review, is_active, created_at, updated_at,
+                       category_id, barcode, brand, description_ar, description_en,
+                       is_online_visible`;
+
+/**
+ * Absent means unchanged; `null` means clear.
+ *
+ * Written as a named function rather than inline `??`, because `??` would be WRONG here: it treats
+ * `null` as absent, and clearing a category is a real thing an owner does. The distinction between
+ * "do not touch this" and "remove this" is the one that would have been lost.
+ */
+function keep<T>(incoming: T | null | undefined, current: T | null): T | null {
+  return incoming === undefined ? current : incoming;
 }
 
 export class CatalogRepository {
@@ -348,8 +430,7 @@ export class CatalogRepository {
   listAll(): AdminProductRow[] {
     return this.db
       .prepare(
-        `SELECT id, source, source_key, sku, name_ar, name_en, selling_price_minor, currency,
-                base_unit, price_needs_review, is_active, created_at, updated_at
+        `SELECT ${ADMIN_COLUMNS}
            FROM catalog_products
           ORDER BY source, CAST(source_key AS INTEGER), source_key`,
       )
@@ -358,11 +439,7 @@ export class CatalogRepository {
 
   findById(id: string): AdminProductRow | null {
     const row = this.db
-      .prepare(
-        `SELECT id, source, source_key, sku, name_ar, name_en, selling_price_minor, currency,
-                base_unit, price_needs_review, is_active, created_at, updated_at
-           FROM catalog_products WHERE id = ?`,
-      )
+      .prepare(`SELECT ${ADMIN_COLUMNS} FROM catalog_products WHERE id = ?`)
       .get(id) as AdminProductRow | undefined;
     return row ?? null;
   }
@@ -370,13 +447,56 @@ export class CatalogRepository {
   /** The SKU is unique across the whole table when present (migration 3's partial unique index). */
   findBySku(sku: string): AdminProductRow | null {
     const row = this.db
-      .prepare(
-        `SELECT id, source, source_key, sku, name_ar, name_en, selling_price_minor, currency,
-                base_unit, price_needs_review, is_active, created_at, updated_at
-           FROM catalog_products WHERE sku = ?`,
-      )
+      .prepare(`SELECT ${ADMIN_COLUMNS} FROM catalog_products WHERE sku = ?`)
       .get(sku) as AdminProductRow | undefined;
     return row ?? null;
+  }
+
+  /**
+   * Finds a product by barcode. Migration 9's partial unique index makes the answer at most one.
+   *
+   * 🔴 THE CALLER MUST PASS THE CANONICAL FORM, and that is not a convenience — it is the whole
+   * contract. A 12-digit UPC-A typed off a box and the 13-digit EAN-13 a decoder returns for the
+   * same symbol are different strings, so a raw lookup finds nothing and the shop creates a second
+   * product for one item. `normalizeBarcode` in `src/domain/barcode.ts` is the only thing that
+   * decides canonical; this method does not normalize, so that there is exactly one place that
+   * does and this file stays statements.
+   */
+  findByBarcode(canonicalBarcode: string): AdminProductRow | null {
+    const row = this.db
+      .prepare(`SELECT ${ADMIN_COLUMNS} FROM catalog_products WHERE barcode = ?`)
+      .get(canonicalBarcode) as AdminProductRow | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Every brand this shop has already typed, once each.
+   *
+   * 🔴 THIS IS THE WHOLE OF "BRAND MANAGEMENT", AND DELIBERATELY SO. The approved architecture
+   * (study §I) chose free text with suggestions over a normalized brand table, because a hardware
+   * shop carries hundreds of brands arriving as supplier spellings, and normalizing them would mean
+   * building category management twice plus a merge tool to fix a problem the first online shop
+   * will not have. So there is no brand table, no brand id, and no row to manage — there is this
+   * query, and a datalist.
+   *
+   * What it does NOT return, each for a reason: no product ids and no counts, because a suggestion
+   * list needs neither and either one would leak how the catalog is shaped to any signed-in
+   * operator; and nothing blank, because `brand` is stored already-trimmed-or-null by
+   * `validateProductMaster`, so a blank here would mean a hand-edited database and a blank
+   * suggestion is noise either way.
+   *
+   * Ordered by the database, in one place, so two surfaces cannot disagree about the order.
+   */
+  distinctBrands(): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT brand FROM catalog_products
+            WHERE brand IS NOT NULL AND trim(brand) <> ''
+            ORDER BY brand`,
+        )
+        .all() as Array<{ brand: string }>
+    ).map((r) => r.brand);
   }
 
   /**
@@ -405,8 +525,11 @@ export class CatalogRepository {
         this.db
           .prepare(
             `INSERT INTO catalog_products (id, source, source_key, sku, name_ar, name_en, selling_price_minor,
-                                           currency, base_unit, price_needs_review, is_active, created_at, updated_at)
-             VALUES (@id, @source, @sourceKey, @sku, @nameAr, @nameEn, @price, @currency, @baseUnit, 0, 1, @now, @now)`,
+                                           currency, base_unit, price_needs_review, is_active, created_at, updated_at,
+                                           category_id, barcode, brand, description_ar, description_en,
+                                           is_online_visible)
+             VALUES (@id, @source, @sourceKey, @sku, @nameAr, @nameEn, @price, @currency, @baseUnit, 0, 1, @now, @now,
+                     @categoryId, @barcode, @brand, @descriptionAr, @descriptionEn, @isOnlineVisible)`,
           )
           .run({
             id,
@@ -419,6 +542,17 @@ export class CatalogRepository {
             currency: input.currency,
             baseUnit: input.baseUnit,
             now: stamp,
+            // 🔴 `?? null` and `?? 0`, NOT the column defaults, because a named parameter that is
+            // `undefined` is an error in better-sqlite3 rather than a skipped column. An absent
+            // enrichment group therefore produces exactly the empty product the schema's own
+            // defaults would have — and `is_online_visible` starts 0, so nothing is published by
+            // being created.
+            categoryId: input.master?.categoryId ?? null,
+            barcode: input.master?.barcode ?? null,
+            brand: input.master?.brand ?? null,
+            descriptionAr: input.master?.descriptionAr ?? null,
+            descriptionEn: input.master?.descriptionEn ?? null,
+            isOnlineVisible: input.master?.isOnlineVisible ? 1 : 0,
           });
         const row = this.findById(id);
         if (!row) throw new Error("catalog: created product could not be read back");
@@ -441,7 +575,10 @@ export class CatalogRepository {
             `UPDATE catalog_products
                 SET sku = @sku, name_ar = @nameAr, name_en = @nameEn, selling_price_minor = @price,
                     base_unit = @baseUnit, is_active = @active, price_needs_review = @needsReview,
-                    updated_at = @now
+                    updated_at = @now,
+                    category_id = @categoryId, barcode = @barcode, brand = @brand,
+                    description_ar = @descriptionAr, description_en = @descriptionEn,
+                    is_online_visible = @isOnlineVisible
               WHERE id = @id`,
           )
           .run({
@@ -461,6 +598,20 @@ export class CatalogRepository {
                   ? 1
                   : 0,
             now: now.toISOString(),
+            // 🔴 ABSENT CARRIES THE CURRENT VALUE FORWARD, exactly as `needsReview` above does.
+            // `keep` is written out per field rather than spread, so that adding a Product Master
+            // column later cannot silently inherit "clear me" by being forgotten here.
+            categoryId: keep(input.master?.categoryId, before.category_id),
+            barcode: keep(input.master?.barcode, before.barcode),
+            brand: keep(input.master?.brand, before.brand),
+            descriptionAr: keep(input.master?.descriptionAr, before.description_ar),
+            descriptionEn: keep(input.master?.descriptionEn, before.description_en),
+            isOnlineVisible:
+              input.master?.isOnlineVisible === undefined
+                ? Number(before.is_online_visible)
+                : input.master.isOnlineVisible
+                  ? 1
+                  : 0,
           });
         const row = this.findById(id);
         if (!row) throw new Error("catalog: updated product could not be read back");

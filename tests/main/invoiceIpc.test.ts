@@ -94,7 +94,17 @@ describe("the invoice channels exist and answer", () => {
     }
   });
 
-  it("printInvoice and saveInvoicePdf are the ONLY asynchronous channels", () => {
+  // 🔴 THE OLD VALUE WAS `["printInvoice", "saveInvoicePdf"]` — exactly two, and this test's title
+  // said so. Slice H1 adds two more, and they are async for a real reason rather than a style
+  // choice: `startPhoneSession` binds a TCP socket and encodes a QR from 647 KB of WebAssembly,
+  // and `cancelPhoneSession` waits for the socket to actually close. Pretending either were
+  // synchronous would mean returning before the surface was open (or shut), which is the one thing
+  // a shutdown assertion must never be allowed to do.
+  //
+  // The list stays EXHAUSTIVE and pinned by name rather than counted: a channel that becomes async
+  // by accident is a caller somewhere receiving a Promise it treats as a value, and `syncHandlers`
+  // throwing is how that gets caught.
+  it("printInvoice, saveInvoicePdf and the two phone-session channels are the ONLY asynchronous channels", () => {
     // `syncHandlers` assumes exactly this. Asserting it keeps that assumption honest rather than
     // leaving a cast that would quietly hand a Promise to a caller expecting a result.
     const handlers = createIpcHandlers(h.service, { invoices: h.invoices });
@@ -112,7 +122,12 @@ describe("the invoice channels exist and answer", () => {
         void (result as Promise<unknown>).catch(() => undefined);
       }
     }
-    expect(async_.sort()).toEqual(["printInvoice", "saveInvoicePdf"]);
+    expect(async_.sort()).toEqual([
+      "cancelPhoneSession",
+      "printInvoice",
+      "saveInvoicePdf",
+      "startPhoneSession",
+    ]);
   });
 
   it("without the invoice service wired, every invoice channel says NOT_AVAILABLE", () => {

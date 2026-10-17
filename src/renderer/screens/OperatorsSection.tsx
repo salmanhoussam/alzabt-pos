@@ -102,7 +102,14 @@ export function OperatorsSection({ selfId }: { readonly selfId: string }) {
             {list.map((op) => (
               <tr key={op.id} data-testid="ops-row" data-operator-id={op.id} data-role={op.role}>
                 <td dir="auto">{op.name}</td>
-                <td data-testid="ops-row-role">{roleLabel(op.role)}</td>
+                <td data-testid="ops-row-role">
+                  {roleLabel(op.role)}
+                  {op.role !== "owner" && op.mayCreateProducts && (
+                    <span className="badge ok" data-testid="ops-row-may-create">
+                      {t("ops.mayCreate")}
+                    </span>
+                  )}
+                </td>
                 <td>
                   <span className={op.isActive ? "badge ok" : "badge warn"} data-testid="ops-row-status">
                     {op.isActive ? t("ops.active") : t("ops.inactive")}
@@ -156,6 +163,29 @@ export function OperatorsSection({ selfId }: { readonly selfId: string }) {
                       data-testid="ops-toggle-role"
                     >
                       {t(op.role === "owner" ? "ops.makeCashier" : "ops.makeOwner")}
+                    </button>
+                  )}
+                  {/* 🔴 OFFERED FOR A CASHIER ONLY, because an owner already adds products by
+                      virtue of being one — the service refuses the call on an owner rather than
+                      storing a flag that decides nothing. Not offered on yourself either: this is
+                      the one permission a cashier would most like to grant themselves. */}
+                  {op.id !== selfId && op.role !== "owner" && (
+                    <button
+                      className="btn ghost small"
+                      disabled={busy}
+                      onClick={() =>
+                        void act(() =>
+                          call(
+                            pos().setOperatorMayCreateProducts({
+                              operatorId: op.id,
+                              mayCreateProducts: !op.mayCreateProducts,
+                            }),
+                          ),
+                        )
+                      }
+                      data-testid="ops-toggle-create"
+                    >
+                      {t(op.mayCreateProducts ? "ops.denyCreate" : "ops.allowCreate")}
                     </button>
                   )}
                   <button

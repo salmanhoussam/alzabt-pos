@@ -60,6 +60,12 @@ export const COUNTED_TABLES = [
   // database. A one-row table is the easiest kind to leave out of a list like this and the most
   // expensive kind to lose.
   "terminal_security_state",
+  // Migration 9 — Product Master. Both are durable, and the IMAGES table is the one that would
+  // hurt most if it were ever left out: a snapshot missing it restores a catalog whose every
+  // product photo is gone, silently, while the backup still verified as good. That is the
+  // frozen-logo gap this list exists to prevent, at the scale of a whole catalog.
+  "catalog_categories",
+  "catalog_product_images",
   "audit_events",
   "company_profile",
   "invoices",

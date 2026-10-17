@@ -20,6 +20,7 @@ export const CHANNELS = {
   resetOperatorPin: "pos:resetOperatorPin",
   setOperatorActive: "pos:setOperatorActive",
   setOperatorRole: "pos:setOperatorRole",
+  setOperatorMayCreateProducts: "pos:setOperatorMayCreateProducts",
   currentCashier: "pos:currentCashier",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
@@ -28,12 +29,36 @@ export const CHANNELS = {
   getSaleHistory: "pos:getSaleHistory",
   importCatalog: "pos:importCatalog",
   exportCatalog: "pos:exportCatalog",
+  exportOnlineCatalog: "pos:exportOnlineCatalog",
   exportBackup: "pos:exportBackup",
   getAppInfo: "pos:getAppInfo",
   listProducts: "pos:listProducts",
   createProduct: "pos:createProduct",
   updateProduct: "pos:updateProduct",
   setProductActive: "pos:setProductActive",
+  // ── Product Master (migration 9) ─────────────────────────────────────────────────────────────
+  //
+  // 🔴 THERE IS NO CHANNEL THAT CARRIES IMAGE BYTES INTO MAIN. `setProductImage` names a product
+  // and nothing else; main runs the picker, decodes and normalizes, exactly as `pickInvoiceLogo`
+  // already does for the invoice logo. The renderer never supplies a path or a buffer.
+  listCategories: "pos:listCategories",
+  listBrands: "pos:listBrands",
+  createCategory: "pos:createCategory",
+  renameCategory: "pos:renameCategory",
+  setCategoryActive: "pos:setCategoryActive",
+  deleteCategory: "pos:deleteCategory",
+  getProductImageMeta: "pos:getProductImageMeta",
+  getProductImageBytes: "pos:getProductImageBytes",
+  setProductImage: "pos:setProductImage",
+  removeProductImage: "pos:removeProductImage",
+  // ── Phone entry over the LAN (slice H1) ──────────────────────────────────────────────────────
+  //
+  // 🔴 NEITHER CHANNEL EVER RETURNS THE TOKEN. `startPhoneSession` answers with the QR to show and
+  // the address to read out for support — the secret is inside the encoded URL and nowhere else in
+  // the DTO, so a renderer (or a screenshot of one) cannot leak a reusable credential.
+  startPhoneSession: "pos:startPhoneSession",
+  cancelPhoneSession: "pos:cancelPhoneSession",
+  phoneSessionState: "pos:phoneSessionState",
   getSettings: "pos:getSettings",
   setTerminalLanguage: "pos:setTerminalLanguage",
   // ── Manual invoices (migration 6) ────────────────────────────────────────────────────────────
@@ -78,6 +103,12 @@ export interface CashierDto {
   readonly name: string;
   /** Migration 8. Present on a SESSION; the login list deliberately carries only id and name. */
   readonly role?: OperatorRoleDto;
+  /**
+   * Migration 11. Present on a SESSION only, and CONVENIENCE ONLY: it decides which buttons are
+   * worth drawing, never whether an act is allowed. The service re-reads the durable row on every
+   * create, so a stale `true` here buys a renderer nothing but a refusal.
+   */
+  readonly mayCreateProducts?: boolean;
 }
 
 export type OperatorRoleDto = "owner" | "admin" | "cashier";
@@ -89,6 +120,8 @@ export interface OperatorDto {
   readonly role: OperatorRoleDto;
   readonly isActive: boolean;
   readonly mustResetPin: boolean;
+  /** Migration 11 — the narrow "may add products" grant. Meaningless on an owner, who always may. */
+  readonly mayCreateProducts: boolean;
 }
 
 /**
@@ -133,6 +166,10 @@ export interface SetOperatorActiveRequest extends OperatorIdRequest {
 
 export interface SetOperatorRoleRequest extends OperatorIdRequest {
   readonly role: OperatorRoleDto;
+}
+
+export interface SetOperatorMayCreateProductsRequest extends OperatorIdRequest {
+  readonly mayCreateProducts: boolean;
 }
 
 export interface ProductDto {
@@ -259,6 +296,21 @@ export type ImportCatalogResponse =
     }
   | { readonly status: "rejected"; readonly rejected: ReadonlyArray<{ readonly line: number; readonly reason: string }> };
 
+/**
+ * What a finished Online Catalog export tells the owner.
+ *
+ * 🔴 `folderName`, NOT A PATH. The owner chose the parent folder a moment ago, so naming the
+ * package inside it is all they need — and an absolute path on screen is one that ends up in a
+ * screenshot, a support email, or a log, carrying the operator's Windows username with it.
+ */
+export interface OnlineCatalogExportDto {
+  readonly folderName: string;
+  readonly products: number;
+  readonly images: number;
+  /** Exported products missing a photo, English name, category, brand or description. */
+  readonly incomplete: number;
+}
+
 /** exportCatalog / exportBackup take NO payload: the main process shows the save dialog and writes. */
 export type ExportResponse =
   | { readonly status: "cancelled" }
@@ -292,15 +344,164 @@ export interface AdminProductDto {
   readonly priceNeedsReview: boolean;
   readonly isActive: boolean;
   readonly updatedAt: string;
+  // ── Product Master (migration 9) ─────────────────────────────────────────────────────────────
+  //
+  // 🔴 EVERY ONE OF THESE IS OPTIONAL FOR SELLING, and they travel on the ordinary list because
+  // they are small: an id, a code and some text. What does NOT travel is the photo — `hasImage` is
+  // a boolean computed from one small query over the image table, never the bytes. The products
+  // screen renders every product, and a blob here would load the shop's whole photo library to
+  // draw a list that shows none of them.
+  readonly categoryId: string | null;
+  /** Canonical form only — a 12-digit UPC-A is already its 13-digit EAN-13 here. */
+  readonly barcode: string | null;
+  readonly brand: string | null;
+  readonly descriptionAr: string | null;
+  readonly descriptionEn: string | null;
+  readonly isOnlineVisible: boolean;
+  // ── The product's photo, as STATE rather than as an image ────────────────────────────────────
+  //
+  // 🔴 EXACTLY ENOUGH TO DRAW A LIST AND THEN ASK FOR WHAT IS ON SCREEN. `hasImage` decides
+  // thumbnail-or-placeholder with no further call; `primaryImageId` is what
+  // `getProductImageBytes` takes; `imageVersion` is the stored CONTENT HASH, so a renderer cache
+  // keyed on it is exact — replacing a photo changes the key, and nothing has to guess whether a
+  // cached thumbnail is stale. Three small scalars, and still not one byte of any photo.
+  readonly hasImage: boolean;
+  readonly primaryImageId: string | null;
+  readonly imageMime: "image/jpeg" | "image/png" | null;
+  /** The sha256 of the stored bytes. A cache key that cannot be wrong, not a version counter. */
+  readonly imageVersion: string | null;
 }
 
-/** What the operator typed. Optional fields are null when not given — never an empty string. */
+/** One category, as every surface sees it. Flat: there is no parent and no tree in V1. */
+export interface CategoryDto {
+  readonly id: string;
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+  readonly isActive: boolean;
+  readonly sortOrder: number;
+  readonly updatedAt: string;
+}
+
+/**
+ * A product photo's metadata. There is no `bytes` field, in the DTO as in the repository row.
+ *
+ * 🔴 The absence is the contract, not an omission: a screen holding this object cannot reach the
+ * image data, so it must ask for it by name through `getProductImageBytes`.
+ */
+/**
+ * Asking for a phone session. `productId` is present only for an edit.
+ *
+ * 🔴 The renderer names an ACTION and, for an edit, a product. It cannot choose the port, the
+ * address, the token or the expiry — all four are main's, so a compromised or buggy renderer
+ * cannot widen the surface or weaken the credential.
+ */
+export interface StartPhoneSessionRequest {
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  readonly productId?: string | null;
+}
+
+/** One plausible LAN address, offered when the machine has more than one real candidate. */
+export interface LanCandidateDto {
+  readonly interfaceName: string;
+  readonly address: string;
+  readonly note: string;
+}
+
+/**
+ * What the desktop needs to display a pairing QR — and deliberately not one field more.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WHAT IS ABSENT IS THE CONTRACT. There is no `token`, no `url`, no operator id, no operator
+ * name, no product name and no database path. The token exists only inside `qrSvg`'s encoded
+ * symbol, which is the one place it has to be, because that is what the phone's camera reads.
+ *
+ * `host` and `port` ARE present: the approved design requires a visible address so a merchant
+ * whose phone cannot connect can be asked to read it out, and so a future retry UI can offer the
+ * other adapter. An address is not a secret — the token is.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export interface PhoneSessionDto {
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  readonly host: string;
+  readonly port: number;
+  /** ISO-8601. The desktop counts down from this rather than inventing its own ten minutes. */
+  readonly expiresAt: string;
+  /** A self-contained SVG. No object URL, no `blob:`, nothing for the renderer's CSP to refuse. */
+  readonly qrSvg: string;
+  /** True when the machine had more than one real candidate and this one was a best guess. */
+  readonly addressAmbiguous: boolean;
+  /** Every plausible address, when ambiguous — so a retry path exists without re-measuring. */
+  readonly addressCandidates: readonly LanCandidateDto[];
+}
+
+/**
+ * The live state of the phone session, for the desktop dialog.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WHY POLLING RATHER THAN A PUSH EVENT. This bridge has no main→renderer event channel and
+ * never has: every one of the 60-odd channels is a request the renderer makes. Adding a push
+ * channel for one dialog would be a new direction of travel across the contextIsolation boundary,
+ * and the thing it would carry — "the phone saved" — is checkable in a poll the dialog is already
+ * running to count down the expiry. So the smaller change is the honest one.
+ *
+ * 🔴 `saved` IS REPORTED EXACTLY ONCE. The bridge clears it on read, so a dialog that keeps
+ * polling does not re-announce a save the owner has already been shown.
+ *
+ * 🔴 AND THERE IS NO TOKEN HERE EITHER. The states are what the owner needs to see; the credential
+ * stays inside the QR symbol.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export interface PhoneSessionState {
+  /**
+   * `waiting` — open, no phone has scanned yet.
+   * `claimed` — a phone has the form open.
+   * `saved`   — a product was saved; `savedProductId` names it. Reported once.
+   * `closed`  — nothing open (cancelled, expired, or never started).
+   */
+  readonly state: "waiting" | "claimed" | "saved" | "closed";
+  readonly savedProductId: string | null;
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | null;
+  /** ISO-8601 while the session is live, so the dialog counts down from the real deadline. */
+  readonly expiresAt: string | null;
+  readonly claimed: boolean;
+}
+
+export interface ProductImageMetaDto {
+  readonly id: string;
+  readonly productId: string;
+  readonly mime: "image/jpeg" | "image/png";
+  readonly sha256Hex: string;
+  readonly byteSize: number;
+  readonly widthPx: number;
+  readonly heightPx: number;
+  readonly origin: "desktop" | "phone";
+  readonly updatedAt: string;
+}
+
+/**
+ * The bytes of one named photo, with the metadata to interpret them.
+ *
+ * A `Uint8Array` rather than a Buffer: that is what a structured clone delivers to the renderer,
+ * and naming it honestly stops a caller assuming Buffer methods that will not be there.
+ */
+export interface ProductImageBytesDto {
+  readonly meta: ProductImageMetaDto;
+  readonly bytes: Uint8Array;
+}
+
+/**
+ * What the operator typed. Optional fields are null when not given — never an empty string.
+ *
+ * `master` is OPTIONAL AS A WHOLE. Omitting it means this caller does not deal in enrichment, which
+ * is what the import path and invoice reconciliation mean; it never means "clear those fields".
+ */
 export interface ProductDraftRequest {
   readonly nameAr: string;
   readonly nameEn: string | null;
   readonly sku: string | null;
   readonly price: string;
   readonly baseUnit: string;
+  readonly master?: ProductMasterPatch;
 }
 
 export interface CreateProductRequest {
@@ -316,6 +517,71 @@ export interface UpdateProductRequest {
 export interface SetProductActiveRequest {
   readonly id: string;
   readonly isActive: boolean;
+}
+
+/**
+ * The Product Master enrichment group, as a PATCH.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 EVERY KEY IS OPTIONAL, AND ABSENT IS NOT NULL. An absent key means "this caller is not
+ * touching that field"; `null` means "clear it". They are different on the wire, in the handler, in
+ * the domain and in the repository, and the whole chain exists so that the import path and invoice
+ * reconciliation — neither of which knows what a category is — cannot erase a category, a brand or
+ * a description the owner typed simply by saving a product.
+ *
+ * This is why it is a patch and not six more fields on `ProductDraftRequest`: an exact-shape object
+ * would force every caller to send all six, and a caller that does not know them would send nulls.
+ * The invoice header patch (`InvoiceHeaderPatch`) is the same shape for the same reason.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export interface ProductMasterPatch {
+  readonly categoryId?: string | null;
+  /** Raw, as typed or as a decoder returned it. Main canonicalizes; a screen never pre-processes. */
+  readonly barcode?: string | null;
+  readonly brand?: string | null;
+  readonly descriptionAr?: string | null;
+  readonly descriptionEn?: string | null;
+  readonly isOnlineVisible?: boolean;
+}
+
+/** The patch keys, as data, so the preload bridge and the handler cannot drift from this list. */
+export const PRODUCT_MASTER_PATCH_KEYS = [
+  "categoryId",
+  "barcode",
+  "brand",
+  "descriptionAr",
+  "descriptionEn",
+  "isOnlineVisible",
+] as const satisfies ReadonlyArray<keyof ProductMasterPatch>;
+
+export type ProductMasterPatchKey = (typeof PRODUCT_MASTER_PATCH_KEYS)[number];
+
+export interface CreateCategoryRequest {
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+}
+
+export interface RenameCategoryRequest {
+  readonly categoryId: string;
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+}
+
+export interface SetCategoryActiveRequest {
+  readonly categoryId: string;
+  readonly isActive: boolean;
+}
+
+export interface CategoryIdRequest {
+  readonly categoryId: string;
+}
+
+export interface ProductIdRequest {
+  readonly productId: string;
+}
+
+export interface ImageIdRequest {
+  readonly imageId: string;
 }
 
 export interface SetTerminalLanguageRequest {
@@ -704,6 +970,7 @@ export interface PosApi {
   resetOperatorPin(req: ResetOperatorPinRequest): Promise<IpcResult<OperatorDto>>;
   setOperatorActive(req: SetOperatorActiveRequest): Promise<IpcResult<OperatorDto>>;
   setOperatorRole(req: SetOperatorRoleRequest): Promise<IpcResult<OperatorDto>>;
+  setOperatorMayCreateProducts(req: SetOperatorMayCreateProductsRequest): Promise<IpcResult<OperatorDto>>;
   currentCashier(): Promise<IpcResult<CashierDto | null>>;
   getCatalog(): Promise<IpcResult<CatalogDto>>;
   createSale(req: CreateSaleRequest): Promise<IpcResult<CreateSaleResponse>>;
@@ -712,12 +979,58 @@ export interface PosApi {
   getSaleHistory(req: HistoryRequest): Promise<IpcResult<SaleWithVoidDto[]>>;
   importCatalog(): Promise<IpcResult<ImportCatalogResponse>>;
   exportCatalog(): Promise<IpcResult<ExportResponse>>;
+  /**
+   * Writes the Online Catalog package to a folder the OWNER chooses.
+   *
+   * 🔴 NO PAYLOAD, AND NO PATH IN EITHER DIRECTION. The renderer names nothing: main shows the
+   * directory picker, main writes, and what comes back is a narrow summary. A renderer that could
+   * name a destination would be a filesystem write primitive, which is the one thing this bridge
+   * has never granted. `null` means the owner cancelled — not an error, and nothing was written.
+   */
+  exportOnlineCatalog(): Promise<IpcResult<OnlineCatalogExportDto | null>>;
   exportBackup(): Promise<IpcResult<ExportResponse>>;
   getAppInfo(): Promise<IpcResult<AppInfoDto>>;
   listProducts(): Promise<IpcResult<AdminProductDto[]>>;
   createProduct(req: CreateProductRequest): Promise<IpcResult<AdminProductDto>>;
   updateProduct(req: UpdateProductRequest): Promise<IpcResult<AdminProductDto>>;
   setProductActive(req: SetProductActiveRequest): Promise<IpcResult<AdminProductDto>>;
+
+  // ── Product Master (migration 9) ─────────────────────────────────────────────────────────────
+  //
+  // `listCategories` returns ACTIVE AND INACTIVE rows, deliberately: the form must still display
+  // the retired category a product already carries, and it filters the chooser itself. A second
+  // "active only" channel would invite a screen to pick the wrong one and lose a product's label.
+  listCategories(): Promise<IpcResult<CategoryDto[]>>;
+  listBrands(): Promise<IpcResult<string[]>>;
+  createCategory(req: CreateCategoryRequest): Promise<IpcResult<CategoryDto>>;
+  renameCategory(req: RenameCategoryRequest): Promise<IpcResult<CategoryDto>>;
+  setCategoryActive(req: SetCategoryActiveRequest): Promise<IpcResult<CategoryDto>>;
+  deleteCategory(req: CategoryIdRequest): Promise<IpcResult<{ readonly deletedId: string }>>;
+
+  getProductImageMeta(req: ProductIdRequest): Promise<IpcResult<ProductImageMetaDto | null>>;
+  /** Bytes, by image id, asked for on purpose. The only route to them. */
+  getProductImageBytes(req: ImageIdRequest): Promise<IpcResult<ProductImageBytesDto>>;
+  /** Names a product; MAIN runs the picker and owns the file. No bytes cross this bridge. */
+  setProductImage(req: ProductIdRequest): Promise<IpcResult<ProductImageMetaDto | null>>;
+  removeProductImage(req: ProductIdRequest): Promise<IpcResult<{ readonly removed: boolean }>>;
+
+  // ── Phone entry over the LAN (slice H1) ──────────────────────────────────────────────────────
+  /** Owner only. Opens a temporary listener and returns the QR to show. Never returns the token. */
+  startPhoneSession(req: StartPhoneSessionRequest): Promise<IpcResult<PhoneSessionDto>>;
+  /** Owner only. Closes whatever session is open; answers honestly when there was none. */
+  cancelPhoneSession(): Promise<IpcResult<{ readonly closed: boolean }>>;
+  /**
+   * Owner only. What the open dialog polls: waiting / claimed / saved / closed. No token.
+   *
+   * 🔴 NAMED `...State`, NOT `...Status`, AND THE RENAME WAS FORCED BY A REAL ASSERTION.
+   * `invoiceIpc.test.ts` requires that NO channel name matches `/status|setReconcil|markResolved|
+   * setPrice|writeCatalog/i`, guarding against the renderer ever being able to set a
+   * reconciliation status. `phoneSessionStatus` tripped it. The choice was to weaken a protective
+   * assertion or to pick a more precise name; the name was wrong anyway, since the DTO's own field
+   * is `state`.
+   */
+  phoneSessionState(): Promise<IpcResult<PhoneSessionState>>;
+
   getSettings(): Promise<IpcResult<TerminalSettings>>;
   setTerminalLanguage(req: SetTerminalLanguageRequest): Promise<IpcResult<TerminalSettings>>;
 

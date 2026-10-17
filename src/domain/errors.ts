@@ -32,6 +32,18 @@ export type DomainErrorCode =
   | "NOT_AVAILABLE"
   | "PRODUCT_NOT_FOUND"
   | "DUPLICATE_SKU"
+  // Migration 9, Product Master. Each is a business refusal the UI acts on, not an internal
+  // error: a duplicate barcode names the product that holds it, and an inactive category is
+  // refused only when newly ASSIGNED — a product that already carries one keeps it.
+  | "DUPLICATE_BARCODE"
+  | "CATEGORY_NOT_FOUND"
+  | "CATEGORY_INACTIVE"
+  | "CATEGORY_IN_USE"
+  | "DUPLICATE_CATEGORY"
+  // The product's photo. Separate from PRODUCT_NOT_FOUND because the two mean different things to
+  // the UI: the product is there and simply has no photo yet, which is an empty state, not an error
+  // the operator has to recover from.
+  | "IMAGE_NOT_FOUND"
   | "UNSUPPORTED_UNIT"
   // migration 4 — exact quantities
   | "FRACTION_NOT_ALLOWED"
@@ -58,6 +70,10 @@ export type DomainErrorCode =
   | "NOT_AUTHORIZED"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
+  // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,
+  // and a shop reading "cannot change their own role" after touching a permission switch would be
+  // told about the wrong thing.
+  | "SELF_PERMISSION_CHANGE"
   // 🔴 The install/upgrade ceremony: while the seeded bootstrap owner has not claimed this
   // terminal, nobody else gets a session OR a setup ticket. Distinct from SETUP_REQUIRED, which is
   // about one operator missing a valid ticket; this is about the TERMINAL not being claimed yet.

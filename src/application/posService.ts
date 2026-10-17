@@ -9,11 +9,36 @@
 import { createHash, randomUUID } from "node:crypto";
 import { businessDateOf } from "../domain/businessDay";
 import { type CartLine, priceCart } from "../domain/cart";
-import { type Catalog, loadCatalog } from "../domain/catalog";
+import { BASE_UNITS, type Catalog, loadCatalog } from "../domain/catalog";
 import { decodeUtf8Strict, toImportCsv, validateImport, type ImportRejection } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
 import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
+import { categoryNameAr, categoryNameEn } from "../domain/category";
+import { imageBytes, imageEdge, imageMime, imageOrigin } from "../domain/productImage";
+import type { PhoneSessionAction, PhoneSessionSpec } from "../domain/phoneSession";
+import type { PhoneSubmission } from "../domain/phoneSubmission";
+import { toAdminProductDto } from "../shared/dto";
+import {
+  EMPTY_MASTER_FORM,
+  type MasterForm,
+  masterFormOf,
+  masterPatchFrom,
+} from "../shared/productMasterForm";
+import {
+  isEligibleForOnlineCatalog,
+  onlineCatalogDocument,
+  onlineCatalogImageFile,
+  onlineCatalogProduct,
+  type OnlineCatalogDocument,
+} from "../domain/onlineCatalog";
+import type { CategoryRepository, CategoryRow } from "../persistence/categoryRepository";
+import type {
+  ImageMime,
+  ImageOrigin,
+  ProductImageMeta,
+  ProductImageRepository,
+} from "../persistence/productImageRepository";
 import {
   type PaymentMethod,
   type SaleRecord,
@@ -33,8 +58,12 @@ import type { CashierFixture } from "../fixtures/cashiers";
 import type { TerminalConfig } from "../fixtures/terminal";
 import { validateProductDraft, type ProductDraft } from "../domain/productDraft";
 import {
+  AUDITED_CATEGORY_FIELDS,
   AUDITED_PRODUCT_FIELDS,
+  AUDITED_PRODUCT_IMAGE_FIELDS,
+  type AuditChange,
   type AuditDraft,
+  type AuditScalar,
   type AuditEventType,
   type AuditRow,
   CURRENT_ACTOR_TIER,
@@ -56,6 +85,72 @@ import type { LoginOutcome as OperatorLoginOutcome, OperatorService } from "./op
 import type { OperatorRole } from "../persistence/operatorRepository";
 
 /**
+ * A category's audited state — its two names and whether it is offered, and nothing else.
+ *
+ * 🔴 NO PRODUCT DATA, by `AUDITED_CATEGORY_FIELDS`' own contract. A category event describes the
+ * category; a rename touches no product row, and a delete is REFUSED while any product points at
+ * one, so "how many products were affected" is always zero on a successful delete and irrelevant
+ * otherwise.
+ *
+ * `is_active` is reported as a BOOLEAN, matching how PRODUCT_* events report theirs, so a reader
+ * does not meet 1 here and true there for the same fact.
+ */
+function categoryState(row: CategoryRow): Record<string, AuditScalar> {
+  return { is_active: row.is_active === 1, name_ar: row.name_ar, name_en: row.name_en };
+}
+
+/**
+ * A photo's audited state. Metadata only — there is no bytes field in the row to copy, and
+ * `AuditScalar` admits no object, so a blob cannot be nested even by mistake.
+ */
+function imageState(meta: ProductImageMeta): Record<string, AuditScalar> {
+  return {
+    byte_size: meta.byte_size,
+    height_px: meta.height_px,
+    image_id: meta.id,
+    mime: meta.mime,
+    sha256_hex: meta.sha256_hex,
+    width_px: meta.width_px,
+  };
+}
+
+/**
+ * The diff for a thing that was DESTROYED: every audited field, from its last value to null.
+ *
+ * 🔴 WHY `diffAuditedFields` CANNOT DO THIS. Its `after` is non-nullable — it describes a row that
+ * still exists — and passing `{}` would produce an EMPTY diff for a delete, which the empty-diff
+ * backstop then refuses, rolling back the deletion. A destruction is the one case where the facts
+ * only exist on the `before` side, so it gets its own shape rather than a cast.
+ */
+function epitaph(state: Record<string, AuditScalar>): Record<string, AuditChange> {
+  const out: Record<string, AuditChange> = {};
+  for (const key of Object.keys(state).sort()) out[key] = { before: state[key]!, after: null };
+  return out;
+}
+
+/** A category create (`before` null), an edit, or a delete (`after` null). */
+function categoryDiff(before: CategoryRow | null, after: CategoryRow | null): Record<string, AuditChange> {
+  if (after === null) {
+    if (before === null) throw new Error("categoryDiff: a category event must describe a category");
+    return epitaph(categoryState(before));
+  }
+  return diffAuditedFields(before === null ? null : categoryState(before), categoryState(after), AUDITED_CATEGORY_FIELDS);
+}
+
+/** A first photo (`before` null), a replacement, or a removal (`after` null). */
+function imageDiff(before: ProductImageMeta | null, after: ProductImageMeta | null): Record<string, AuditChange> {
+  if (after === null) {
+    if (before === null) throw new Error("imageDiff: a photo event must describe a photo");
+    return epitaph(imageState(before));
+  }
+  return diffAuditedFields(
+    before === null ? null : imageState(before),
+    imageState(after),
+    AUDITED_PRODUCT_IMAGE_FIELDS,
+  );
+}
+
+/**
  * What a login attempt produces.
  *
  * 🔴 A `setup` outcome CARRIES NO SESSION and assigns none, so a bootstrap credential cannot reach
@@ -69,6 +164,22 @@ export interface PosServiceDeps {
   readonly catalog: Catalog;
   /** The local catalog table. Without it (tests, older callers) catalog import is unavailable. */
   readonly catalogStore?: CatalogRepository;
+  /**
+   * Migration 9's categories. OPTIONAL, like `catalogStore` above and for the same reason: a
+   * terminal or a test that never touches a category needs no category table wired, and every
+   * existing caller keeps working untouched.
+   *
+   * 🔴 Its absence FAILS CLOSED rather than silently skipping the check: assigning a category with
+   * no repository to validate it against raises NOT_AVAILABLE. An unvalidated category id would
+   * reach the foreign key and abort a transaction the operator cannot diagnose.
+   */
+  readonly categories?: CategoryRepository;
+  /**
+   * Migration 9's product photos. OPTIONAL for the same reason as `categories` above, and it fails
+   * closed the same way: every image operation answers NOT_AVAILABLE rather than pretending a
+   * terminal with no image table has no photos.
+   */
+  readonly productImages?: ProductImageRepository;
   /**
    * The compiled-in TEST cashiers. Still here for tests and for a terminal with no `operators`
    * service wired; once `operators` is present it is the authority and this is ignored.
@@ -186,6 +297,70 @@ export interface ProductWriteProvenance {
 
 const MANUAL_PROVENANCE: ProductWriteProvenance = Object.freeze({ origin: "manual_entry" });
 
+/**
+ * Slice H2. A product entered on a phone over the shop LAN.
+ *
+ * 🔴 IT IS ITS OWN ORIGIN, NOT `manual_entry`. The audit trail should be able to answer "where did
+ * this product come from" truthfully, and "an owner typed it on a phone in the aisle" is a
+ * different answer from "an owner typed it at the till". Nothing branches on it; it is recorded so
+ * a later question can be asked at all. The photo table's `origin` column already made the same
+ * distinction ('desktop' vs 'phone') before any phone existed.
+ */
+const PHONE_PROVENANCE: ProductWriteProvenance = Object.freeze({ origin: "phone_entry" });
+
+/**
+ * What the phone form needs in order to render. Slice H2.
+ *
+ * 🔴 IT CARRIES THE AUTHORITATIVE VOCABULARIES, so the served page restates none of them: `units`
+ * is `BASE_UNITS` itself, `categories` is every category (active and retired, so the caller can
+ * apply `categoryChoices` exactly as the desktop does) and `brands` is what the shop has already
+ * typed. A phone that hard-coded a unit list would be a second contract the moment `BASE_UNITS`
+ * changed.
+ */
+/**
+ * A photo the phone uploaded and the POS has normalized, waiting for Save. Slice I1.
+ *
+ * 🔴 IT IS NOT A PRODUCT IMAGE YET. These are F's normalized bytes held in memory against one
+ * session — no row, no file, no draft table, nothing to orphan. It becomes durable only inside
+ * `savePhoneProduct`'s transaction, and it is dropped whenever the session ends for any reason.
+ */
+export interface StagedPhonePhoto {
+  readonly bytes: Buffer;
+  readonly mime: ImageMime;
+  readonly widthPx: number;
+  readonly heightPx: number;
+}
+
+export interface PhoneFormData {
+  readonly action: PhoneSessionAction;
+  readonly units: readonly string[];
+  readonly currency: string;
+  readonly categories: readonly {
+    readonly id: string;
+    readonly nameAr: string;
+    readonly nameEn: string | null;
+    readonly isActive: boolean;
+  }[];
+  readonly brands: readonly string[];
+  /** The selling fields of the product being edited, or null for a new one. */
+  readonly product: {
+    readonly nameAr: string;
+    readonly nameEn: string | null;
+    readonly sku: string | null;
+    readonly priceDecimal: string;
+    readonly baseUnit: string;
+    readonly isActive: boolean;
+    /**
+     * 🔴 A BOOLEAN, NEVER THE BYTES. Slice I2 shows "this product already has a photo; leave it
+     * alone and it stays" — which needs one flag, not an image sent over the LAN to a form that
+     * would only shrink it again.
+     */
+    readonly hasPhoto: boolean;
+  } | null;
+  /** The enrichment fields as a form holds them — and the snapshot a later save diffs against. */
+  readonly master: MasterForm;
+}
+
 /** The audit metadata a product write carries — bounded scalars only, per the audit contract. */
 function provenanceMetadata(
   provenance: ProductWriteProvenance,
@@ -194,6 +369,19 @@ function provenanceMetadata(
   const meta: Record<string, string> = { origin: provenance.origin, source };
   if (provenance.invoiceId !== undefined) meta.invoice_id = provenance.invoiceId;
   return meta;
+}
+
+/**
+ * What slice G2's package writer is handed.
+ *
+ * 🔴 `document` IS EXACTLY WHAT `catalog.json` WILL CONTAIN — nothing is added to it on the way to
+ * disk. `images` is main-process plumbing and is NEVER serialized: it carries internal image ids
+ * so the writer can fetch bytes through the verifying read path, and an id in a published file
+ * would be internal state the website has no use for.
+ */
+export interface OnlineCatalogSnapshot {
+  readonly document: OnlineCatalogDocument;
+  readonly images: ReadonlyArray<{ readonly file: string; readonly imageId: string; readonly sha256: string }>;
 }
 
 export class PosService {
@@ -382,16 +570,33 @@ export class PosService {
    * there is no durable row to re-read, so the session is used as it was. That path cannot occur in
    * production: migration 8 always creates the table and both rows.
    */
-  private liveSession(): { readonly id: string; readonly name: string; readonly role: OperatorRole } {
+  private liveSession(): {
+    readonly id: string;
+    readonly name: string;
+    readonly role: OperatorRole;
+    /**
+     * 🔴 FAILS CLOSED ON A TERMINAL WITH NO OPERATOR STORE. Tests and pre-migration-8 databases
+     * have no durable row to read, and the safe reading of a missing permission record is "not
+     * granted" — never "granted because we could not check".
+     */
+    readonly mayCreateProducts: boolean;
+  } {
     if (!this.cashier) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
     const ops = this.deps.operators;
-    if (!ops) return { id: this.cashier.id, name: this.cashier.name, role: this.role ?? "cashier" };
+    if (!ops) {
+      return {
+        id: this.cashier.id,
+        name: this.cashier.name,
+        role: this.role ?? "cashier",
+        mayCreateProducts: false,
+      };
+    }
     const row = ops.liveRow(this.cashier.id);
     if (!row) throw new DomainError("OPERATOR_NOT_FOUND", "This account no longer exists — sign in again");
     if (!row.isActive) {
       throw new DomainError("OPERATOR_INACTIVE", "This account has been deactivated — sign in again");
     }
-    return { id: row.id, name: row.name, role: row.role };
+    return { id: row.id, name: row.name, role: row.role, mayCreateProducts: row.mayCreateProducts };
   }
 
   /** The live role, for the channel guard. Throws exactly as `liveSession` does. */
@@ -541,6 +746,93 @@ export class PosService {
     return { csv: toImportCsv(rows), productCount: rows.length };
   }
 
+  /**
+   * The authoritative Online Catalog, ready to be written to disk by slice G2.
+   *
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 THIS IS NOT `exportCatalogCsv` AND MUST NEVER BECOME IT. That one reads
+   * `listForExport(CSV_SOURCE)` — only products whose `source` is the merchant CSV — which is the
+   * measured gap where a hand-typed product silently disappears from a shop's own export. This
+   * reads the authoritative Product Master through `listAll()`, where origin is not part of the
+   * question. The legacy 7-column contract is untouched, still round-trips with
+   * `importCatalogCsv`, and is not routed through here.
+   *
+   * 🔴 OWNER ONLY, IN THE SERVICE. The channel guard refuses a cashier too, but a guard that lives
+   * only in `channelPolicy` is one slice H's LAN listener would walk straight past — it calls the
+   * service directly and never touches `ipcMain`. The same reasoning as every other owner
+   * operation in this file.
+   *
+   * 🔴 IT RETURNS NO IMAGE BYTES. `images` carries the image IDS the writer will fetch one at a
+   * time through `productImageBytes`, which re-hashes what it read and refuses a mismatch. Loading
+   * every photo here would put the whole catalogue in memory for a function whose job is to
+   * describe it, and would duplicate a verification path that already exists.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  onlineCatalogSnapshot(): OnlineCatalogSnapshot {
+    const owner = this.requireOwner();
+    const store = this.requireStore();
+    const categories = this.requireCategories();
+    const images = this.requireImages();
+
+    // One read of each, rather than a query per product: a shop with 400 products would otherwise
+    // issue 800 statements to build one file.
+    const categoryById = new Map(categories.listAll().map((c) => [c.id, c]));
+    const photoByProduct = images.primaryMetaByProduct();
+
+    const products = [];
+    const imageRefs: Array<{ file: string; imageId: string; sha256: string }> = [];
+    for (const row of store.listAll()) {
+      if (!isEligibleForOnlineCatalog(row)) continue;
+      const photo = photoByProduct.get(row.id) ?? null;
+      let image = null;
+      if (photo !== null) {
+        const file = onlineCatalogImageFile(row.id, photo.mime);
+        image = {
+          file,
+          mime: photo.mime,
+          sha256: photo.sha256_hex,
+          width: Number(photo.width_px),
+          height: Number(photo.height_px),
+        };
+        imageRefs.push({ file, imageId: photo.id, sha256: photo.sha256_hex });
+      }
+      const category = categoryById.get(row.category_id ?? "") ?? null;
+      products.push(
+        onlineCatalogProduct({
+          row: {
+            id: row.id,
+            sku: row.sku,
+            barcode: row.barcode,
+            name_ar: row.name_ar,
+            name_en: row.name_en,
+            brand: row.brand,
+            selling_price_minor: row.selling_price_minor,
+            currency: row.currency,
+            base_unit: row.base_unit,
+            description_ar: row.description_ar,
+            description_en: row.description_en,
+            updated_at: row.updated_at,
+          },
+          // 🔴 A RETIRED CATEGORY IS STILL EXPORTED. See the domain module: the product genuinely
+          // carries it, and `is_active` governs what may be chosen NEXT, not what is true now.
+          category:
+            category === null
+              ? null
+              : { id: category.id, name_ar: category.name_ar, name_en: category.name_en },
+          image,
+        }),
+      );
+    }
+
+    // The service has no logger dependency, and this is not worth adding one for: the IPC handler
+    // logs the export it actually performed, where the outcome is known.
+    void owner;
+    return {
+      document: onlineCatalogDocument(this.now().toISOString(), products),
+      images: imageRefs,
+    };
+  }
+
   // ── Product administration ──────────────────────────────────────────────────────────────────────
   //
   // Master data. Every write goes through here, re-reads the local catalog and replaces the live
@@ -583,7 +875,7 @@ export class PosService {
   private auditDraft(
     cashier: Cashier,
     eventType: AuditEventType,
-    entityType: "product" | "catalog",
+    entityType: "product" | "catalog" | "category" | "product_image",
     entityId: string,
     instant: Date,
     changes: AuditDraft["changes"],
@@ -628,6 +920,68 @@ export class PosService {
    * does not get to change master data. That is why this refuses rather than quietly writing an
    * unaudited edit — the whole point of migration 5 would otherwise be optional at runtime.
    */
+  /**
+   * Refuses a barcode another product already holds.
+   *
+   * 🔴 THE VALUE IS ALREADY CANONICAL when it arrives — `validateProductMaster` normalized it — so
+   * this compares like with like. A raw 12-digit UPC-A would find nothing here and the partial
+   * unique index would then accept it as a second product for the same box, which is the exact
+   * failure the canonical form exists to prevent.
+   *
+   * `selfId` is excluded so that saving a product without changing its barcode is not a duplicate
+   * of itself — the mistake that makes an edit screen impossible to save twice.
+   */
+  private assertBarcodeFree(
+    store: CatalogRepository,
+    canonical: string | null,
+    selfId: string | null,
+  ): void {
+    if (canonical === null) return;
+    const holder = store.findByBarcode(canonical);
+    if (holder && holder.id !== selfId) {
+      throw new DomainError(
+        "DUPLICATE_BARCODE",
+        `Another product already uses the barcode ${canonical} — ${holder.name_ar}`,
+      );
+    }
+  }
+
+  /**
+   * Refuses a category that does not exist, and refuses newly ASSIGNING an inactive one.
+   *
+   * 🔴 THE ASYMMETRY IS THE POINT, and it is the rule the approved contract states: deactivating a
+   * category must PRESERVE the link on products that already carry it, while the owner must not be
+   * able to pick a retired category for something new. So existence is required always, and
+   * activity is required only at the moment of assignment.
+   *
+   * `undefined` means the caller is not touching the category, so there is nothing to check —
+   * which is what keeps invoice reconciliation and the import path working unchanged.
+   */
+  private assertCategoryUsable(categoryId: string | null | undefined, currentCategoryId: string | null): void {
+    if (categoryId === undefined || categoryId === null) return;
+    const categories = this.deps.categories;
+    if (!categories) {
+      throw new DomainError("NOT_AVAILABLE", "Categories are not available on this terminal");
+    }
+    const row = categories.findById(categoryId);
+    if (!row) throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
+    // 🔴 NOT A NEW ASSIGNMENT, SO NOT REFUSED. The product already carries this exact category;
+    // the form simply sent back what it was showing. Refusing here would make a product with a
+    // retired category UNEDITABLE — the owner could not fix its price without first reactivating a
+    // category they deliberately retired — and the approved contract says the opposite: a
+    // deactivated category STAYS on the products that already use it.
+    //
+    // This is the same asymmetry one step further in. Existence is still required always: a
+    // category that was DELETED is gone, and a product cannot keep pointing at nothing.
+    if (currentCategoryId !== null && categoryId === currentCategoryId) return;
+    if (row.is_active !== 1) {
+      throw new DomainError(
+        "CATEGORY_INACTIVE",
+        `'${row.name_ar}' is no longer offered — choose another category, or reactivate it first`,
+      );
+    }
+  }
+
   private requireProductStack(): {
     readonly store: CatalogRepository;
     readonly auditStore: AuditRepository;
@@ -656,7 +1010,12 @@ export class PosService {
    * real price, unlike a placeholder that arrives in a file.
    */
   createProduct(draft: ProductDraft, provenance: ProductWriteProvenance = MANUAL_PROVENANCE): AdminProductRow {
-    const cashier = this.requireCashier();
+    // 🔴 THE SERVICE DECIDES, NOT THE CHANNEL. This used to be `requireCashier()` — any signed-in
+    // operator — with the owner gate living only in `channelPolicy`. That was sound while the rule
+    // was "owner only", because every caller arrived through `ipcMain`. It is not sound now: the
+    // rule is per-operator, the phone's listener calls this service directly without touching
+    // `channelPolicy` at all, and a capability that one caller can bypass is not a capability.
+    const cashier = this.requireProductCreator();
     const { store, auditStore, transact } = this.requireProductStack();
     const valid = validateProductDraft(draft, this.deps.terminal.currency);
     const instant = this.now();
@@ -668,6 +1027,12 @@ export class PosService {
       if (valid.sku !== null && store.findBySku(valid.sku)) {
         throw new DomainError("DUPLICATE_SKU", `Another product already uses the SKU '${valid.sku}'`);
       }
+      // 🔴 THE SAME REASONING AS THE SKU CHECK ABOVE, for the same reason it was moved in here:
+      // outside the transaction, two near-simultaneous creates could both pass and only the index
+      // would catch the second — and a category could be deleted between the check and the write.
+      this.assertBarcodeFree(store, valid.master?.barcode ?? null, null);
+      // A create has no current category, so every assignment here is a new one.
+      this.assertCategoryUsable(valid.master?.categoryId, null);
       const created = store.createManual(
         {
           nameAr: valid.nameAr,
@@ -676,6 +1041,7 @@ export class PosService {
           priceMinor: valid.price.minor,
           currency: valid.price.currency,
           baseUnit: valid.baseUnit,
+          ...(valid.master === undefined ? {} : { master: valid.master }),
         },
         instant,
       );
@@ -731,6 +1097,8 @@ export class PosService {
           throw new DomainError("DUPLICATE_SKU", `Another product already uses the SKU '${valid.sku}'`);
         }
       }
+      this.assertBarcodeFree(store, valid.master?.barcode ?? null, id);
+      this.assertCategoryUsable(valid.master?.categoryId, before.category_id);
       const updated = store.updateProduct(
         id,
         {
@@ -741,6 +1109,7 @@ export class PosService {
           baseUnit: valid.baseUnit,
           isActive,
           priceNeedsReview: provenance.priceNeedsReview,
+          ...(valid.master === undefined ? {} : { master: valid.master }),
         },
         instant,
       );
@@ -823,6 +1192,847 @@ export class PosService {
     this.refreshCatalogFromStore(store);
     this.mirror(written);
     return after;
+  }
+
+  // ── Categories, brands and photos (migration 9, Product Master) ─────────────────────────────────
+  //
+  // ════════════════════════════════════════════════════════════════════════════════════════════════
+  // 🔴 THE OWNER CHECK IS HERE, IN THE SERVICE, AND NOT ONLY IN THE CHANNEL POLICY.
+  //
+  // `channelPolicy.ts` already refuses a cashier on every one of these channels, and that is tested
+  // by calling the real handlers. This second guard is not belt-and-braces for its own sake: the
+  // approved mobile LAN bridge (slice H) answers HTTP requests inside the MAIN process and calls
+  // this service DIRECTLY — it never goes through `ipcMain`, so it never passes through
+  // `channelPolicy`. A service whose authorization lived only in the IPC table would be wide open
+  // the moment that listener exists.
+  //
+  // So the rule is: a restricted operation is restricted by the SERVICE. The channel policy is the
+  // outer door, enforced before a payload is even examined; this is the lock on the thing itself.
+  // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+  /** The live owner, or a refusal. Re-reads the durable role, exactly as `requireLiveRole` does. */
+  private requireOwner(): Cashier {
+    const live = this.liveSession();
+    if (live.role !== "owner") {
+      // The SAME code and the SAME sentence the channel guard uses, so an operator cannot tell
+      // which of the two layers refused them — and so there is one message to translate.
+      throw new DomainError("NOT_AUTHORIZED", "Only the shop owner can do that");
+    }
+    return { id: live.id, name: live.name };
+  }
+
+  /**
+   * May the operator signed in right now CREATE a product?
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 THE ONE PLACE THE QUESTION IS ANSWERED. The desktop create, the phone session that opens a
+   * create, and the phone's final Save all come here, so they cannot drift apart — and a renderer
+   * that hides a button has changed nothing about what the service will do.
+   *
+   * 🔴 IT RE-READS THE DURABLE ROW EVERY TIME. `liveSession` fetches the operator from the
+   * database, so a permission revoked while a phone session is open is refused at Save, not
+   * honoured because it was true when the QR was drawn. The same mechanism already makes a
+   * deactivated account stop working mid-session.
+   *
+   * An owner never consults the flag — their authority is the role. A cashier needs BOTH an active
+   * account (which `liveSession` guarantees, by throwing otherwise) and the explicit grant.
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  canCreateProducts(): boolean {
+    const live = this.liveSession();
+    if (live.role === "owner") return true;
+    // 🔴 NO OPERATOR DIRECTORY MEANS NO CAPABILITY MODEL AT ALL — not a cashier with nothing
+    // granted. Such a terminal predates migration 8: it has no roles, no permissions and no rows
+    // to read, and `createProduct` has always accepted any signed-in operator there. Answering
+    // "refused" would not be stricter, it would be WRONG — it would brick product entry on a
+    // database whose schema has no way to express the grant that would unbrick it.
+    //
+    // It cannot be reached in the real application: `main.ts` wires the operator service
+    // unconditionally, which `tests/main/startup.test.ts` asserts rather than assumes. Tests and
+    // pre-migration-8 databases are the whole of this branch.
+    if (!this.deps.operators) return true;
+    return live.mayCreateProducts === true;
+  }
+
+  /** Whether this terminal has a durable operator directory to read permissions from at all. */
+  private hasOperatorDirectory(): boolean {
+    return Boolean(this.deps.operators);
+  }
+
+  /**
+   * The create gate, as a refusal.
+   *
+   * 🔴 THE SAME SENTENCE THE CHANNEL GUARD USES for an owner-only act would be a lie here — this
+   * act is not owner-only any more. A cashier who has not been granted the permission is told what
+   * is actually true, and is not invited to guess which layer refused them.
+   */
+  private requireProductCreator(): Cashier {
+    const live = this.liveSession();
+    const permitted =
+      live.role === "owner" || !this.hasOperatorDirectory() || live.mayCreateProducts === true;
+    if (!permitted) {
+      throw new DomainError("NOT_AUTHORIZED", "You are not allowed to add products");
+    }
+    return { id: live.id, name: live.name };
+  }
+
+  private requireCategories(): CategoryRepository {
+    const categories = this.deps.categories;
+    if (!categories) {
+      throw new DomainError("NOT_AVAILABLE", "Categories are not available on this terminal");
+    }
+    return categories;
+  }
+
+  private requireImages(): ProductImageRepository {
+    const images = this.deps.productImages;
+    if (!images) {
+      throw new DomainError("NOT_AVAILABLE", "Product photos are not available on this terminal");
+    }
+    return images;
+  }
+
+  /**
+   * Every category, active and inactive — the owner's management list AND the product form's
+   * dropdown source.
+   *
+   * ONE read for both, rather than a separate `listActiveCategories`: the form must still be able
+   * to DISPLAY the inactive category a product already carries (that is the approved contract), so
+   * it needs the inactive rows too and filters the chooser itself. A second channel returning a
+   * subset would invite the form to use the wrong one and silently lose a product's category label.
+   *
+   * SESSION, not owner: the products list shows a category name, and a cashier may read the
+   * products list.
+   */
+  listCategories(): CategoryRow[] {
+    this.requireCashier();
+    return this.requireCategories().listAll();
+  }
+
+  /**
+   * The brands this shop has already typed, for the Brand field's suggestions.
+   *
+   * SESSION for the same reason as `listCategories`. There is no brand table and no brand row —
+   * see `CatalogRepository.distinctBrands`, which is the whole of brand "management" by decision.
+   */
+  listBrands(): string[] {
+    this.requireCashier();
+    return this.requireStore().distinctBrands();
+  }
+
+  /**
+   * Authorize a temporary phone-entry session (slice H1), and resolve what it is scoped to.
+   *
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 THIS IS THE AUTHORIZATION FOR THE LAN BRIDGE, AND IT IS HERE FOR THE REASON WRITTEN AT THE
+   * TOP OF THIS SECTION. The channel policy refuses a cashier on `startPhoneSession` too — but the
+   * listener this method opens answers HTTP inside the main process and calls service methods
+   * DIRECTLY, never through `ipcMain`, so `channelPolicy` is not in that path at all. If the only
+   * owner check lived in the channel table, opening the surface would be a cashier-reachable act
+   * the moment anything other than the renderer could ask for it.
+   *
+   * 🔴 IT RETURNS THE SPEC, NOT A SESSION, AND OPENS NO SOCKET. The service decides WHO may do
+   * this and WHAT it may touch; main owns the listener, the port and the QR. Keeping it that way
+   * means this authorization is testable without a network, and that the service never grows a
+   * dependency on `node:http`.
+   *
+   * 🔴 THE PRODUCT IS RESOLVED NOW, NOT WHEN THE PHONE SAVES. An EDIT session names a product that
+   * must exist at the moment the owner asks, so a token can never be minted for a product id that
+   * was never real. The phone itself never sends a product id — the token IS the binding.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  authorizePhoneSession(action: PhoneSessionAction, productId: string | null): PhoneSessionSpec {
+    if (action !== "NEW_PRODUCT" && action !== "EDIT_PRODUCT") {
+      // 🔴 VALIDATED BEFORE ANYONE IS AUTHORIZED, because the two actions are authorized
+      // DIFFERENTLY now. An unknown action must never fall through to the weaker of the two gates.
+      throw new DomainError("INVALID_INPUT", "A phone session is either a new product or an edit");
+    }
+    if (action === "NEW_PRODUCT") {
+      // 🔴 A CREATE SESSION NEEDS THE CREATE PERMISSION — not ownership. This is the only phone
+      // action a granted cashier may open, and the token it mints carries that one action.
+      const creator = this.requireProductCreator();
+      if (productId !== null) {
+        throw new DomainError("INVALID_INPUT", "A new product cannot name an existing product");
+      }
+      // 🔴 The store is required even for NEW_PRODUCT: a terminal that cannot write a product has
+      // no business handing a phone a form that ends in a save it would refuse.
+      this.requireStore();
+      return { action, productId: null, operatorId: creator.id };
+    }
+    // 🔴 EDITING AN EXISTING PRODUCT REMAINS OWNER-ONLY, and the gate is here rather than at the
+    // top so that a granted cashier asking for an EDIT session is refused by the SAME rule that
+    // refuses any other cashier. The capability grants creation and nothing adjacent to it.
+    const owner = this.requireOwner();
+    if (typeof productId !== "string" || productId.trim() === "") {
+      throw new DomainError("INVALID_INPUT", "Editing on the phone needs the product it is editing");
+    }
+    const existing = this.requireStore().findById(productId);
+    if (!existing) throw new DomainError("PRODUCT_NOT_FOUND", "That product no longer exists");
+    return { action, productId: existing.id, operatorId: owner.id };
+  }
+
+  /**
+   * What the phone form is shown. Slice H2.
+   *
+   * 🔴 THE AUTHORITATIVE DATA, READ AT SERVE TIME — never a copy the desktop held. The units come
+   * from `BASE_UNITS`, the categories from the category table, the brands from what the shop has
+   * already typed, and for an edit the product's own current values. A phone that restated any of
+   * these would be a second vocabulary.
+   *
+   * 🔴 OWNER ONLY, for the same reason as every other method in this section: the LAN listener
+   * calls this directly and never passes through `channelPolicy`.
+   */
+  phoneSessionForm(spec: PhoneSessionSpec): PhoneFormData {
+    this.requirePhoneOperator(spec);
+    const store = this.requireStore();
+    const categories = this.requireCategories();
+
+    // 🔴 ACTIVE CATEGORIES, PLUS THE PRODUCT'S OWN EVEN IF RETIRED — `categoryChoices` is not
+    // reimplemented here; the caller applies it to this list exactly as the desktop form does.
+    // Returning every category (not only active ones) is what makes that possible, and is the
+    // same deliberate decision `listCategories` documents.
+    const product = spec.productId === null ? null : store.findById(spec.productId);
+    if (spec.productId !== null && !product) {
+      throw new DomainError("PRODUCT_NOT_FOUND", "That product no longer exists");
+    }
+    // 🔴 METADATA, NOT BYTES — the same query the products list uses for its `hasImage` flag. The
+    // form needs to say "there is already a photo"; it has no use for the photo itself.
+    const photoByProduct = this.requireImages().primaryMetaByProduct();
+
+    // 🔴 ONE DTO MAPPER, NOT A SECOND HAND-BUILT SHAPE. `toAdminProductDto` already converts the
+    // row — including the exact decimal price and the bigint flags, which a hand-written mapper
+    // here would have got wrong (`is_active === 1` is false for `1n`).
+    const dto = product === null ? null : toAdminProductDto(product);
+
+    return {
+      action: spec.action,
+      units: [...BASE_UNITS],
+      currency: this.deps.terminal.currency,
+      categories: categories.listAll().map((c) => ({
+        id: c.id,
+        nameAr: c.name_ar,
+        nameEn: c.name_en,
+        isActive: c.is_active === 1,
+      })),
+      brands: store.distinctBrands(),
+      product:
+        dto === null
+          ? null
+          : {
+              nameAr: dto.nameAr,
+              nameEn: dto.nameEn,
+              sku: dto.sku,
+              priceDecimal: dto.priceDecimal,
+              baseUnit: dto.baseUnit,
+              isActive: dto.isActive,
+              hasPhoto: photoByProduct.has(dto.id),
+            },
+      // 🔴 THE SERVED SNAPSHOT, which the caller must remember and hand back at save time. It is
+      // what the diff is taken against — see `savePhoneProduct`.
+      master: dto === null ? EMPTY_MASTER_FORM : masterFormOf(dto),
+    };
+  }
+
+  /**
+   * Save what the phone submitted. Slice H2. THE ONLY write path the LAN surface has.
+   *
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 IT DELEGATES TO `createProduct` / `updateProduct` AND ADDS NO PERSISTENCE OF ITS OWN. There
+   * is no phone product table, no second validation schema and no SQL here. Everything that makes
+   * a product valid — the required Arabic name, the exact price, the unit vocabulary, the barcode
+   * canonicalization, the duplicate-SKU and duplicate-barcode checks, the category's existence and
+   * the inactive-category asymmetry, and the audit row — happens inside those two methods, in their
+   * transaction, exactly as it does for the desktop.
+   *
+   * 🔴 THE PRODUCT ID COMES FROM `spec`, WHICH CAME FROM THE SESSION. It is never read from the
+   * submission; `parsePhoneSubmission` refuses a payload that even mentions one. Wrong-product
+   * substitution is therefore not a check that could be forgotten — there is no parameter to
+   * substitute.
+   *
+   * 🔴 AND THE OWNER CHECK HAPPENS AGAIN, HERE, AT SAVE TIME. This is the one that is easy to miss:
+   * `createProduct` requires only a logged-in operator (`requireCashier`), because its owner gate
+   * has always been the channel table — and the channel table is exactly what this path skips. So
+   * an owner could open a phone session, log out, a CASHIER could log in, and the phone's save
+   * would have written a product under the cashier's session. `requirePhoneOperator` closes that:
+   * the live session must still be an owner AND still be the same operator who opened it.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  savePhoneProduct(
+    spec: PhoneSessionSpec,
+    submission: PhoneSubmission,
+    servedMaster: MasterForm | null,
+    stagedPhoto: StagedPhonePhoto | null = null,
+  ): AdminProductRow {
+    this.requirePhoneOperator(spec);
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // 🔴 THE PRODUCT AND ITS PHOTO COMMIT TOGETHER OR NOT AT ALL. Slice I1.
+    //
+    // `createProduct` and `setProductPrimaryImage` each open their own transaction. Called one
+    // after the other, a failure in the second would leave a product the merchant asked to have a
+    // photo WITHOUT one, reported as a success — and on a phone, where the photo is often the
+    // whole reason they walked to the shelf.
+    //
+    // better-sqlite3 nests `db.transaction()` via SAVEPOINT, which was measured rather than
+    // assumed: an inner transaction that commits is rolled back when the outer one throws. So an
+    // outer transaction around both calls makes the pair atomic with NO architectural change, no
+    // new table and no migration.
+    //
+    // When there is no staged photo this is one empty wrapper around the write that would have
+    // happened anyway.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    const { transact } = this.requireAuditedStack();
+    // 🔴 THE ACTOR IS RESOLVED ONCE, BY THE ACTION'S OWN RULE, and it is the same check
+    // `requirePhoneOperator` just made: a NEW_PRODUCT save needs the create permission as it
+    // stands now, an EDIT save needs an owner. Resolving it here rather than inside the photo
+    // branch means the save is refused before anything is written, not halfway through.
+    const actor = spec.action === "NEW_PRODUCT" ? this.requireProductCreator() : this.requireOwner();
+    return transact((): AdminProductRow => {
+      const row = this.writePhoneProduct(spec, submission, servedMaster);
+      if (stagedPhoto) {
+        // 🔴 A CREATE GETS `writeInitialPhoto`, AN EDIT GETS THE OWNER-GATED PATH. On a create the
+        // product was made microseconds ago inside this very transaction, so this is its FIRST
+        // photo by construction; on an edit the product already existed and replacing its photo
+        // stays an owner's act. One branch, so the narrow power cannot be used for the broad one.
+        const write = spec.action === "NEW_PRODUCT" ? this.writeInitialPhoto(actor, {
+          productId: row.id,
+          bytes: stagedPhoto.bytes,
+          mime: stagedPhoto.mime,
+          widthPx: stagedPhoto.widthPx,
+          heightPx: stagedPhoto.heightPx,
+          // 🔴 TRUTHFULLY 'phone'. The column has admitted this value since migration 9, before
+          // any phone existed, so a support question about where a photo came from has an answer.
+          origin: "phone",
+        }) : this.setProductPrimaryImage({
+          productId: row.id,
+          bytes: stagedPhoto.bytes,
+          mime: stagedPhoto.mime,
+          widthPx: stagedPhoto.widthPx,
+          heightPx: stagedPhoto.heightPx,
+          origin: "phone",
+        });
+        void write;
+      }
+      return row;
+    });
+  }
+
+  /** The product half of a phone save. Always runs inside `savePhoneProduct`'s transaction. */
+  private writePhoneProduct(
+    spec: PhoneSessionSpec,
+    submission: PhoneSubmission,
+    servedMaster: MasterForm | null,
+  ): AdminProductRow {
+
+    if (spec.action === "NEW_PRODUCT") {
+      if (spec.productId !== null) {
+        throw new DomainError("INVALID_INPUT", "A new product cannot name an existing product");
+      }
+      // A create has no "before", so every enrichment field the form holds is a new value. The
+      // diff is taken against an EMPTY form, which is what the desktop's Add dialog also does.
+      const master = masterPatchFrom(EMPTY_MASTER_FORM, submission.master);
+      return this.createProduct(
+        master === undefined ? submission.draft : { ...submission.draft, master },
+        PHONE_PROVENANCE,
+      );
+    }
+
+    const productId = spec.productId;
+    if (productId === null) {
+      throw new DomainError("INVALID_INPUT", "Editing on the phone needs the product it is editing");
+    }
+    const before = this.requireStore().findById(productId);
+    if (!before) throw new DomainError("PRODUCT_NOT_FOUND", "That product no longer exists");
+
+    // 🔴 THE DIFF IS AGAINST WHAT THE FORM WAS SERVED, NOT AGAINST STORAGE AS IT IS NOW.
+    //
+    // `spec.servedMaster` is the snapshot this service handed the phone when the form was opened.
+    // Diffing against the CURRENT row instead would reintroduce the exact failure the desktop's
+    // own patch builder documents: a field changed elsewhere while the phone was open would be
+    // reverted to what the phone happened to be showing. Diffing against what was served means an
+    // untouched field is ABSENT from the patch, and `keep()` preserves whatever storage now holds.
+    // A null `servedMaster` means the caller never served a form (it cannot happen through the
+    // listener, which always serves before it accepts a POST) — falling back to the stored row is
+    // the conservative reading: the diff then describes only what the submission really changes.
+    const served = servedMaster ?? masterFormOf(toAdminProductDto(before));
+    const master = masterPatchFrom(served, submission.master);
+
+    // 🔴 `isActive` IS CARRIED THROUGH FROM STORAGE, NEVER FROM THE FORM. The phone has no active
+    // toggle in V1, and `updateProduct` takes the flag positionally — so passing anything else
+    // here would silently deactivate a product on every phone save.
+    return this.updateProduct(
+      productId,
+      master === undefined ? submission.draft : { ...submission.draft, master },
+      before.is_active === 1n,
+      PHONE_PROVENANCE,
+    );
+  }
+
+  /**
+   * The live operator must be an owner, and the SAME owner who opened the phone session.
+   *
+   * 🔴 WHY SAME-OPERATOR AND NOT MERELY OWNER. "Still an owner" already closes the escalation
+   * (a cashier cannot inherit a session an owner opened). Requiring the same person closes a
+   * smaller one that is still real: in a shop with two owners, one could open a session and the
+   * other's signed-in till would carry the write and the audit actor. A ten-minute session belongs
+   * to the person who started it, and the audit row should name them.
+   */
+  private requirePhoneOperator(spec: PhoneSessionSpec): void {
+    // 🔴 RE-ASSERTED AT SAVE, AGAINST THE DURABLE ROW, AND SPLIT BY ACTION. A NEW_PRODUCT session
+    // needs the create permission as it stands RIGHT NOW — not as it stood when the QR was drawn —
+    // so an owner who revokes the grant while the phone is open has the save refused. An
+    // EDIT_PRODUCT session still needs an owner, so a token cannot outlive the authority that
+    // minted it either way.
+    const actor = spec.action === "NEW_PRODUCT" ? this.requireProductCreator() : this.requireOwner();
+    if (actor.id !== spec.operatorId) {
+      throw new DomainError(
+        "NOT_AUTHORIZED",
+        "This phone session was opened by a different operator; ask for a new code",
+      );
+    }
+  }
+
+  /**
+   * Creates a category. The name is the owner's, and the duplicate check asks the question the
+   * UNIQUE INDEX will ask.
+   *
+   * 🔴 INSIDE ONE TRANSACTION, for the reason every other check in this file moved inside one: two
+   * near-simultaneous creates would both pass a check made outside it, and only the index would
+   * catch the second — as a raw constraint failure the owner cannot act on.
+   */
+  createCategory(nameAr: string, nameEn: string | null): CategoryRow {
+    const owner = this.requireOwner();
+    const categories = this.requireCategories();
+    const { auditStore, transact } = this.requireAuditedStack();
+    const instant = this.now();
+    const now = instant.toISOString();
+    const name = categoryNameAr(nameAr);
+    const en = categoryNameEn(nameEn);
+    const written: AuditRow[] = [];
+    const row = transact((): CategoryRow => {
+      const clash = categories.findByNameAr(name);
+      if (clash) {
+        throw new DomainError("DUPLICATE_CATEGORY", `'${clash.name_ar}' already exists`);
+      }
+      const created = categories.insert({
+        id: this.newId(),
+        nameAr: name,
+        nameEn: en,
+        sortOrder: categories.nextSortOrder(),
+        now,
+      });
+      // A creation records its whole audited state with every `before` null — the same
+      // representation an edit uses, so there is one format and not two.
+      written.push(
+        auditStore.append(
+          this.auditDraft(owner, "CATEGORY_CREATED", "category", created.id, instant, categoryDiff(null, created), {}),
+          this.newId(),
+        ),
+      );
+      return created;
+    });
+    this.mirror(written);
+    return row;
+  }
+
+  /** Renames a category. The id is the identity, so every product keeps its link. */
+  renameCategory(id: string, nameAr: string, nameEn: string | null): CategoryRow {
+    const owner = this.requireOwner();
+    const categories = this.requireCategories();
+    const { auditStore, transact } = this.requireAuditedStack();
+    const instant = this.now();
+    const now = instant.toISOString();
+    const name = categoryNameAr(nameAr);
+    const en = categoryNameEn(nameEn);
+    const written: AuditRow[] = [];
+    const row = transact((): CategoryRow => {
+      const before = categories.findById(id);
+      if (!before) {
+        throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
+      }
+      const clash = categories.findByNameAr(name);
+      // Renaming a category to the name it already has is not a clash with itself.
+      if (clash && clash.id !== id) {
+        throw new DomainError("DUPLICATE_CATEGORY", `'${clash.name_ar}' already exists`);
+      }
+      const after = categories.rename(id, name, en, now);
+      const changes = categoryDiff(before, after);
+      // Renaming to the identical name changed nothing, and nothing is not an event — the same
+      // rule setProductActive follows, and the one the empty-diff backstop would enforce anyway.
+      if (Object.keys(changes).length > 0) {
+        written.push(
+          auditStore.append(
+            this.auditDraft(owner, "CATEGORY_RENAMED", "category", id, instant, changes, {}),
+            this.newId(),
+          ),
+        );
+      }
+      return after;
+    });
+    this.mirror(written);
+    return row;
+  }
+
+  /**
+   * Retires a category, or brings it back.
+   *
+   * 🔴 DEACTIVATING CHANGES NO PRODUCT. Every product that already carries this category keeps it —
+   * that is the approved contract and the reason `assertCategoryUsable` is asymmetric. What
+   * deactivating does is remove it from the chooser for NEW assignments.
+   */
+  setCategoryActive(id: string, active: boolean): CategoryRow {
+    const owner = this.requireOwner();
+    const categories = this.requireCategories();
+    const { auditStore, transact } = this.requireAuditedStack();
+    const instant = this.now();
+    const now = instant.toISOString();
+    const written: AuditRow[] = [];
+    const row = transact((): CategoryRow => {
+      const before = categories.findById(id);
+      if (!before) {
+        throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
+      }
+      const after = categories.setActive(id, active, now);
+      const changes = categoryDiff(before, after);
+      // Toggling a category to the state it is already in changed nothing.
+      if (Object.keys(changes).length > 0) {
+        written.push(
+          auditStore.append(
+            this.auditDraft(
+              owner,
+              active ? "CATEGORY_ACTIVATED" : "CATEGORY_DEACTIVATED",
+              "category",
+              id,
+              instant,
+              changes,
+              {},
+            ),
+            this.newId(),
+          ),
+        );
+      }
+      return after;
+    });
+    this.mirror(written);
+    return row;
+  }
+
+  /**
+   * Deletes a category, and ONLY when nothing uses it.
+   *
+   * 🔴 THE SCHEMA WOULD HAPPILY DO SOMETHING ELSE, WHICH IS EXACTLY WHY THIS EXISTS.
+   * `catalog_products.category_id` carries `ON DELETE SET NULL`, so deleting a used category would
+   * succeed and silently blank the category on every product that had it — no error, no audit, and
+   * the owner discovers it later as missing data. The referential action is the floor under a
+   * mistake, never the behaviour: the count and the delete run in ONE transaction, so a product
+   * cannot be assigned to this category between the two.
+   *
+   * The count includes INACTIVE products, by `countProductsUsing`'s own contract.
+   */
+  deleteCategoryIfUnused(id: string): { readonly deletedId: string } {
+    const owner = this.requireOwner();
+    const categories = this.requireCategories();
+    const { auditStore, transact } = this.requireAuditedStack();
+    const instant = this.now();
+    const written: AuditRow[] = [];
+    const result = transact((): { readonly deletedId: string } => {
+      const row = categories.findById(id);
+      if (!row) throw new DomainError("CATEGORY_NOT_FOUND", "That category no longer exists");
+      const used = categories.countProductsUsing(id);
+      if (used > 0) {
+        // 🔴 THE REFUSAL THROWS BEFORE ANYTHING IS APPENDED, so a refused delete emits NO audit
+        // event. An audit trail that records attempts as if they succeeded is worse than none.
+        throw new DomainError(
+          "CATEGORY_IN_USE",
+          `'${row.name_ar}' is used by ${used} product(s) — move them to another category first, or just deactivate it`,
+        );
+      }
+      // 🔴 THE FACTS ARE CAPTURED BEFORE THE ROW IS DESTROYED, inside this transaction. After the
+      // DELETE there is nothing left to read, so "what was this category called" would be
+      // unanswerable — which is precisely the question a deletion makes someone ask later.
+      const epitaph = categoryDiff(row, null);
+      categories.delete(id);
+      written.push(
+        auditStore.append(
+          this.auditDraft(owner, "CATEGORY_DELETED", "category", id, instant, epitaph, {}),
+          this.newId(),
+        ),
+      );
+      return { deletedId: id };
+    });
+    this.mirror(written);
+    return result;
+  }
+
+  /**
+   * The primary-photo METADATA of every product that has one. One small read for the whole table.
+   *
+   * 🔴 THIS IS WHAT KEEPS BYTES OFF THE LIST while still letting the list show thumbnails. The
+   * obvious way to show a photo on a list — read the image row alongside the product — would load
+   * every photo in the catalog to render a screen that displays them at 40 pixels. This returns an
+   * id, a MIME and a content hash per product; the renderer then asks for the bytes of the few
+   * photos actually on screen, and the hash tells it when a cached one is stale.
+   */
+  primaryPhotoIndex(): ReadonlyMap<string, ProductImageMeta> {
+    this.requireCashier();
+    const images = this.deps.productImages;
+    // 🔴 DELIBERATELY TOLERANT, AND ONLY THIS ONE IS. Every other image operation fails closed with
+    // NOT_AVAILABLE, because refusing is the safe answer for a mutation and for a byte read. Here
+    // the question is "should the list draw a photo placeholder", and migration 9 creates
+    // `catalog_product_images` unconditionally — so a terminal without this repository wired is a
+    // test harness that opted out, not a shop with hidden photos, and the empty set is the literal
+    // truth about what this service can see. A refusal here would instead take down the whole
+    // products list over a decoration.
+    if (!images) return new Map();
+    return images.primaryMetaByProduct();
+  }
+
+  /**
+   * The metadata of a product's current photo — never its bytes.
+   *
+   * 🔴 SESSION, AND THIS IS THE DELIBERATE RECLASSIFICATION THE PREVIOUS COMMENT PROMISED. It read
+   * OWNER, with the reason "the only V1 surface that reads a photo is the owner's own Add/Edit
+   * form". That stopped being true the moment the products LIST was required to show thumbnails —
+   * a cashier may read that list, so a cashier must be able to fetch the photos on it, or the
+   * feature is owner-only in practice and the cashier's screen shows placeholders for everything.
+   *
+   * What it exposes is the shop's own product photograph, which is destined for a public website
+   * anyway, to an operator who already sees that product's name, SKU and price on the same row.
+   * The MUTATIONS stay owner: changing a product's photo is a master-data act.
+   */
+  productImageMeta(productId: string): ProductImageMeta | null {
+    this.requireCashier();
+    const images = this.requireImages();
+    if (!this.requireStore().findById(productId)) {
+      throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
+    }
+    return images.findPrimaryMeta(productId);
+  }
+
+  /**
+   * The bytes of ONE named image — the only route to them, and it has to be asked for by name.
+   *
+   * 🔴 IT VERIFIES WHAT IT READ. `sha256_hex` was computed when the image was stored; re-hashing on
+   * the way out costs microseconds on a photo and turns silent bit-rot in a copied-around SQLite
+   * file into a refusal instead of a corrupt picture on a website. The online catalog export
+   * (slice G) depends on this guarantee rather than re-deriving it.
+   */
+  productImageBytes(imageId: string): { readonly meta: ProductImageMeta; readonly bytes: Buffer } {
+    this.requireCashier();
+    const images = this.requireImages();
+    const bytes = images.readBytes(imageId);
+    if (bytes === null) throw new DomainError("IMAGE_NOT_FOUND", "That photo is no longer stored");
+    const meta = images.findMetaById(imageId);
+    if (!meta) throw new DomainError("IMAGE_NOT_FOUND", "That photo is no longer stored");
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== meta.sha256_hex) {
+      throw new DomainError(
+        "LEDGER_INTEGRITY",
+        "This photo does not match its stored checksum and was not returned",
+      );
+    }
+    return { meta, bytes };
+  }
+
+  /**
+   * Stores a product's photo, replacing whatever it had.
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 THE BYTES NEVER COME FROM THE RENDERER, AND THERE IS NO IPC CHANNEL THAT ACCEPTS THEM.
+   *
+   * Every caller of this method lives in the MAIN process: slice F's native photo picker, which
+   * decodes and normalizes with Electron's `nativeImage`, and slice H's LAN listener, which receives
+   * the phone's upload. That is the same shape `pickInvoiceLogo` already uses — main owns the
+   * dialog, main owns the file, and the renderer only ever says WHICH product it means.
+   *
+   * 🔴 AND THIS METHOD IS NOT THE VALIDATOR. It checks what it can cheaply prove — a known MIME, a
+   * non-empty buffer under the cap, positive dimensions, and that the product exists — and it
+   * computes the checksum ITSELF so no caller can supply a wrong one. What it cannot do is decode
+   * the image; proving these bytes really are a JPEG of these dimensions is the producer's job —
+   * `src/main/photoNormalize.ts`, which decodes through Electron's `nativeImage` and refuses
+   * anything that comes back empty. The cap here is a backstop against a 50 MB phone photo
+   * reaching SQLite, not a substitute for decoding, and it is deliberately looser than the
+   * producer's own output cap so it never fires when the producer is working.
+   * ════════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  setProductPrimaryImage(input: {
+    readonly productId: string;
+    readonly bytes: Buffer;
+    readonly mime: ImageMime;
+    readonly widthPx: number;
+    readonly heightPx: number;
+    readonly origin: ImageOrigin;
+  }): ProductImageMeta {
+    // 🔴 SETTING OR REPLACING THE PHOTO OF AN EXISTING PRODUCT IS AN OWNER ACT, STILL. A granted
+    // cashier may give a product they are creating its first photo — see `writeInitialPhoto` —
+    // and may not touch the photo of any product that already exists. The two live in different
+    // methods precisely so that widening one cannot silently widen the other.
+    return this.writeProductPrimaryImage(this.requireOwner(), input);
+  }
+
+  /**
+   * The first photo of a product being CREATED, written by whoever is permitted to create it.
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 THE NARROW HALF OF THE PHOTO AUTHORITY, AND WHY IT IS A SEPARATE ENTRY POINT. A merchant
+   * creating a product from the shelf needs its photo in the same act — on a phone that is usually
+   * the whole reason they walked over. But "may give a NEW product its first photo" and "may
+   * replace or delete the photo of ANY product" are different powers, and a cashier is granted
+   * only the first.
+   *
+   * It is private, and it takes the actor it was already authorized as rather than re-deciding:
+   * the one caller is the create transaction, which has just run `requireProductCreator()` and is
+   * holding a row it created microseconds ago. Nothing reaches this with a product id of its own
+   * choosing — the id comes from the create that is still in flight.
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  private writeInitialPhoto(
+    actor: Cashier,
+    input: {
+      readonly productId: string;
+      readonly bytes: Buffer;
+      readonly mime: ImageMime;
+      readonly widthPx: number;
+      readonly heightPx: number;
+      readonly origin: ImageOrigin;
+    },
+  ): ProductImageMeta {
+    return this.writeProductPrimaryImage(actor, input);
+  }
+
+  private writeProductPrimaryImage(
+    owner: Cashier,
+    input: {
+      readonly productId: string;
+      readonly bytes: Buffer;
+      readonly mime: ImageMime;
+      readonly widthPx: number;
+      readonly heightPx: number;
+      readonly origin: ImageOrigin;
+    },
+  ): ProductImageMeta {
+    const images = this.requireImages();
+    const store = this.requireStore();
+    const { auditStore, transact } = this.requireAuditedStack();
+    // The cheap, provable checks, from the one module that owns them. None of them decodes the
+    // image; see src/domain/productImage.ts for why that is stated rather than implied.
+    const mime = imageMime(input.mime);
+    const origin = imageOrigin(input.origin);
+    const bytes = imageBytes(input.bytes);
+    const widthPx = imageEdge(input.widthPx, "width");
+    const heightPx = imageEdge(input.heightPx, "height");
+    // ONE instant for the row's timestamps and for its audit event, so the two cannot disagree
+    // about when the photo was stored.
+    const instant = this.now();
+    const now = instant.toISOString();
+    // 🔴 COMPUTED HERE, FROM THESE BYTES. A checksum a caller passes in is a claim; this is the
+    // fact, and it is what `productImageBytes` and the online export later verify against.
+    const sha256Hex = createHash("sha256").update(bytes).digest("hex");
+    const written: AuditRow[] = [];
+    const meta = transact((): ProductImageMeta => {
+      if (!store.findById(input.productId)) {
+        throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
+      }
+      // 🔴 READ BEFORE WRITE, INSIDE THE TRANSACTION. `putPrimary` deletes the old primary row
+      // before inserting the new one, so after it runs there is no way to tell a first photo from
+      // a replacement — and "when did we lose the old photo" is exactly what someone asks later.
+      const previous = images.findPrimaryMeta(input.productId);
+      const stored = images.putPrimary({
+        id: this.newId(),
+        productId: input.productId,
+        bytes,
+        mime,
+        sha256Hex,
+        widthPx,
+        heightPx,
+        origin,
+        now,
+      });
+      written.push(
+        auditStore.append(
+          this.auditDraft(
+            owner,
+            previous === null ? "PRODUCT_IMAGE_SET" : "PRODUCT_IMAGE_REPLACED",
+            "product_image",
+            input.productId,
+            instant,
+            imageDiff(previous, stored),
+            { photo_origin: stored.origin },
+          ),
+          this.newId(),
+        ),
+      );
+      return stored;
+    });
+    this.mirror(written);
+    return meta;
+  }
+
+  /**
+   * Removes a product's photo. Returns whether there was one.
+   *
+   * Idempotent on purpose: removing a photo that is already gone is not an error the owner needs to
+   * see, and reporting one would make a double click look like a failure.
+   */
+  removeProductPrimaryImage(productId: string): { readonly removed: boolean } {
+    const owner = this.requireOwner();
+    const images = this.requireImages();
+    const store = this.requireStore();
+    const { auditStore, transact } = this.requireAuditedStack();
+    const instant = this.now();
+    const written: AuditRow[] = [];
+    const result = transact((): { readonly removed: boolean } => {
+      if (!store.findById(productId)) {
+        throw new DomainError("PRODUCT_NOT_FOUND", "This product no longer exists");
+      }
+      // Same reason as above: the facts of the photo being destroyed are only readable before it is.
+      const previous = images.findPrimaryMeta(productId);
+      const removed = images.removePrimary(productId);
+      // 🔴 NO EVENT WHEN NOTHING WAS REMOVED. Removing a photo that is already gone is idempotent
+      // by design (a double click must not look like a failure) and it is not a fact about the shop.
+      if (removed && previous !== null) {
+        written.push(
+          auditStore.append(
+            this.auditDraft(
+              owner,
+              "PRODUCT_IMAGE_REMOVED",
+              "product_image",
+              productId,
+              instant,
+              imageDiff(previous, null),
+              { photo_origin: previous.origin },
+            ),
+            this.newId(),
+          ),
+        );
+      }
+      return { removed };
+    });
+    this.mirror(written);
+    return result;
+  }
+
+  /**
+   * The audit trail AND the transaction that binds it to a mutation — both, or neither.
+   *
+   * 🔴 FAIL CLOSED ON THE AUDIT TRAIL, NOT JUST ON THE TRANSACTION. A terminal that can write but
+   * cannot record refuses the write. `requireProductStack` above says the same thing for products;
+   * this is that rule applied to categories and photos, and it is the reason there is no
+   * "unaudited fallback path" for a category rename.
+   */
+  private requireAuditedStack(): {
+    readonly auditStore: AuditRepository;
+    readonly transact: <T>(fn: () => T) => T;
+  } {
+    const auditStore = this.deps.auditStore;
+    const transact = this.deps.transact;
+    if (!auditStore || !transact) {
+      throw new DomainError(
+        "NOT_AVAILABLE",
+        "This operation is unavailable: the durable audit trail is not wired on this terminal",
+      );
+    }
+    return { auditStore, transact };
   }
 
   // ── Sales ───────────────────────────────────────────────────────────────────────────────────────

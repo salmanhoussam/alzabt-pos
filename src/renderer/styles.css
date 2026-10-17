@@ -217,7 +217,100 @@ h1, h2 { margin: 0 0 12px; }
 .admin-table td, .admin-table th { vertical-align: top; }
 .admin-table .row-inactive { opacity: 0.55; }
 .admin-actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
-.product-form { display: flex; flex-direction: column; gap: 10px; min-width: 340px; max-width: 460px; }
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   🔴 THE ACTIONS COLUMN IS SHRINK-TO-FIT, AND THIS IS A ROW-HEIGHT FIX, NOT A TIDY-UP.
+
+   `.history-table` is `width: 100%`, so the table always fills its container and the columns
+   negotiate for that fixed width. Slice H2 added a third row action, the actions column grew, and
+   the NAME column lost the pixels — so on the English screen one product's name wrapped to a
+   second line and its neighbour's did not. The Windows gate measured 66px against 89px, against a
+   ±2px tolerance. Arabic passed at 69 vs 69 the same run, because `تعديل · أكمل من الهاتف · إيقاف`
+   is far narrower than `Edit · Edit on Phone · Deactivate`.
+
+   `width: 1%` on a `white-space: nowrap` cell is the standard table idiom for "take exactly your
+   content width and leave the rest to the flexible columns". With the tighter button padding
+   below and the shorter English label, the name column gets its pixels back.
+
+   🔴 THE ASSERTION WAS NOT TOUCHED. The ±2px tolerance is correct and caught a real regression —
+   this is the second time this project has been told to fix the layout rather than the tolerance
+   (migration 10's gate found 69 vs 57 and the answer then was the same).
+
+   Nothing is clipped, hidden or shrunk below a readable size: the labels stay whole and the
+   buttons keep `--text-small`, which every other small control on the screen already uses.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+.admin-table td.col-actions, .admin-table th.col-actions { width: 1%; }
+/* 12px -> 10px per side. Three buttons, two sides each, on every row. */
+.admin-actions .btn.small { padding: 0 10px; }
+.product-form { display: flex; flex-direction: column; gap: 10px; min-width: 340px; max-width: 880px; }
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   🔴 THE PRODUCT MASTER MODAL — A WORKSPACE, NOT TWO NARROW FORMS SIDE BY SIDE.
+
+   `.dialog` is 520px, and the two-column grid was being squeezed into it: each column got ~230px,
+   which is why the Windows capture looked cramped. The fix is width, not smaller type. 960px on a
+   1024px-minimum window (main.ts: minWidth 1024, minHeight 640) leaves a real gutter, and the main
+   column gets 1.6 of the 2.6 fractions because it carries nine controls to the side panel's five.
+
+   🔴 AND THE CARD NO LONGER SCROLLS. `.overlay > .card` gives every dialog `overflow-y: auto`, so
+   a footer sticky INSIDE it sits over content passing beneath — which is what the screenshot
+   showed. The card is now a flex column: title, a scroll region, and a footer that is their
+   sibling. Nothing can pass under the footer because the footer is not in the scrolling box.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+.overlay > .card.product-form {
+  width: min(960px, calc(100vw - 32px));
+  max-width: none;
+  overflow: hidden;            /* the CARD does not scroll; .form-scroll does */
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.product-form .form-scroll {
+  flex: 1 1 auto;
+  min-block-size: 0;           /* without this a flex child refuses to shrink and never scrolls */
+  overflow-y: auto;
+  padding-block: var(--space-2);
+  /* Room for a native dropdown opening against the bottom of the list, so it has somewhere to go
+     other than across the footer. */
+  padding-block-end: var(--space-4);
+}
+
+.product-form .form-footer {
+  flex: 0 0 auto;
+  margin: 0;
+  padding-block: var(--space-3);
+  border-block-start: 1px solid var(--border);
+  background: var(--surface);
+}
+
+/* 🔴 TWO COLUMNS SO NOTHING IMPORTANT SITS BELOW THE FOLD.
+   The installed Windows capture of Edit Product, at the shop's real 1008x681, ended at the Category
+   field: the photo preview, the online section and the Save button were all off-screen. "Opening
+   Edit must make the photo state obvious" is not satisfied by something a scroll away — and the
+   E2E passed regardless, because the element was in the DOM. The screenshot is the gate.
+   One column again below 900px, where two would be worse than a scroll.
+   `.product-form`'s own max-width went 460px -> 880px for the same reason. */
+.form-grid { display: grid; grid-template-columns: 1fr; gap: var(--space-4); align-items: start; }
+
+/* 🔴 THE WAY OUT STAYS IN VIEW WHILE THE FORM SCROLLS PAST IT.
+   The same decision `.inv-actions.inv-keep` already carries for the invoice panel, and the same
+   reason: this form is about 630px of controls in its first column alone, so on a 1008x681 shop
+   screen it scrolls — and a Save button that scrolls away is how a merchant loses what they typed.
+   Measured in CI: `save-product` must be on screen when the form opens. */
+
+/* The preview is bounded tighter than a standalone image would be: it shares a column with the
+   online-catalogue fields, and a 220px picture pushed the rest of them off a 681px screen. */
+/* The empty state's icon, small because it shares a column with the online fields. */
+.thumb-big { inline-size: 72px; }
+.form-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+
+/* The main column carries nine controls, the side panel five — so it gets the larger share rather
+   than an even split. `minmax(0, …)` because a grid track's default `min-width: auto` refuses to
+   shrink below its content and would push the modal wider than the window. */
+@media (min-width: 820px) {
+  .form-grid { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: var(--space-4); }
+}
 .product-form .field { display: flex; flex-direction: column; gap: 4px; text-align: start; }
 .product-form .field > span { font-size: 13px; }
 .product-form input, .product-form select {
@@ -462,3 +555,143 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 /* ── Operators (owner only) ──────────────────────────────────────────────────────────────────── */
 .ops { display: grid; gap: var(--space-3); }
 .ops .row-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: flex-end; }
+
+/* ── Product Master: thumbnails, form sections, the photo panel ──────────────────────────────────
+   🔴 EVERY SIZE HERE IS FIXED ON PURPOSE. A thumbnail that grows with its image is a row height
+   that changes per row, and a products list whose rows are different heights cannot be scanned.
+   `aspect-ratio: 1` keeps the box identical whatever shape the photo is.
+
+   🔴 BUT THE FIT DIFFERS BETWEEN THE TWO, and this comment used to say `cover` for both. The LIST
+   thumbnail crops (`cover`): it is an identifier at 40px, and uniform rows are the whole point.
+   The FORM preview contains (`contain`): it is what the owner looks at to decide whether this is
+   the right photo, and a centred square crop of a 3:4 photo hid that it was portrait at all. Same
+   box, two jobs, two fits — neither stretches the picture.
+   Colours come from the shipped tokens only; no literal appears below. */
+.col-thumb { width: 52px; }
+
+/* 🔴 ONE LINE FOR BOTH CODES. The installed Windows run measured 69px and 57px rows when the
+   barcode sat on its own line: a product with a barcode was taller than one without, which gives a
+   scan-friendly list two row heights depending on its data. `nowrap` is what stops a long code
+   wrapping and bringing that back. */
+.col-codes { white-space: nowrap; }
+
+/* 🔴 AND THE PRICE DOES NOT WRAP EITHER, for the same reason and found the same way. The English
+   capture showed "23.00 USD" breaking across two lines while "7.50 USD" did not, so the two rows
+   were different heights again — in the OTHER language, which the Arabic measurement could not
+   see. An amount and its currency are one isolated run (`<bdi dir="ltr">`); this stops the column
+   splitting that run when the label words are longer. */
+.admin-table td.num { white-space: nowrap; }
+
+.thumb {
+  display: block;
+  inline-size: 40px;
+  aspect-ratio: 1;
+  border-radius: var(--space-1);
+  border: 1px solid var(--border);
+  background: var(--surface-sunken);
+  object-fit: cover;
+  object-position: center;
+}
+
+/* The three non-image states share the box so nothing reflows when bytes arrive. */
+.thumb-empty { border-style: dashed; }
+.thumb-loading { opacity: 0.6; }
+.thumb-broken { border-style: dotted; border-color: var(--danger); }
+
+
+/* 🔴 `contain`, NOT `cover`, AND SLICE F IS WHY. This was written when the only photo that could
+   exist was a square 96x96 test seed, so a square centre-crop was invisible. Real photos are 4:3
+   and 3:4, and the crop hid exactly the thing the owner opens this panel to judge: a PORTRAIT
+   photo stored upright looked identical to a landscape one, in the screenshot AND on screen.
+   Letterboxing it inside the same square box shows the whole image and its real shape, costs no
+   layout movement, and leaves the LIST thumbnail on `cover` where uniform rows are the point. */
+.photo-preview {
+  display: block;
+  max-inline-size: 100%;
+  inline-size: 150px;
+  max-block-size: 150px;
+  aspect-ratio: 1;
+  object-fit: contain;
+  object-position: center;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-sunken);
+}
+
+.photo-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+}
+
+/* 🔴 A PICTURE FRAME, NOT AN EMPTY FIELD. The dashed square read as an empty INPUT in the Windows
+   capture — a merchant saw somewhere to type, not somewhere a photo goes. A bordered frame with a
+   picture glyph inside says what it is before anyone reads the label. */
+.photo-frame {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-block-size: 150px;
+  padding: var(--space-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  text-align: center;
+}
+
+.photo-frame-broken { border-style: dotted; border-color: var(--danger); }
+
+.photo-glyph {
+  inline-size: 48px;
+  block-size: 48px;
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+/* 🔴 A SECTION HEADING, NOT A SECOND CARD. The form is one dialog with three labelled parts; a
+   nested card per section would read as three separate things to save. */
+.form-section {
+  margin-block: var(--space-4) var(--space-2);
+  padding-block-end: var(--space-1);
+  border-block-end: 1px solid var(--border);
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+.form-section:first-of-type { margin-block-start: var(--space-3); }
+
+.cat-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-block-end: var(--space-3);
+}
+
+/* ── Phone pairing dialog (slice H2) ───────────────────────────────────────────────────────────
+   🔴 THE SYMBOL IS SIZED IN CSS, NOT IN THE ENCODER. zxing-wasm emits a 45x45 SVG — one unit per
+   module — which would render as a postage stamp at its intrinsic size. `width:100%` on the SVG
+   with a fixed box scales it losslessly (it is a vector), and `image-rendering: pixelated` keeps
+   the module edges crisp instead of letting the browser blur them, which is what makes it
+   scannable from a phone held at arm's length in front of a till.
+
+   The white plate is deliberate and NOT theming: a QR needs a light quiet zone around a dark
+   symbol to decode, so it stays white in dark mode too rather than inheriting the card. */
+.phone-qr {
+  width: 260px; height: 260px; margin: 12px auto; padding: 12px;
+  background: #ffffff; border-radius: 12px; display: grid; place-items: center;
+}
+.phone-qr svg { width: 100%; height: 100%; image-rendering: pixelated; shape-rendering: crispEdges; }
+.phone-dialog { text-align: center; }
+.phone-dialog ul { text-align: start; margin: 4px 0 0; padding-inline-start: 1.2em; }
+/* 🔴 REUSES `.actions`, WHICH ALREADY DOES THIS. A new `.dialog-actions` class was written first
+   and then removed: `.actions` has provided the flex row and the 8px gap since the history table,
+   and a second class for the same job is how two spacings drift apart. Only the top margin, which
+   is specific to sitting under a QR, is added here. */
+.phone-dialog .phone-actions { margin-top: 16px; justify-content: center; }

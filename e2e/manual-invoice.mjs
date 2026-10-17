@@ -292,7 +292,8 @@ await app.close();
 {
   const f = facts();
   log("after setup:", JSON.stringify(f));
-  assert(f.schema === 8, `the ledger is at schema v8 (got ${f.schema})`);
+  // 🔴 TRANSITION: v8 -> v10 (9 = product_master, 10 = product_master_audit).
+  assert(f.schema === 11, `the ledger is at schema v11 (got ${f.schema})`);
   assert(f.invoices === 0 && f.invoiceLines === 0 && f.reconciliation === 0, "no invoice exists yet");
   assert(count("company_profile") === 1, "exactly one company_profile row, however many saves happened");
   assert(Number(one("SELECT next_invoice_number AS n FROM company_profile").n) === 61, "the sequence starts at 61 as configured");
@@ -704,7 +705,7 @@ await app.close();
 {
   const f = facts();
   log("FINAL LEDGER:", JSON.stringify(f));
-  assert(f.schema === 8 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v8");
+  assert(f.schema === 11 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v11");
   assert(f.invoices === 1 && f.invoiceLines === 4, "the invoice and its lines survived the restart");
   assert(f.highestNumber === 61, "the invoice number is unchanged");
   assert(f.reconciliation === 4, "every reconciliation row survived");

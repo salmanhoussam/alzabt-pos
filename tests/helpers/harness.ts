@@ -9,6 +9,8 @@ import { FIXTURE_CATALOG } from "../../src/fixtures/catalog";
 import { FIXTURE_TERMINAL, type TerminalConfig } from "../../src/fixtures/terminal";
 import { AuditRepository } from "../../src/persistence/auditRepository";
 import { CatalogRepository } from "../../src/persistence/catalogRepository";
+import { CategoryRepository } from "../../src/persistence/categoryRepository";
+import { ProductImageRepository } from "../../src/persistence/productImageRepository";
 import { type Db, openDatabase } from "../../src/persistence/db";
 import { MIGRATIONS } from "../../src/persistence/migrations";
 import { OperatorRepository } from "../../src/persistence/operatorRepository";
@@ -75,6 +77,12 @@ export function makeHarness(
     auditSink?: (row: AuditRow) => void;
     /** A deterministic id source for the invoice stack. Default: a per-harness counter. */
     ids?: () => string;
+    /**
+     * Migration 9's category and photo tables, wired by default so harness tests run through the
+     * REAL wiring the installed app uses. Pass null to wire neither — the fail-closed path, which
+     * is what a terminal looked like before `main.ts` wired them and is worth a test of its own.
+     */
+    productMaster?: null;
   } = {},
 ): Harness {
   const db = openDatabase(dbPath);
@@ -137,6 +145,10 @@ export function makeHarness(
       pinStates: new PinStateRepository(db),
       catalog: opts.catalog ?? loadCatalog(opts.catalogSource ?? FIXTURE_CATALOG),
       catalogStore: new CatalogRepository(db),
+      // Wired by DEFAULT, matching main.ts. A test that wants the fail-closed shape asks for it.
+      ...(opts.productMaster === null
+        ? {}
+        : { categories: new CategoryRepository(db), productImages: new ProductImageRepository(db) }),
       auditStore: opts.auditStore === null ? undefined : (opts.auditStore ?? audit),
       transact: (fn) => db.transaction(fn).immediate(),
       cashiers: FIXTURE_CASHIERS,

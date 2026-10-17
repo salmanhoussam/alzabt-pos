@@ -34,7 +34,26 @@ describe("IPC surface", () => {
   // The surface grew from THIRTEEN channels to NINETEEN when offline product management landed:
   // listProducts, createProduct, updateProduct, setProductActive, getSettings, setTerminalLanguage.
   // It then grew from NINETEEN to FORTY-FOUR with manual invoices (migration 6) — the twenty-five
-  // channels listed below the blank line.
+  // channels listed below the blank line. Operator accounts (migration 8) took it to FIFTY-THREE.
+  //
+  // 🔴 TRANSITION — FIFTY-THREE to SIXTY-THREE with Product Master (migration 9). The ten added:
+  // listCategories, listBrands, createCategory, renameCategory, setCategoryActive, deleteCategory,
+  // getProductImageMeta, getProductImageBytes, setProductImage, removeProductImage.
+  //
+  // 🔴 TRANSITION — SIXTY-FOUR to SIXTY-SIX with the phone LAN bridge (slice H1). The two added:
+  // startPhoneSession, cancelPhoneSession. The old value was 64 and is named rather than replaced.
+  //
+  // 🔴 AND WHAT IS STILL ABSENT IS AGAIN THE POINT. H1 opens this product's first inbound network
+  // surface, and the obvious channels to add — one that returns the session TOKEN, one that lets
+  // the renderer choose a port or an address, one that proxies a request from the phone to a named
+  // service method — are NOT here. `startPhoneSession` names an action; main owns the token, the
+  // port, the address and the socket, and the phone's own surface answers exactly one route.
+  //
+  // 🔴 AND WHAT IS STILL ABSENT IS THE POINT OF THE TRANSITION. Product Master stores PHOTOS, and
+  // the obvious channel to add — one that takes image bytes from the renderer — is NOT here.
+  // `setProductImage` names a product and nothing else; main runs the picker, reads the file and
+  // normalizes it, exactly as `pickInvoiceLogo` does. So the rule below still holds unbroken: no
+  // channel accepts a filesystem path, and none accepts a blob.
   //
   // The old values are named here on purpose — this assertion is the record of what the renderer
   // may ask for, so every addition has to be written down, and the shape rule below still holds:
@@ -45,22 +64,31 @@ describe("IPC surface", () => {
   it("exposes only the fixed business channels — no SQL, query, file or generic invoke", () => {
     expect(CHANNEL_NAMES.sort()).toEqual(
       [
+        "createCategory",
         "createSale",
         "currentCashier",
         "exportBackup",
         "exportCatalog",
+        // Slice G3. An OWNER channel; it names no path in either direction.
+        "exportOnlineCatalog",
         "getAppInfo",
         "getCatalog",
         "getSaleHistory",
+        "getProductImageBytes",
+        "getProductImageMeta",
         "getSettings",
         "getTodaySales",
         "importCatalog",
+        "listBrands",
         "listCashiers",
+        "listCategories",
         "listProducts",
         "login",
         "logout",
         "createProduct",
+        "setCategoryActive",
         "setProductActive",
+        "setProductImage",
         "setTerminalLanguage",
         "updateProduct",
         "voidSale",
@@ -83,12 +111,16 @@ describe("IPC surface", () => {
         "completeBootstrapSetup",
         "createOperator",
         "listOperators",
+        "renameCategory",
         "renameOperator",
         "resetOperatorPin",
         "setOperatorActive",
+        "setOperatorMayCreateProducts",
         "setOperatorRole",
         "updateInvoiceLine",
         "removeInvoiceLine",
+        "removeProductImage",
+        "deleteCategory",
         "discardInvoiceDraft",
         "finalizeInvoice",
         "listInvoices",
@@ -106,9 +138,19 @@ describe("IPC surface", () => {
         "pickInvoiceLogo",
         "printInvoice",
         "saveInvoicePdf",
+        "startPhoneSession",
+        "cancelPhoneSession",
+        "phoneSessionState",
       ].sort(),
     );
-    expect(CHANNEL_NAMES).toHaveLength(53); // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8)
+    // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
+    // migration 9) -> 64 (exportOnlineCatalog, slice G3 — the old value is named, not replaced)
+    // -> 66 (slice H1: startPhoneSession, cancelPhoneSession)
+    // -> 67 (slice H2: phoneSessionState — the dialog's poll; see ipcContract for why it is not
+    //        named "...Status", which invoiceIpc.test.ts forbids on purpose)
+    // -> 68 (migration 11: setOperatorMayCreateProducts — the owner grants one cashier the
+    //        narrow right to add products; see channelPolicy for why it is owner-only itself)
+    expect(CHANNEL_NAMES).toHaveLength(68);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.
@@ -148,7 +190,13 @@ describe("IPC surface", () => {
     // a cashier here would now be refused with NOT_AUTHORIZED, which is the feature working.
     expect(ipc.login({ cashierId: "cashier-01", pin: "1111" })).toEqual({
       ok: true,
-      data: { status: "session", cashier: { id: "cashier-01", name: "Cashier One", role: "owner" } },
+      // 🔴 `mayCreateProducts` JOINED THE SESSION SHAPE WITH MIGRATION 11 — convenience for the
+      // Products screen, never authority. True here because this session is the owner, who may
+      // always. The old shape was { id, name, role }.
+      data: {
+        status: "session",
+        cashier: { id: "cashier-01", name: "Cashier One", role: "owner", mayCreateProducts: true },
+      },
     });
 
     const created = ipc.createSale(goodSale());

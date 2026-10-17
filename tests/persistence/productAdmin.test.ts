@@ -37,11 +37,17 @@ const wrench = {
 
 // ── The schema proof ────────────────────────────────────────────────────────────────────────────
 //
-// This PR added no migration. These two tests are what makes that claim checkable instead of
-// stated: if anyone adds a migration or a column, they fail by name and the reviewer sees it.
+// Offline product management added no migration, and these tests are what makes that claim
+// checkable instead of stated: every later addition fails them BY NAME, and the reviewer sees it.
+//
+// 🔴 AND THAT IS EXACTLY WHAT HAPPENED, TWICE. Migration 8 (operator accounts) moved the list, and
+// migration 9 (product_master) is the first to touch THIS FILE'S OWN TABLE — five additive columns
+// on `catalog_products`. The describe title said "schema is unchanged by this feature" and still
+// does, because "this feature" is product administration, not the schema in general; the two tests
+// below now state what changed, when, and what must STILL be absent.
 
 describe("schema is unchanged by this feature", () => {
-  it("has exactly eight migrations, and offline product management still contributed none of them", () => {
+  it("has exactly eleven migrations, and offline product management still contributed none of them", () => {
     // Was three until migration 4 (exact_sale_quantity), four until migration 5
     // (durable_local_audit), five until migration 6 (manual_invoices), and six until migration 7
     // (invoice_sales_integration), and seven until migration 8 (operator_accounts).
@@ -57,10 +63,19 @@ describe("schema is unchanged by this feature", () => {
       [6, "manual_invoices"],
       [7, "invoice_sales_integration"],
       [8, "operator_accounts"],
+      [9, "product_master"],
+      // 🔴 TRANSITION — migration 10 widened audit_events' enumerated CHECKs so a CATEGORY_* or
+      // PRODUCT_IMAGE_* row can exist at all. Migrations 1-9 are byte-identical after it.
+      [10, "product_master_audit"],
+      // 🔴 TRANSITION — migration 11 added `operators.may_create_products` and widened
+      // audit_events' event vocabulary by the two operator events that record granting and
+      // revoking it. Migrations 1-10 are byte-identical after it, which the per-migration tests
+      // check by checksum rather than by this list.
+      [11, "operator_product_create_capability"],
     ]);
   });
 
-  it("catalog_products has exactly the columns migration 3 created — no more, no fewer", () => {
+  it("catalog_products has migration 3's columns PLUS migration 9's six — no more, no fewer", () => {
     const columns = (db.prepare("PRAGMA table_info(catalog_products)").all() as Array<{ name: string }>).map(
       (c) => c.name,
     );
@@ -78,9 +93,27 @@ describe("schema is unchanged by this feature", () => {
       "is_active",
       "created_at",
       "updated_at",
+      // 🔴 TRANSITION — migration 9 (product_master). This list ended at `updated_at` until then.
+      // All five are additive and nullable-or-defaulted, so every existing product keeps selling
+      // the moment the migration lands: online content is enrichment, never a precondition.
+      "category_id",
+      // 🔴 TRANSITION within migration 9 itself: barcode was approved into it while it was still
+      // unmerged, rather than becoming a migration 10 for one adjacent Product Master field.
+      "barcode",
+      "brand",
+      "description_ar",
+      "description_en",
+      "is_online_visible",
     ]);
     // Named explicitly, because each one is a documented follow-up PR rather than an oversight.
-    for (const absent of ["barcode", "category_id", "description", "unit_needs_review", "stock_qty", "image_url"]) {
+    // 🔴 `category_id`, `barcode` and `description` all LEFT this list — the first two because
+    // they now exist, and `description` because it never will under that bare name: the approved
+    // model is one description PER LANGUAGE, so a bare `description` column appearing would mean
+    // somebody had reintroduced the short+long shape the study rejected.
+    //
+    // `stock_qty` staying absent is the one that matters most: inventory is a separate business
+    // domain, and a quantity column arriving here is how a POS quietly becomes a stock system.
+    for (const absent of ["description", "unit_needs_review", "stock_qty", "image_url", "barcodes"]) {
       expect(columns, `${absent} must still be absent`).not.toContain(absent);
     }
   });

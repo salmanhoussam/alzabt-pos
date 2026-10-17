@@ -59,20 +59,37 @@ const rows = (db: Db, sql: string) => db.prepare(sql).all() as Array<Record<stri
  * A real v6 ledger: three sales (one fractional, one with a cardless method, one with no SKU on its
  * line), a void against one of them, two products — written in the shape a v6 build wrote them.
  */
+/**
+ * Inserts a product AS A PRE-MIGRATION-9 BUILD WROTE IT, not through today's repository.
+ *
+ * 🔴 The same reasoning this file already applies to `sales`, now required for products too.
+ * Migration 9 added six Product Master columns, so `CatalogRepository.createManual` names them in
+ * its INSERT — and those columns do not exist at this schema. Seeding through today's repository
+ * would therefore fail, and "fixing" it by making the repository omit columns conditionally would
+ * put schema-version branching into production code to satisfy a test.
+ *
+ * An old build wrote exactly these thirteen columns. That is what a real upgraded ledger contains.
+ */
+function insertPreV9Product(
+  db: Db,
+  p: { id: string; sourceKey: string; nameAr: string; nameEn: string | null; sku: string | null; priceMinor: number; baseUnit: string; at: string },
+): void {
+  db.prepare(
+    `INSERT INTO catalog_products (id, source, source_key, sku, name_ar, name_en,
+                                   selling_price_minor, currency, base_unit, price_needs_review,
+                                   is_active, created_at, updated_at)
+     VALUES (@id, 'manual', @sourceKey, @sku, @nameAr, @nameEn, @priceMinor, 'USD', @baseUnit,
+             0, 1, @at, @at)`,
+  ).run(p);
+}
+
 function v6Ledger(): Array<Record<string, unknown>> {
   const db = openDatabase(t.dbPath, MIGRATIONS.slice(0, V6));
   try {
     expect(schemaVersion(db)).toBe(V6);
-    const store = new CatalogRepository(db);
     const at = "2026-10-05T09:00:00.000Z";
-    store.createManual(
-      { nameAr: "صنف ألف", nameEn: "Item A", sku: "SYN-A", priceMinor: 400n, currency: "USD", baseUnit: "piece" },
-      new Date(at),
-    );
-    store.createManual(
-      { nameAr: "صنف باء", nameEn: null, sku: null, priceMinor: 250n, currency: "USD", baseUnit: "kg" },
-      new Date(at),
-    );
+    insertPreV9Product(db, { id: "manual:000001", sourceKey: "000001", nameAr: "صنف ألف", nameEn: "Item A", sku: "SYN-A", priceMinor: 400, baseUnit: "piece", at });
+    insertPreV9Product(db, { id: "manual:000002", sourceKey: "000002", nameAr: "صنف باء", nameEn: null, sku: null, priceMinor: 250, baseUnit: "kg", at });
     insertPreV7Sale(db, {
       id: "sale-1",
       receiptNumber: 1,
@@ -158,9 +175,10 @@ function v6Ledger(): Array<Record<string, unknown>> {
 
 describe("migration 7 — v6 to v7", () => {
   it("is the seventh migration, and 1-6 are byte-identical after it", () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]); // 7 -> 8 with operator accounts
+    // 7 -> 8 operator accounts -> 9 product master -> 10 product master audit
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(MIGRATIONS[6]!.name).toBe("invoice_sales_integration");
-    expect(MIGRATIONS).toHaveLength(8);
+    expect(MIGRATIONS).toHaveLength(11); // was 10 before migration 11 (operator_product_create_capability)
 
     // The released fingerprints of 1-6. A ledger upgraded by this build must still recognise every
     // one of them, or openDatabase refuses the file — which is what the next test proves.
