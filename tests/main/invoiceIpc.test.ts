@@ -218,8 +218,8 @@ describe("what the renderer cannot send", () => {
     const id = ok<{ invoice: { id: string } }>(ipc.createInvoiceDraft(undefined)).invoice.id;
     const handlers = createIpcHandlers(h.service, {
       invoices: h.invoices,
-      printInvoice: async () => "printed",
-      saveInvoicePdf: async () => ({ fileName: "x.pdf" }),
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: false }),
+      saveInvoicePdf: async () => ({ fileName: "x.pdf", logoMissing: false }),
     });
     expect(errCode((await handlers.printInvoice({ invoiceId: id })) as { ok: boolean; error?: { code: string } })).toBe(
       "INVOICE_NOT_DRAFT",
@@ -227,6 +227,44 @@ describe("what the renderer cannot send", () => {
     expect(errCode((await handlers.saveInvoicePdf({ invoiceId: id })) as { ok: boolean; error?: { code: string } })).toBe(
       "INVOICE_NOT_DRAFT",
     );
+  });
+
+  /**
+   * 🔴 THE WARNING MUST CROSS THE BOUNDARY, OR THE OPERATOR NEVER SEES IT. `resolveInvoiceLogo`
+   * decides that a named-but-absent frozen asset prints nothing; this is the other half — the
+   * channel carrying that fact to the screen. A pure-helper test alone would pass while the
+   * renderer stayed silent, which is the exact failure mode this slice exists to prevent.
+   */
+  it("🔴 a missing archived logo is reported to the renderer by BOTH document channels", async () => {
+    ok(ipc.saveCompanyProfile(PROFILE));
+    const id = ok<{ invoice: { id: string } }>(ipc.createInvoiceDraft(undefined)).invoice.id;
+    ok(ipc.addInvoiceLine({ invoiceId: id, line: LINE }));
+    ok(ipc.finalizeInvoice({ invoiceId: id }));
+    const handlers = createIpcHandlers(h.service, {
+      invoices: h.invoices,
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: true }),
+      saveInvoicePdf: async () => ({ fileName: "inv.pdf", logoMissing: true }),
+    });
+
+    expect(await handlers.printInvoice({ invoiceId: id })).toEqual({
+      ok: true,
+      data: { status: "printed", logoMissing: true },
+    });
+    expect(await handlers.saveInvoicePdf({ invoiceId: id })).toEqual({
+      ok: true,
+      data: { status: "saved", fileName: "inv.pdf", logoMissing: true },
+    });
+
+    // And the ordinary case stays ordinary: no warning when the asset was there.
+    const quiet = createIpcHandlers(h.service, {
+      invoices: h.invoices,
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: false }),
+      saveInvoicePdf: async () => ({ fileName: "inv.pdf", logoMissing: false }),
+    });
+    expect(await quiet.printInvoice({ invoiceId: id })).toEqual({
+      ok: true,
+      data: { status: "printed", logoMissing: false },
+    });
   });
 
   it("print is unavailable rather than pretending when no printer path is wired", async () => {

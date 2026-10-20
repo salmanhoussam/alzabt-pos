@@ -147,6 +147,8 @@ export function InvoiceSheet({
   const [pickerFor, setPickerFor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /** This document printed without its own archived logo. A warning, never an error — see below. */
+  const [logoWarning, setLogoWarning] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [exiting, setExiting] = useState(false);
@@ -437,17 +439,23 @@ export function InvoiceSheet({
   };
 
   const print = async () => {
+    setLogoWarning(false);
     try {
       const result = await call(pos().printInvoice({ invoiceId }));
       if (result.status === "unavailable") setError(t("inv.sheet.print") + " — " + t("inv.review.none"));
+      // Reported on a cancelled print too: the document was rendered before the dialog opened, so
+      // the archived logo was already found to be missing and the operator should know either way.
+      else if (result.logoMissing === true) setLogoWarning(true);
     } catch (e) {
       setError(errorText(e));
     }
   };
 
   const savePdf = async () => {
+    setLogoWarning(false);
     try {
-      await call(pos().saveInvoicePdf({ invoiceId }));
+      const result = await call(pos().saveInvoicePdf({ invoiceId }));
+      if (result.status === "saved" && result.logoMissing === true) setLogoWarning(true);
     } catch (e) {
       setError(errorText(e));
     }
@@ -879,6 +887,16 @@ export function InvoiceSheet({
       </section>
 
       {error && <p className="error" data-testid="sheet-error">{error}</p>}
+      {/* 🔴 A WARNING, NOT AN ERROR. The print SUCCEEDED and the invoice's figures are untouched —
+          what is missing is this document's own archived logo, which the application refuses to
+          substitute with the shop's current one. Red-and-bold would say the document failed; it
+          did not. Held in its own state so it never masks a real error, and cleared on the next
+          attempt rather than lingering over a later, correct print. */}
+      {logoWarning && (
+        <p className="small" data-testid="sheet-logo-warning">
+          <span className="badge warn">{t("tools.noticeTag")}</span> {t("inv.sheet.logoMissing")}
+        </p>
+      )}
 
       {/* 🔴 inv-keep: the action bar stays in view while the sheet scrolls past it. The class
           already existed and was used by one screen only; the sheet it was written for did not

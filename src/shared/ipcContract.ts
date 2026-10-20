@@ -953,10 +953,21 @@ export type PickInvoiceLogoResponse =
   | { readonly status: "chosen"; readonly logoPath: string }
   | { readonly status: "unavailable" };
 
+/**
+ * 🔴 `logoMissing` IS A TRUTH ABOUT THE DOCUMENT THAT WAS JUST PRODUCED, not a failure. The invoice
+ * named a frozen logo asset that is no longer on disk, so it printed without its own branding
+ * rather than borrowing the shop's current logo. The operator is told; the commercial content is
+ * unchanged and the print still succeeded. See src/main/invoiceLogo.ts.
+ */
 export type PrintInvoiceResponse =
-  | { readonly status: "printed" }
-  | { readonly status: "cancelled" }
+  | { readonly status: "printed"; readonly logoMissing?: boolean }
+  | { readonly status: "cancelled"; readonly logoMissing?: boolean }
   | { readonly status: "unavailable" };
+
+/** Like ExportResponse, plus the same archived-logo truth as PrintInvoiceResponse. */
+export type SaveInvoicePdfResponse =
+  | { readonly status: "cancelled" }
+  | { readonly status: "saved"; readonly fileName: string; readonly logoMissing?: boolean };
 
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
@@ -1067,5 +1078,5 @@ export interface PosApi {
   pickInvoiceLogo(): Promise<IpcResult<PickInvoiceLogoResponse>>;
   /** The renderer sends an INVOICE ID. Main loads the frozen invoice and owns the print. */
   printInvoice(req: InvoiceIdRequest): Promise<IpcResult<PrintInvoiceResponse>>;
-  saveInvoicePdf(req: InvoiceIdRequest): Promise<IpcResult<ExportResponse>>;
+  saveInvoicePdf(req: InvoiceIdRequest): Promise<IpcResult<SaveInvoicePdfResponse>>;
 }

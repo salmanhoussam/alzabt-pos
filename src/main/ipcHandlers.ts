@@ -158,9 +158,18 @@ export interface IpcHandlerOptions {
    * loads the frozen document itself and owns the print dialog. There is deliberately no channel
    * that accepts HTML, a path, or anything else executable from the renderer.
    */
-  readonly printInvoice?: (invoiceId: string) => Promise<"printed" | "cancelled">;
+  /**
+   * `logoMissing` is true when the invoice NAMED a frozen logo asset that is not on disk, so the
+   * document printed without its own branding. It is reported, never silently substituted — see
+   * src/main/invoiceLogo.ts.
+   */
+  readonly printInvoice?: (
+    invoiceId: string,
+  ) => Promise<{ readonly status: "printed" | "cancelled"; readonly logoMissing: boolean }>;
   /** Save-as dialog + printToPDF of the frozen invoice. Null when the operator cancelled. */
-  readonly saveInvoicePdf?: (invoiceId: string) => Promise<SavedFile | null>;
+  readonly saveInvoicePdf?: (
+    invoiceId: string,
+  ) => Promise<(SavedFile & { readonly logoMissing: boolean }) | null>;
   /**
    * Native image picker. Main copies the chosen file into its own branding folder and returns a
    * BARE FILE NAME; the renderer never sees or supplies a path.
@@ -1136,14 +1145,17 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       const id = invoiceId(p);
       if (!options.printInvoice) return { status: "unavailable" as const };
       requireFinalized(id);
-      return { status: await options.printInvoice(id) };
+      const printed = await options.printInvoice(id);
+      return { status: printed.status, logoMissing: printed.logoMissing };
     }),
     saveInvoicePdf: wrapAsync("saveInvoicePdf", async (p) => {
       const id = invoiceId(p);
       if (!options.saveInvoicePdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
       requireFinalized(id);
       const saved = await options.saveInvoicePdf(id);
-      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+      return saved
+        ? { status: "saved" as const, fileName: saved.fileName, logoMissing: saved.logoMissing }
+        : { status: "cancelled" as const };
     }),
   };
 

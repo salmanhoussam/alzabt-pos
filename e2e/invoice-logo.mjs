@@ -31,7 +31,17 @@
 import { _electron as electron } from "playwright-core";
 import { signIn } from "./_signin.mjs";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -328,6 +338,115 @@ await testid(page, "save-pdf").click();
 await until(`the post-restart PDF at ${pdfRestart}`, () => existsSync(pdfRestart) && statSync(pdfRestart).size > 0);
 assert(embedsImage(pdfRestart), "after a full restart the frozen logo still resolves and is embedded");
 await app.close();
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 6b · 🔴 THE FROZEN ASSET IS GONE — the document must NOT borrow the shop's current logo
+//
+// This is what a database-only restore onto a clean machine looks like: `issuer_snapshot_json`
+// still names logo ONE's asset, and `branding/frozen/` no longer holds it, while the live branding
+// file (logo TWO, under the FIXED name `invoice-logo.png`) is sitting right there. The resolver
+// used to fall through to it, so a historical invoice reprinted carrying the NEW branding — a
+// document that looks right and is not. It must now print no logo and say so.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// Captured BEFORE anything is removed, so "unchanged" below compares two real readings.
+const beforeLost = one("SELECT invoice_number AS n, status AS s, total_minor AS t FROM invoices WHERE status = 'final'");
+assert(existsSync(frozenPath), "the frozen asset is present before this step removes it");
+rmSync(frozenPath);
+assert(!existsSync(frozenPath), "the archived logo file has been removed, as a lost backup would leave it");
+assert(sha(liveLogo) === SHA_TWO, "while the shop's CURRENT logo (logo TWO) is still on disk under its fixed name");
+// The DB is untouched: the invoice still NAMES the asset it can no longer find.
+const issuerLost = JSON.parse(one("SELECT issuer_snapshot_json AS j FROM invoices WHERE status = 'final'").j);
+assert(issuerLost.logo_asset === `${SHA_ONE}.png`, "and the invoice still names logo ONE's asset in the ledger");
+
+({ app, page } = await launch());
+await tab(page, "invoices");
+await page.waitForSelector('[data-testid="history-table"]');
+await testid(page, "history-open").first().click();
+await page.waitForSelector('[data-testid="sheet-readonly"]');
+const pdfLost = join(home, "invoice-frozen-logo-lost.pdf");
+await stubSave(app, pdfLost);
+await testid(page, "save-pdf").click();
+await until(`the PDF at ${pdfLost}`, () => existsSync(pdfLost) && statSync(pdfLost).size > 0);
+
+// 🔴 THE ASSERTION THIS WHOLE SECTION EXISTS FOR.
+assert(!embedsImage(pdfLost), "🔴 the reprint embeds NO image — the current logo was NOT substituted");
+assert(statSync(pdfLost).size > 2000, `and it is still a real, complete invoice (${statSync(pdfLost).size}B)`);
+
+// And the operator is TOLD, in the workflow they are standing in — not only in a log file.
+await page.waitForSelector('[data-testid="sheet-logo-warning"]');
+const warning = await textOf(page, "sheet-logo-warning");
+assert(warning.length > 0, `the operator sees a visible warning: "${warning}"`);
+assert(
+  (await testid(page, "sheet-error").count()) === 0,
+  "and it is NOT shown as an error — the print succeeded and the figures are intact",
+);
+await page.screenshot({ path: SHOTS + "L3-frozen-logo-missing-warning.png" });
+
+// The commercial content is unchanged by any of this: same number, same total, still final.
+const afterLost = one("SELECT invoice_number AS n, status AS s, total_minor AS t FROM invoices WHERE status = 'final'");
+assert(afterLost.s === "final" && beforeLost.s === "final", "the invoice is still final");
+assert(String(afterLost.n) === String(beforeLost.n), `its number is unchanged (${afterLost.n})`);
+assert(String(afterLost.t) === String(beforeLost.t), `and its total is unchanged (${afterLost.t} minor units)`);
+await app.close();
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 6c · THE SUPPORT RUNBOOK'S CENTRAL CLAIM, REHEARSED
+//
+// docs/SUPPORT-BACKUP-RECOVERY.md tells support that a WHOLE-FOLDER cold copy carries the frozen
+// invoice logos that a `.sqlite`-only export cannot. That is a promise about recovery, and an
+// untested recovery procedure is not a procedure — so it is exercised here, on a disposable
+// fixture, never on a shop machine.
+//
+// 6b above is the other half of the same proof: with the asset gone, the document prints without
+// branding. Here the asset travels with the folder, and the document prints WITH it.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// Put logo ONE's frozen asset back, exactly as a cold copy taken before the loss would have held it.
+writeFileSync(frozenPath, readFileSync(LOGO_ONE));
+assert(sha(frozenPath) === SHA_ONE, "the fixture is restored to the state a cold copy would have captured");
+
+const coldRoot = mkdtempSync(join(tmpdir(), "pos-e2e-coldcopy-"));
+const coldUserData = join(coldRoot, "userData");
+// This is step 4 of the runbook: copy the WHOLE data folder, with the app closed.
+cpSync(join(home, "userData"), coldUserData, { recursive: true });
+assert(
+  existsSync(join(coldUserData, "alzabt-pos-ledger.sqlite")),
+  "the cold copy carries the ledger",
+);
+assert(
+  existsSync(join(coldUserData, "branding", "frozen", `${SHA_ONE}.png`)),
+  "🔴 and it carries the FROZEN invoice logo — the file a .sqlite export leaves behind",
+);
+assert(
+  sha(join(coldUserData, "branding", "frozen", `${SHA_ONE}.png`)) === SHA_ONE,
+  "byte for byte, logo ONE",
+);
+
+{
+  const coldEnv = { ...process.env, ALZABT_POS_USER_DATA: coldUserData };
+  delete coldEnv.ELECTRON_RUN_AS_NODE;
+  const a = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env: coldEnv });
+  const p = await a.firstWindow();
+  // The recovered profile keeps its operators, so the same credentials sign in — which is itself
+  // part of what the runbook claims a cold copy preserves.
+  await signIn(p, "Cashier One", "1111");
+  await p.locator('[data-testid="tab-invoices"]').click();
+  await p.waitForSelector('[data-testid="history-table"]');
+  await p.locator('[data-testid="history-open"]').first().click();
+  await p.waitForSelector('[data-testid="sheet-readonly"]');
+  const pdfRecovered = join(coldRoot, "invoice-after-cold-recovery.pdf");
+  await a.evaluate(({ dialog }, target) => {
+    dialog.showSaveDialogSync = () => target;
+  }, pdfRecovered);
+  await p.locator('[data-testid="save-pdf"]').click();
+  await until(`the recovered PDF at ${pdfRecovered}`, () => existsSync(pdfRecovered) && statSync(pdfRecovered).size > 0);
+  assert(embedsImage(pdfRecovered), "🔴 the historical invoice reprints WITH its logo after a cold-copy recovery");
+  assert(
+    (await p.locator('[data-testid="sheet-logo-warning"]').count()) === 0,
+    "and no missing-asset warning is shown, because nothing is missing",
+  );
+  await p.screenshot({ path: SHOTS + "L4-cold-copy-recovery.png" });
+  await a.close();
+}
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 7 · A shop with NO logo prints a correct document — no broken image, no refusal

@@ -44,6 +44,12 @@ import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
 import { toInvoiceViewDto } from "../shared/dto";
 import { renderInvoiceDocument } from "./invoiceDocument";
+import {
+  type InvoiceIssuerLogo,
+  type InvoiceLogoFs,
+  logoWarningFor,
+  resolveInvoiceLogo,
+} from "./invoiceLogo";
 import { AUTO_START_MARKER_FILE, applyAutoStart } from "./autoStart";
 import { diag, diagEnabled } from "./diagnostics";
 import { buildLabel, readBuildInfo } from "./buildInfo";
@@ -329,26 +335,29 @@ function logoPathFor(stored: string | null, dir: string): string | null {
 }
 
 /**
- * The logo a FINALIZED invoice prints.
- *
- * Prefers the frozen asset, which cannot change after the document was issued. Falls back to the
- * live branding file only for invoices finalized before freezing existed — those keep the old
- * behaviour, because a finalized invoice is immutable and cannot be backfilled.
+ * The two filesystem questions the logo decision asks. Both refuse anything that is not a plain
+ * file name inside their own directory, because `logoPathFor` does.
  */
-function invoiceLogoUrl(issuer: { logoAsset: string | null; logoPath: string | null } | null): string | null {
-  if (!issuer) return null;
-  const frozen = issuer.logoAsset ? logoPathFor(issuer.logoAsset, join(BRANDING_DIR, FROZEN_DIR)) : null;
-  if (frozen) return pathToFileURL(frozen).toString();
-  return logoUrlFor(issuer.logoPath);
-}
+const invoiceLogoFs: InvoiceLogoFs = {
+  frozen: (assetName) => logoPathFor(assetName, join(BRANDING_DIR, FROZEN_DIR)),
+  live: (storedName) => logoPathFor(storedName, BRANDING_DIR),
+};
 
-function logoUrlFor(stored: string | null): string | null {
-  if (!stored || stored.includes("/") || stored.includes("\\") || stored.includes("..")) return null;
-  if (!LOGO_EXTENSIONS.includes(extname(stored).toLowerCase())) return null;
-  const path = join(app.getPath("userData"), BRANDING_DIR, stored);
-  if (resolve(path) !== resolve(join(app.getPath("userData"), BRANDING_DIR, basename(stored)))) return null;
-  if (!existsSync(path)) return null;
-  return pathToFileURL(path).toString();
+/**
+ * The logo a FINALIZED invoice prints, and whether the operator must be told something is wrong.
+ *
+ * 🔴 THE DECISION IS NOT HERE. `resolveInvoiceLogo` owns it and is unit-tested; this function is
+ * the filesystem seam and the URL conversion, nothing more. A recorded asset that is absent
+ * resolves to NO logo plus a warning — never to the shop's current branding, which is a different
+ * image under a fixed name. See src/main/invoiceLogo.ts for why that mattered.
+ */
+function invoiceLogo(issuer: InvoiceIssuerLogo | null): { readonly url: string | null; readonly missing: boolean } {
+  const resolution = resolveInvoiceLogo(issuer, invoiceLogoFs);
+  const url =
+    resolution.kind === "frozen" || resolution.kind === "legacy"
+      ? pathToFileURL(resolution.path).toString()
+      : null;
+  return { url, missing: logoWarningFor(resolution) };
 }
 
 /** Where a document being printed is staged. One file, overwritten per render, removed after. */
@@ -403,10 +412,11 @@ function stagePrintable(html: string, name: string): { readonly url: string; rea
  * surface that cannot execute script is one less thing to reason about. The HTML comes from
  * `renderInvoiceDocument`, which takes the frozen DTO and nothing else.
  */
-async function renderInvoicePdf(invoiceId: string): Promise<Buffer> {
+async function renderInvoicePdf(invoiceId: string): Promise<{ pdf: Buffer; logoMissing: boolean }> {
   if (!invoices) throw new DomainError("NOT_AVAILABLE", "Invoices are not available");
   const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
-  const html = renderInvoiceDocument(view, { logoUrl: invoiceLogoUrl(view.invoice.issuer ?? null) });
+  const logo = invoiceLogo(view.invoice.issuer ?? null);
+  const html = renderInvoiceDocument(view, { logoUrl: logo.url });
   const win = new BrowserWindow({
     show: false,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
@@ -414,7 +424,7 @@ async function renderInvoicePdf(invoiceId: string): Promise<Buffer> {
   const staged = stagePrintable(html, "invoice-pdf");
   try {
     await win.loadURL(staged.url);
-    return await win.webContents.printToPDF({
+    const pdf = await win.webContents.printToPDF({
       pageSize: "A4",
       printBackground: true,
       // 🔴 Zero margins HERE on purpose: the document's own `@page { margin: 14mm 12mm }` is what
@@ -422,16 +432,20 @@ async function renderInvoicePdf(invoiceId: string): Promise<Buffer> {
       // default of ~1cm would be added on top of it, silently narrowing the page the tests measured.
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
+    return { pdf, logoMissing: logo.missing };
   } finally {
     win.destroy();
     staged.cleanup();
   }
 }
 
-async function printInvoiceDocument(invoiceId: string): Promise<"printed" | "cancelled"> {
+async function printInvoiceDocument(
+  invoiceId: string,
+): Promise<{ status: "printed" | "cancelled"; logoMissing: boolean }> {
   if (!invoices) throw new DomainError("NOT_AVAILABLE", "Invoices are not available");
   const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
-  const html = renderInvoiceDocument(view, { logoUrl: invoiceLogoUrl(view.invoice.issuer ?? null) });
+  const logo = invoiceLogo(view.invoice.issuer ?? null);
+  const html = renderInvoiceDocument(view, { logoUrl: logo.url });
   const win = new BrowserWindow({
     show: false,
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
@@ -442,8 +456,13 @@ async function printInvoiceDocument(invoiceId: string): Promise<"printed" | "can
     const printed = await new Promise<boolean>((done) => {
       win.webContents.print({ silent: false, printBackground: true }, (success) => done(success));
     });
-    log.info("invoice-printed", { id: invoiceId, number: view.invoice.invoiceNumber, printed });
-    return printed ? "printed" : "cancelled";
+    log.info("invoice-printed", {
+      id: invoiceId,
+      number: view.invoice.invoiceNumber,
+      printed,
+      logoMissing: logo.missing,
+    });
+    return { status: printed ? "printed" : "cancelled", logoMissing: logo.missing };
   } finally {
     win.destroy();
     staged.cleanup();
@@ -451,7 +470,7 @@ async function printInvoiceDocument(invoiceId: string): Promise<"printed" | "can
 }
 
 /** Native "save as" + the A4 PDF of the frozen invoice. */
-async function saveInvoicePdfFile(invoiceId: string): Promise<SavedFile | null> {
+async function saveInvoicePdfFile(invoiceId: string): Promise<(SavedFile & { logoMissing: boolean }) | null> {
   if (!mainWindow || !invoices) return null;
   const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
   const suggested = `invoice-${view.invoice.invoiceNumber ?? "draft"}.pdf`;
@@ -461,10 +480,15 @@ async function saveInvoicePdfFile(invoiceId: string): Promise<SavedFile | null> 
     filters: [{ name: "PDF", extensions: ["pdf"] }],
   });
   if (!path) return null;
-  const pdf = await renderInvoicePdf(invoiceId);
+  const { pdf, logoMissing } = await renderInvoicePdf(invoiceId);
   writeFileSync(path, pdf);
-  log.info("invoice-pdf-saved", { id: invoiceId, number: view.invoice.invoiceNumber, bytes: pdf.length });
-  return { fileName: basename(path) };
+  log.info("invoice-pdf-saved", {
+    id: invoiceId,
+    number: view.invoice.invoiceNumber,
+    bytes: pdf.length,
+    logoMissing,
+  });
+  return { fileName: basename(path), logoMissing };
 }
 
 /** Native "save as" + a verified consistent snapshot of the live ledger (never a raw file copy). */
