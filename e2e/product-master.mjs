@@ -1273,6 +1273,47 @@ assert(
 await page.screenshot({ path: SHOTS + "PM8-corrupt-photo-falls-back.png" });
 log("PM8 — a corrupt photo falls back to the placeholder and breaks nothing");
 
+// ── R3 · A SECOND, GOOD PHOTO — ON AN EXISTING PRODUCT, AND ONLY NOW ────────────────────────────
+//
+// 🔴 WHY THIS EXISTS AND WHY IT IS HERE. The cashier signs in at the END of this script, and by
+// then §6 has deliberately corrupted the ONLY photographed product — so the cashier's till could
+// only ever show a placeholder, and "a cashier can see a product photo" had no installed-app
+// evidence anywhere (run 39677347766). The fix is one good photo on a product that already exists.
+//
+// 🔴 NO FOURTH PRODUCT. The population stays SKU-100, SKU-200, SKU-LONG-9001: R1's acceptance
+// counted these three and §W's price and category evidence belongs to SKU-200, so inventing a
+// fourth would quietly change a fixture three slices already depend on.
+//
+// 🔴 AND AFTER EVERY EARLIER ASSERTION THAT COUNTED PHOTOS. R3/A above proves one photo and two
+// placeholders; §6 proves exactly one failed thumbnail. Staging this before either would have made
+// both of them say something different, so it waits until both have been asked and answered.
+//
+// 🔴 SKU-200, NOT SKU-LONG-9001. The long-name product is R1's crowding fixture and carries its
+// reveal, hit-test and real-click evidence in two writing directions; SKU-200 is already fully
+// measured and is not the subject of any later geometry claim. A photo also changes no price, SKU,
+// category or state — `photo-add` writes the image and the form is then CANCELLED, so nothing else
+// about the product is touched.
+{
+  const second = join(APP, "tests", "fixtures", "photos", "portrait-exif.jpg");
+  await app.evaluate(({ dialog }, f) => {
+    dialog.showOpenDialogSync = () => [f];
+  }, second);
+  const target = rows(page).filter({ has: page.locator("td.col-codes", { hasText: /\bSKU-200\b/ }) });
+  assert((await target.count()) === 1, "exactly one row is SKU-200, the product that gets the second photo");
+  await target.locator('[data-testid="product-edit"]').click();
+  await page.locator('[data-testid="photo-panel"]').waitFor({ state: "visible" });
+  await page.locator('[data-testid="photo-add"]').click();
+  await page.locator('[data-testid="photo-preview"]').waitFor({ state: "visible" });
+  await page.waitForFunction(() => {
+    const img = document.querySelector('[data-testid="photo-preview"]');
+    return img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0;
+  });
+  await page.locator('.product-form [data-testid="cancel-product"]').click();
+  await page.locator('[data-testid="photo-panel"]').waitFor({ state: "detached" });
+  await rows(page).first().waitFor();
+  log("R3 — a second, READABLE photo now exists, on SKU-200");
+}
+
 // ── 7 · English / LTR, so the mirrored layout is reviewable too ──────────────────────────────────
 // 🔴 THROUGH THE REAL TOGGLE, NOT THROUGH window.pos. Calling `setTerminalLanguage` directly
 // persists the choice and returns the new settings, but nothing re-reads them: the document's `dir`
@@ -1449,26 +1490,76 @@ log("J — the same table as a cashier: no owner controls, prices and units inta
 {
   await page.locator('[data-testid="tab-sell"]').click();
   await page.locator('[data-testid="sell-thumb"], [data-testid="sell-thumb-empty"]').first().waitFor();
-  const seen = await page.locator('[data-testid="sell-thumb"]').count();
-  assert(seen === 1, `a cashier sees the product photo too (${seen})`);
+  // 🔴 BOTH STATES, ON ONE CASHIER'S TILL. A good photo and a deliberately corrupt one are
+  // different claims and neither substitutes for the other: one says a cashier can SEE the
+  // product, the other says an unreadable file costs a picture rather than a sale.
+  //
+  // The ledger names which is which, so the screen is judged against the data rather than against
+  // itself: two products carry an image row, and the corrupt one is the product §6 broke.
+  const ids = await page.evaluate(async () => {
+    const r = await window.pos.listProducts();
+    return Object.fromEntries(r.data.map((p) => [p.sku, p.id]));
+  });
+  const good = ids["SKU-200"];
+  const corrupt = ids["SKU-100"];
+  assert(typeof good === "string" && typeof corrupt === "string", `the ledger names both products (${JSON.stringify(ids)})`);
 
+  // A · THE GOOD PHOTO. Exactly one card draws an image, and it is SKU-200's.
+  const shown = await page.locator('[data-testid="sell-thumb"]').count();
+  const blank = await page.locator('[data-testid="sell-thumb-empty"]').count();
+  assert(shown === 1, `a cashier sees the readable product photo (${shown})`);
+  assert(blank === 2, `and the corrupt one and the unphotographed one both show placeholders (${blank})`);
+  const owner = await page.locator('[data-testid="sell-thumb"]').first().getAttribute("data-product");
+  assert(owner === good, `the photo a cashier sees belongs to SKU-200 (${owner} vs ${good})`);
+
+  // B · THE CORRUPT ONE. Refused by the checksum guard, drawn as the ordinary placeholder — and
+  // named, so this cannot pass by pointing at the product that simply never had a photo.
+  const blankOwners = await page.locator('[data-testid="sell-thumb-empty"]').evaluateAll((els) =>
+    els.map((e) => e.getAttribute("data-product")),
+  );
+  assert(blankOwners.includes(corrupt), `the CORRUPT product falls back to the placeholder (${blankOwners.join(", ")})`);
+  // And nothing of the failure reaches the shop: no bytes, no path, no internal message.
+  const visible = await page.locator(".products-pane").innerText();
+  for (const leak of ["base64", "data:image", "sqlite", "Error", "checksum"]) {
+    assert(!visible.includes(leak), `the till shows a cashier no "${leak}"`);
+  }
+
+  // The preview opens on the GOOD photo, shows the real bytes, and sells nothing.
   const before = await page.locator('[data-testid="cart"] .line').count();
   await page.locator('[data-testid="sell-thumb"]').first().click();
   await page.locator('[data-testid="sell-photo-preview"]').waitFor({ state: "visible" });
-  const after = await page.locator('[data-testid="cart"] .line').count();
-  assert(after === before, `🔴 and opening it sold nothing (${before} -> ${after})`);
-  // Nothing in this view offers to change the photo — the owner's controls are not merely hidden
-  // behind a disabled attribute, they are absent.
+  const previewed = await page.locator('[data-testid="sell-preview-image"]').evaluate((img) => ({
+    w: img.naturalWidth,
+    h: img.naturalHeight,
+    wide: img.getBoundingClientRect().width > 100,
+  }));
+  assert(previewed.w > 0 && previewed.h > 0, `the cashier's preview really decoded (${previewed.w}x${previewed.h})`);
+  assert(previewed.wide, "and it is drawn large enough to identify the product by");
+  assert(
+    (await page.locator('[data-testid="cart"] .line').count()) === before,
+    "🔴 opening the photo added nothing to the cart",
+  );
+  await page.screenshot({ path: SHOTS + "R3-C2-sell-cashier-preview.png" });
+  await page.locator('[data-testid="sell-photo-close"]').click();
+  await page.locator('[data-testid="sell-photo-preview"]').waitFor({ state: "detached" });
+  await page.screenshot({ path: SHOTS + "R3-C1-sell-cashier-thumbnails.png" });
+
+  // Nothing here offers to change a photo — the owner's controls are absent, not disabled.
   for (const id of ["photo-add", "photo-remove", "product-edit"]) {
     assert(
       (await page.locator(`[data-testid="${id}"]`).count()) === 0,
-      `viewing a photo gives a cashier no "${id}" control`,
+      `a cashier's till offers no "${id}" control`,
     );
   }
-  await page.screenshot({ path: SHOTS + "R3-C-sell-cashier-preview.png" });
-  await page.locator('[data-testid="sell-photo-close"]').click();
-  await page.locator('[data-testid="sell-photo-preview"]').waitFor({ state: "detached" });
-  log("R3/C — a cashier may look at the product and still cannot change it");
+
+  // 🔴 AND BOTH PRODUCTS STILL SELL — the one whose photo failed included.
+  for (const [label, id] of [["the corrupt-photo product", corrupt], ["the photographed product", good]]) {
+    const was = await page.locator('[data-testid="cart"] .line').count();
+    await page.locator(`.product-cell:has([data-product="${id}"]) button.product`).click();
+    const now = await page.locator('[data-testid="cart"] .line').count();
+    assert(now === was + 1, `a cashier can still sell ${label} (${was} -> ${now})`);
+  }
+  log("R3/C — a cashier sees the readable photo, the broken one degrades quietly, and both still sell");
 }
 
 await app.close();
