@@ -1111,6 +1111,16 @@ await page.locator('[data-testid="cancel-product"]').click();
 // Scoped to the CODES cell with a word-bounded SKU rather than a bare `hasText`, so neither a
 // longer SKU nor a product whose NAME happens to contain the digits can satisfy it.
 const retiredRow = rows(page).filter({ has: page.locator("td.col-codes", { hasText: /\bSKU-200\b/ }) });
+// 🔴 WAIT FOR THIS PRODUCT, NOT FOR "A ROW" — and this is the defect that cost run 39643859710.
+// `locator.count()` is an immediate query; it does not auto-wait. The positional selector it
+// replaced ended in `.click()`, which DOES auto-wait, so the missing wait was invisible until the
+// thing hiding it was removed. `launch()` signs in, clicks the products tab and returns, and the
+// list loads asynchronously — so the count ran against an empty table and saw zero rows.
+//
+// Waiting for `rows().first()` would be the same mistake one level up: two other products load
+// first, so "a row exists" would be satisfied without SKU-200 being there at all. The wait is on
+// the target itself.
+await retiredRow.first().waitFor({ state: "visible", timeout: 30000 });
 assert((await retiredRow.count()) === 1, "exactly one row is SKU-200 — the product §W gave the retired category to");
 await retiredRow.locator('[data-testid="product-edit"]').click();
 await page.locator('[data-testid="field-category"]').waitFor();
@@ -1137,9 +1147,23 @@ await page.locator(".dialog .btn.primary.wide").click();
   const db = new Database(LEDGER, { readonly: true });
   const after = db.prepare("SELECT category_id, selling_price_minor FROM catalog_products WHERE sku = 'SKU-200'").get();
   const retired = db.prepare("SELECT id FROM catalog_categories WHERE is_active = 0").get();
+  const untouched = db.prepare("SELECT selling_price_minor FROM catalog_products WHERE sku = 'SKU-LONG-9001'").get();
   db.close();
   assert(after.category_id === retired.id, "re-saving a product with a RETIRED category keeps it");
-  log("price also saved:", after.selling_price_minor);
+  // 🔴 THE EDIT LANDED ON THE PRODUCT THIS BLOCK IS ABOUT — asserted, not logged. The price was
+  // READ here and only printed, which is precisely why nothing noticed that `rows().last()` had
+  // been typing 23.00 into SKU-LONG-9001 for four commits while this block went on asking the
+  // database about SKU-200. A value fetched and not asserted is not a check.
+  assert(
+    Number(after.selling_price_minor) === 2300,
+    `the price edit landed on SKU-200 itself (USD exponent 2 → 2300, got ${after.selling_price_minor})`,
+  );
+  // And the other half of the same fact: the R1 fixture still carries the long price the layout
+  // measurements depend on. If the edit ever strays again, this says so in the same breath.
+  assert(
+    Number(untouched.selling_price_minor) === 9999900,
+    `and SKU-LONG-9001 was NOT the product edited (expected 9999900, got ${untouched.selling_price_minor})`,
+  );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
