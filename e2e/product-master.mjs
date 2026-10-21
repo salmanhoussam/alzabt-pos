@@ -956,6 +956,34 @@ const arReveal = await proveActionsReachable(page, {
 });
 log(`R1 Arabic: ${arReveal.scroll.clientWidth}px strip holding ${arReveal.scroll.scrollWidth}px of columns, scrolled ${arReveal.scrolledFrom} → ${arReveal.scrolledTo}`);
 
+// ── R3 · THE SAME CATALOGUE, SEEN FROM THE TILL ────────────────────────────────────────────────
+// 🔴 THE MIXED STATE IS THE POINT. One photographed product and two without is what makes a
+// thumbnail informative rather than decorative, and this script is the one that builds it —
+// `product-photo.mjs` holds a single product and cannot answer this.
+{
+  await page.locator('[data-testid="tab-sell"]').click();
+  await page.locator('[data-testid="sell-thumb"], [data-testid="sell-thumb-empty"]').first().waitFor();
+  const photos = await page.locator('[data-testid="sell-thumb"]').count();
+  const blanks = await page.locator('[data-testid="sell-thumb-empty"]').count();
+  assert(photos === 1, `exactly one Sell card shows a real photo (${photos})`);
+  assert(blanks === 2, `and the other two show the placeholder (${blanks})`);
+
+  // 🔴 WHOSE PHOTO IS IT? Asked against the LEDGER rather than against the screen that is being
+  // judged: the only product the ledger says has an image must be the one carrying the thumbnail.
+  const owner = await page.locator('[data-testid="sell-thumb"]').first().getAttribute("data-product");
+  const photographedId = await page.evaluate(async () => {
+    const r = await window.pos.listProducts();
+    return r.data.filter((p) => p.hasImage).map((p) => p.id);
+  });
+  assert(photographedId.length === 1, `the ledger has exactly one photographed product (${photographedId.length})`);
+  assert(owner === photographedId[0], `the Sell thumbnail belongs to it (${owner} vs ${photographedId[0]})`);
+  await page.screenshot({ path: SHOTS + "R3-A-sell-thumbnails-arabic.png" });
+  log("R3/A — one photo, two placeholders, on the product the ledger names");
+
+  await page.locator('[data-testid="tab-products"]').click();
+  await rows(page).first().waitFor();
+}
+
 await page.screenshot({ path: SHOTS + "E2.1-B-products-arabic.png" });
 
 // 🔴 THE TABLE STARTS HIGHER. Two explanatory paragraphs pushed it a long way down on every visit;
@@ -1414,6 +1442,34 @@ assert(
 );
 await page.screenshot({ path: SHOTS + "E2.1-J-products-cashier.png" });
 log("J — the same table as a cashier: no owner controls, prices and units intact");
+
+// ── R3 · AND THE CASHIER'S OWN TILL: look, but not touch ────────────────────────────────────────
+// 🔴 THE WHOLE AUTHORIZATION CLAIM, ASKED WHERE IT MATTERS. A cashier sells, so a cashier must be
+// able to SEE the product; nothing about that may hand them a way to replace or remove the photo.
+{
+  await page.locator('[data-testid="tab-sell"]').click();
+  await page.locator('[data-testid="sell-thumb"], [data-testid="sell-thumb-empty"]').first().waitFor();
+  const seen = await page.locator('[data-testid="sell-thumb"]').count();
+  assert(seen === 1, `a cashier sees the product photo too (${seen})`);
+
+  const before = await page.locator('[data-testid="cart"] .line').count();
+  await page.locator('[data-testid="sell-thumb"]').first().click();
+  await page.locator('[data-testid="sell-photo-preview"]').waitFor({ state: "visible" });
+  const after = await page.locator('[data-testid="cart"] .line').count();
+  assert(after === before, `🔴 and opening it sold nothing (${before} -> ${after})`);
+  // Nothing in this view offers to change the photo — the owner's controls are not merely hidden
+  // behind a disabled attribute, they are absent.
+  for (const id of ["photo-add", "photo-remove", "product-edit"]) {
+    assert(
+      (await page.locator(`[data-testid="${id}"]`).count()) === 0,
+      `viewing a photo gives a cashier no "${id}" control`,
+    );
+  }
+  await page.screenshot({ path: SHOTS + "R3-C-sell-cashier-preview.png" });
+  await page.locator('[data-testid="sell-photo-close"]').click();
+  await page.locator('[data-testid="sell-photo-preview"]').waitFor({ state: "detached" });
+  log("R3/C — a cashier may look at the product and still cannot change it");
+}
 
 await app.close();
 log("screenshots in", SHOTS);

@@ -269,12 +269,13 @@ await shot(page, "F-C-products-list-real-thumbnail");
   await page.locator('[data-testid="tab-sell"]').click();
   await page.locator('[data-testid="sell-thumb"], [data-testid="sell-thumb-empty"]').first().waitFor();
 
-  // A · BOTH STATES ON ONE SCREEN. The photographed product carries an image; the others carry the
-  // placeholder — which is what makes the thumbnail informative rather than decorative.
+  // 🔴 THIS PROFILE HOLDS ONE PRODUCT, so this script asks only what one product can answer.
+  // "A photographed card beside an unphotographed one" needs a mixed catalogue and is asserted in
+  // `product-master.mjs`, which builds exactly that — three products, one of them photographed.
+  // The first version of this block assumed a second product here and failed on its own premise
+  // (run 39675341683), which is a fixture mistake, not a finding about the screen.
   const withPhoto = await page.locator('[data-testid="sell-thumb"]').count();
-  const without = await page.locator('[data-testid="sell-thumb-empty"]').count();
-  check(withPhoto === 1, `exactly one Sell card shows a real photo (got ${withPhoto})`);
-  check(without >= 1, `and at least one shows the placeholder (got ${without})`);
+  check(withPhoto === 1, `the photographed product shows a real photo in Sell (got ${withPhoto})`);
 
   // 🔴 THE RIGHT PRODUCT. The thumbnail carries the product id it belongs to, and the one showing
   // a photo must be the product that was photographed — not whichever card sorted first.
@@ -289,7 +290,7 @@ await shot(page, "F-C-products-list-real-thumbnail");
   const filtered = await page.locator('[data-testid="sell-thumb"]').first().getAttribute("data-product");
   check(filtered === product.id, `after filtering, the photo still belongs to ${product.id} (got ${filtered})`);
   await page.locator('[data-testid="product-search"]').fill("");
-  await page.waitForFunction(() => document.querySelectorAll("button.product").length > 1);
+  await page.locator('[data-testid="sell-thumb"]').first().waitFor({ state: "visible" });
 
   // B · THE PREVIEW OPENS, AND THE CART DOES NOT MOVE. Both halves of the contract in one act.
   const cartBefore = await page.locator('[data-testid="cart"] .line').count();
