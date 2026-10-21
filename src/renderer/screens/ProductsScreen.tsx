@@ -400,6 +400,10 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
           {t("products.noMatch")}
         </p>
       ) : (
+        /* 🔴 A CONTAINED SCROLLER, NOT A WIDER PAGE. `.admin-table` carries a min-width so its
+           columns can never be squeezed into each other; when the window is genuinely narrower
+           than that, THIS element scrolls horizontally and the rest of the screen does not. */
+        <div className="admin-table-scroll">
         <table className="history-table admin-table">
           <thead>
             <tr>
@@ -410,8 +414,8 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
               <th>{t("products.colName")}</th>
               <th>{t("products.colSku")}</th>
               <th>{t("products.colCategory")}</th>
-              <th className="num">{t("products.colPrice")}</th>
-              <th>{t("products.colUnit")}</th>
+              <th className="num col-price">{t("products.colPrice")}</th>
+              <th className="col-unit">{t("products.colUnit")}</th>
               <th>{t("products.colState")}</th>
               {/* 🔴 `col-actions`, NOT `admin-actions`. The width rule has to reach the header or
                   the column is still negotiated from it — but `.admin-actions` is `display: flex`,
@@ -479,12 +483,12 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
                     <span className="muted">—</span>
                   )}
                 </td>
-                <td className="num">
+                <td className="num col-price">
                   {/* One isolated run: amount and currency together, never split. */}
                   <bdi dir="ltr">{`${p.priceDecimal} ${p.price.currency}`}</bdi>
                   {p.priceNeedsReview && <span className="badge warn">{t("products.priceNeedsReview")}</span>}
                 </td>
-                <td>
+                <td className="col-unit">
                   {unit(p.baseUnit)}
                   {/* A bare "0.001" said nothing. Every badge carries a word, never a value. */}
                   {FRACTIONAL_SALE_UNITS.includes(p.baseUnit) && (
@@ -568,6 +572,7 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
             ))}
           </tbody>
         </table>
+        </div>
       )}
 
       {phone && (

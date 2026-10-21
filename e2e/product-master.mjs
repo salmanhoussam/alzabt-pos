@@ -142,6 +142,91 @@ async function addProduct(page, { nameAr, nameEn, sku, price, unit, barcode, bra
 const rows = (page) => page.locator('[data-testid="product-row"]');
 
 /**
+ * R1 — IS THE PRICE ACTUALLY READABLE, OR IS A BUTTON SITTING ON IT?
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 DOM TEXT IS NOT THE QUESTION. `innerText` returns "7.50 USD" whether the cell renders it in
+ * full or clips its leading digit under the Edit button — which is exactly what the installed
+ * Arabic owner screen did (run 39573996462, E2.1-B-products-arabic.png): the price was cut, the
+ * الوحدة column showed no value at all, and the state badge was pushed below the buttons. Only
+ * geometry can tell those apart, so this reads real rectangles:
+ *
+ *   clipped   the price RUN is wider than the cell that holds it, or spills past its edges
+ *   covered   the actions cell's rectangle intersects the price or unit cell's rectangle
+ *   empty     the unit cell has text but no box to draw it in
+ *
+ * Returns one record per row so a failure can name the row and the numbers, not just fail.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function productRowGeometry(page) {
+  return page.evaluate(() => {
+    const box = (el) => {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height) };
+    };
+    const overlaps = (a, b) =>
+      a !== null && b !== null && a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1;
+
+    return [...document.querySelectorAll('[data-testid="product-row"]')].map((tr, i) => {
+      const priceCell = tr.querySelector("td.col-price");
+      const unitCell = tr.querySelector("td.col-unit");
+      const actionsCell = tr.querySelector("td.col-actions");
+      const priceRun = priceCell?.querySelector("bdi") ?? null;
+      const buttons = actionsCell ? [...actionsCell.querySelectorAll("button")] : [];
+
+      const pc = box(priceCell);
+      const pr = box(priceRun);
+      const uc = box(unitCell);
+      const ac = box(actionsCell);
+
+      return {
+        row: i,
+        priceText: (priceRun?.textContent ?? "").trim(),
+        unitText: (unitCell?.textContent ?? "").trim(),
+        buttonCount: buttons.length,
+        priceCell: pc,
+        priceRun: pr,
+        unitCell: uc,
+        actionsCell: ac,
+        // The run must fit inside its own cell, with a pixel of tolerance for sub-pixel rounding.
+        priceFitsCell: pc !== null && pr !== null && pr.left >= pc.left - 1 && pr.right <= pc.right + 1 && pr.width > 0,
+        // And the cell must not be scrolling its own content out of sight.
+        priceNotScrolled: priceCell === null ? false : priceCell.scrollWidth <= priceCell.clientWidth + 1,
+        unitNotScrolled: unitCell === null ? false : unitCell.scrollWidth <= unitCell.clientWidth + 1,
+        unitHasBox: uc !== null && uc.width > 0 && uc.height > 0,
+        actionsOverPrice: overlaps(ac, pc),
+        actionsOverUnit: overlaps(ac, uc),
+        buttonsInsideCell: ac !== null && buttons.every((b) => {
+          const r = b.getBoundingClientRect();
+          return r.left >= ac.left - 1 && r.right <= ac.right + 1;
+        }),
+      };
+    });
+  });
+}
+
+/** Assert every row reads cleanly, naming the geometry when it does not. */
+async function assertNoClipping(page, where) {
+  const g = await productRowGeometry(page);
+  assert(g.length > 0, `${where}: there are rows to measure (${g.length})`);
+  for (const r of g) {
+    const id = `${where} row ${r.row} ("${r.priceText}")`;
+    assert(r.priceText.length > 0, `${id}: the price renders text`);
+    assert(r.priceFitsCell, `${id}: the price run fits INSIDE its cell — run ${JSON.stringify(r.priceRun)} cell ${JSON.stringify(r.priceCell)}`);
+    assert(r.priceNotScrolled, `${id}: the price cell is not hiding content behind its own edge`);
+    assert(r.unitHasBox, `${id}: the unit cell has a real box ${JSON.stringify(r.unitCell)}`);
+    assert(r.unitText.length > 0, `${id}: the unit renders text ("${r.unitText}")`);
+    assert(r.unitNotScrolled, `${id}: the unit cell is not hiding content behind its own edge`);
+    assert(!r.actionsOverPrice, `🔴 ${id}: the actions cell does NOT overlap the price — actions ${JSON.stringify(r.actionsCell)} price ${JSON.stringify(r.priceCell)}`);
+    assert(!r.actionsOverUnit, `🔴 ${id}: the actions cell does NOT overlap the unit`);
+    assert(r.buttonsInsideCell, `${id}: all ${r.buttonCount} action buttons stay inside their own cell`);
+  }
+  return g;
+}
+
+
+/**
  * Is this element actually ON SCREEN — inside the window, with a real box?
  *
  * 🔴 MEASURED, NOT ASKED. `locator.isIntersectingViewport` does not exist in this playwright-core
@@ -400,6 +485,21 @@ assert(!listShape.hasBinary, "no value in any listProducts row is binary");
 log("list photo state:", listShape.keys.join(", "));
 
 await page.screenshot({ path: SHOTS + "PM3-products-list-mixed-photos.png" });
+// ── R1 · A REALISTIC ROW BEFORE MEASURING ───────────────────────────────────────────────────────
+// Two short fixtures prove nothing about a shop's real catalogue: the defect showed up on a LONG
+// Arabic name beside a LONG price, which is what crowds the row. Added through the real form.
+await addProduct(page, {
+  nameAr: "مفك براغي كهربائي لاسلكي بعلبة معدنية وبطارية احتياطية",
+  nameEn: "Cordless electric screwdriver with metal case and spare battery",
+  sku: "SKU-LONG-9001",
+  price: "99999.00",
+  unit: "piece",
+});
+await page.waitForSelector('[data-testid="product-row"]');
+
+const arGeom = await assertNoClipping(page, "Arabic owner");
+log("R1 Arabic owner geometry: " + JSON.stringify(arGeom.map((r) => ({ price: r.priceText, unit: r.unitText, priceCell: r.priceCell?.width, unitCell: r.unitCell?.width, actionsCell: r.actionsCell?.width, buttons: r.buttonCount }))));
+
 await page.screenshot({ path: SHOTS + "E2.1-B-products-arabic.png" });
 
 // 🔴 THE TABLE STARTS HIGHER. Two explanatory paragraphs pushed it a long way down on every visit;
@@ -631,6 +731,9 @@ const enHeights = await rows(page).evaluateAll((els) => els.map((e) => Math.roun
 assert(Math.abs(enHeights[0] - enHeights[1]) <= 2, `English rows are the same height: ${enHeights.join(" vs ")}`);
 assert(enHeights.every((h) => h < 110), `no row-height explosion in English: ${enHeights.join(", ")}`);
 await page.screenshot({ path: SHOTS + "PM9-products-english-ltr.png" });
+const enGeom = await assertNoClipping(page, "English owner");
+log("R1 English owner geometry: " + JSON.stringify(enGeom.map((r) => ({ price: r.priceText, unit: r.unitText, priceCell: r.priceCell?.width, unitCell: r.unitCell?.width, actionsCell: r.actionsCell?.width, buttons: r.buttonCount }))));
+
 await page.screenshot({ path: SHOTS + "E2.1-A-products-english.png" });
 log("PM9/A — the same screen in English/LTR");
 
@@ -643,6 +746,8 @@ await app.evaluate(({ BrowserWindow }) => {
 });
 await page.waitForFunction(() => window.innerWidth <= 1024, undefined, { timeout: 10000 });
 await rows(page).first().waitFor();
+await assertNoClipping(page, "narrowest window");
+
 await page.screenshot({ path: SHOTS + "E2.1-I-narrowest-window-list.png" });
 const narrowHeights = await rows(page).evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().height)));
 assert(
@@ -662,6 +767,40 @@ await scrollForm(page, 0);
 await page.screenshot({ path: SHOTS + "E2.1-I-narrowest-window-form.png" });
 log("I — the narrowest supported window, 1024x640");
 await page.locator('[data-testid="cancel-product"]').click();
+
+// ── R1 · THE CASHIER'S VIEW OF THE SAME TABLE ───────────────────────────────────────────────────
+//
+// 🔴 WHY THE CASHIER MATTERS HERE. The clipping was never about the data: the SAME prices rendered
+// correctly for a cashier and were cut for the owner, because the owner's row carries three extra
+// controls and the cashier's carries none. So the cashier is the control case — if the fix is
+// real, both roles read cleanly, and the owner-only controls are still absent for the cashier.
+//
+// 🔴 AND WHY `may_create_products` CANNOT CHANGE THIS MEASUREMENT. That capability governs the
+// TOOLBAR's "add" button, not anything inside a row; the per-row Edit / phone / deactivate controls
+// are gated on `isOwner` alone (ProductsScreen.tsx). Row geometry therefore cannot vary with it,
+// and the capability's own authorization is proven elsewhere
+// (tests/application/productCreateCapability.test.ts, and the service re-check at every save).
+await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1280, 800));
+await page.locator('[data-testid="change-cashier"]').click().catch(() => undefined);
+await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+await signIn(page, "Cashier Two", "2222");
+await page.locator('[data-testid="tab-products"]').click();
+await page.locator('[data-testid="product-row"]').first().waitFor({ timeout: 30000 });
+
+const cashierGeom = await assertNoClipping(page, "cashier");
+log("R1 cashier geometry: " + JSON.stringify(cashierGeom.map((r) => ({ price: r.priceText, unit: r.unitText, buttons: r.buttonCount }))));
+
+// The owner-only row controls are genuinely gone — which is also what makes this a control and not
+// a repeat of the owner measurement.
+for (const id of ["product-edit", "product-edit-phone"]) {
+  assert((await page.locator(`[data-testid="${id}"]`).count()) === 0, `a cashier sees no ${id} control`);
+}
+assert(
+  cashierGeom.every((r) => r.buttonCount === 0),
+  `and no per-row action buttons at all (${cashierGeom.map((r) => r.buttonCount).join(", ")})`,
+);
+await page.screenshot({ path: SHOTS + "E2.1-J-products-cashier.png" });
+log("J — the same table as a cashier: no owner controls, prices and units intact");
 
 await app.close();
 log("screenshots in", SHOTS);

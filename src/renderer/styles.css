@@ -216,7 +216,13 @@ h1, h2 { margin: 0 0 12px; }
 .small { font-size: var(--text-small); }
 .admin-table td, .admin-table th { vertical-align: top; }
 .admin-table .row-inactive { opacity: 0.55; }
-.admin-actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+/* 🔴 `flex-wrap: wrap` IS THE LOAD-BEARING WORD. Without it the three owner buttons are one
+   unbreakable run, so `width: 1%` on the cell ("take your content width") resolves to a very wide
+   cell, and auto table layout pays for it out of the FLEXIBLE columns — price and unit. With
+   `white-space: nowrap` on the price, that squeeze does not wrap, it CLIPS. Allowing the buttons
+   to take a second line costs a few pixels of row height and gives the columns their width back.
+   `nowrap` stays: it keeps each BUTTON's own label on one line. */
+.admin-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; white-space: nowrap; }
 
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
    🔴 THE ACTIONS COLUMN IS SHRINK-TO-FIT, AND THIS IS A ROW-HEIGHT FIX, NOT A TIDY-UP.
@@ -588,6 +594,32 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
    see. An amount and its currency are one isolated run (`<bdi dir="ltr">`); this stops the column
    splitting that run when the label words are longer. */
 .admin-table td.num { white-space: nowrap; }
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   🔴 R1 — THE OWNER'S ACTIONS WERE EATING THE PRICE AND THE UNIT.
+
+   MEASURED on the installed Windows app (Arabic owner, run 39573996462,
+   E2.1-B-products-arabic.png): the leading digit of "7.50 USD" was cut by the تعديل button, the
+   الوحدة column showed NO value on either row, and the الحالة badge was pushed under the buttons.
+   The same prices render correctly for a cashier — who sees fewer buttons. The data was never
+   wrong; the layout was.
+
+   WHY: the table is `width: 100%` with AUTO layout and, until now, sizing on only three of its
+   eight columns. Auto layout satisfies the inflexible cells first and divides what is left, so
+   three nowrap buttons in a `width: 1%` cell took their full run and the remainder was split
+   between name, sku, category, price, unit and state. `white-space: nowrap` on the price then
+   turned "too little room" into "clipped" rather than "wrapped".
+
+   THE FIX IS PREDICTABLE MINIMUMS, not a pixel nudge: the two columns that must stay legible get
+   a floor, the table gets a floor, and a window narrower than that floor scrolls the TABLE rather
+   than overlapping its cells. `table.inv-lines` already uses `min-width` the same way.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+.admin-table-scroll { overflow-x: auto; }
+.admin-table { min-width: 48rem; }
+/* Enough for "99999.00 USD" and the review badge beside it, in both writing directions. */
+.admin-table td.col-price, .admin-table th.col-price { min-width: 7rem; }
+/* Enough for a unit word plus the "fractions allowed" badge. */
+.admin-table td.col-unit, .admin-table th.col-unit { min-width: 6rem; }
 
 .thumb {
   display: block;
