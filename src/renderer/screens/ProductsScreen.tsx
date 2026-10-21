@@ -411,12 +411,12 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
                   photo is there to let the owner recognise an item at a glance, and a thumbnail
                   wide enough to admire would halve the number of rows on screen. */}
               <th className="col-thumb">{t("products.colPhoto")}</th>
-              <th>{t("products.colName")}</th>
-              <th>{t("products.colSku")}</th>
-              <th>{t("products.colCategory")}</th>
+              <th className="col-name">{t("products.colName")}</th>
+              <th className="col-codes">{t("products.colSku")}</th>
+              <th className="col-category">{t("products.colCategory")}</th>
               <th className="num col-price">{t("products.colPrice")}</th>
               <th className="col-unit">{t("products.colUnit")}</th>
-              <th>{t("products.colState")}</th>
+              <th className="col-state">{t("products.colState")}</th>
               {/* 🔴 `col-actions`, NOT `admin-actions`. The width rule has to reach the header or
                   the column is still negotiated from it — but `.admin-actions` is `display: flex`,
                   and a `<th>` with `display: flex` stops being a table cell and takes the header
@@ -433,7 +433,7 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
                       state the operator needs to read, not the absence of a picture. */}
                   <Thumb product={p} cache={thumbs} label={t} />
                 </td>
-                <td>
+                <td className="col-name">
                   <span dir="auto">{p.nameAr}</span>
                   {p.nameEn && (
                     <>
@@ -476,7 +476,7 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
                     </>
                   )}
                 </td>
-                <td>
+                <td className="col-category">
                   {categoryName(p.categoryId) ? (
                     <span dir="auto">{categoryName(p.categoryId)}</span>
                   ) : (
@@ -497,7 +497,7 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
                     </span>
                   )}
                 </td>
-                <td>
+                <td className="col-state">
                   <span className={p.isActive ? "badge ok" : "badge state"}>
                     {t(p.isActive ? "products.active" : "products.inactive")}
                   </span>

@@ -142,85 +142,132 @@ async function addProduct(page, { nameAr, nameEn, sku, price, unit, barcode, bra
 const rows = (page) => page.locator('[data-testid="product-row"]');
 
 /**
- * R1 — IS THE PRICE ACTUALLY READABLE, OR IS A BUTTON SITTING ON IT?
+ * R1 — IS EVERY CELL READABLE, AND IS EVERY OWNER CONTROL ACTUALLY CLICKABLE?
  *
  * ════════════════════════════════════════════════════════════════════════════════════════════════
- * 🔴 DOM TEXT IS NOT THE QUESTION. `innerText` returns "7.50 USD" whether the cell renders it in
- * full or clips its leading digit under the Edit button — which is exactly what the installed
- * Arabic owner screen did (run 39573996462, E2.1-B-products-arabic.png): the price was cut, the
- * الوحدة column showed no value at all, and the state badge was pushed below the buttons. Only
- * geometry can tell those apart, so this reads real rectangles:
+ * 🔴 TWO LESSONS ARE BUILT INTO THIS, BOTH PAID FOR.
  *
- *   clipped   the price RUN is wider than the cell that holds it, or spills past its edges
- *   covered   the actions cell's rectangle intersects the price or unit cell's rectangle
- *   empty     the unit cell has text but no box to draw it in
+ * 1 · DOM TEXT CANNOT SEE CLIPPING. `innerText` returns "7.50 USD" whether the cell draws it in
+ *     full or hides its first digit under a button — which is exactly what the Arabic owner screen
+ *     did (run 39573996462). Only rectangles tell those apart.
  *
- * Returns one record per row so a failure can name the row and the numbers, not just fail.
+ * 2 · RECTANGLES CANNOT SEE INTERCEPTION. The first R1 attempt checked actions against price and
+ *     unit only, passed its own geometry, and still broke the product: the STATE column's badges
+ *     overflowed onto the Edit button and ate its clicks (run 39577792181). Two boxes can be
+ *     mathematically disjoint while a third element paints over the one you care about. So every
+ *     cell is compared against every other, and each control is HIT-TESTED with
+ *     `document.elementFromPoint` at its centre and at interior points — the browser's own answer
+ *     to "what would a click land on", which is the question Playwright was really asking.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+const CELLS = ["col-thumb", "col-name", "col-codes", "col-category", "col-price", "col-unit", "col-state", "col-actions"];
+
 async function productRowGeometry(page) {
-  return page.evaluate(() => {
+  return page.evaluate((cells) => {
     const box = (el) => {
       if (!el) return null;
       const r = el.getBoundingClientRect();
       return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height) };
     };
+    // A pixel of slack absorbs sub-pixel rounding; anything more is a real intersection.
     const overlaps = (a, b) =>
       a !== null && b !== null && a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1;
 
     return [...document.querySelectorAll('[data-testid="product-row"]')].map((tr, i) => {
-      const priceCell = tr.querySelector("td.col-price");
-      const unitCell = tr.querySelector("td.col-unit");
-      const actionsCell = tr.querySelector("td.col-actions");
-      const priceRun = priceCell?.querySelector("bdi") ?? null;
-      const buttons = actionsCell ? [...actionsCell.querySelectorAll("button")] : [];
+      const found = {};
+      for (const c of cells) found[c] = tr.querySelector(`td.${c}`);
 
-      const pc = box(priceCell);
+      const boxes = {};
+      for (const c of cells) boxes[c] = box(found[c]);
+
+      // Every pair, not a chosen two. Named so a failure says WHICH columns collided.
+      const collisions = [];
+      for (let a = 0; a < cells.length; a++) {
+        for (let b = a + 1; b < cells.length; b++) {
+          if (overlaps(boxes[cells[a]], boxes[cells[b]])) collisions.push(`${cells[a]}×${cells[b]}`);
+        }
+      }
+
+      // Content wider than its own cell is content the operator cannot fully read.
+      const overflowing = cells.filter((c) => {
+        const el = found[c];
+        return el !== null && el.scrollWidth > el.clientWidth + 1;
+      });
+
+      const priceRun = found["col-price"]?.querySelector("bdi") ?? null;
+      const pc = boxes["col-price"];
       const pr = box(priceRun);
-      const uc = box(unitCell);
-      const ac = box(actionsCell);
+
+      // 🔴 HIT-TESTING: what would a click actually land on? Centre plus four interior points, so a
+      // badge covering only part of a button is caught too.
+      const buttons = found["col-actions"] ? [...found["col-actions"].querySelectorAll("button")] : [];
+      const hits = buttons.map((btn) => {
+        const r = btn.getBoundingClientRect();
+        const probes = [
+          [r.left + r.width / 2, r.top + r.height / 2],
+          [r.left + r.width * 0.25, r.top + r.height / 2],
+          [r.left + r.width * 0.75, r.top + r.height / 2],
+          [r.left + r.width / 2, r.top + r.height * 0.25],
+          [r.left + r.width / 2, r.top + r.height * 0.75],
+        ];
+        const blockedBy = [];
+        for (const [x, y] of probes) {
+          const top = document.elementFromPoint(Math.round(x), Math.round(y));
+          if (top === null) { blockedBy.push("offscreen"); continue; }
+          if (top !== btn && !btn.contains(top)) {
+            const id = top.getAttribute("data-testid");
+            blockedBy.push(id ? `${top.tagName.toLowerCase()}[${id}]` : top.tagName.toLowerCase());
+          }
+        }
+        return {
+          testid: btn.getAttribute("data-testid"),
+          box: box(btn),
+          clickable: blockedBy.length === 0,
+          blockedBy: [...new Set(blockedBy)],
+        };
+      });
 
       return {
         row: i,
         priceText: (priceRun?.textContent ?? "").trim(),
-        unitText: (unitCell?.textContent ?? "").trim(),
-        buttonCount: buttons.length,
-        priceCell: pc,
-        priceRun: pr,
-        unitCell: uc,
-        actionsCell: ac,
-        // The run must fit inside its own cell, with a pixel of tolerance for sub-pixel rounding.
+        unitText: (found["col-unit"]?.textContent ?? "").trim(),
+        stateText: (found["col-state"]?.textContent ?? "").trim(),
+        nameText: (found["col-name"]?.textContent ?? "").trim().slice(0, 40),
+        widths: Object.fromEntries(cells.map((c) => [c, boxes[c]?.width ?? null])),
+        collisions,
+        overflowing,
         priceFitsCell: pc !== null && pr !== null && pr.left >= pc.left - 1 && pr.right <= pc.right + 1 && pr.width > 0,
-        // And the cell must not be scrolling its own content out of sight.
-        priceNotScrolled: priceCell === null ? false : priceCell.scrollWidth <= priceCell.clientWidth + 1,
-        unitNotScrolled: unitCell === null ? false : unitCell.scrollWidth <= unitCell.clientWidth + 1,
-        unitHasBox: uc !== null && uc.width > 0 && uc.height > 0,
-        actionsOverPrice: overlaps(ac, pc),
-        actionsOverUnit: overlaps(ac, uc),
-        buttonsInsideCell: ac !== null && buttons.every((b) => {
-          const r = b.getBoundingClientRect();
-          return r.left >= ac.left - 1 && r.right <= ac.right + 1;
-        }),
+        buttons: hits,
       };
     });
-  });
+  }, cells);
 }
 
-/** Assert every row reads cleanly, naming the geometry when it does not. */
+/** Assert every row reads cleanly AND every control is genuinely clickable. Names the geometry. */
 async function assertNoClipping(page, where) {
   const g = await productRowGeometry(page);
   assert(g.length > 0, `${where}: there are rows to measure (${g.length})`);
+  log(`R1 ${where} column widths: ${JSON.stringify(g[0].widths)}`);
   for (const r of g) {
     const id = `${where} row ${r.row} ("${r.priceText}")`;
     assert(r.priceText.length > 0, `${id}: the price renders text`);
-    assert(r.priceFitsCell, `${id}: the price run fits INSIDE its cell — run ${JSON.stringify(r.priceRun)} cell ${JSON.stringify(r.priceCell)}`);
-    assert(r.priceNotScrolled, `${id}: the price cell is not hiding content behind its own edge`);
-    assert(r.unitHasBox, `${id}: the unit cell has a real box ${JSON.stringify(r.unitCell)}`);
+    assert(r.priceFitsCell, `${id}: the price run fits INSIDE its cell`);
     assert(r.unitText.length > 0, `${id}: the unit renders text ("${r.unitText}")`);
-    assert(r.unitNotScrolled, `${id}: the unit cell is not hiding content behind its own edge`);
-    assert(!r.actionsOverPrice, `🔴 ${id}: the actions cell does NOT overlap the price — actions ${JSON.stringify(r.actionsCell)} price ${JSON.stringify(r.priceCell)}`);
-    assert(!r.actionsOverUnit, `🔴 ${id}: the actions cell does NOT overlap the unit`);
-    assert(r.buttonsInsideCell, `${id}: all ${r.buttonCount} action buttons stay inside their own cell`);
+    assert(r.stateText.length > 0, `${id}: the state renders text ("${r.stateText}")`);
+    assert(
+      r.overflowing.length === 0,
+      `🔴 ${id}: NO cell hides its own content — overflowing: ${r.overflowing.join(", ") || "none"} · widths ${JSON.stringify(r.widths)}`,
+    );
+    assert(
+      r.collisions.length === 0,
+      `🔴 ${id}: NO two cells overlap — collisions: ${r.collisions.join(", ") || "none"} · widths ${JSON.stringify(r.widths)}`,
+    );
+    for (const b of r.buttons) {
+      assert(
+        b.clickable,
+        `🔴 ${id}: "${b.testid}" is actually clickable — elementFromPoint hit ${b.blockedBy.join(", ")} instead (box ${JSON.stringify(b.box)})`,
+      );
+    }
   }
   return g;
 }
@@ -413,6 +460,15 @@ await rows(page).first().waitFor();
   // product happened to sort first. The SKU is rendered in the row, so the row is found by it.
   const target = rows(page).filter({ hasText: "SKU-100" });
   assert((await target.count()) === 1, "exactly one row is SKU-100");
+
+  // 🔴 MEASURED BEFORE THE FIRST CLICK, NOT AFTER IT. The previous attempt put this check further
+  // down the script, so when the state badge covered the Edit button the run died HERE — at an
+  // ordinary click, 84 lines before the geometry it would have explained. A layout assertion that
+  // runs after the interaction it protects is an assertion that never runs.
+  await assertNoClipping(page, "Arabic owner (pre-click)");
+
+  // And then the real thing: Playwright's own click, with interception left ON. A forced click
+  // would prove only that the coordinates exist.
   await target.locator('[data-testid="product-edit"]').click();
   await page.locator('[data-testid="photo-panel"]').waitFor({ state: "visible" });
   await page.locator('[data-testid="photo-add"]').click();
@@ -498,6 +554,17 @@ await addProduct(page, {
 await page.waitForSelector('[data-testid="product-row"]');
 
 const arGeom = await assertNoClipping(page, "Arabic owner");
+
+// 🔴 CLICKABLE IS NOT THE SAME AS "IT WORKED". Hit-testing says a click would land on the button;
+// this says the button then DID something. Run on the long-name row, which is the one that crowds
+// the layout, with interception left on.
+const longRow = rows(page).filter({ hasText: "SKU-LONG-9001" });
+assert((await longRow.count()) === 1, "the long-name row is present for the click test");
+await longRow.locator('[data-testid="product-edit"]').click();
+await page.locator('[data-testid="form-footer"]').waitFor({ state: "visible", timeout: 30000 });
+assert(true, "🔴 the Owner Edit action really fires on the crowded row — the form opened");
+await page.locator('[data-testid="cancel-product"]').click();
+await page.locator('[data-testid="product-row"]').first().waitFor();
 log("R1 Arabic owner geometry: " + JSON.stringify(arGeom.map((r) => ({ price: r.priceText, unit: r.unitText, priceCell: r.priceCell?.width, unitCell: r.unitCell?.width, actionsCell: r.actionsCell?.width, buttons: r.buttonCount }))));
 
 await page.screenshot({ path: SHOTS + "E2.1-B-products-arabic.png" });

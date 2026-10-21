@@ -615,11 +615,31 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
    than overlapping its cells. `table.inv-lines` already uses `min-width` the same way.
    ════════════════════════════════════════════════════════════════════════════════════════════════ */
 .admin-table-scroll { overflow-x: auto; }
-.admin-table { min-width: 48rem; }
+
+/* 🔴 THE WHOLE-TABLE READING, after the first attempt moved the damage instead of ending it.
+   Flooring price and unit alone pushed the squeeze onto the STATE column, whose two inline-block
+   badges cannot shrink; they spilled into the actions cell and sat ON TOP of the Edit button,
+   intercepting its clicks (run 39577792181, step 23). That was the SAME failure as the original
+   clipping, one column over — proof that the table was already over-constrained before R1 and that
+   per-column patches just relocate the overflow.
+
+   So every column that CANNOT shrink is given its floor at once, and the table is given a floor
+   that covers their sum. Only `col-name` and `col-category` hold prose, so only they flex — and
+   name keeps a floor of its own so it cannot collapse to one character per line.
+
+   floors: thumb 52px · name 10rem · price 7rem · unit 6rem · state 6rem  (sku is nowrap, actions
+   is content-sized) ≈ 46rem before prose, hence 52rem for the table with room to breathe.
+   Below that the container scrolls — the columns never paint over each other again. */
+.admin-table { min-width: 52rem; }
+/* Prose, and the only truly flexible column — but never narrower than a readable line. */
+.admin-table td.col-name, .admin-table th.col-name { min-width: 10rem; }
 /* Enough for "99999.00 USD" and the review badge beside it, in both writing directions. */
 .admin-table td.col-price, .admin-table th.col-price { min-width: 7rem; }
 /* Enough for a unit word plus the "fractions allowed" badge. */
 .admin-table td.col-unit, .admin-table th.col-unit { min-width: 6rem; }
+/* 🔴 THE COLUMN THAT BROKE THE FIRST ATTEMPT. Two badges that cannot shrink below their own text,
+   so the cell gets a floor AND is told to let them stack rather than run past its edge. */
+.admin-table td.col-state, .admin-table th.col-state { min-width: 6rem; white-space: normal; }
 
 .thumb {
   display: block;
