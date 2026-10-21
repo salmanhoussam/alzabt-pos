@@ -1330,9 +1330,21 @@ await assertNoClipping(page, "narrowest window");
 
 await page.screenshot({ path: SHOTS + "E2.1-I-narrowest-window-list.png" });
 const narrowHeights = await rows(page).evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().height)));
+// 🔴 SAY WHAT IS ACTUALLY BEING COMPARED. This printed "rows stay even at 1024x640: 66 vs 65 vs 89"
+// — a claim of evenness beside a number that is not even, because it compares [0] and [1] and
+// reports all three. The long-name row wraps to more lines and is legitimately taller; the
+// contract is the maximum, which is asserted for every row.
+assert(
+  narrowHeights.length === FIXTURE_SKUS.length,
+  `every fixture row is measured at 1024x640 (${narrowHeights.length} of ${FIXTURE_SKUS.length}: ${narrowHeights.join(", ")})`,
+);
 assert(
   Math.abs(narrowHeights[0] - narrowHeights[1]) <= 2,
-  `rows stay even at 1024x640: ${narrowHeights.join(" vs ")}`,
+  `the two short-name rows stay equal at 1024x640: ${narrowHeights[0]} vs ${narrowHeights[1]}`,
+);
+assert(
+  narrowHeights.every((h) => h < 110),
+  `NO row-height explosion at 1024x640, long name included: ${narrowHeights.join(", ")}`,
 );
 // 🔴 The modal still works at the minimum size: nothing under the action bar, Save reachable.
 await rows(page).first().locator("button").first().click();
@@ -1361,11 +1373,28 @@ await page.locator('[data-testid="cancel-product"]').click();
 // and the capability's own authorization is proven elsewhere
 // (tests/application/productCreateCapability.test.ts, and the service re-check at every save).
 await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1280, 800));
-await page.locator('[data-testid="change-cashier"]').click().catch(() => undefined);
+// 🔴 LOG OUT FIRST — `change-cashier` LIVES ON A DIFFERENT SCREEN. This clicked `change-cashier`
+// while the app was signed in on the Products screen, where that control does not exist at all
+// (`LoginScreen.tsx` renders it, and only once an operator is already selected). The click failed,
+// `.catch(() => undefined)` swallowed the failure, and the only symptom was a 30-second timeout on
+// the NEXT line naming a selector that was never going to appear — run 39656633002.
+//
+// `operator-accounts.mjs` uses the same pair legitimately, because it is already ON the login
+// screen. The difference is the screen, so the correction is to go to it. And nothing is swallowed
+// here any more: a failed logout click must say so where it happens, not 30 seconds later as
+// somebody else's missing selector. After logout the screen mounts fresh with no operator
+// selected, so `select-cashier` is the prompt that appears and `change-cashier` is not needed.
+await page.locator('[data-testid="logout"]').click();
 await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
 await signIn(page, "Cashier Two", "2222");
 await page.locator('[data-testid="tab-products"]').click();
 await page.locator('[data-testid="product-row"]').first().waitFor({ timeout: 30000 });
+
+// 🔴 AND IT REALLY IS A DIFFERENT OPERATOR. Everything below is a statement about what a CASHIER
+// sees; if the switch had silently left Cashier One signed in, the owner-control assertions would
+// be measuring the wrong person and failing for the right reason by accident.
+const whoami = (await page.locator(".topbar span.muted").first().innerText()).trim();
+assert(whoami === "Cashier Two", `the signed-in operator really is the cashier ("${whoami}")`);
 
 const cashierGeom = await assertNoClipping(page, "cashier");
 log("R1 cashier geometry: " + JSON.stringify(cashierGeom.map((r) => ({ price: r.priceText, unit: r.unitText, buttons: r.buttons.length }))));
