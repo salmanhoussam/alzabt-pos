@@ -194,6 +194,28 @@ async function productRowGeometry(page) {
         return el !== null && el.scrollWidth > el.clientWidth + 1;
       });
 
+      // 🔴 THE VISIBLE STRIP IS NOT THE WINDOW. `.admin-table-scroll` clips its own overflow, so a
+      // button can have a perfectly good box, sit entirely inside its own cell, and still be
+      // unreachable until the operator scrolls the table. That is a SCROLLING fact, not a layout
+      // defect, and the two are reported separately below — conflating them is what made the old
+      // check call ordinary horizontal scrolling a failure.
+      const scroller = tr.closest(".admin-table-scroll");
+      const scBox = scroller === null ? null : scroller.getBoundingClientRect();
+      const sv =
+        scBox === null
+          ? null
+          : { left: Math.max(Math.round(scBox.left), 0), right: Math.min(Math.round(scBox.right), window.innerWidth) };
+      const scroll =
+        scroller === null
+          ? null
+          : {
+              scrollWidth: Math.round(scroller.scrollWidth),
+              clientWidth: Math.round(scroller.clientWidth),
+              scrollLeft: Math.round(scroller.scrollLeft),
+              overflowX: getComputedStyle(scroller).overflowX,
+              scrollable: scroller.scrollWidth > scroller.clientWidth + 1,
+            };
+
       const priceRun = found["col-price"]?.querySelector("bdi") ?? null;
       const pc = boxes["col-price"];
       const pr = box(priceRun);
@@ -232,6 +254,13 @@ async function productRowGeometry(page) {
             cell !== null &&
             r.left >= cell.left - 1 && r.right <= cell.right + 1 &&
             r.top >= cell.top - 1 && r.bottom <= cell.bottom + 1,
+          // 🔴 C · IS IT IN THE VISIBLE STRIP RIGHT NOW? Only a button that IS determines whether
+          // `clickable` above is a claim about the layout at all: `elementFromPoint` answers
+          // `null` for anything outside the window, which reads identically to "covered".
+          inScrollView:
+            sv !== null && r.left >= sv.left - 1 && r.right <= sv.right + 1 && r.top >= 0 && r.bottom <= window.innerHeight,
+          needsScroll:
+            sv === null ? null : Math.round(r.left < sv.left ? sv.left - r.left : r.right > sv.right ? r.right - sv.right : 0),
         };
       });
 
@@ -269,6 +298,8 @@ async function productRowGeometry(page) {
         stateText: (found["col-state"]?.textContent ?? "").trim(),
         nameText: (found["col-name"]?.textContent ?? "").trim().slice(0, 40),
         widths: Object.fromEntries(cells.map((c) => [c, boxes[c]?.width ?? null])),
+        scroll,
+        scrollView: sv,
         collisions,
         overflowing,
         priceFitsCell: pc !== null && pr !== null && pr.left >= pc.left - 1 && pr.right <= pc.right + 1 && pr.width > 0,
@@ -322,15 +353,300 @@ async function assertNoClipping(page, where) {
         b.insideCell,
         `🔴 ${id}: "${b.testid}" stays INSIDE its own actions cell — button ${JSON.stringify(b.box)} cell width ${r.widths["col-actions"]}`,
       );
-      assert(
-        b.clickable,
-        `🔴 ${id}: "${b.testid}" is actually clickable — elementFromPoint hit ${b.blockedBy.join(", ")} instead (box ${JSON.stringify(b.box)})`,
-      );
+      if (b.inScrollView) {
+        assert(
+          b.clickable,
+          `🔴 ${id}: "${b.testid}" is actually clickable — elementFromPoint hit ${b.blockedBy.join(", ")} instead (box ${JSON.stringify(b.box)})`,
+        );
+      } else {
+        // 🔴 NOT A DEFECT, AND NOT TAKEN ON TRUST EITHER. A control outside the strip is reachable
+        // by the ordinary horizontal scrolling the container exists for — but only if the container
+        // really can scroll that far, which is asserted here, and only if the scroll then actually
+        // lands the click, which `revealAction` + a real Playwright click prove below. This branch
+        // never excuses a control that is covered WHERE IT SITS: that case is the branch above.
+        assert(
+          r.scroll !== null && r.scroll.scrollable,
+          `🔴 ${id}: "${b.testid}" sits ${b.needsScroll}px outside the visible table strip and the container CANNOT scroll to it (${JSON.stringify(r.scroll)})`,
+        );
+        log(
+          `R1 ${id}: "${b.testid}" needs ${b.needsScroll}px of ordinary horizontal scrolling ` +
+            `(strip ${r.scroll.clientWidth}px of ${r.scroll.scrollWidth}px, overflow-x: ${r.scroll.overflowX})`,
+        );
+      }
     }
   }
   return g;
 }
 
+
+/**
+ * R1 · REVEAL AN ACTION BY SCROLLING THE REAL CONTAINER — THEN HIT-TEST, THEN CLICK.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WHAT THIS CORRECTS. At the default window the eight columns measure ~978px inside a ~944px
+ * strip, so the LAST control in the run starts just outside `.admin-table-scroll`. The previous
+ * check hit-tested it at the initial scroll offset — where `elementFromPoint` answers `null` —
+ * and reported a layout defect. It was not one: scrolling that strip is what the container is for.
+ * The defect was the SEQUENCE, so the sequence is what changed here.
+ *
+ * 🔴 AND WHY NOTHING HERE ASSUMES A DIRECTION. The screen is `dir="rtl"` in Arabic and `ltr` in
+ * English, and `scrollLeft` does not mean the same thing in both: Chrome reports a NEGATIVE range
+ * in RTL, other engines have used a reversed positive one. So this never decides which way to go
+ * from the writing direction. It computes the shortfall from real rectangles, applies it, MEASURES
+ * whether the button actually moved, and only if it did not does it try the opposite sign. A
+ * container that cannot move at all is reported as exactly that, not looped over.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function revealAction(page, sku, testid) {
+  return page.evaluate(
+    ({ sku, testid }) => {
+      const row = [...document.querySelectorAll('[data-testid="product-row"]')].find((tr) =>
+        (tr.textContent ?? "").includes(sku),
+      );
+      if (row === undefined) return { ok: false, why: `no product row contains "${sku}"` };
+      const btn = row.querySelector(`[data-testid="${testid}"]`);
+      if (btn === null) return { ok: false, why: `row "${sku}" carries no "${testid}" control` };
+      const sc = btn.closest(".admin-table-scroll");
+      if (sc === null) return { ok: false, why: `"${testid}" has no .admin-table-scroll ancestor to scroll` };
+
+      // The strip the operator can actually see: the container's own box, clipped by the window.
+      const strip = () => {
+        const c = sc.getBoundingClientRect();
+        return { left: Math.max(c.left, 0), right: Math.min(c.right, window.innerWidth) };
+      };
+      const inside = () => {
+        const r = btn.getBoundingClientRect();
+        const s = strip();
+        return r.left >= s.left - 1 && r.right <= s.right + 1 && r.top >= 0 && r.bottom <= window.innerHeight;
+      };
+
+      const scrolledFrom = Math.round(sc.scrollLeft);
+      const steps = [];
+      for (let i = 0; i < 12 && !inside(); i++) {
+        const r = btn.getBoundingClientRect();
+        const s = strip();
+        const delta = Math.round(r.left < s.left ? r.left - s.left : r.right - s.right);
+        if (delta === 0) break;
+        const slBefore = sc.scrollLeft;
+        const leftBefore = r.left;
+        sc.scrollLeft = slBefore + delta;
+        let moved = btn.getBoundingClientRect().left - leftBefore;
+        const step = { delta, slFrom: Math.round(slBefore), slTo: Math.round(sc.scrollLeft), moved: Math.round(moved), reversed: false };
+        if (Math.abs(moved) < 1) {
+          sc.scrollLeft = slBefore - delta;
+          moved = btn.getBoundingClientRect().left - leftBefore;
+          step.reversed = true;
+          step.slTo = Math.round(sc.scrollLeft);
+          step.moved = Math.round(moved);
+        }
+        steps.push(step);
+        if (Math.abs(moved) < 1) break; // genuinely immovable — report it rather than spin
+      }
+
+      const r = btn.getBoundingClientRect();
+      const s = strip();
+      // The browser's own answer to "what would a click land on", asked only now that the button
+      // is where the operator would have scrolled it to.
+      const probes = [
+        [0.5, 0.5],
+        [0.25, 0.5],
+        [0.75, 0.5],
+        [0.5, 0.25],
+        [0.5, 0.75],
+      ].map(([fx, fy]) => {
+        const x = Math.round(r.left + r.width * fx);
+        const y = Math.round(r.top + r.height * fy);
+        const top = document.elementFromPoint(x, y);
+        return {
+          x,
+          y,
+          ok: top !== null && (top === btn || btn.contains(top)),
+          hit: top === null ? "nothing" : (top.getAttribute("data-testid") ?? top.tagName.toLowerCase()),
+        };
+      });
+
+      return {
+        ok: true,
+        dir: document.documentElement.dir,
+        inside: inside(),
+        scrolledFrom,
+        scrolledTo: Math.round(sc.scrollLeft),
+        steps,
+        strip: { left: Math.round(s.left), right: Math.round(s.right) },
+        box: { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom) },
+        scroll: {
+          scrollWidth: Math.round(sc.scrollWidth),
+          clientWidth: Math.round(sc.clientWidth),
+          overflowX: getComputedStyle(sc).overflowX,
+          scrollable: sc.scrollWidth > sc.clientWidth + 1,
+        },
+        probes,
+        blockers: [...new Set(probes.filter((pr) => !pr.ok).map((pr) => pr.hit))],
+      };
+    },
+    { sku, testid },
+  );
+}
+
+/** The row's own state, as the operator reads it — class and badge text, not an internal flag. */
+const rowState = (page, sku) =>
+  page.evaluate((s) => {
+    const tr = [...document.querySelectorAll('[data-testid="product-row"]')].find((x) => (x.textContent ?? "").includes(s));
+    if (tr === undefined) return null;
+    return {
+      inactive: tr.classList.contains("row-inactive"),
+      state: (tr.querySelector("td.col-state")?.textContent ?? "").trim(),
+    };
+  }, sku);
+
+/**
+ * Is the scrollable strip usable, or is something painting over it?
+ *
+ * 🔴 Asked at four real points inside the strip rather than from its CSS. `overflow-x: auto` is a
+ * declaration; what the operator can reach is a hit test.
+ */
+const stripUsable = (page) =>
+  page.evaluate(() => {
+    const sc = document.querySelector(".admin-table-scroll");
+    if (sc === null) return { ok: false, why: "no .admin-table-scroll on this screen" };
+    const c = sc.getBoundingClientRect();
+    const left = Math.max(c.left, 0);
+    const right = Math.min(c.right, window.innerWidth);
+    const bottom = Math.min(c.bottom, window.innerHeight);
+    const hits = [];
+    for (const y of [c.top + 8, (c.top + bottom) / 2]) {
+      for (const x of [left + 8, right - 8]) {
+        const top = document.elementFromPoint(Math.round(x), Math.round(y));
+        hits.push({
+          x: Math.round(x),
+          y: Math.round(y),
+          inScroller: top !== null && sc.contains(top),
+          hit: top === null ? "nothing" : (top.getAttribute("data-testid") ?? top.tagName.toLowerCase()),
+        });
+      }
+    }
+    return { ok: true, overflowX: getComputedStyle(sc).overflowX, box: { left: Math.round(left), right: Math.round(right) }, hits };
+  });
+
+/**
+ * R1 · THE WHOLE ACCEPTANCE, IN ONE ORDER, IN ONE WRITING DIRECTION.
+ *
+ * 🔴 RUN IN BOTH DIRECTIONS ON PURPOSE. Arabic is RTL and English is LTR, the offscreen action is
+ * at the opposite end of the run in each, and `scrollLeft` behaves differently between them — so a
+ * pass in one direction is a pass in one direction. The toggle is restored afterwards, because
+ * every later assertion on this screen reads the state badge this click changes.
+ */
+async function proveActionsReachable(page, { sku, where, deactivated, activated, shot }) {
+  // 1 · WITHOUT SCROLLING AT ALL: the two actions the owner uses constantly are already there.
+  const geom = await productRowGeometry(page);
+  const immediate = geom.flatMap((r) =>
+    r.buttons.filter((b) => b.testid === "product-edit" || b.testid === "product-edit-phone").map((b) => ({ row: r.row, ...b })),
+  );
+  assert(immediate.length > 0, `${where}: there are Edit / Edit-phone controls to measure`);
+  for (const b of immediate) {
+    assert(
+      b.inScrollView,
+      `🔴 ${where}: "${b.testid}" on row ${b.row} is immediately accessible with NO scrolling (short by ${b.needsScroll}px, box ${JSON.stringify(b.box)})`,
+    );
+    assert(b.clickable, `🔴 ${where}: "${b.testid}" on row ${b.row} is clickable exactly where it sits`);
+  }
+  log(`R1 ${where}: ${immediate.length} Edit / Edit-phone controls reachable with no scrolling`);
+
+  // 2 · THE STRIP ITSELF IS USABLE — nothing is painting over the area to be scrolled.
+  const usable = await stripUsable(page);
+  assert(usable.ok, `${where}: ${usable.why ?? "the table strip exists"}`);
+  assert(
+    usable.overflowX === "auto" || usable.overflowX === "scroll",
+    `${where}: the table strip really is the scroller (overflow-x: ${usable.overflowX})`,
+  );
+  assert(
+    usable.hits.every((h) => h.inScroller),
+    `🔴 ${where}: no other UI layer covers the scrollable strip — ${JSON.stringify(usable.hits)}`,
+  );
+
+  // 3 · SCROLL THE REAL CONTAINER, and prove the button ended up genuinely inside the strip.
+  const before = await rowState(page, sku);
+  assert(before !== null, `${where}: the row "${sku}" is on screen`);
+  const reveal = await revealAction(page, sku, "product-deactivate");
+  assert(reveal.ok, `${where}: ${reveal.why ?? "the deactivate control was found"}`);
+  log(`R1 ${where} reveal(product-deactivate, dir=${reveal.dir}): ${JSON.stringify(reveal)}`);
+  assert(reveal.scroll.scrollable, `${where}: the strip has something to scroll (${JSON.stringify(reveal.scroll)})`);
+  assert(
+    reveal.inside,
+    `🔴 ${where}: after scrolling, "product-deactivate" is INSIDE the visible strip (box ${JSON.stringify(reveal.box)} strip ${JSON.stringify(reveal.strip)})`,
+  );
+  // 4 · AND ONLY THERE, the hit test — the browser's own answer, not a rectangle of mine.
+  assert(
+    reveal.blockers.length === 0,
+    `🔴 ${where}: nothing covers it where it now sits — elementFromPoint hit ${reveal.blockers.join(", ")} (${JSON.stringify(reveal.probes)})`,
+  );
+  if (shot !== undefined) await page.screenshot({ path: SHOTS + shot });
+
+  // 5 · THE REAL CLICK, interception ON, no `force`. And then: did it DO anything?
+  const target = rows(page).filter({ hasText: sku });
+  assert((await target.count()) === 1, `${where}: exactly one row is ${sku}`);
+  await target.locator('[data-testid="product-deactivate"]').click();
+  const dialog = page.locator(".overlay .card.dialog p").first();
+  await dialog.waitFor({ state: "visible", timeout: 30000 });
+  const said = (await dialog.textContent()) ?? "";
+  assert(
+    said.includes(deactivated),
+    `🔴 ${where}: the click really deactivated the product — the shop was told "${said.trim()}"`,
+  );
+  await page.locator(".dialog .btn.primary.wide").click();
+  await page.waitForFunction(
+    (s) => {
+      const tr = [...document.querySelectorAll('[data-testid="product-row"]')].find((x) => (x.textContent ?? "").includes(s));
+      return tr !== undefined && tr.classList.contains("row-inactive");
+    },
+    sku,
+    { timeout: 30000 },
+  );
+  const after = await rowState(page, sku);
+  assert(
+    after !== null && after.inactive && after.state !== before.state,
+    `🔴 ${where}: the row itself changed — "${before.state}" → "${after?.state}"`,
+  );
+  log(`R1 ${where}: deactivate reached by ordinary scrolling and it WORKED ("${before.state}" → "${after.state}")`);
+
+  // 6 · PUT IT BACK. Everything after this reads the state badge.
+  const back = await revealAction(page, sku, "product-deactivate");
+  assert(back.ok && back.inside, `${where}: the control is reachable again to restore the product`);
+  await target.locator('[data-testid="product-deactivate"]').click();
+  const again = page.locator(".overlay .card.dialog p").first();
+  await again.waitFor({ state: "visible", timeout: 30000 });
+  const saidBack = (await again.textContent()) ?? "";
+  assert(saidBack.includes(activated), `${where}: and re-activating says so ("${saidBack.trim()}")`);
+  await page.locator(".dialog .btn.primary.wide").click();
+  await page.waitForFunction(
+    (s) => {
+      const tr = [...document.querySelectorAll('[data-testid="product-row"]')].find((x) => (x.textContent ?? "").includes(s));
+      return tr !== undefined && !tr.classList.contains("row-inactive");
+    },
+    sku,
+    { timeout: 30000 },
+  );
+  const restored = await rowState(page, sku);
+  assert(
+    restored !== null && restored.state === before.state,
+    `${where}: the product is left exactly as it was found ("${restored?.state}" vs "${before.state}")`,
+  );
+
+  // 🔴 AND THE VIEW IS PUT BACK TOO, because the very next line of this script photographs this
+  // screen under a filename that says "products". A capture of a table left scrolled by a test
+  // would be a picture of the test, not of the screen the shop opens.
+  const parked = await page.evaluate((from) => {
+    const sc = document.querySelector(".admin-table-scroll");
+    if (sc === null) return null;
+    sc.scrollLeft = from;
+    return Math.round(sc.scrollLeft);
+  }, reveal.scrolledFrom);
+  assert(
+    parked === reveal.scrolledFrom,
+    `${where}: the table is returned to the offset it was found at (${parked} vs ${reveal.scrolledFrom})`,
+  );
+  return reveal;
+}
 
 /**
  * Is this element actually ON SCREEN — inside the window, with a real box?
@@ -624,7 +940,17 @@ await page.locator('[data-testid="form-footer"]').waitFor({ state: "visible", ti
 assert(true, "🔴 the Owner Edit action really fires on the crowded row — the form opened");
 await page.locator('[data-testid="cancel-product"]').click();
 await page.locator('[data-testid="product-row"]').first().waitFor();
-log("R1 Arabic owner geometry: " + JSON.stringify(arGeom.map((r) => ({ price: r.priceText, unit: r.unitText, priceCell: r.priceCell?.width, unitCell: r.unitCell?.width, actionsCell: r.actionsCell?.width, buttons: r.buttonCount }))));
+log("R1 Arabic owner geometry: " + JSON.stringify(arGeom.map((r) => ({ price: r.priceText, unit: r.unitText, widths: r.widths, buttons: r.buttons.length, strip: r.scroll }))));
+
+// ── R1 · DEACTIVATE IS REACHED BY ORDINARY HORIZONTAL SCROLLING, IN RTL ─────────────────────────
+const arReveal = await proveActionsReachable(page, {
+  sku: "SKU-LONG-9001",
+  where: "Arabic owner (RTL)",
+  deactivated: "أُوقف الصنف",
+  activated: "أُعيد تفعيل",
+  shot: "E2.1-R1-A-deactivate-after-scroll-arabic.png",
+});
+log(`R1 Arabic: ${arReveal.scroll.clientWidth}px strip holding ${arReveal.scroll.scrollWidth}px of columns, scrolled ${arReveal.scrolledFrom} → ${arReveal.scrolledTo}`);
 
 await page.screenshot({ path: SHOTS + "E2.1-B-products-arabic.png" });
 
@@ -858,7 +1184,18 @@ assert(Math.abs(enHeights[0] - enHeights[1]) <= 2, `English rows are the same he
 assert(enHeights.every((h) => h < 110), `no row-height explosion in English: ${enHeights.join(", ")}`);
 await page.screenshot({ path: SHOTS + "PM9-products-english-ltr.png" });
 const enGeom = await assertNoClipping(page, "English owner");
-log("R1 English owner geometry: " + JSON.stringify(enGeom.map((r) => ({ price: r.priceText, unit: r.unitText, priceCell: r.priceCell?.width, unitCell: r.unitCell?.width, actionsCell: r.actionsCell?.width, buttons: r.buttonCount }))));
+log("R1 English owner geometry: " + JSON.stringify(enGeom.map((r) => ({ price: r.priceText, unit: r.unitText, widths: r.widths, buttons: r.buttons.length, strip: r.scroll }))));
+
+// 🔴 THE SAME PROOF IN LTR. The offscreen end swaps sides and `scrollLeft` does not mean the same
+// thing here, so this is a second measurement, not a repeat of the first.
+const enReveal = await proveActionsReachable(page, {
+  sku: "SKU-LONG-9001",
+  where: "English owner (LTR)",
+  deactivated: "Product deactivated",
+  activated: "Product activated",
+  shot: "E2.1-R1-B-deactivate-after-scroll-english.png",
+});
+log(`R1 English: ${enReveal.scroll.clientWidth}px strip holding ${enReveal.scroll.scrollWidth}px of columns, scrolled ${enReveal.scrolledFrom} → ${enReveal.scrolledTo}`);
 
 await page.screenshot({ path: SHOTS + "E2.1-A-products-english.png" });
 log("PM9/A — the same screen in English/LTR");
@@ -873,6 +1210,25 @@ await app.evaluate(({ BrowserWindow }) => {
 await page.waitForFunction(() => window.innerWidth <= 1024, undefined, { timeout: 10000 });
 await rows(page).first().waitFor();
 await assertNoClipping(page, "narrowest window");
+// 🔴 AND AT THE SMALLEST SUPPORTED SIZE the last action is still reachable — measured, not assumed
+// from the wider window passing. No click here: the click is proven in both writing directions
+// above, and this is the reach that 1024px puts under the most pressure.
+{
+  const narrowReveal = await revealAction(page, "SKU-LONG-9001", "product-deactivate");
+  assert(narrowReveal.ok, `1024x640: ${narrowReveal.why ?? "the deactivate control was found"}`);
+  log("R1 narrowest reveal: " + JSON.stringify(narrowReveal));
+  assert(
+    narrowReveal.inside,
+    `🔴 1024x640: "product-deactivate" reaches the visible strip (box ${JSON.stringify(narrowReveal.box)} strip ${JSON.stringify(narrowReveal.strip)})`,
+  );
+  assert(narrowReveal.blockers.length === 0, `🔴 1024x640: nothing covers it there — ${narrowReveal.blockers.join(", ")}`);
+  const narrowUsable = await stripUsable(page);
+  assert(
+    narrowUsable.ok && narrowUsable.hits.every((h) => h.inScroller),
+    `🔴 1024x640: the scrollable strip is not covered — ${JSON.stringify(narrowUsable)}`,
+  );
+  await page.screenshot({ path: SHOTS + "E2.1-R1-C-deactivate-after-scroll-1024.png" });
+}
 
 await page.screenshot({ path: SHOTS + "E2.1-I-narrowest-window-list.png" });
 const narrowHeights = await rows(page).evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().height)));
@@ -914,16 +1270,20 @@ await page.locator('[data-testid="tab-products"]').click();
 await page.locator('[data-testid="product-row"]').first().waitFor({ timeout: 30000 });
 
 const cashierGeom = await assertNoClipping(page, "cashier");
-log("R1 cashier geometry: " + JSON.stringify(cashierGeom.map((r) => ({ price: r.priceText, unit: r.unitText, buttons: r.buttonCount }))));
+log("R1 cashier geometry: " + JSON.stringify(cashierGeom.map((r) => ({ price: r.priceText, unit: r.unitText, buttons: r.buttons.length }))));
 
 // The owner-only row controls are genuinely gone — which is also what makes this a control and not
 // a repeat of the owner measurement.
 for (const id of ["product-edit", "product-edit-phone"]) {
   assert((await page.locator(`[data-testid="${id}"]`).count()) === 0, `a cashier sees no ${id} control`);
 }
+// 🔴 `r.buttons.length`, NOT `r.buttonCount`. The CELLS rewrite renamed this field and these two
+// lines kept reading the old one, so `undefined === 0` was false and this assertion would have
+// failed on a cashier screen that was perfectly correct. It never surfaced because every run so
+// far died earlier. Reported rather than quietly corrected.
 assert(
-  cashierGeom.every((r) => r.buttonCount === 0),
-  `and no per-row action buttons at all (${cashierGeom.map((r) => r.buttonCount).join(", ")})`,
+  cashierGeom.every((r) => r.buttons.length === 0),
+  `and no per-row action buttons at all (${cashierGeom.map((r) => r.buttons.length).join(", ")})`,
 );
 await page.screenshot({ path: SHOTS + "E2.1-J-products-cashier.png" });
 log("J — the same table as a cashier: no owner controls, prices and units intact");
