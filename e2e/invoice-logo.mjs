@@ -224,6 +224,24 @@ async function visibleNow(page, ids) {
       out.stickyBar = { top: Math.round(b.top), bottom: Math.round(b.bottom), height: Math.round(b.height) };
     }
 
+    /**
+     * The nearest sticky/fixed ANCESTOR — a structural fact, independent of scroll position.
+     *
+     * 🔴 THIS IS THE CORRECTION. The first version asked `bar.contains(el)`, where `bar` was
+     * whatever sticky element was CURRENTLY anchored to the viewport bottom. A `position: sticky`
+     * element only sticks once its natural position would scroll away; on a short sheet the action
+     * bar sits at its natural place (measured: 589..637 in a 681px viewport) and is therefore not
+     * detected at all. So the check answered "is the bar stuck right now", when what it must
+     * answer is "does this element ride WITH the bar" — which is true whether or not it is stuck.
+     */
+    const stickyAncestor = (el) => {
+      for (let n = el.parentElement; n && n !== document.body; n = n.parentElement) {
+        const cs = getComputedStyle(n);
+        if (cs.position === "sticky" || cs.position === "fixed") return n;
+      }
+      return null;
+    };
+
     for (const id of wanted) {
       const el = document.querySelector(`[data-testid="${id}"]`);
       if (!el) {
@@ -231,9 +249,19 @@ async function visibleNow(page, ids) {
         continue;
       }
       const r = el.getBoundingClientRect();
-      // An element inside the sticky bar is not hidden BY the sticky bar.
-      const insideBar = bar !== null && bar.contains(el);
-      const floor = insideBar ? vh : limit;
+      const anchor = stickyAncestor(el);
+      const insideBar = anchor !== null;
+      if (insideBar && !out.stickyContainer) {
+        const a = anchor.getBoundingClientRect();
+        out.stickyContainer = {
+          top: Math.round(a.top),
+          bottom: Math.round(a.bottom),
+          height: Math.round(a.height),
+          position: getComputedStyle(anchor).position,
+        };
+      }
+      // An element inside the bottom-anchored bar is not hidden BY that bar.
+      const floor = bar !== null && bar.contains(el) ? vh : limit;
       out.elements[id] = {
         present: true,
         top: Math.round(r.top),
@@ -528,7 +556,7 @@ assert(
 );
 assert(
   warnBox.insideStickyBar === true,
-  "and it rides INSIDE the sticky action bar, so scrolling the sheet cannot carry it away",
+  `and it rides INSIDE the sticky action bar (${seenUnscrolled.stickyContainer?.position}), so scrolling the sheet cannot carry it away`,
 );
 assert(warnBox.height > 0 && warnBox.width > 0, `its text really occupies space (${warnBox.width}x${warnBox.height})`);
 
@@ -541,7 +569,7 @@ for (const id of ["save-pdf", "print"]) {
 
 // And the bar must not have swollen to eat the document. Measured, not eyeballed: a feedback row
 // that pushed the sticky bar past a third of the viewport would be obscuring the invoice itself.
-const barHeight = seenUnscrolled.stickyBar?.height ?? 0;
+const barHeight = seenUnscrolled.stickyContainer?.height ?? 0;
 assert(
   barHeight > 0 && barHeight < seenUnscrolled.viewportHeight / 3,
   `the sticky action bar stays compact (${barHeight}px of ${seenUnscrolled.viewportHeight}px viewport)`,
