@@ -240,7 +240,7 @@ async function productRowGeometry(page) {
         buttons: hits,
       };
     });
-  }, cells);
+  }, CELLS);
 }
 
 /** Assert every row reads cleanly AND every control is genuinely clickable. Names the geometry. */
