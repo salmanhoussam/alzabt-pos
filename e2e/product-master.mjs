@@ -1166,6 +1166,18 @@ await page.locator(".dialog .btn.primary.wide").click();
   );
 }
 
+/**
+ * The controlled catalogue this script has built by this point, BY IDENTITY:
+ *   SKU-100         — the photographed, barcoded, online product   (added above, §3)
+ *   SKU-200         — the plain second product, §W's subject        (added above, §3)
+ *   SKU-LONG-9001   — the long Arabic name + long price R1 fixture  (added above, §R1)
+ * Nothing else creates a product in this script and the profile is a fresh temp directory, so this
+ * list is exhaustive rather than a minimum.
+ */
+const FIXTURE_SKUS = ["SKU-100", "SKU-200", "SKU-LONG-9001"];
+/** Filled from the ledger while the app is closed, below. */
+let ledgerSkus = [];
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 6 · A CORRUPT photo must not break the screen
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1188,6 +1200,9 @@ await page.locator(".dialog .btn.primary.wide").click();
     .get();
   assert(image !== undefined, "the photographed product has a stored primary image to corrupt");
   const result = db.prepare("UPDATE catalog_product_images SET bytes = ? WHERE id = ?").run(Buffer.from("not an image"), image.id);
+  // Measured here, with the app closed, so the screen can be compared against something that did
+  // not come from the screen.
+  ledgerSkus = db.prepare("SELECT sku FROM catalog_products").all().map((r) => r.sku).sort();
   db.close();
   assert(result.changes === 1, `the corruption changed exactly one row (changed ${result.changes})`);
   log("corrupted the stored photo behind the application's back:", image.id);
@@ -1197,7 +1212,32 @@ await page.locator(".dialog .btn.primary.wide").click();
 await rows(page).first().waitFor();
 // The checksum guard refuses it, the row falls back to a placeholder, and the LIST STILL WORKS.
 await page.locator('[data-testid="thumb-failed"]').first().waitFor({ timeout: 15000 });
-assert((await rows(page).count()) === 2, "both rows still render with one photo unreadable");
+// 🔴 IDENTITY, NOT A COUNT — and `=== 3` would have been the same mistake with a different digit.
+// The literal `=== 2` was correct until `d3eed98` added SKU-LONG-9001 for R1, and nothing noticed
+// because a number carries no record of WHICH products it was counting. A count cannot tell a
+// missing product from a duplicated one, and it cannot tell either from an unexpected third.
+//
+// So the fixture population is named, and the screen is compared against it AND against the
+// ledger read above — three sources that must agree, rather than one number that must be right.
+const renderedSkus = await page.evaluate(() =>
+  [...document.querySelectorAll('[data-testid="product-row"]')].map((tr) =>
+    (tr.querySelector("td.col-codes bdi")?.textContent ?? "").trim(),
+  ),
+);
+const sortedRendered = [...renderedSkus].sort();
+assert(
+  JSON.stringify(sortedRendered) === JSON.stringify([...FIXTURE_SKUS].sort()),
+  `every fixture product still renders, exactly once each, with one photo unreadable — rendered: ${renderedSkus.join(", ") || "(none)"}`,
+);
+assert(
+  JSON.stringify(sortedRendered) === JSON.stringify(ledgerSkus),
+  `and the screen shows exactly what the ledger holds (screen: ${sortedRendered.join(", ")} · ledger: ${ledgerSkus.join(", ")})`,
+);
+// The corrupt photo is the only casualty: one failed placeholder, and every other row still draws.
+assert(
+  (await page.locator('[data-testid="thumb-failed"]').count()) === 1,
+  "exactly one row falls back to the failed-photo placeholder",
+);
 await page.screenshot({ path: SHOTS + "PM8-corrupt-photo-falls-back.png" });
 log("PM8 — a corrupt photo falls back to the placeholder and breaks nothing");
 
