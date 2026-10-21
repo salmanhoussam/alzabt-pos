@@ -80,9 +80,24 @@ export type DomainErrorCode =
   | "OWNER_SETUP_REQUIRED";
 
 export class DomainError extends Error {
+  /**
+   * An OPTIONAL machine tag naming WHICH refusal this is, for presentation layers that must say
+   * it in another language.
+   *
+   * 🔴 WHY A TAG AND NOT A NEW CODE. Every photo refusal is honestly `INVALID_INPUT` — the file
+   * was not acceptable — and splitting that into six codes would change a domain vocabulary the
+   * UI, the tests and the IPC contract already depend on. But "INVALID_INPUT" alone cannot tell a
+   * merchant whether to pick a smaller file or a different one, and the only thing that knew the
+   * difference was the English sentence. A tag carries the distinction without the prose, so a
+   * translation can be looked up instead of parsed out of a message.
+   *
+   * It is additive and optional: every existing throw site, code, message and behaviour is
+   * unchanged, and a consumer that ignores it sees exactly what it saw before.
+   */
   constructor(
     readonly code: DomainErrorCode,
     message: string,
+    readonly reason?: string,
   ) {
     super(message);
     this.name = "DomainError";

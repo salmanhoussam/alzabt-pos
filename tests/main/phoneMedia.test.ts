@@ -341,6 +341,80 @@ describe("uploading a photo stages it — and changes nothing durable", () => {
   });
 });
 
+/**
+ * R2 · THE REFUSAL THE MERCHANT ACTUALLY RECEIVES, over the real socket.
+ *
+ * 🔴 WHY HERE AND NOT ONLY IN A UNIT TEST. `phoneMediaText.test.ts` proves the mapping; this
+ * proves the WIRE — that the bridge uses it, that the HTTP status and the domain code are the
+ * same ones the form has always acted on, and that no English sentence survives the journey. The
+ * three are separate claims and the middle one is the one a refactor breaks silently.
+ */
+describe("R2 · a refused photo is said in the shop's own language", () => {
+  const LATIN = /[A-Za-z]/;
+  const ARABIC = /[\u0600-\u06ff]/;
+
+  for (const [label, body] of [
+    ["an empty file", Buffer.alloc(0)],
+    ["bytes that were never an image", Buffer.from("not an image")],
+  ] as const) {
+    it(`${label} is refused in Arabic, with the status and code unchanged`, async () => {
+      const f = fixture();
+      try {
+        const dto = await openSession(f);
+        const res = await request(dto.host, dto.port, "POST", `/m/${TOKEN}/photo`, body);
+        const payload = res.json();
+        expect(res.status).toBe(422);
+        expect(payload.ok).toBe(false);
+        // 🔴 THE CODE IS UNTOUCHED. R2 changed what is SAID, never what the form branches on.
+        expect(payload.code).toBe("INVALID_INPUT");
+        const message = String(payload.message);
+        expect(ARABIC.test(message), message).toBe(true);
+        expect(LATIN.test(message), `English reached the phone: ${message}`).toBe(false);
+        // And nothing the terminal knows travels with it.
+        expect(message).not.toContain(TOKEN);
+        expect(message).not.toContain("/");
+        expect(message).not.toContain("\\");
+        expect(countImages(f.h)).toBe(0);
+      } finally {
+        await f.cleanup();
+      }
+    });
+  }
+
+  for (const name of ["sample.webp", "corrupt.jpg"]) {
+    it(`${name} is refused in Arabic too`, async () => {
+      const f = fixture();
+      try {
+        const dto = await openSession(f);
+        const res = await request(dto.host, dto.port, "POST", `/m/${TOKEN}/photo`, readFileSync(join(PHOTOS, name)));
+        const payload = res.json();
+        expect(res.status, name).toBe(422);
+        expect(payload.code).toBe("INVALID_INPUT");
+        const message = String(payload.message);
+        expect(ARABIC.test(message), message).toBe(true);
+        expect(LATIN.test(message), `English reached the phone: ${message}`).toBe(false);
+      } finally {
+        await f.cleanup();
+      }
+    });
+  }
+
+  it("🔴 and a GOOD photo is still accepted, unchanged", async () => {
+    const f = fixture();
+    try {
+      const dto = await openSession(f);
+      const res = await request(dto.host, dto.port, "POST", `/m/${TOKEN}/photo`, readFileSync(join(PHOTOS, "shelf.jpg")));
+      expect(res.status).toBe(200);
+      expect(res.json().ok).toBe(true);
+      expect(f.bridge.hasStagedPhoto()).toBe(true);
+      // Still nothing durable until Save — R2 touched copy, not the contract this rests on.
+      expect(countImages(f.h)).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
+
 describe("staged media never outlives its session", () => {
   for (const [label, end] of [
     ["cancel", (b: PhoneSessionBridge) => b.cancel()],

@@ -84,7 +84,11 @@ const AR = {
   photoUploading: "جارٍ إرسال الصورة…",
   photoReady: "الصورة جاهزة وستُحفظ مع الصنف.",
   photoCurrent: "للصنف صورة حالية. إن لم تلتقط صورة جديدة، تبقى كما هي.",
-  photoHint: "JPEG أو PNG. صور الآيفون بصيغة HEIC لازم تُحفظ JPEG أوّلاً.",
+  // 🔴 WHAT TO DO, NOT WHAT A FORMAT IS. This used to explain iPhone image encoding to a cashier
+  // holding a phone — a sentence nobody can act on while photographing a shelf. The real limit is
+  // unchanged and still enforced by `photoNormalize.ts`; when a picture is refused, the refusal
+  // itself now says what to do next (`phoneMediaText.ts`), which is where that guidance belongs.
+  photoHint: "صورة واضحة للصنف، بإضاءة جيدة.",
   photoRetry: "حاول مرة أخرى",
   // 🔴 ITS OWN SENTENCE, AND IT SAYS THE SAVE IS SAFE. A preview is a courtesy; failing to draw
   // one must never read as "your photo was lost", because at this point the till already has it.

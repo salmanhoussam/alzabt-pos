@@ -276,11 +276,11 @@ export function orientBitmap(
  * 🔴 `isEmpty()` AND BOTH DIMENSIONS. See measurement 2: an undecodable file arrives here as a
  * 0x0 image, not as an exception, so a check that only catches throws catches nothing.
  */
-function decodeOrRefuse(codec: ImageCodec, bytes: Buffer, what: string): DecodedImage {
+function decodeOrRefuse(codec: ImageCodec, bytes: Buffer, what: string, reason: PhotoRefusal): DecodedImage {
   const image = codec.decode(bytes);
   const size = image.isEmpty() ? { width: 0, height: 0 } : image.getSize();
   if (image.isEmpty() || size.width <= 0 || size.height <= 0) {
-    throw new DomainError("INVALID_INPUT", what);
+    throw new DomainError("INVALID_INPUT", what, reason);
   }
   return image;
 }
@@ -297,29 +297,52 @@ function decodeOrRefuse(codec: ImageCodec, bytes: Buffer, what: string): Decoded
  * over the bitmap, and a 1600-edge bitmap is 10 MB where a 12-megapixel one is 48 MB; a 90-degree
  * rotation swaps the edges but cannot change which edge is longer, so the result is identical.
  */
+/**
+ * WHICH refusal a rejected photo is — a machine tag, never shown to anybody.
+ *
+ * 🔴 NO TRANSLATION LIVES IN THIS FILE, and that is the whole point of the tag. This module owns
+ * what a valid photo IS; it does not own what a shop is told about one, which differs by language
+ * and by which screen asked. The English sentences beside each tag stay as the developer-facing
+ * message every log and desktop path already carries; `phoneMediaText.ts` turns the TAG into the
+ * merchant's own language at the boundary that has one.
+ */
+export type PhotoRefusal =
+  | "PHOTO_EMPTY"
+  | "PHOTO_TOO_MANY_BYTES"
+  | "PHOTO_UNSUPPORTED_FORMAT"
+  | "PHOTO_UNREADABLE"
+  | "PHOTO_TOO_MANY_PIXELS"
+  | "PHOTO_PREPARE_FAILED";
+
 export function normalizeProductPhoto(sourceBytes: Buffer, codec: ImageCodec): NormalizedPhoto {
   if (sourceBytes.length === 0) {
-    throw new DomainError("INVALID_INPUT", "That file is empty");
+    throw new DomainError("INVALID_INPUT", "That file is empty", "PHOTO_EMPTY");
   }
   if (sourceBytes.length > MAX_SOURCE_BYTES) {
     throw new DomainError(
       "INVALID_INPUT",
       `Choose an image smaller than ${Math.floor(MAX_SOURCE_BYTES / (1024 * 1024))} MB`,
+      "PHOTO_TOO_MANY_BYTES",
     );
   }
   const sourceMime = sniffImageFormat(sourceBytes);
   if (sourceMime === null) {
     // The message names what WILL work, because the commonest real case is an iPhone's HEIC and
     // "unsupported format" tells the owner nothing they can do about it.
-    throw new DomainError("INVALID_INPUT", "Choose a JPEG or PNG image (an iPhone HEIC photo must be saved as JPEG first)");
+    throw new DomainError(
+      "INVALID_INPUT",
+      "Choose a JPEG or PNG image (an iPhone HEIC photo must be saved as JPEG first)",
+      "PHOTO_UNSUPPORTED_FORMAT",
+    );
   }
 
-  const decoded = decodeOrRefuse(codec, sourceBytes, "That file is not a readable image");
+  const decoded = decodeOrRefuse(codec, sourceBytes, "That file is not a readable image", "PHOTO_UNREADABLE");
   const source = decoded.getSize();
   if (source.width * source.height > MAX_SOURCE_PIXELS) {
     throw new DomainError(
       "INVALID_INPUT",
       `That image is too large (${Math.round((source.width * source.height) / 1_000_000)} megapixels)`,
+      "PHOTO_TOO_MANY_PIXELS",
     );
   }
 
@@ -339,7 +362,7 @@ export function normalizeProductPhoto(sourceBytes: Buffer, codec: ImageCodec): N
       finalImage = codec.fromBitmap(oriented.bytes, { width: oriented.width, height: oriented.height });
     }
     if (finalImage.isEmpty()) {
-      throw new DomainError("INVALID_INPUT", "That photo could not be prepared");
+      throw new DomainError("INVALID_INPUT", "That photo could not be prepared", "PHOTO_PREPARE_FAILED");
     }
     const finalSize = finalImage.getSize();
     const transparent = hasTransparency(finalImage.toBitmap());
@@ -364,7 +387,7 @@ export function normalizeProductPhoto(sourceBytes: Buffer, codec: ImageCodec): N
       attemptEdge = FALLBACK_LONG_EDGE;
       continue;
     }
-    throw new DomainError("INVALID_INPUT", "That image could not be reduced to a reasonable size");
+    throw new DomainError("INVALID_INPUT", "That image could not be reduced to a reasonable size", "PHOTO_PREPARE_FAILED");
   }
 }
 
@@ -399,18 +422,18 @@ function encodeJpegWithinCap(image: DecodedImage): { bytes: Buffer; mime: "image
  */
 export function assertStorable(photo: NormalizedPhoto): NormalizedPhoto {
   if (photo.bytes.length === 0 || photo.bytes.length > MAX_PRODUCT_IMAGE_BYTES) {
-    throw new DomainError("INVALID_INPUT", "That photo could not be prepared");
+    throw new DomainError("INVALID_INPUT", "That photo could not be prepared", "PHOTO_PREPARE_FAILED");
   }
   if (photo.widthPx <= 0 || photo.heightPx <= 0) {
-    throw new DomainError("INVALID_INPUT", "That photo could not be prepared");
+    throw new DomainError("INVALID_INPUT", "That photo could not be prepared", "PHOTO_PREPARE_FAILED");
   }
   if (photo.widthPx > MAX_PRODUCT_IMAGE_EDGE || photo.heightPx > MAX_PRODUCT_IMAGE_EDGE) {
-    throw new DomainError("INVALID_INPUT", "That photo could not be prepared");
+    throw new DomainError("INVALID_INPUT", "That photo could not be prepared", "PHOTO_PREPARE_FAILED");
   }
   if (sniffImageFormat(photo.bytes) !== photo.mime) {
     // The bytes and the declared type must agree, because the declared type is what the renderer
     // will put in a `data:` URL and what slice G will serve.
-    throw new DomainError("INVALID_INPUT", "That photo could not be prepared");
+    throw new DomainError("INVALID_INPUT", "That photo could not be prepared", "PHOTO_PREPARE_FAILED");
   }
   return photo;
 }

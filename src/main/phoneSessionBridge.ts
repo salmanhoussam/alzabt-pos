@@ -15,6 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { DomainError } from "../domain/errors";
+import { phonePhotoRefusalText } from "./phoneMediaText";
 import {
   PHONE_SESSION_TOKEN_BYTES,
   createSession,
@@ -216,7 +217,17 @@ export class PhoneSessionBridge {
                       if (err instanceof DomainError) {
                         // 🔴 THE SESSION AND THE DRAFT SURVIVE. A refused photo costs the photo,
                         // never the form the merchant has been filling in.
-                        return { ok: false as const, code: err.code, message: err.message };
+                        //
+                        // 🔴 AND IT IS SAID IN THE PAGE'S OWN LANGUAGE. `err.message` is English —
+                        // `photoNormalize.ts` writes it for logs and for the desktop — and this
+                        // page is Arabic, so forwarding it verbatim showed a shop
+                        // "Choose a JPEG or PNG image (an iPhone HEIC photo…)" on an Arabic phone.
+                        // The CODE is unchanged, because the form's behaviour is keyed on it.
+                        return {
+                          ok: false as const,
+                          code: err.code,
+                          message: phonePhotoRefusalText(err.reason),
+                        };
                       }
                       this.deps.logger?.error("phone-photo-internal", { error: err });
                       return { ok: false as const, code: "INTERNAL", message: "تعذّرت معالجة الصورة." };
