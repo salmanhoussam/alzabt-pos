@@ -364,9 +364,13 @@ async function assertNoClipping(page, where) {
         // really can scroll that far, which is asserted here, and only if the scroll then actually
         // lands the click, which `revealAction` + a real Playwright click prove below. This branch
         // never excuses a control that is covered WHERE IT SITS: that case is the branch above.
+        // 🔴 THE MESSAGE HAS TO READ TRUE WHEN IT PASSES. `assert` here prints "PASS <message>", so
+        // a message phrased as the failure produces a log line that states the opposite of what
+        // happened — this one printed "…the container CANNOT scroll to it" on every success.
+        // Evidence that contradicts itself is worse than no evidence.
         assert(
           r.scroll !== null && r.scroll.scrollable,
-          `🔴 ${id}: "${b.testid}" sits ${b.needsScroll}px outside the visible table strip and the container CANNOT scroll to it (${JSON.stringify(r.scroll)})`,
+          `${id}: "${b.testid}" sits ${b.needsScroll}px outside the visible strip, and the container CAN scroll to it (${JSON.stringify(r.scroll)})`,
         );
         log(
           `R1 ${id}: "${b.testid}" needs ${b.needsScroll}px of ordinary horizontal scrolling ` +
@@ -1260,8 +1264,22 @@ assert(!/[\u0600-\u06ff]/.test(addLabel), `the screen is really English ("${addL
 // the rows were uneven again in the other language. A layout measured in one direction is measured
 // in one direction.
 const enHeights = await rows(page).evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().height)));
-assert(Math.abs(enHeights[0] - enHeights[1]) <= 2, `English rows are the same height: ${enHeights.join(" vs ")}`);
-assert(enHeights.every((h) => h < 110), `no row-height explosion in English: ${enHeights.join(", ")}`);
+// 🔴 ALL THREE ROWS, AND NOT BY PRETENDING THEY ARE EQUAL. This compared [0] and [1] only, so when
+// the run logged "66 vs 65 vs 89" it reported the two it looked at and said nothing about the
+// third. The long-name product legitimately wraps to more lines and is legitimately taller;
+// forcing equality would be inventing a contract nobody agreed to. What must hold for EVERY row is
+// the long-standing maximum, and that the two comparable rows stay comparable.
+assert(
+  enHeights.length === FIXTURE_SKUS.length,
+  `every fixture row is measured in English (${enHeights.length} of ${FIXTURE_SKUS.length}: ${enHeights.join(", ")})`,
+);
+assert(
+  Math.abs(enHeights[0] - enHeights[1]) <= 2,
+  `the two short-name English rows are the same height: ${enHeights[0]} vs ${enHeights[1]}`,
+);
+assert(enHeights.every((h) => h < 110), `NO row-height explosion in English, long name included: ${enHeights.join(", ")}`);
+// And the taller row is taller because its NAME wraps, not because its price or unit was pushed
+// out of shape — `assertNoClipping` below measures that for all three rows.
 await page.screenshot({ path: SHOTS + "PM9-products-english-ltr.png" });
 const enGeom = await assertNoClipping(page, "English owner");
 log("R1 English owner geometry: " + JSON.stringify(enGeom.map((r) => ({ price: r.priceText, unit: r.unitText, widths: r.widths, buttons: r.buttons.length, strip: r.scroll }))));

@@ -562,7 +562,12 @@ const EN: Dict = {
   "products.exportOnlineIncomplete": "{count} products exported with incomplete online information.",
   // ── Phone entry over the LAN (slice H2) ──────────────────────────────────────────────────────
   "phone.add": "Add Product from Phone",
-  "phone.edit": "Edit on Phone",
+  /* 🔴 SHORT ON PURPOSE, AND MEASURED. The English run measured the actions column at 260px against
+     Arabic's 205px — longer labels, 109px of overflow instead of 37px — which pushed "Edit on Phone"
+     11px outside the visible table strip at the default window, i.e. the shop could not reach it
+     without scrolling. The meaning is not lost: `phone.editHint` below is the button's `title` and
+     still says it in full. */
+  "phone.edit": "Phone Edit",
   "phone.editHint": "Carry on editing this product on a phone",
   "phone.title": "Scan the code with the phone camera",
   "phone.explain": "Open the phone camera and point it at the code. The phone must be on the same shop network. No Internet is needed.",
