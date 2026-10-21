@@ -20,6 +20,30 @@
  * Both now stage a file; this script is the proof that the PRODUCT's path embeds an image.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WHAT PROVES WHAT HERE — because one green run already produced a lying picture.
+ *
+ * Run 39503757417 attempt 2 was 46/46 steps and 1304/1304 tests green, and still shipped
+ * `L3-frozen-logo-missing-warning.png` with no warning in it and `L4-cold-copy-recovery.png`
+ * byte-identical to `L2`. The assertions were true; the screenshots were not evidence. So this
+ * script is explicit about which instrument answers which question:
+ *
+ *   PDF BYTES (embedsImage)      does the printed DOCUMENT carry a raster image?
+ *                                The only thing that can answer it — the renderer never shows the
+ *                                logo, so no screenshot of the app can. Has a NEGATIVE CONTROL in
+ *                                §7: a shop with no logo must produce a PDF with NO image.
+ *   FILESYSTEM (sha of files)    which bytes are on disk, and did a copy carry them?
+ *   LEDGER (SQLite reads)        what the invoice RECORDS — number, total, status, logo_asset —
+ *                                read before and after, so "unchanged" compares two readings.
+ *   DOM (locator counts/text)    is the warning present, and is it not an error?
+ *   SCREENSHOT (shotShowing)     what the OPERATOR can see — and only ever captured through the
+ *                                measured framing helper, which refuses to save a file whose name
+ *                                claims an element that is off-frame or behind the sticky bar.
+ *
+ * A screenshot is therefore used for exactly one claim in this script: that the missing-logo
+ * warning is visible to a person. Everything about the logo itself is proven by bytes.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ *
  * 🔴 Synthetic data only. The two logos are generated here in a few lines of zlib — flat colour
  * rectangles, no shop's mark, nothing from any real business.
  *
@@ -144,6 +168,97 @@ async function launch() {
 const tab = (page, name) => page.locator(`[data-testid="tab-${name}"]`).click();
 const testid = (page, id) => page.locator(`[data-testid="${id}"]`);
 const textOf = async (page, id) => (await testid(page, id).innerText()).trim();
+
+/**
+ * Capture a screenshot that REALLY SHOWS the elements its name claims.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WHY THIS EXISTS HERE. Run 39503757417 attempt 2 was fully green and produced
+ * `L3-frozen-logo-missing-warning.png` — which did NOT contain the warning. The DOM assertion was
+ * true (the text was read from the element), and the picture was still a lie, because
+ * `page.screenshot()` captures the VIEWPORT and the warning was outside it.
+ *
+ * 🔴 AND THE VIEWPORT'S BOTTOM IS NOT THE VISIBLE BOTTOM. `.inv-actions.inv-keep` is
+ * `position: sticky; bottom: 0` with an opaque `background: var(--card)` (src/renderer/styles.css),
+ * so it PAINTS OVER content beneath it: an element can satisfy `bottom <= innerHeight` and still be
+ * invisible to the operator. Its top edge is measured here, never assumed — anything fixed or
+ * sticky anchored to the bottom of the viewport counts, so this keeps working if that bar is
+ * restyled or another one is added. No height is hard-coded, and no blind offset is applied.
+ *
+ * This is the same practice `e2e/phone-entry.mjs` already uses, for the same reason.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function shotShowing(page, ids, name) {
+  const settle = () =>
+    page
+      .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))
+      .catch(() => undefined);
+
+  const boxes = async () => {
+    const out = {};
+    for (const id of ids) out[id] = await testid(page, id).boundingBox();
+    return out;
+  };
+
+  /** The lowest edge an operator can actually see: the viewport, minus any bottom-anchored bar. */
+  const usableBottom = () =>
+    page.evaluate(() => {
+      const vh = window.innerHeight;
+      let top = vh;
+      for (const el of document.body.getElementsByTagName("*")) {
+        const cs = getComputedStyle(el);
+        if (cs.position !== "fixed" && cs.position !== "sticky") continue;
+        if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        if (r.bottom >= vh - 2 && r.top < top) top = r.top;
+      }
+      return top;
+    });
+
+  // Bring the BOTTOM-MOST required element into view — measured from the page, not assumed from
+  // the argument order. Everything above it comes with it.
+  const first = await boxes();
+  const lowest = ids
+    .filter((id) => first[id])
+    .sort((a, b) => first[a].y + first[a].height - (first[b].y + first[b].height))
+    .pop();
+  if (lowest) await testid(page, lowest).scrollIntoViewIfNeeded();
+  await settle();
+
+  // One MEASURED correction if the lowest element still sits under the sticky bar — by exactly the
+  // overlap, never a guess. A page that cannot scroll further fails honestly instead of retrying.
+  let limit = await usableBottom();
+  const afterScroll = await boxes();
+  if (lowest && afterScroll[lowest]) {
+    const overlap = afterScroll[lowest].y + afterScroll[lowest].height - limit;
+    if (overlap > 0) {
+      await page.evaluate((by) => window.scrollBy(0, by), Math.ceil(overlap));
+      await settle();
+      limit = await usableBottom();
+    }
+  }
+
+  const final = await boxes();
+  const off = [];
+  for (const id of ids) {
+    const box = final[id];
+    if (!box || box.width <= 0 || box.height <= 0) off.push(`${id}=absent`);
+    else if (box.y < 0) off.push(`${id}=above-frame(y${Math.round(box.y)})`);
+    else if (box.y + box.height > limit + 1) {
+      // Named distinctly: "below the fold" and "behind the sticky bar" need different fixes.
+      const vh = page.viewportSize()?.height ?? 0;
+      off.push(
+        `${id}=${limit < vh - 1 ? "under-footer" : "below-fold"}(y${Math.round(box.y)} h${Math.round(
+          box.height,
+        )} limit${Math.round(limit)})`,
+      );
+    }
+  }
+  assert(off.length === 0, `🔴 ${name}.png really shows what its name claims (off-frame: ${off.join(", ") || "none"})`);
+  // A composited frame exists by now: two rAFs have passed since the last scroll.
+  await page.screenshot({ path: SHOTS + name + ".png" });
+}
 
 /** Points the NATIVE open dialog at one synthetic file, exactly as the other scripts do. */
 const stubOpen = (app, path) =>
@@ -380,7 +495,38 @@ assert(
   (await testid(page, "sheet-error").count()) === 0,
   "and it is NOT shown as an error — the print succeeded and the figures are intact",
 );
-await page.screenshot({ path: SHOTS + "L3-frozen-logo-missing-warning.png" });
+// 🔴 DISCOVERABILITY, MEASURED BEFORE ANYTHING SCROLLS. Is the warning where the operator is
+// actually looking at the moment it appears? Recorded, never asserted: this is a UX judgement, it
+// must not turn the gate red, and moving where it renders would be product code that an
+// evidence-only change is not authorized to touch. The number below is the finding, not an opinion.
+const seenUnscrolled = await page.evaluate(() => {
+  const el = document.querySelector('[data-testid="sheet-logo-warning"]');
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  const vh = window.innerHeight;
+  let limit = vh;
+  for (const n of document.body.getElementsByTagName("*")) {
+    const cs = getComputedStyle(n);
+    if (cs.position !== "fixed" && cs.position !== "sticky") continue;
+    if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") continue;
+    const b = n.getBoundingClientRect();
+    if (b.width <= 0 || b.height <= 0) continue;
+    if (b.bottom >= vh - 2 && b.top < limit) limit = b.top;
+  }
+  return {
+    top: Math.round(r.y),
+    bottom: Math.round(r.bottom),
+    viewportHeight: vh,
+    visibleBottom: Math.round(limit),
+    visibleWithoutScrolling: r.y >= 0 && r.bottom <= limit + 1,
+  };
+});
+log(`WARNING DISCOVERABILITY (as it appears, unscrolled): ${JSON.stringify(seenUnscrolled)}`);
+
+// The picture must carry the warning AND the control the operator just pressed, so it shows the
+// moment rather than a stripe of text. `save-pdf` lives in the sticky bar, so framing the warning
+// above it is exactly the operator's view.
+await shotShowing(page, ["sheet-logo-warning", "save-pdf"], "L3-frozen-logo-missing-warning");
 
 // The commercial content is unchanged by any of this: same number, same total, still final.
 const afterLost = one("SELECT invoice_number AS n, status AS s, total_minor AS t FROM invoices WHERE status = 'final'");
@@ -444,7 +590,26 @@ assert(
     (await p.locator('[data-testid="sheet-logo-warning"]').count()) === 0,
     "and no missing-asset warning is shown, because nothing is missing",
   );
-  await p.screenshot({ path: SHOTS + "L4-cold-copy-recovery.png" });
+  // 🔴 NO SCREENSHOT HERE, DELIBERATELY — AND THIS IS THE POINT, NOT AN OMISSION.
+  //
+  // `L4-cold-copy-recovery.png` existed in run 39503757417 and was BYTE-IDENTICAL to
+  // `L2-reprint-after-rebrand.png` (both sha256 0374d00e…). It could not be anything else: the
+  // renderer NEVER displays the invoice logo — a search of src/renderer finds no logo rendering
+  // outside the company-profile form — so the invoice sheet looks the same whether the archived
+  // asset is present, missing or recovered. A screenshot of this screen cannot show recovery, and
+  // a file named as though it does is a false witness.
+  //
+  // Manufacturing a visually distinct frame would be worse: it would be a picture arranged to look
+  // like proof. What actually proves this recovery is above and below, and it is stronger:
+  //
+  //   filesystem  the cold copy CARRIES branding/frozen/<sha>.png, and sha(copy) === SHA_ONE
+  //   PDF         the recovered invoice's document EMBEDS a raster image (embedsImage)
+  //   DOM         NO missing-asset warning is present after recovery
+  //   ledger      invoice number and total are unchanged, read before and after
+  //   control     a shop with no logo produces a PDF with NO image, so the image check is real
+  //
+  // That is bytes, a rendered document and durable rows — not pixels of a form that was never
+  // going to differ.
   await a.close();
 }
 
