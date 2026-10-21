@@ -1099,8 +1099,24 @@ await page.locator('[data-testid="cancel-product"]').click();
 }
 
 ({ app, page } = await launch());
-await rows(page).last().locator("button").first().click();
+// 🔴 THE PRODUCT BY NAME, NOT BY POSITION — and this is the SECOND time this exact trap has been
+// paid for in this file. `rows(page).last()` meant SKU-200 only until `d3eed98` appended
+// SKU-LONG-9001 for R1, which sorts last (`ORDER BY source, CAST(source_key AS INTEGER),
+// source_key`). From then on this block opened the long-name fixture, asked it about a retired
+// category it was never given, and the §W assertion below became a question about the wrong
+// product — while the price edit it performs landed on the wrong product too. No run caught it
+// because every run since died earlier at R1. The row's own `product-edit` testid replaces
+// `.locator("button").first()` for the same reason the deactivate testid exists.
+//
+// Scoped to the CODES cell with a word-bounded SKU rather than a bare `hasText`, so neither a
+// longer SKU nor a product whose NAME happens to contain the digits can satisfy it.
+const retiredRow = rows(page).filter({ has: page.locator("td.col-codes", { hasText: /\bSKU-200\b/ }) });
+assert((await retiredRow.count()) === 1, "exactly one row is SKU-200 — the product §W gave the retired category to");
+await retiredRow.locator('[data-testid="product-edit"]').click();
 await page.locator('[data-testid="field-category"]').waitFor();
+// And the form that opened really is that product's, not merely a row that matched.
+const openedName = await page.locator('[data-testid="field-nameAr"]').inputValue();
+assert(openedName === "دهان أبيض", `the Edit form that opened is SKU-200's own ("${openedName}")`);
 const retiredOptions = await page.locator('[data-testid="field-category"] option').allTextContents();
 assert(
   retiredOptions.some((o) => o.includes("متوقّف")),
