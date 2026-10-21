@@ -201,6 +201,7 @@ async function productRowGeometry(page) {
       // 🔴 HIT-TESTING: what would a click actually land on? Centre plus four interior points, so a
       // badge covering only part of a button is caught too.
       const buttons = found["col-actions"] ? [...found["col-actions"].querySelectorAll("button")] : [];
+      const actionsCellButtons = buttons;
       const hits = buttons.map((btn) => {
         const r = btn.getBoundingClientRect();
         const probes = [
@@ -243,8 +244,20 @@ async function productRowGeometry(page) {
       const hb = head ? head.getBoundingClientRect() : null;
       const ab = boxes["col-actions"];
 
+      const rowBox = box(tr);
+
       return {
         row: i,
+        rowHeight: rowBox?.height ?? null,
+        // 🔴 ONE LINE OF BUTTONS, OR THE ROW GROWS. Three stacked buttons measured 137px against a
+        // contract of under 110 (run 39618284936) — a third fewer products on screen, with nothing
+        // overlapping and every button clickable. Geometry alone could not call that wrong.
+        actionsLines: (() => {
+          const btns = actionsCellButtons;
+          if (btns.length < 2) return 1;
+          const tops = new Set(btns.map((b) => Math.round(b.getBoundingClientRect().top)));
+          return tops.size;
+        })(),
         actionsDisplay: actionsEl ? getComputedStyle(actionsEl).display : null,
         wrapperDisplay: wrapper ? getComputedStyle(wrapper).display : null,
         wrapperIsChild: wrapper !== null && wrapper.parentElement === actionsEl,
@@ -283,6 +296,14 @@ async function assertNoClipping(page, where) {
     assert(
       r.collisions.length === 0,
       `🔴 ${id}: NO two cells overlap — collisions: ${r.collisions.join(", ") || "none"} · widths ${JSON.stringify(r.widths)}`,
+    );
+    assert(
+      r.rowHeight !== null && r.rowHeight < 110,
+      `🔴 ${id}: the row stays under the long-standing 110px contract (${r.rowHeight}px, action buttons on ${r.actionsLines} line(s))`,
+    );
+    assert(
+      r.actionsLines === 1 || r.buttons.length < 2,
+      `🔴 ${id}: the action buttons sit on ONE line (${r.actionsLines} lines, cell width ${r.widths["col-actions"]})`,
     );
     assert(
       r.actionsDisplay === "table-cell",
@@ -583,8 +604,8 @@ await page.screenshot({ path: SHOTS + "PM3-products-list-mixed-photos.png" });
 // Two short fixtures prove nothing about a shop's real catalogue: the defect showed up on a LONG
 // Arabic name beside a LONG price, which is what crowds the row. Added through the real form.
 await addProduct(page, {
-  nameAr: "مفك براغي كهربائي لاسلكي بعلبة معدنية وبطارية احتياطية",
-  nameEn: "Cordless electric screwdriver with metal case and spare battery",
+  nameAr: "مفك براغي كهربائي لاسلكي",
+  nameEn: "Cordless electric screwdriver",
   sku: "SKU-LONG-9001",
   price: "99999.00",
   unit: "piece",

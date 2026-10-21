@@ -216,13 +216,14 @@ h1, h2 { margin: 0 0 12px; }
 .small { font-size: var(--text-small); }
 .admin-table td, .admin-table th { vertical-align: top; }
 .admin-table .row-inactive { opacity: 0.55; }
-/* 🔴 `flex-wrap: wrap` IS THE LOAD-BEARING WORD. Without it the three owner buttons are one
-   unbreakable run, so `width: 1%` on the cell ("take your content width") resolves to a very wide
-   cell, and auto table layout pays for it out of the FLEXIBLE columns — price and unit. With
-   `white-space: nowrap` on the price, that squeeze does not wrap, it CLIPS. Allowing the buttons
-   to take a second line costs a few pixels of row height and gives the columns their width back.
-   `nowrap` stays: it keeps each BUTTON's own label on one line. */
-.admin-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+/* 🔴 NOWRAP, AND THE CELL DECIDES ITS OWN WIDTH.
+   `flex-wrap: wrap` was only ever needed to survive a cell that had stopped being a table cell: a
+   collapsed 16px cell could not hold one line of buttons, so they wrapped. With the flex moved to
+   this wrapper the `<td>` is a real cell again, and its intrinsic min-content IS the one-line
+   button run — which the table honours, and `.admin-table-scroll` covers when the window cannot.
+   Wrapping now would only stack three buttons into three rows: measured at 137px per row against a
+   long-standing contract of under 110 (run 39618284936), i.e. a third fewer products on screen. */
+.admin-actions { display: flex; flex-wrap: nowrap; gap: 6px; justify-content: flex-end; white-space: nowrap; }
 
 /* ════════════════════════════════════════════════════════════════════════════════════════════════
    🔴 THE ACTIONS COLUMN IS SHRINK-TO-FIT, AND THIS IS A ROW-HEIGHT FIX, NOT A TIDY-UP.
@@ -245,13 +246,12 @@ h1, h2 { margin: 0 0 12px; }
    Nothing is clipped, hidden or shrunk below a readable size: the labels stay whole and the
    buttons keep `--text-small`, which every other small control on the screen already uses.
    ════════════════════════════════════════════════════════════════════════════════════════════════ */
-/* 🔴 NO MORE `width: 1%`. That meant "shrink to your content", which a `<td>` turned into a flex
-   container could not report — it measured SIXTEEN PIXELS while holding three buttons, and they
-   rendered outside the cell, under the state badges (run 39601171087). The flex now lives on an
-   inner wrapper, so this is an ordinary table cell again and the column algorithm can size it from
-   what is really in it. The floor is the width of the widest single button, so the cell can never
-   collapse; with room it takes its natural one-line width, and without room the wrapper wraps. */
-.admin-table td.col-actions, .admin-table th.col-actions { min-width: 7rem; }
+/* 🔴 NO WIDTH RULE AT ALL ON THE ACTIONS COLUMN, AND THAT IS THE FIX.
+   `width: 1%` collapsed it to 16px while it was a flex container; `min-width: 7rem` then let auto
+   layout settle on 149px, which is narrower than the one-line run and so wrapped the buttons into
+   three rows. Both were me naming a number the content already knows. The cell is a real table
+   cell and its wrapper is `nowrap`, so its min-content is exactly the width those buttons need —
+   in whichever language, with whichever labels. Nothing here to drift out of date. */
 /* 12px -> 10px per side. Three buttons, two sides each, on every row. */
 .admin-actions .btn.small { padding: 0 10px; }
 .product-form { display: flex; flex-direction: column; gap: 10px; min-width: 340px; max-width: 880px; }
