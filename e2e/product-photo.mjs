@@ -259,6 +259,72 @@ await closeForm(page);
 await page.locator('[data-testid="thumb-image"]').first().waitFor({ state: "visible" });
 await shot(page, "F-C-products-list-real-thumbnail");
 
+// ══ R3. THE SAME PHOTO, WHERE THE CASHIER ACTUALLY SELLS ═════════════════════════════════════
+//
+// 🔴 MEASURED, NOT ASSERTED FROM THE DOM ALONE. "A thumbnail exists" is cheap and nearly
+// meaningless: the questions are whether the picture beside a product is THAT product's, whether
+// touching it sells something by accident, and whether a cashier who may view it is thereby able
+// to change it. Each is asked here as the shop would ask it.
+{
+  await page.locator('[data-testid="tab-sell"]').click();
+  await page.locator('[data-testid="sell-thumb"], [data-testid="sell-thumb-empty"]').first().waitFor();
+
+  // A · BOTH STATES ON ONE SCREEN. The photographed product carries an image; the others carry the
+  // placeholder — which is what makes the thumbnail informative rather than decorative.
+  const withPhoto = await page.locator('[data-testid="sell-thumb"]').count();
+  const without = await page.locator('[data-testid="sell-thumb-empty"]').count();
+  check(withPhoto === 1, `exactly one Sell card shows a real photo (got ${withPhoto})`);
+  check(without >= 1, `and at least one shows the placeholder (got ${without})`);
+
+  // 🔴 THE RIGHT PRODUCT. The thumbnail carries the product id it belongs to, and the one showing
+  // a photo must be the product that was photographed — not whichever card sorted first.
+  const owner = await page.locator('[data-testid="sell-thumb"]').first().getAttribute("data-product");
+  check(owner === product.id, `the photo sits on the product that owns it (${owner} vs ${product.id})`);
+  await shot(page, "R3-A-sell-thumbnails");
+
+  // 🔴 AND IT STAYS WITH IT THROUGH A SEARCH. A cache keyed by position rather than identity shows
+  // product B's picture on product A the moment the list is filtered; this is that question.
+  await page.locator('[data-testid="product-search"]').fill(SKU);
+  await page.waitForFunction(() => document.querySelectorAll("button.product").length === 1);
+  const filtered = await page.locator('[data-testid="sell-thumb"]').first().getAttribute("data-product");
+  check(filtered === product.id, `after filtering, the photo still belongs to ${product.id} (got ${filtered})`);
+  await page.locator('[data-testid="product-search"]').fill("");
+  await page.waitForFunction(() => document.querySelectorAll("button.product").length > 1);
+
+  // B · THE PREVIEW OPENS, AND THE CART DOES NOT MOVE. Both halves of the contract in one act.
+  const cartBefore = await page.locator('[data-testid="cart"] .line').count();
+  await page.locator('[data-testid="sell-thumb"]').first().click();
+  await page.locator('[data-testid="sell-photo-preview"]').waitFor({ state: "visible" });
+  const previewed = await page.locator('[data-testid="sell-preview-image"]').evaluate((img) => ({
+    w: img.naturalWidth,
+    h: img.naturalHeight,
+    onScreen: img.getBoundingClientRect().width > 100,
+  }));
+  check(previewed.w === 1600 && previewed.h === 1200, `the preview shows the real stored photo (${previewed.w}x${previewed.h})`);
+  check(previewed.onScreen, "and it is drawn large enough to judge the product by");
+  const cartAfter = await page.locator('[data-testid="cart"] .line').count();
+  check(cartAfter === cartBefore, `🔴 opening the photo added NOTHING to the cart (${cartBefore} -> ${cartAfter})`);
+  await shot(page, "R3-B-sell-photo-preview");
+
+  // It closes, by its own button and by Escape, and selling carries on.
+  await page.locator('[data-testid="sell-photo-close"]').click();
+  await page.locator('[data-testid="sell-photo-preview"]').waitFor({ state: "detached" });
+  await page.locator('[data-testid="sell-thumb"]').first().click();
+  await page.locator('[data-testid="sell-photo-preview"]').waitFor({ state: "visible" });
+  await page.keyboard.press("Escape");
+  await page.locator('[data-testid="sell-photo-preview"]').waitFor({ state: "detached" });
+
+  // 🔴 THE ORDINARY ACT STILL WORKS. A photo that broke adding to the cart would be a worse screen
+  // than one with no photos at all.
+  await page.locator("button.product").first().click();
+  const sold = await page.locator('[data-testid="cart"] .line').count();
+  check(sold === cartBefore + 1, `the card itself still adds to the cart (${cartBefore} -> ${sold})`);
+  await page.locator('[data-testid="clear-cart"]').click();
+  await page.locator('[data-testid="clear-confirm"], .dialog .btn.primary.wide').first().click();
+  await page.locator('[data-testid="tab-products"]').click();
+  await page.locator('[data-testid="product-row"]').first().waitFor();
+}
+
 await app.close();
 
 // ── the stored row, read with the app closed ──────────────────────────────────────────────────

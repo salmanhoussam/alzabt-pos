@@ -145,6 +145,51 @@ h1, h2 { margin: 0 0 12px; }
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; font-size: 16px;
 }
 .product:active { background: var(--bg); }
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   R3 · THE SELL CARD'S PHOTO.
+
+   🔴 A CELL, AND THE PHOTO FLOATS IN ITS CORNER. The card stays one button covering the whole
+   cell — the hand aims at the card, which is what adds to the cart — and the photo sits above it
+   in the corner as a SIBLING. Nesting it inside would be a button inside a button: invalid, and a
+   click that has to be stopped from reaching its parent instead of being unable to.
+
+   🔴 THE CARD GETS ROOM, SO NOTHING IS CLIPPED. Without the padding the name would run under the
+   photo at exactly the width where names get long — the defect R1 spent six gate runs on, in a
+   different table. `padding-inline-end` and not `padding-right`: this screen is read in both
+   directions and the photo is on the opposite side in each.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+.product-cell { position: relative; display: flex; }
+.product-cell > .product { flex: 1; padding-inline-end: 62px; }
+
+.product-thumb {
+  position: absolute;
+  inset-block-start: 10px;
+  inset-inline-end: 10px;
+  inline-size: 44px;
+  block-size: 44px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--space-1);
+  background: var(--surface-sunken);
+  cursor: zoom-in;
+  overflow: hidden;
+}
+.product-thumb > img { inline-size: 100%; block-size: 100%; object-fit: cover; object-position: center; display: block; }
+/* Dashed, exactly as the products table marks "no photo" — one visual vocabulary, two screens. */
+.product-thumb-empty { border-style: dashed; cursor: default; }
+
+/* Letterboxed, for the same reason `.photo-preview` is: this is opened to SEE the product, and a
+   centre-crop would hide the shape of the thing being identified. */
+.sell-preview-image {
+  display: block;
+  inline-size: 100%;
+  max-block-size: 60vh;
+  object-fit: contain;
+  background: var(--surface-sunken);
+  border-radius: var(--space-1);
+  margin-block: var(--space-2);
+}
 .product-name { font-weight: 600; }
 .product-sku { font-size: 13px; }
 .product-price { margin-top: auto; font-size: 18px; font-variant-numeric: tabular-nums; }

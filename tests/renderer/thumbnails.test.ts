@@ -112,6 +112,41 @@ describe("thumbnailsToFetch", () => {
     expect(thumbnailsToFetch([fixed], all(fixed), failed)).toHaveLength(1);
   });
 
+  /**
+   * R3 · THE SELL SCREEN SEARCHES WHILE THE CASHIER TYPES, which is a shape the products table
+   * never had: the visible set changes on every keystroke, over a catalogue of 508 and growing.
+   * These are the three moments that decide whether that costs reads.
+   */
+  describe("R3 · a search that narrows, widens, and narrows again", () => {
+    const a = photographed("a", "img-a", "v1");
+    const b = photographed("b", "img-b", "v1");
+    const c = photographed("c", "img-c", "v1");
+    const products = [a, b, c];
+    const held = (...ids: string[]) =>
+      new Map(ids.map((id) => [id, { kind: "ready", version: "v1", url: `data:image/jpeg;base64,${id}` } as const]));
+
+    it("🔴 typing a filter costs NOTHING for photos already in hand", () => {
+      // The whole grid was fetched; the cashier types and one card remains.
+      expect(thumbnailsToFetch(products, new Set(["b"]), held("a", "b", "c"))).toEqual([]);
+    });
+
+    it("🔴 clearing the search re-renders two held photos and fetches neither", () => {
+      expect(thumbnailsToFetch(products, all(a, b, c), held("a", "b", "c"))).toEqual([]);
+    });
+
+    it("a card the search REVEALS for the first time is fetched once, and alone", () => {
+      const out = thumbnailsToFetch(products, all(a, b, c), held("a", "b"));
+      expect(out).toEqual([{ productId: "c", imageId: "img-c", version: "v1" }]);
+    });
+
+    it("🔴 and a photo replaced on another screen is re-fetched when Sell shows it again", () => {
+      // The owner replaced c's photo in Product Master; the content hash moved with it.
+      const replaced = [a, b, photographed("c", "img-c", "v2")];
+      const out = thumbnailsToFetch(replaced, all(a, b, c), held("a", "b", "c"));
+      expect(out).toEqual([{ productId: "c", imageId: "img-c", version: "v2" }]);
+    });
+  });
+
   it("🔴 a photographed INACTIVE product still gets its thumbnail", () => {
     // Deactivating a product hides it from Sell; it is still on this screen, and still identifiable
     // by its photo. Nothing about `isActive` belongs in a loading decision.

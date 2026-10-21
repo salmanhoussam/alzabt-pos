@@ -387,6 +387,8 @@ const AR: Dict = {
   "login.backspace": "حذف آخر رقم",
   "login.submit": "دخول",
 
+  "sell.photoOpen": "عرض صورة الصنف",
+  "sell.photoNone": "بدون صورة",
   "sell.currentSale": "البيع الحالي",
   "sell.total": "الإجمالي",
   "sell.empty": "اختر صنفاً لإضافته.",
@@ -825,6 +827,8 @@ const EN: Dict = {
   "login.backspace": "Delete last digit",
   "login.submit": "Log in",
 
+  "sell.photoOpen": "View product photo",
+  "sell.photoNone": "No photo",
   "sell.currentSale": "Current sale",
   "sell.total": "Total",
   "sell.empty": "Tap a product to add it.",
