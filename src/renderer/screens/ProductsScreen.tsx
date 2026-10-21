@@ -509,64 +509,72 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
                     </span>
                   )}
                 </td>
-                <td className="admin-actions col-actions">
-                  {/* 🔴 EVERY CONTROL IN THIS CELL ACTS ON A PRODUCT THAT ALREADY EXISTS, so all
-                      three are owner-only — including for a cashier who may CREATE products. The
-                      create capability deliberately stops at the product's first save; editing it,
-                      editing it from a phone and retiring it are administration, and main refuses
-                      all three for a cashier however they are reached. */}
-                  {isOwner && (
-                    <>
-                  {/* A testid because E2E selectors are never visible text — the terminal's
-                      default language is Arabic, and "Edit" is not what this button says. */}
-                  <button
-                    className="btn small"
-                    onClick={() => setEditing({ mode: "edit", product: p })}
-                    data-testid="product-edit"
-                  >
-                    {t("action.edit")}
-                  </button>
-                  {/* 🔴 THE PRODUCT IS NAMED HERE AND NOWHERE ELSE AFTERWARDS. This id goes to
-                      main, which resolves it once and binds the SESSION to it; the phone never
-                      sends a product id and could not change which product it edits if it tried. */}
-                  <button
-                    className="btn small"
-                    onClick={() => void openPhone("EDIT_PRODUCT", p.id)}
-                    disabled={phoneBusy}
-                    title={t("phone.editHint")}
-                    data-testid="product-edit-phone"
-                  >
-                    {t("phone.edit")}
-                  </button>
-                  {/* Deactivating hides a product from sale: ghost-danger, not a twin of Edit.
+                <td className="col-actions">
+                  {/* 🔴 THE FLEX LIVES ON THIS WRAPPER, NOT ON THE CELL. A `<td>` with
+                      `display: flex` leaves the table formatting context, so the column algorithm
+                      can no longer size it from its content — measured at SIXTEEN PIXELS while
+                      holding three buttons (run 39601171087), which then rendered outside their own
+                      cell and under the state badges. The header comment above already warned about
+                      exactly this for the `<th>`; the body cell had been violating it all along. */}
+                  <div className="admin-actions">
+                    {/* 🔴 EVERY CONTROL IN THIS CELL ACTS ON A PRODUCT THAT ALREADY EXISTS, so all
+                        three are owner-only — including for a cashier who may CREATE products. The
+                        create capability deliberately stops at the product's first save; editing it,
+                        editing it from a phone and retiring it are administration, and main refuses
+                        all three for a cashier however they are reached. */}
+                    {isOwner && (
+                      <>
+                    {/* A testid because E2E selectors are never visible text — the terminal's
+                        default language is Arabic, and "Edit" is not what this button says. */}
+                    <button
+                      className="btn small"
+                      onClick={() => setEditing({ mode: "edit", product: p })}
+                      data-testid="product-edit"
+                    >
+                      {t("action.edit")}
+                    </button>
+                    {/* 🔴 THE PRODUCT IS NAMED HERE AND NOWHERE ELSE AFTERWARDS. This id goes to
+                        main, which resolves it once and binds the SESSION to it; the phone never
+                        sends a product id and could not change which product it edits if it tried. */}
+                    <button
+                      className="btn small"
+                      onClick={() => void openPhone("EDIT_PRODUCT", p.id)}
+                      disabled={phoneBusy}
+                      title={t("phone.editHint")}
+                      data-testid="product-edit-phone"
+                    >
+                      {t("phone.edit")}
+                    </button>
+                    {/* Deactivating hides a product from sale: ghost-danger, not a twin of Edit.
 
-                      🔴 THE TESTID IS LOAD-BEARING, ADDED IN H2 AFTER A REAL GATE FAILURE. Two
-                      installed-app scripts selected this button BY POSITION
-                      (`getByRole("button").nth(1)`), because it had no testid to ask for. H2 added
-                      "Continue on Phone" above it, index 1 became that button, and
-                      `product-management.mjs` clicked the phone action and then waited 30s for an
-                      OK dialog that never came. `online-catalog.mjs` held the same selector and
-                      would have broken next; it only escaped because the first failure skipped it.
+                        🔴 THE TESTID IS LOAD-BEARING, ADDED IN H2 AFTER A REAL GATE FAILURE. Two
+                        installed-app scripts selected this button BY POSITION
+                        (`getByRole("button").nth(1)`), because it had no testid to ask for. H2 added
+                        "Continue on Phone" above it, index 1 became that button, and
+                        `product-management.mjs` clicked the phone action and then waited 30s for an
+                        OK dialog that never came. `online-catalog.mjs` held the same selector and
+                        would have broken next; it only escaped because the first failure skipped it.
 
-                      Reordering the new button below this one would have "fixed" it by moving the
-                      same trap one slot along. A name cannot be displaced. */}
-                  <button
-                    className={p.isActive ? "btn danger ghost small" : "btn small"}
-                    data-testid="product-deactivate"
-                    onClick={async () => {
-                      try {
-                        await call(pos().setProductActive({ id: p.id, isActive: !p.isActive }));
-                        setNotice(t(p.isActive ? "msg.deactivated" : "msg.activated"));
-                        await reload();
-                      } catch (e) {
-                        setError(errorText(e));
-                      }
-                    }}
-                  >
-                    {t(p.isActive ? "action.deactivate" : "action.activate")}
-                  </button>
-                    </>
-                  )}
+                        Reordering the new button below this one would have "fixed" it by moving the
+                        same trap one slot along. A name cannot be displaced. */}
+                    <button
+                      className={p.isActive ? "btn danger ghost small" : "btn small"}
+                      data-testid="product-deactivate"
+                      onClick={async () => {
+                        try {
+                          await call(pos().setProductActive({ id: p.id, isActive: !p.isActive }));
+                          setNotice(t(p.isActive ? "msg.deactivated" : "msg.activated"));
+                          await reload();
+                        } catch (e) {
+                          setError(errorText(e));
+                        }
+                      }}
+                    >
+                      {t(p.isActive ? "action.deactivate" : "action.activate")}
+                    </button>
+                      </>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
@@ -1219,34 +1227,42 @@ function CategoryManager(props: {
                     )}
                     {!c.isActive && <span className="badge state">{t("form.categoryRetired")}</span>}
                   </td>
-                  <td className="admin-actions col-actions">
-                    <button
-                      className={c.isActive ? "btn danger ghost small" : "btn small"}
-                      type="button"
-                      disabled={busy}
-                      onClick={() =>
-                        void run(
-                          () => call(pos().setCategoryActive({ categoryId: c.id, isActive: !c.isActive })),
-                          t("cat.renamed"),
-                        )
-                      }
-                    >
-                      {t(c.isActive ? "action.deactivate" : "action.activate")}
-                    </button>
-                    {/* 🔴 Delete is offered, and the service is the authority on whether it may
-                        proceed: a category in use is refused with CATEGORY_IN_USE and the owner is
-                        told to deactivate or move its products. The renderer does not pre-judge it,
-                        because it does not know the count — and guessing would either hide a
-                        legitimate delete or promise one that cannot happen. */}
-                    <button
-                      className="btn danger ghost small"
-                      type="button"
-                      disabled={busy}
-                      onClick={() => void run(() => call(pos().deleteCategory({ categoryId: c.id })), t("cat.deleted"))}
-                      data-testid="cat-delete"
-                    >
-                      {t("action.delete")}
-                    </button>
+                  <td className="col-actions">
+                    {/* 🔴 THE FLEX LIVES ON THIS WRAPPER, NOT ON THE CELL. A `<td>` with
+                        `display: flex` leaves the table formatting context, so the column algorithm
+                        can no longer size it from its content — measured at SIXTEEN PIXELS while
+                        holding three buttons (run 39601171087), which then rendered outside their own
+                        cell and under the state badges. The header comment above already warned about
+                        exactly this for the `<th>`; the body cell had been violating it all along. */}
+                    <div className="admin-actions">
+                      <button
+                        className={c.isActive ? "btn danger ghost small" : "btn small"}
+                        type="button"
+                        disabled={busy}
+                        onClick={() =>
+                          void run(
+                            () => call(pos().setCategoryActive({ categoryId: c.id, isActive: !c.isActive })),
+                            t("cat.renamed"),
+                          )
+                        }
+                      >
+                        {t(c.isActive ? "action.deactivate" : "action.activate")}
+                      </button>
+                      {/* 🔴 Delete is offered, and the service is the authority on whether it may
+                          proceed: a category in use is refused with CATEGORY_IN_USE and the owner is
+                          told to deactivate or move its products. The renderer does not pre-judge it,
+                          because it does not know the count — and guessing would either hide a
+                          legitimate delete or promise one that cannot happen. */}
+                      <button
+                        className="btn danger ghost small"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void run(() => call(pos().deleteCategory({ categoryId: c.id })), t("cat.deleted"))}
+                        data-testid="cat-delete"
+                      >
+                        {t("action.delete")}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

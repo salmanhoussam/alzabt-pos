@@ -245,7 +245,13 @@ h1, h2 { margin: 0 0 12px; }
    Nothing is clipped, hidden or shrunk below a readable size: the labels stay whole and the
    buttons keep `--text-small`, which every other small control on the screen already uses.
    ════════════════════════════════════════════════════════════════════════════════════════════════ */
-.admin-table td.col-actions, .admin-table th.col-actions { width: 1%; }
+/* 🔴 NO MORE `width: 1%`. That meant "shrink to your content", which a `<td>` turned into a flex
+   container could not report — it measured SIXTEEN PIXELS while holding three buttons, and they
+   rendered outside the cell, under the state badges (run 39601171087). The flex now lives on an
+   inner wrapper, so this is an ordinary table cell again and the column algorithm can size it from
+   what is really in it. The floor is the width of the widest single button, so the cell can never
+   collapse; with room it takes its natural one-line width, and without room the wrapper wraps. */
+.admin-table td.col-actions, .admin-table th.col-actions { min-width: 7rem; }
 /* 12px -> 10px per side. Three buttons, two sides each, on every row. */
 .admin-actions .btn.small { padding: 0 10px; }
 .product-form { display: flex; flex-direction: column; gap: 10px; min-width: 340px; max-width: 880px; }
@@ -630,7 +636,11 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
    floors: thumb 52px · name 10rem · price 7rem · unit 6rem · state 6rem  (sku is nowrap, actions
    is content-sized) ≈ 46rem before prose, hence 52rem for the table with room to breathe.
    Below that the container scrolls — the columns never paint over each other again. */
-.admin-table { min-width: 52rem; }
+/* 🔴 NO TABLE-LEVEL min-width ANY MORE. 52rem was a guess at the sum of the columns, and with the
+   action cell restored to a real table cell every column now reports its own min-content — a table
+   cannot shrink below that, so the floor was doing nothing except inviting a future mismatch
+   between a hard-coded total and the columns it was supposed to cover. `.admin-table-scroll`
+   handles a container narrower than the content. */
 /* Prose, and the only truly flexible column — but never narrower than a readable line. */
 .admin-table td.col-name, .admin-table th.col-name { min-width: 10rem; }
 /* Enough for "99999.00 USD" and the review badge beside it, in both writing directions. */

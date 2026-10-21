@@ -219,16 +219,38 @@ async function productRowGeometry(page) {
             blockedBy.push(id ? `${top.tagName.toLowerCase()}[${id}]` : top.tagName.toLowerCase());
           }
         }
+        const cell = boxes["col-actions"];
         return {
           testid: btn.getAttribute("data-testid"),
           box: box(btn),
           clickable: blockedBy.length === 0,
           blockedBy: [...new Set(blockedBy)],
+          // 🔴 B · INSIDE ITS OWN CELL. 16px-wide cell, buttons rendering past it and under the
+          // neighbouring column, is exactly what "no two cells overlap" could not see.
+          insideCell:
+            cell !== null &&
+            r.left >= cell.left - 1 && r.right <= cell.right + 1 &&
+            r.top >= cell.top - 1 && r.bottom <= cell.bottom + 1,
         };
       });
 
+      // 🔴 A · IS THIS STILL A TABLE CELL? The whole defect was a `<td>` turned into a flex
+      // container, which stops the column algorithm sizing it. Read the computed value rather
+      // than trusting the class list.
+      const actionsEl = found["col-actions"];
+      const wrapper = actionsEl?.querySelector(".admin-actions") ?? null;
+      const head = document.querySelector("thead th.col-actions");
+      const hb = head ? head.getBoundingClientRect() : null;
+      const ab = boxes["col-actions"];
+
       return {
         row: i,
+        actionsDisplay: actionsEl ? getComputedStyle(actionsEl).display : null,
+        wrapperDisplay: wrapper ? getComputedStyle(wrapper).display : null,
+        wrapperIsChild: wrapper !== null && wrapper.parentElement === actionsEl,
+        // The header cell and the body cell must describe the SAME column.
+        headerAligned: hb !== null && ab !== null && Math.abs(hb.left - ab.left) <= 2 && Math.abs(hb.right - ab.right) <= 2,
+        headerBox: hb ? { left: Math.round(hb.left), right: Math.round(hb.right) } : null,
         priceText: (priceRun?.textContent ?? "").trim(),
         unitText: (found["col-unit"]?.textContent ?? "").trim(),
         stateText: (found["col-state"]?.textContent ?? "").trim(),
@@ -262,7 +284,23 @@ async function assertNoClipping(page, where) {
       r.collisions.length === 0,
       `🔴 ${id}: NO two cells overlap — collisions: ${r.collisions.join(", ") || "none"} · widths ${JSON.stringify(r.widths)}`,
     );
+    assert(
+      r.actionsDisplay === "table-cell",
+      `🔴 ${id}: the actions cell is still a TABLE CELL, not a flex container (display: ${r.actionsDisplay})`,
+    );
+    if (r.buttons.length > 0) {
+      assert(r.wrapperIsChild === true, `${id}: the flex layout sits on a child wrapper of the cell`);
+      assert(r.wrapperDisplay === "flex", `${id}: and that wrapper is the flex container (display: ${r.wrapperDisplay})`);
+    }
+    assert(
+      r.headerAligned,
+      `${id}: the header and body actions cells describe the same column (head ${JSON.stringify(r.headerBox)} body width ${r.widths["col-actions"]})`,
+    );
     for (const b of r.buttons) {
+      assert(
+        b.insideCell,
+        `🔴 ${id}: "${b.testid}" stays INSIDE its own actions cell — button ${JSON.stringify(b.box)} cell width ${r.widths["col-actions"]}`,
+      );
       assert(
         b.clickable,
         `🔴 ${id}: "${b.testid}" is actually clickable — elementFromPoint hit ${b.blockedBy.join(", ")} instead (box ${JSON.stringify(b.box)})`,
