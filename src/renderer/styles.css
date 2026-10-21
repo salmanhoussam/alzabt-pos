@@ -340,6 +340,13 @@ h1, h2 { margin: 0 0 12px; }
 /* The safe way out stays in view while the panel's own content scrolls past it. */
 .inv-actions.inv-keep { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px;
                         position: sticky; bottom: 0; background: var(--card); }
+/* 🔴 A FULL ROW OF THE WRAPPING BAR, SO IT SITS ABOVE THE BUTTONS AND DISPLACES NONE OF THEM.
+   `flex: 1 0 100%` makes this its own line in `.inv-actions`' wrap; the controls keep the next.
+   It is inside the sticky bar on purpose — measured in the installed app, this feedback used to
+   render at y=709 in a 681px viewport, entirely below the fold. `min-width: 0` and wrapping let a
+   long Arabic sentence break instead of forcing the bar wider than a narrow window. */
+.inv-feedback { flex: 1 0 100%; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.inv-feedback p { margin: 0; overflow-wrap: anywhere; }
 
 .inv-sheet { display: flex; flex-direction: column; gap: 12px; }
 .inv-sheet-head { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: flex-start;

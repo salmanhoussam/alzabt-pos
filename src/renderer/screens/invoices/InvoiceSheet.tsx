@@ -886,23 +886,44 @@ export function InvoiceSheet({
         </div>
       </section>
 
-      {error && <p className="error" data-testid="sheet-error">{error}</p>}
-      {/* 🔴 A WARNING, NOT AN ERROR. The print SUCCEEDED and the invoice's figures are untouched —
-          what is missing is this document's own archived logo, which the application refuses to
-          substitute with the shop's current one. Red-and-bold would say the document failed; it
-          did not. Held in its own state so it never masks a real error, and cleared on the next
-          attempt rather than lingering over a later, correct print. */}
-      {logoWarning && (
-        <p className="small" data-testid="sheet-logo-warning">
-          <span className="badge warn">{t("tools.noticeTag")}</span> {t("inv.sheet.logoMissing")}
-        </p>
-      )}
-
       {/* 🔴 inv-keep: the action bar stays in view while the sheet scrolls past it. The class
           already existed and was used by one screen only; the sheet it was written for did not
           have it. Reused because this sheet scrolls inside the same .content scrollport, not
           because the class happened to exist — verified in the installed-app screenshots. */}
       <div className="inv-actions inv-keep">
+        {/* ════════════════════════════════════════════════════════════════════════════════════
+            🔴 FEEDBACK LIVES WITH THE BUTTONS, BECAUSE THAT IS WHERE THE OPERATOR IS LOOKING.
+
+            Both of these used to render ABOVE this bar, in normal document flow. Measured in the
+            installed Windows app, the missing-logo warning appeared at y=709 in a 681px viewport
+            — ENTIRELY BELOW THE FOLD, 28px past anything the merchant could see. They pressed
+            "حفظ PDF", got a document with no logo, and the sentence explaining why was off-screen
+            with nothing to scroll them to it. The E2E screenshot looked fine because the test
+            scrolled; a merchant gets no such scroll.
+
+            The bar is `position: sticky; bottom: 0`, so anything inside it stays visible while the
+            sheet scrolls. `.inv-feedback` is `flex: 1 0 100%`, which takes a full row of the
+            wrapping flex container and therefore sits ABOVE the buttons without displacing them.
+
+            🔴 TWO STATES, NEVER ONE. A genuine print/save failure and "this document has no
+            archived logo" are different facts: the first means the operator's action did not
+            happen, the second means it happened and the document is honest about what it lacks.
+            They render as separate elements with their own testids, and the error is first — a
+            warning must never stand in for a failure, and a failure must never be dressed as a
+            warning.
+
+            aria-live="polite" on the container announces whichever appears, without interrupting.
+            ════════════════════════════════════════════════════════════════════════════════════ */}
+        {(error || logoWarning) && (
+          <div className="inv-feedback" role="status" aria-live="polite" data-testid="sheet-feedback">
+            {error && <p className="error" data-testid="sheet-error">{error}</p>}
+            {logoWarning && (
+              <p className="small" data-testid="sheet-logo-warning">
+                <span className="badge warn">{t("tools.noticeTag")}</span> {t("inv.sheet.logoMissing")}
+              </p>
+            )}
+          </div>
+        )}
         {!readOnly ? (
           <>
             <button

@@ -36,9 +36,10 @@
  *   LEDGER (SQLite reads)        what the invoice RECORDS — number, total, status, logo_asset —
  *                                read before and after, so "unchanged" compares two readings.
  *   DOM (locator counts/text)    is the warning present, and is it not an error?
- *   SCREENSHOT (shotShowing)     what the OPERATOR can see — and only ever captured through the
- *                                measured framing helper, which refuses to save a file whose name
- *                                claims an element that is off-frame or behind the sticky bar.
+ *   SCREENSHOT (shotVisibleNow)  what the OPERATOR can see — captured only after the required
+ *                                elements are measured as ALREADY visible, with no scrolling:
+ *                                the helper refuses to save a file whose name claims an element the
+ *                                merchant could not see.
  *
  * A screenshot is therefore used for exactly one claim in this script: that the missing-logo
  * warning is visible to a person. Everything about the logo itself is proven by bytes.
@@ -170,94 +171,95 @@ const testid = (page, id) => page.locator(`[data-testid="${id}"]`);
 const textOf = async (page, id) => (await testid(page, id).innerText()).trim();
 
 /**
- * Capture a screenshot that REALLY SHOWS the elements its name claims.
+ * Measure, then capture — and REFUSE to write a file whose name claims something off-screen.
  *
  * ════════════════════════════════════════════════════════════════════════════════════════════════
- * 🔴 WHY THIS EXISTS HERE. Run 39503757417 attempt 2 was fully green and produced
- * `L3-frozen-logo-missing-warning.png` — which did NOT contain the warning. The DOM assertion was
- * true (the text was read from the element), and the picture was still a lie, because
- * `page.screenshot()` captures the VIEWPORT and the warning was outside it.
+ * 🔴 THIS DELIBERATELY DOES NOT SCROLL, AND THAT IS THE WHOLE POINT NOW.
+ *
+ * An earlier version scrolled the required elements into view before capturing. That produced an
+ * honest picture of a thing the MERCHANT COULD NOT SEE: measured in the installed Windows app, the
+ * missing-logo warning sat at y=709 in a 681px viewport — 28px below the fold — and the test
+ * scrolled to it while a real operator got no such scroll. A screenshot arranged by scrolling
+ * proves the file is not lying; it proves nothing about normal use.
+ *
+ * So the contract is now stricter: every required element must ALREADY be visible, exactly as the
+ * operator finds it, or the check fails. The fix belongs in the product, not in the camera.
  *
  * 🔴 AND THE VIEWPORT'S BOTTOM IS NOT THE VISIBLE BOTTOM. `.inv-actions.inv-keep` is
- * `position: sticky; bottom: 0` with an opaque `background: var(--card)` (src/renderer/styles.css),
- * so it PAINTS OVER content beneath it: an element can satisfy `bottom <= innerHeight` and still be
- * invisible to the operator. Its top edge is measured here, never assumed — anything fixed or
- * sticky anchored to the bottom of the viewport counts, so this keeps working if that bar is
- * restyled or another one is added. No height is hard-coded, and no blind offset is applied.
- *
- * This is the same practice `e2e/phone-entry.mjs` already uses, for the same reason.
+ * `position: sticky; bottom: 0` with an opaque `background: var(--card)`, so it PAINTS OVER content
+ * beneath it: an element can satisfy `bottom <= innerHeight` and still be invisible. Any
+ * bottom-anchored fixed/sticky element is measured, never assumed, so this keeps working if that
+ * bar is restyled. An element INSIDE that bar is not occluded by it, which is why `within` is
+ * measured against the bar's own box when the element lives in it.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
-async function shotShowing(page, ids, name) {
-  const settle = () =>
-    page
-      .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))
-      .catch(() => undefined);
+async function visibleNow(page, ids) {
+  // Two animation frames: a composited frame exists before anything is measured or photographed.
+  await page
+    .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))
+    .catch(() => undefined);
 
-  const boxes = async () => {
-    const out = {};
-    for (const id of ids) out[id] = await testid(page, id).boundingBox();
-    return out;
-  };
+  return page.evaluate((wanted) => {
+    const vh = window.innerHeight;
+    const vw = window.innerWidth;
 
-  /** The lowest edge an operator can actually see: the viewport, minus any bottom-anchored bar. */
-  const usableBottom = () =>
-    page.evaluate(() => {
-      const vh = window.innerHeight;
-      let top = vh;
-      for (const el of document.body.getElementsByTagName("*")) {
-        const cs = getComputedStyle(el);
-        if (cs.position !== "fixed" && cs.position !== "sticky") continue;
-        if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") continue;
-        const r = el.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) continue;
-        if (r.bottom >= vh - 2 && r.top < top) top = r.top;
+    // The lowest edge an operator can actually see, and the bar that defines it.
+    let limit = vh;
+    let bar = null;
+    for (const el of document.body.getElementsByTagName("*")) {
+      const cs = getComputedStyle(el);
+      if (cs.position !== "fixed" && cs.position !== "sticky") continue;
+      if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      if (r.bottom >= vh - 2 && r.top < limit) {
+        limit = r.top;
+        bar = el;
       }
-      return top;
-    });
-
-  // Bring the BOTTOM-MOST required element into view — measured from the page, not assumed from
-  // the argument order. Everything above it comes with it.
-  const first = await boxes();
-  const lowest = ids
-    .filter((id) => first[id])
-    .sort((a, b) => first[a].y + first[a].height - (first[b].y + first[b].height))
-    .pop();
-  if (lowest) await testid(page, lowest).scrollIntoViewIfNeeded();
-  await settle();
-
-  // One MEASURED correction if the lowest element still sits under the sticky bar — by exactly the
-  // overlap, never a guess. A page that cannot scroll further fails honestly instead of retrying.
-  let limit = await usableBottom();
-  const afterScroll = await boxes();
-  if (lowest && afterScroll[lowest]) {
-    const overlap = afterScroll[lowest].y + afterScroll[lowest].height - limit;
-    if (overlap > 0) {
-      await page.evaluate((by) => window.scrollBy(0, by), Math.ceil(overlap));
-      await settle();
-      limit = await usableBottom();
     }
-  }
 
-  const final = await boxes();
-  const off = [];
-  for (const id of ids) {
-    const box = final[id];
-    if (!box || box.width <= 0 || box.height <= 0) off.push(`${id}=absent`);
-    else if (box.y < 0) off.push(`${id}=above-frame(y${Math.round(box.y)})`);
-    else if (box.y + box.height > limit + 1) {
-      // Named distinctly: "below the fold" and "behind the sticky bar" need different fixes.
-      const vh = page.viewportSize()?.height ?? 0;
-      off.push(
-        `${id}=${limit < vh - 1 ? "under-footer" : "below-fold"}(y${Math.round(box.y)} h${Math.round(
-          box.height,
-        )} limit${Math.round(limit)})`,
-      );
+    const out = { viewportHeight: vh, viewportWidth: vw, visibleBottom: Math.round(limit), elements: {} };
+    if (bar) {
+      const b = bar.getBoundingClientRect();
+      out.stickyBar = { top: Math.round(b.top), bottom: Math.round(b.bottom), height: Math.round(b.height) };
     }
-  }
-  assert(off.length === 0, `🔴 ${name}.png really shows what its name claims (off-frame: ${off.join(", ") || "none"})`);
-  // A composited frame exists by now: two rAFs have passed since the last scroll.
+
+    for (const id of wanted) {
+      const el = document.querySelector(`[data-testid="${id}"]`);
+      if (!el) {
+        out.elements[id] = { present: false };
+        continue;
+      }
+      const r = el.getBoundingClientRect();
+      // An element inside the sticky bar is not hidden BY the sticky bar.
+      const insideBar = bar !== null && bar.contains(el);
+      const floor = insideBar ? vh : limit;
+      out.elements[id] = {
+        present: true,
+        top: Math.round(r.top),
+        bottom: Math.round(r.bottom),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+        insideStickyBar: insideBar,
+        visible: r.height > 0 && r.width > 0 && r.top >= 0 && r.bottom <= floor + 1 && r.left >= 0 && r.right <= vw + 1,
+      };
+    }
+    return out;
+  }, ids);
+}
+
+/** Assert every id is visible WITHOUT scrolling, then capture. Names the real geometry on failure. */
+async function shotVisibleNow(page, ids, name) {
+  const m = await visibleNow(page, ids);
+  const bad = ids
+    .filter((id) => !m.elements[id]?.visible)
+    .map((id) => `${id}=${JSON.stringify(m.elements[id])}`);
+  assert(
+    bad.length === 0,
+    `🔴 ${name}.png shows what its name claims WITHOUT scrolling (viewport ${m.viewportHeight}, visible bottom ${m.visibleBottom}${bad.length ? ", off-frame: " + bad.join(", ") : ""})`,
+  );
   await page.screenshot({ path: SHOTS + name + ".png" });
+  return m;
 }
 
 /** Points the NATIVE open dialog at one synthetic file, exactly as the other scripts do. */
@@ -436,6 +438,15 @@ await stubSave(app, pdfReprint);
 await testid(page, "save-pdf").click();
 await until(`the reprint at ${pdfReprint}`, () => existsSync(pdfReprint) && statSync(pdfReprint).size > 0);
 assert(embedsImage(pdfReprint), "the reprint still embeds an image after the shop changed its logo");
+// 🔴 THE ORDINARY CASE MUST STAY SILENT. A warning that appears when nothing is wrong teaches the
+// operator to ignore it, which costs more than never showing one. The asset is present here, so
+// the feedback area must be empty — and this is the control that makes the §6b assertion mean
+// something: without it, "the warning appeared" could just be "the warning always appears".
+assert(
+  (await testid(page, "sheet-logo-warning").count()) === 0,
+  "🔴 NO missing-logo warning on a normal successful save — the archived asset is right there",
+);
+assert((await testid(page, "sheet-error").count()) === 0, "and no error either");
 await page.screenshot({ path: SHOTS + "L2-reprint-after-rebrand.png" });
 await app.close();
 
@@ -495,38 +506,88 @@ assert(
   (await testid(page, "sheet-error").count()) === 0,
   "and it is NOT shown as an error — the print succeeded and the figures are intact",
 );
-// 🔴 DISCOVERABILITY, MEASURED BEFORE ANYTHING SCROLLS. Is the warning where the operator is
-// actually looking at the moment it appears? Recorded, never asserted: this is a UX judgement, it
-// must not turn the gate red, and moving where it renders would be product code that an
-// evidence-only change is not authorized to touch. The number below is the finding, not an opinion.
-const seenUnscrolled = await page.evaluate(() => {
-  const el = document.querySelector('[data-testid="sheet-logo-warning"]');
-  if (!el) return null;
-  const r = el.getBoundingClientRect();
-  const vh = window.innerHeight;
-  let limit = vh;
-  for (const n of document.body.getElementsByTagName("*")) {
-    const cs = getComputedStyle(n);
-    if (cs.position !== "fixed" && cs.position !== "sticky") continue;
-    if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") continue;
-    const b = n.getBoundingClientRect();
-    if (b.width <= 0 || b.height <= 0) continue;
-    if (b.bottom >= vh - 2 && b.top < limit) limit = b.top;
-  }
-  return {
-    top: Math.round(r.y),
-    bottom: Math.round(r.bottom),
-    viewportHeight: vh,
-    visibleBottom: Math.round(limit),
-    visibleWithoutScrolling: r.y >= 0 && r.bottom <= limit + 1,
-  };
-});
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🔴 NORMAL-USE DISCOVERABILITY — MEASURED BEFORE ANY TEST-CONTROLLED SCROLL.
+//
+// This is the assertion the previous round did not have, and its absence shipped a green gate over
+// an invisible warning: in run 39567481554 this measured
+//   {"top":709,"bottom":733,"viewportHeight":681,"visibleBottom":681,"visibleWithoutScrolling":false}
+// — the whole element 28px BELOW the fold. The screenshot looked right only because the test
+// scrolled to it. A merchant gets no scroll, so the warning has to be where they already are.
+//
+// Nothing here scrolls. If the warning is not visible exactly as the operator finds it, this FAILS.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const seenUnscrolled = await visibleNow(page, ["sheet-logo-warning", "save-pdf", "print", "sheet-feedback"]);
 log(`WARNING DISCOVERABILITY (as it appears, unscrolled): ${JSON.stringify(seenUnscrolled)}`);
 
-// The picture must carry the warning AND the control the operator just pressed, so it shows the
-// moment rather than a stripe of text. `save-pdf` lives in the sticky bar, so framing the warning
-// above it is exactly the operator's view.
-await shotShowing(page, ["sheet-logo-warning", "save-pdf"], "L3-frozen-logo-missing-warning");
+const warnBox = seenUnscrolled.elements["sheet-logo-warning"];
+assert(warnBox.present === true, "the warning element exists after the save");
+assert(
+  warnBox.visible === true,
+  `🔴 the warning is VISIBLE WITHOUT SCROLLING — top ${warnBox.top}, bottom ${warnBox.bottom}, viewport ${seenUnscrolled.viewportHeight}, visible bottom ${seenUnscrolled.visibleBottom}`,
+);
+assert(
+  warnBox.insideStickyBar === true,
+  "and it rides INSIDE the sticky action bar, so scrolling the sheet cannot carry it away",
+);
+assert(warnBox.height > 0 && warnBox.width > 0, `its text really occupies space (${warnBox.width}x${warnBox.height})`);
+
+// The buttons must still be reachable — feedback that covers the controls would be a worse defect
+// than feedback nobody sees.
+for (const id of ["save-pdf", "print"]) {
+  const b = seenUnscrolled.elements[id];
+  assert(b.present && b.visible, `${id} is still visible and reachable alongside the warning`);
+}
+
+// And the bar must not have swollen to eat the document. Measured, not eyeballed: a feedback row
+// that pushed the sticky bar past a third of the viewport would be obscuring the invoice itself.
+const barHeight = seenUnscrolled.stickyBar?.height ?? 0;
+assert(
+  barHeight > 0 && barHeight < seenUnscrolled.viewportHeight / 3,
+  `the sticky action bar stays compact (${barHeight}px of ${seenUnscrolled.viewportHeight}px viewport)`,
+);
+
+// 🔴 CAPTURED WITHOUT SCROLLING FIRST. shotVisibleNow asserts visibility as found and then shoots;
+// it never moves the page. The file therefore shows the operator's own view, not an arranged one.
+await shotVisibleNow(page, ["sheet-logo-warning", "save-pdf"], "L3-frozen-logo-missing-warning");
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 6b-ii · A GENUINE SAVE FAILURE IS STILL VISIBLE, AND IS NOT DRESSED AS A WARNING
+//
+// Two different facts share one feedback area now, so the risk is that one masks the other. A real
+// failure means the operator's action DID NOT HAPPEN; the logo warning means it did and the
+// document is honest about what it lacks. Reporting the first as the second would be the worst
+// outcome of this change.
+//
+// The failure is induced the way a merchant could really cause one — the save dialog returns a
+// path whose directory does not exist, so the write throws. No production logic is weakened to
+// manufacture it.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const impossible = join(home, "no-such-directory", "nested", "invoice.pdf");
+await stubSave(app, impossible);
+await testid(page, "save-pdf").click();
+await page.waitForSelector('[data-testid="sheet-error"]');
+const errText = await textOf(page, "sheet-error");
+assert(errText.length > 0, `a failed save shows a real error: "${errText}"`);
+assert(!existsSync(impossible), "and no file was written, so the failure is real and not cosmetic");
+
+const seenErr = await visibleNow(page, ["sheet-error", "save-pdf"]);
+log(`ERROR DISCOVERABILITY (unscrolled): ${JSON.stringify(seenErr)}`);
+assert(
+  seenErr.elements["sheet-error"].visible === true,
+  `🔴 the genuine error is VISIBLE WITHOUT SCROLLING — top ${seenErr.elements["sheet-error"].top}, visible bottom ${seenErr.visibleBottom}`,
+);
+assert(
+  seenErr.elements["save-pdf"].present && seenErr.elements["save-pdf"].visible,
+  "and the action button is still reachable so the operator can retry",
+);
+// 🔴 NOT MASKED, AND NOT MASKING. savePdf clears the warning before it runs, so a failure shows the
+// error alone — the previous attempt's warning must not linger and claim this one also printed.
+assert(
+  (await testid(page, "sheet-logo-warning").count()) === 0,
+  "🔴 the stale logo warning is GONE — a failed save is never reported as a document that printed",
+);
+await shotVisibleNow(page, ["sheet-error", "save-pdf"], "L5-save-error-visible");
 
 // The commercial content is unchanged by any of this: same number, same total, still final.
 const afterLost = one("SELECT invoice_number AS n, status AS s, total_minor AS t FROM invoices WHERE status = 'final'");
