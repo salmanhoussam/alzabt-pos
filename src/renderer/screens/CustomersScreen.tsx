@@ -147,10 +147,14 @@ export function CustomersScreen({ operator }: Props) {
                     data-testid="customers-row"
                     data-customer={c.id}
                   >
-                    <span dir="auto">{c.displayName}</span>
+                    {/* Same reason as the detail pane: these are flex ITEMS, so they are block
+                        containers and `dir="auto"` would move them, not just order their text. */}
+                    <span>
+                      <bdi>{c.displayName}</bdi>
+                    </span>
                     {twins.length > 0 && (
-                      <span className="muted small" dir="auto" data-testid="customers-disambiguator">
-                        {disambiguator(c)}
+                      <span className="muted small" data-testid="customers-disambiguator">
+                        <bdi>{disambiguator(c)}</bdi>
                       </span>
                     )}
                     {c.isActive ? null : <span className="badge warn">{t("customers.archived")}</span>}
@@ -207,16 +211,28 @@ export function CustomersScreen({ operator }: Props) {
           </form>
         ) : (
           <div className="customer-detail" data-testid="customers-detail" data-customer={selected.id}>
-            <h2 dir="auto">{selected.displayName}</h2>
+            {/* 🔴 <bdi>, NOT dir="auto". `dir="auto"` sets the ELEMENT's direction from its own
+                first strong character, which also flips where the text sits: an Arabic name on an
+                English terminal jumped to the far side of the pane, and a phone number — digits,
+                so LTR — sat ~600px from its own label on an Arabic one. <bdi> isolates the
+                bidirectional run WITHOUT changing the block's alignment, so the box follows the
+                UI language while the name still renders right-to-left inside it. */}
+            <h2>
+              <bdi>{selected.displayName}</bdi>
+            </h2>
             <dl>
               <dt>{t("customers.phone")}</dt>
-              <dd dir="auto" data-testid="customers-detail-phone">
-                {selected.phone ?? "—"}
+              <dd data-testid="customers-detail-phone">
+                <bdi>{selected.phone ?? "—"}</bdi>
               </dd>
               <dt>{t("customers.address")}</dt>
-              <dd dir="auto">{selected.address ?? "—"}</dd>
+              <dd>
+                <bdi>{selected.address ?? "—"}</bdi>
+              </dd>
               <dt>{t("customers.note")}</dt>
-              <dd dir="auto">{selected.note ?? "—"}</dd>
+              <dd>
+                <bdi>{selected.note ?? "—"}</bdi>
+              </dd>
             </dl>
             {/* 🔴 NO BALANCE LINE. S1B has no financial data to put in one. */}
             {mayMutate ? (

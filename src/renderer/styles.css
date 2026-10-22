@@ -844,9 +844,13 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .customers-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
                      margin-bottom: 10px; }
 .customers-list-pane, .customers-detail-pane { min-width: 0; }
+/* The value column stays 1fr so a long note wraps instead of overflowing; the value hugs its label
+   because the <dd> now inherits the UI direction (see the <bdi> note in CustomersScreen.tsx)
+   rather than taking direction from its own content. */
 .customer-detail dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 12px 0; }
 .customer-detail dt { color: var(--muted); }
-.customer-detail dd { margin: 0; }
+.customer-detail dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.customer-detail h2 { margin: 0; overflow-wrap: anywhere; }
 
 /* The chosen customer beside the cart. A chip, not a total — there is no amount to show. */
 .cart-customer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }

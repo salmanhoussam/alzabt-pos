@@ -107,6 +107,32 @@ try {
   for (const word of ["0.00", "USD", "رصيد", "دين", "Balance"]) {
     assert(!detailText.includes(word), `the detail pane shows no "${word}" — there is no balance to show`);
   }
+  // 🔴 MEASURED, NOT ASSERTED FROM A SELECTOR. The defect the first gate shipped was invisible to
+  // every text assertion: the phone number was present, correct and readable — it just sat ~600px
+  // from its own label, because `dir="auto"` on the <dd> took its direction from the digits inside
+  // it. A selector cannot see WHERE a thing is, so this reads real geometry.
+  const gap = async () =>
+    page.evaluate(() => {
+      const dd = document.querySelector('[data-testid="customers-detail-phone"]');
+      const dt = dd?.previousElementSibling;
+      const value = dd?.querySelector("bdi");
+      if (!dd || !dt || !value) return null;
+      const d = dd.getBoundingClientRect();
+      const t = dt.getBoundingClientRect();
+      const v = value.getBoundingClientRect();
+      return {
+        rtl: getComputedStyle(dd).direction === "rtl",
+        // How far the VALUE's text sits from the LABEL, whichever side the label is on.
+        apart: Math.round(Math.min(Math.abs(v.left - t.right), Math.abs(t.left - v.right))),
+        box: Math.round(d.width),
+      };
+    });
+  {
+    const g = await gap();
+    assert(g !== null, "the phone row, its label and the isolated value are all on screen");
+    assert(g.rtl, `🔴 the value box follows the Arabic UI, not its own digits (direction rtl: ${g.rtl})`);
+    assert(g.apart <= 40, `🔴 the phone sits beside its label, not across the pane (${g.apart}px apart)`);
+  }
   await page.screenshot({ path: SHOTS + "S1B-A2-customer-detail-arabic.png" });
 
   // Found again by searching, and the row carries the durable id.
@@ -120,6 +146,27 @@ try {
   await testid(page, "lang-toggle").click();
   await page.waitForFunction(() => document.documentElement.dir === "ltr", undefined, { timeout: 20000 });
   assert((await page.evaluate(() => document.documentElement.lang)) === "en", "the terminal is in English");
+  // 🔴 AN ARABIC NAME ON AN ENGLISH TERMINAL. It used to jump to the opposite edge of its own pane,
+  // because `dir="auto"` on the <h2> read the Arabic and flipped the whole heading. <bdi> isolates
+  // the name instead, so the heading follows the English layout and the name still reads RTL.
+  {
+    const head = await page.evaluate(() => {
+      const h2 = document.querySelector('[data-testid="customers-detail"] h2');
+      const name = h2?.querySelector("bdi");
+      const dl = document.querySelector('[data-testid="customers-detail"] dl');
+      if (!h2 || !name || !dl) return null;
+      return {
+        dir: getComputedStyle(h2).direction,
+        // Distance between where the NAME starts and where the fields below it start.
+        offset: Math.round(Math.abs(name.getBoundingClientRect().left - dl.getBoundingClientRect().left)),
+        text: name.textContent,
+      };
+    });
+    assert(head !== null, "the heading, its isolated name and the field list are all on screen");
+    assert(head.text === "أبو خالد التجاري", `the heading really carries the Arabic name ("${head.text}")`);
+    assert(head.dir === "ltr", `🔴 the heading follows the English UI, not the Arabic name (${head.dir})`);
+    assert(head.offset <= 40, `🔴 and it starts on the same side as its own fields (${head.offset}px off)`);
+  }
   await page.screenshot({ path: SHOTS + "S1B-A3-customers-english-ltr.png" });
   await testid(page, "lang-toggle").click();
   await page.waitForFunction(() => document.documentElement.dir === "rtl", undefined, { timeout: 20000 });
@@ -196,6 +243,13 @@ try {
     (await testid(page, "sell-customer-not-attached").count()) === 1,
     "🔴 and the screen SAYS it is not attached to the sale and records no debt",
   );
+  // 🔴 THE BUTTON SAYS WHAT IT DOES. It used to borrow «تعديل» from the record-editing action,
+  // which a cashier may never perform — so the one control a cashier DOES have was labelled with
+  // the one thing they cannot do. It reopens the picker, so it says «تغيير الزبون».
+  {
+    const label = (await testid(page, "sell-choose-customer").innerText()).trim();
+    assert(label === "تغيير الزبون", `🔴 the Sell button reads «تغيير الزبون», not «تعديل» (got "${label}")`);
+  }
   await page.screenshot({ path: SHOTS + "S1B-C2-cart-after-customer-created.png" });
 
   // 🔴 AND THE MONEY IS UNCHANGED, which is the assertion that actually matters to a merchant.

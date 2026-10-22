@@ -196,11 +196,13 @@ export function CustomerFinder({ onPick, onClose }: Props) {
                         data-testid="customer-row"
                         data-customer={c.id}
                       >
-                        <span dir="auto">{c.displayName}</span>
+                        <span>
+                          <bdi>{c.displayName}</bdi>
+                        </span>
                         {/* Shown only when it is needed to tell two same-named people apart. */}
                         {twins.length > 0 && (
-                          <span className="muted small" dir="auto" data-testid="customer-disambiguator">
-                            {disambiguator(c)}
+                          <span className="muted small" data-testid="customer-disambiguator">
+                            <bdi>{disambiguator(c)}</bdi>
                           </span>
                         )}
                       </button>

@@ -451,6 +451,10 @@ const AR: Dict = {
   "customers.notOnSaleYet": "اختيار الزبون للتذكير فقط — لا يُسجّل ديناً ولا يُربط بالفاتورة بعد.",
   "sell.customer": "الزبون",
   "sell.chooseCustomer": "اختر زبوناً",
+  // 🔴 ITS OWN KEY, NOT `customers.edit`. This button reopens the PICKER; it edits no record, and
+  // a cashier — who may never edit a customer — sees it. Borrowing the edit label said the
+  // opposite of what the button does. See rules/text-context-rule.md rule 2.
+  "sell.changeCustomer": "تغيير الزبون",
   "sell.clearCustomer": "بدون زبون",
   "outcome.internal": "حدث خطأ غير متوقّع. حاول مرّة أخرى، وإذا تكرّر الأمر فاتّصل بالدعم.",
   "outcome.saleNotRecorded": "حدث خطأ غير متوقّع — لم تُسجَّل الفاتورة.",
@@ -954,6 +958,7 @@ const EN: Dict = {
   "customers.notOnSaleYet": "Choosing a customer is a reminder only \u2014 it records no debt and is not linked to the sale yet.",
   "sell.customer": "Customer",
   "sell.chooseCustomer": "Choose a customer",
+  "sell.changeCustomer": "Change customer",
   "sell.clearCustomer": "No customer",
   "outcome.internal": "Unexpected error. Please try again; if it keeps happening, contact support.",
   "outcome.saleNotRecorded": "Unexpected error \u2014 the sale was not recorded.",

@@ -389,12 +389,12 @@ export function SellScreen() {
             onClick={() => setFindingCustomer(true)}
             data-testid="sell-choose-customer"
           >
-            {customer === null ? t("sell.chooseCustomer") : t("customers.edit")}
+            {customer === null ? t("sell.chooseCustomer") : t("sell.changeCustomer")}
           </button>
           {customer !== null && (
             <>
-              <span className="customer-chip" dir="auto" data-testid="sell-customer" data-customer={customer.id}>
-                {customer.displayName}
+              <span className="customer-chip" data-testid="sell-customer" data-customer={customer.id}>
+                <bdi>{customer.displayName}</bdi>
               </span>
               <button className="btn ghost small" onClick={() => setCustomer(null)} data-testid="sell-clear-customer">
                 {t("sell.clearCustomer")}
