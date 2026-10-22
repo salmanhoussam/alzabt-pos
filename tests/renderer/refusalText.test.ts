@@ -19,8 +19,8 @@
  * is preserved and is still asserted — through `errorText(err, "en")`.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
-import { readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ApiError, errorText } from "../../src/renderer/api";
 import { DomainError } from "../../src/domain/errors";
@@ -51,7 +51,35 @@ const DELIBERATELY_EXCLUDED: readonly string[] = [
   "UNSUPPORTED_UNIT", // carries the unit
 ];
 
-const srcFiles = execSync("find src -name '*.ts' -o -name '*.tsx'", { encoding: "utf8" }).trim().split("\n");
+/**
+ * Every TypeScript source file under `src/`, found with Node's own filesystem APIs.
+ *
+ * 🔴 IT USED TO SHELL OUT TO `find`, AND THAT MADE THE WHOLE FILE A NO-OP ON WINDOWS. On Windows
+ * `find` resolves to `C:\Windows\System32\find.exe`, a different program that searches for text
+ * INSIDE files, so it exited 2 with "File not found - '*.ts'", the module failed to LOAD, and none
+ * of this file's assertions ran at all — while the local Linux run passed and looked like proof.
+ * Windows run 39806703245 is where that showed up. A check that cannot run on the platform that
+ * ships is not a check, so the shell is gone rather than special-cased.
+ *
+ * Deliberately narrow and deliberately loud:
+ *   · it starts at `src` and recurses only into real directories, so nothing outside the product
+ *     tree is read and a symlink cannot walk it somewhere else;
+ *   · entries are sorted, so the file order — and therefore any failure message listing offenders —
+ *     is identical on every machine and every run;
+ *   · `readFileSync` is NOT wrapped in try/catch. A source file that cannot be read must fail this
+ *     test loudly, because silently skipping it would silently shrink the audit.
+ */
+function sourceFilesUnder(dir: string): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...sourceFilesUnder(full));
+    else if (entry.isFile() && (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx"))) found.push(full);
+  }
+  return found;
+}
+
+const srcFiles = sourceFilesUnder("src");
 const sources = srcFiles.map((f) => ({ f, text: readFileSync(f, "utf8") }));
 
 /** Every `new DomainError("CODE", <arg>)` for one code, with the raw second argument. */
@@ -226,6 +254,38 @@ describe("the Arabic refusal map", () => {
   });
 
   // ── The eligibility rule, re-derived from src/ on every run ─────────────────────────────────
+  it("🔴 the source enumeration really found the product — this audit cannot pass on an empty walk", () => {
+    // 🔴 WITHOUT THIS, THE TWO CRITERION TESTS BELOW WOULD PASS VACUOUSLY. Both collect `offenders`
+    // and assert the list is empty, so a traversal that returned NOTHING would make them green
+    // while proving nothing at all — which is precisely the shape of the Windows defect this
+    // correction fixes. So the walk's own output is asserted first.
+    expect(srcFiles.length).toBeGreaterThan(50);
+    expect(sources.length).toBe(srcFiles.length);
+    // Both extensions, found by the walk rather than assumed.
+    expect(srcFiles.some((f) => f.endsWith(".ts"))).toBe(true);
+    expect(srcFiles.some((f) => f.endsWith(".tsx"))).toBe(true);
+    // Files it must contain, named individually — each one holds throws this audit depends on.
+    // `join` so the assertion is true with either path separator.
+    for (const expected of [
+      join("src", "renderer", "api.ts"),
+      join("src", "renderer", "refusalText.ts"),
+      join("src", "application", "posService.ts"),
+      join("src", "application", "invoiceService.ts"),
+      join("src", "application", "operatorService.ts"),
+      join("src", "domain", "cart.ts"),
+      join("src", "domain", "errors.ts"),
+      join("src", "main", "ipcHandlers.ts"),
+      join("src", "renderer", "screens", "SellScreen.tsx"),
+    ]) {
+      expect(srcFiles, `${expected} was not enumerated`).toContain(expected);
+    }
+    // Nothing outside the product tree, and nothing read twice.
+    for (const f of srcFiles) expect(f.startsWith(`src${sep}`), `${f} is outside src/`).toBe(true);
+    expect(new Set(srcFiles).size).toBe(srcFiles.length);
+    // Every file really was read — an unreadable one would have thrown at module load, not here.
+    for (const { f, text } of sources) expect(typeof text, f).toBe("string");
+  });
+
   it("🔴 every mapped code is really thrown in the product — a typo would never fire", () => {
     for (const code of MAPPED_CODES) {
       expect(throwSites(code).length, `${code} is mapped but thrown nowhere`).toBeGreaterThan(0);
