@@ -86,8 +86,19 @@ try {
   // A · An owner creates a customer and finds it again
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   await tab(page, "customers");
-  await testid(page, "customers-search").waitFor({ timeout: 30000 });
-  assert((await testid(page, "customers-empty").count()) === 1, "a new shop's directory is empty, and says so");
+  // 🔴 WAIT ON THE SETTLED STATE, NOT ON THE TOOLBAR. `customers-search` lives above the list and
+  // renders unconditionally, so waiting for it is satisfied while `rows` is still null — and gate
+  // 39835438707 failed exactly there, 0.2s after sign-in, counting `customers-empty` while
+  // `customers-loading` was on screen. `customers-empty` renders ONLY when the query has returned
+  // and returned nothing (CustomersScreen.tsx: `rows === null ? loading : rows.length === 0 ?
+  // empty : list`), so its visibility is proof the directory settled. A populated directory never
+  // satisfies it and this times out rather than passing.
+  await testid(page, "customers-empty").waitFor({ state: "visible", timeout: 30000 });
+  assert((await testid(page, "customers-list").count()) === 0, "a new shop's directory holds no customer rows");
+  assert(
+    (await testid(page, "customers-empty").innerText()).trim() === "لا زبائن بعد.",
+    "🔴 and it says the directory is EMPTY, not that a search matched nothing",
+  );
   await page.screenshot({ path: SHOTS + "S1B-A1-customers-empty-arabic.png" });
 
   await testid(page, "customers-add").click();
