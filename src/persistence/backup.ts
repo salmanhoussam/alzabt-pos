@@ -80,6 +80,15 @@ export const COUNTED_TABLES = [
   // what caught this addition, exactly as it caught migration 8's and migration 9's.
   "parties",
   "party_contact_history",
+  // Migration 13 — the money itself. 🔴 THESE TWO ARE THE MOST EXPENSIVE OMISSION ON THIS LIST. A
+  // snapshot that lost `obligations` restores a shop that has forgotten who owes it money, and a
+  // snapshot that lost `settlements` is worse than that: every debt comes back at its FULL
+  // original amount, so a customer who has already paid is asked to pay again, with the shop's own
+  // books as the evidence against them. Neither loss would show anywhere — the balance is derived,
+  // so missing settlement rows read as "never paid" rather than as an error. That is precisely the
+  // silent-verification gap this list exists to close.
+  "obligations",
+  "settlements",
   "schema_migrations",
 ] as const;
 const DAILY_RE = /^daily-(\d{4}-\d{2}-\d{2})\.sqlite$/;

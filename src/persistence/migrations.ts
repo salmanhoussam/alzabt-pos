@@ -1503,4 +1503,158 @@ CREATE TRIGGER party_contact_history_immutable_delete BEFORE DELETE ON party_con
 BEGIN SELECT RAISE(ABORT, 'parties: contact history cannot be deleted'); END;
 `,
   },
+  {
+    version: 13,
+    name: "obligations_and_settlements",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 13 — WHAT is owed, and WHAT has actually been paid against it.
+    //
+    // Purely ADDITIVE: two new tables, one unique index on an existing table, their own indexes and
+    // their triggers. Migrations 1-12 are not touched, no existing table is rebuilt, no existing
+    // column changes, and nothing in `sales`, `sale_lines`, `invoices` or `voids` is read, written
+    // or re-interpreted by anything here.
+    //
+    // 🔴 THIS IS THE SCHEMA MIGRATION 7 PROMISED. Its own comment said: "no accounts receivable,
+    // no credit note. `sales` stays immutable by trigger, so a balance recorded here can never be
+    // 'collected' later by an UPDATE — collecting payment is a future feature with its own schema,
+    // not a side effect of this one." This is that schema. `sales.paid_minor` and
+    // `sales.balance_due_minor` remain exactly what migration 7 called them: truthful fields ON
+    // THE DOCUMENT describing the moment of sale. Nothing here updates them, ever.
+    //
+    // ── THE DOUBLE-POSTING QUESTION, ANSWERED STRUCTURALLY ──────────────────────────────────────
+    //
+    // A finalized invoice and its sale must never produce two obligations for the same money. They
+    // cannot, and not because a service remembers to check:
+    //
+    //   1. `sales.invoice_id` has been UNIQUE since migration 7, so an invoice has AT MOST ONE
+    //      sale. A second sale for one invoice is already impossible at the database level.
+    //   2. An obligation names its source as (source_kind, source_ref), and that pair is UNIQUE
+    //      here. For a sale-sourced obligation `source_ref` IS the sale id, enforced by CHECK.
+    //
+    // So the chain invoice -> sale -> obligation is 1:1:1 the whole way down. The obligation is
+    // keyed to the SALE and never to the invoice, which is also why a DRAFT invoice cannot create
+    // a debt: a draft has no sale, so it has nothing to be keyed to. Selecting a customer at the
+    // till creates no row here either — there is no sale yet, and S1B writes nothing financial.
+    //
+    // ── CURRENCY: SEPARATED, NEVER CONVERTED ────────────────────────────────────────────────────
+    //
+    // `src/domain/money.ts` has refused to add or subtract across currencies since migration 1
+    // (`MIXED_CURRENCY`), and no exchange rate exists anywhere in this product. That refusal is
+    // carried into the ledger STRUCTURALLY rather than restated in a service: `obligations` is
+    // UNIQUE (id, currency) and `settlements` names a composite foreign key (obligation_id,
+    // currency) against it. A settlement in a different currency from its obligation cannot be
+    // inserted at all. A balance is therefore always a balance IN ONE CURRENCY, and a party who
+    // owes both USD and LBP has two obligations and two balances — never one blended number.
+    // Nothing here decides an exchange-rate policy, because nothing here needs one.
+    //
+    // ── THE BALANCE IS CALCULATED, NOT STORED ───────────────────────────────────────────────────
+    //
+    // There is deliberately NO `balance_minor`, no `paid_minor` and no `status` column on
+    // `obligations`. The outstanding amount is `amount_minor - sum(settlements.amount_minor)` and
+    // is computed on read. A stored balance is a second authoritative copy of the truth, and the
+    // first time it disagreed with the settlement rows nobody could say which was right. The cost
+    // is a SUM over a small, indexed set; the benefit is that the arithmetic cannot drift.
+    //
+    // ── WHAT IS DELIBERATELY ABSENT ─────────────────────────────────────────────────────────────
+    //
+    // No reversals, no adjustments, no credit notes, no write-offs, no opening balances, no credit
+    // limits, no ageing buckets, no interest, no `whish` payment method, and no link from a live
+    // POS checkout. Each is a real decision with its own authorization, and a column added "while
+    // we are here" would pre-decide it. `settlements.method` reuses migration 1's four values
+    // unchanged — `cash`, `card`, `external`, `other` — so no historical payment value is
+    // reinterpreted and no new tender is smuggled in.
+    sql: `
+-- ── the composite key the ledger hangs on ─────────────────────────────────────────────────────
+-- parties.id is already the PRIMARY KEY, so this index adds no new uniqueness; what it adds is a
+-- PARENT KEY that a composite foreign key can name. It is what makes "a payable always points at
+-- a supplier" a database guarantee instead of a service convention. Additive: an index on an
+-- existing table changes no row and no column.
+CREATE UNIQUE INDEX parties_id_kind ON parties (id, kind);
+
+-- ── obligations ───────────────────────────────────────────────────────────────────────────────
+CREATE TABLE obligations (
+  id            TEXT    PRIMARY KEY,
+  party_id      TEXT    NOT NULL,
+  -- Denormalised ONLY so the composite foreign key below can exist. It is not a second source of
+  -- truth: the FK makes it impossible for this to disagree with parties.kind.
+  party_kind    TEXT    NOT NULL CHECK (party_kind IN ('customer', 'supplier')),
+  -- Which way the money flows. 'receivable' = the customer owes the shop; 'payable' = the shop
+  -- owes the supplier. Never inferred from the sign of an amount: every amount here is positive.
+  direction     TEXT    NOT NULL CHECK (direction IN ('receivable', 'payable')),
+  -- WHERE the debt came from. 'sale' is a completed sale in this ledger and carries a real foreign
+  -- key. 'manual' is a debt the owner entered from a document that lives outside this app (a
+  -- supplier's paper bill), and its source_ref is that document's own reference.
+  source_kind   TEXT    NOT NULL CHECK (source_kind IN ('sale', 'manual')),
+  source_ref    TEXT    NOT NULL CHECK (length(trim(source_ref)) > 0),
+  sale_id       TEXT    REFERENCES sales (id),
+  currency      TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  -- STRICTLY POSITIVE. A zero obligation is not a debt and a negative one is a reversal, which is
+  -- a separate, unbuilt feature. The upper bound is migration 4's MAX_MINOR, unchanged.
+  amount_minor  INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  posted_by     TEXT    NOT NULL REFERENCES operators (id),
+  posted_at     TEXT    NOT NULL CHECK (posted_at GLOB
+                  '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  -- 🔴 A PAYABLE CAN NEVER POINT AT A CUSTOMER, AND A RECEIVABLE CAN NEVER POINT AT A SUPPLIER.
+  FOREIGN KEY (party_id, party_kind) REFERENCES parties (id, kind),
+  CHECK ((direction = 'receivable' AND party_kind = 'customer')
+      OR (direction = 'payable'    AND party_kind = 'supplier')),
+  -- 🔴 NO DOUBLE POSTING. One source, one obligation, forever.
+  UNIQUE (source_kind, source_ref),
+  -- The sale link exists exactly when the source is a sale, in both directions, and the source
+  -- reference IS the sale id rather than a copy that could drift from it.
+  CHECK ((source_kind = 'sale'   AND sale_id IS NOT NULL AND source_ref = sale_id)
+      OR (source_kind = 'manual' AND sale_id IS NULL)),
+  -- The parent key for settlements.currency. See the currency note above.
+  UNIQUE (id, currency)
+) STRICT;
+
+CREATE INDEX obligations_party     ON obligations (party_id, posted_at);
+CREATE INDEX obligations_direction ON obligations (direction, currency, posted_at);
+
+CREATE TRIGGER obligations_immutable_update BEFORE UPDATE ON obligations
+BEGIN SELECT RAISE(ABORT, 'ledger: a posted obligation is immutable'); END;
+CREATE TRIGGER obligations_immutable_delete BEFORE DELETE ON obligations
+BEGIN SELECT RAISE(ABORT, 'ledger: a posted obligation cannot be deleted'); END;
+
+-- ── settlements ───────────────────────────────────────────────────────────────────────────────
+CREATE TABLE settlements (
+  id                  TEXT    PRIMARY KEY,
+  obligation_id       TEXT    NOT NULL,
+  -- Carried so the composite foreign key can pin it to the obligation's own currency.
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  -- 🔴 RETRY SAFETY, the same two-part shape migration 7 uses for sales. The key makes a repeat
+  -- submission recognisable BEFORE it is attempted; the fingerprint makes a key reused for
+  -- DIFFERENT money a loud refusal instead of a silent second payment.
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  amount_minor        INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  -- Migration 1's four values, unchanged. No 'whish', no 'credit' — 'credit' is a STATE, never a
+  -- method, exactly as migration 7 wrote it.
+  method              TEXT    NOT NULL CHECK (method IN ('cash', 'card', 'external', 'other')),
+  settled_by          TEXT    NOT NULL REFERENCES operators (id),
+  settled_at          TEXT    NOT NULL CHECK (settled_at GLOB
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  -- 🔴 ONE CURRENCY, STRUCTURALLY. A settlement in another currency cannot be inserted.
+  FOREIGN KEY (obligation_id, currency) REFERENCES obligations (id, currency)
+) STRICT;
+
+CREATE INDEX settlements_obligation ON settlements (obligation_id, settled_at);
+
+-- 🔴 OVERPAYMENT IS REFUSED BY THE DATABASE, not only by the service. A SUM cannot live in a CHECK
+-- constraint, so this is the one rule that has to be a trigger. It fires on the row being inserted,
+-- inside the same transaction, so a concurrent second payment cannot slip past a service-side read.
+CREATE TRIGGER settlements_no_overpayment BEFORE INSERT ON settlements
+WHEN NEW.amount_minor
+     + coalesce((SELECT sum(amount_minor) FROM settlements WHERE obligation_id = NEW.obligation_id), 0)
+     > (SELECT amount_minor FROM obligations WHERE id = NEW.obligation_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a settlement cannot exceed what is owed'); END;
+
+CREATE TRIGGER settlements_immutable_update BEFORE UPDATE ON settlements
+BEGIN SELECT RAISE(ABORT, 'ledger: a recorded settlement is immutable'); END;
+CREATE TRIGGER settlements_immutable_delete BEFORE DELETE ON settlements
+BEGIN SELECT RAISE(ABORT, 'ledger: a recorded settlement cannot be deleted'); END;
+`,
+  },
 ];

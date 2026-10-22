@@ -73,6 +73,10 @@ describe("schema is unchanged by this feature", () => {
       // check by checksum rather than by this list.
       [11, "operator_product_create_capability"],
       [12, "party_identity"],
+      // 🔴 TRANSITION — migration 13 added `obligations` and `settlements`, the first tables in
+      // this product that hold a debt. Purely additive: migrations 1-12 are byte-identical after
+      // it, which the per-migration tests check by checksum rather than by this list.
+      [13, "obligations_and_settlements"],
     ]);
   });
 
