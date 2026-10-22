@@ -71,6 +71,15 @@ export const COUNTED_TABLES = [
   "invoices",
   "invoice_lines",
   "invoice_reconciliation",
+  // Migration 12 — the party directory. 🔴 BOTH ARE DURABLE AND BOTH WOULD HAVE BEEN SILENTLY
+  // UNVERIFIED. A snapshot that lost `parties` restores a shop whose customers and suppliers are
+  // gone while the backup still verified as good — and once a later slice links obligations to
+  // these ids, the restored ledger would hold money owed by nobody. `party_contact_history` is the
+  // append-only record of every corrected phone number, so losing it loses the answer to "what
+  // number did we have in March" with no trace that anything was lost. The backup contract test is
+  // what caught this addition, exactly as it caught migration 8's and migration 9's.
+  "parties",
+  "party_contact_history",
   "schema_migrations",
 ] as const;
 const DAILY_RE = /^daily-(\d{4}-\d{2}-\d{2})\.sqlite$/;

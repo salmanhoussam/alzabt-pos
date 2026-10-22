@@ -1390,4 +1390,117 @@ WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
 BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
 `,
   },
+  {
+    version: 12,
+    name: "party_identity",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 12 — WHO the shop owes and who owes the shop. Identity only.
+    //
+    // Purely ADDITIVE: two new tables, their indexes and their triggers. Migrations 1-11 are not
+    // touched, no existing table is rebuilt, no existing column changes, and NOTHING is
+    // synthesized — a migrated ledger has zero parties and zero contact history, which is the
+    // honest state of a shop that has not named a customer yet.
+    //
+    // 🔴 IDENTITY, AND DELIBERATELY NOT ACCOUNTING. There is no balance column, no currency, no
+    // opening figure and no total anywhere below, and that is the point rather than an omission. A
+    // stored balance is a second source of truth that drifts away from the rows it summarizes; the
+    // approved design derives every balance from auditable postings, and those postings
+    // (obligations, settlements, adjustments) are a LATER slice with their own authorization. A
+    // directory that quietly grew a `balance_minor` column would have pre-decided that design.
+    //
+    // 🔴 TWO KINDS IN ONE TABLE, AND A MERCHANT MAY BE BOTH — AS TWO ROWS. `kind` is on the row,
+    // not on a flag, so a hardware shop that both buys from and sells to the same trader holds two
+    // parties with two ids. Receivables and payables therefore cannot be mixed by accident: a
+    // future obligation names one party id, and that id already carries its side of the ledger.
+    // One row with two roles would have made "what does he owe me" ambiguous forever.
+    //
+    // 🔴 THE NAME IS NOT UNIQUE, AND THIS DIVERGES FROM `catalog_categories` ON PURPOSE. Category
+    // names are unique because two categories called "دهان" are a data-entry mistake. Two
+    // CUSTOMERS called "محمد علي" are two real people, and a UNIQUE index would refuse the second
+    // one — forcing the operator to invent "محمد علي 2" or, worse, to reuse the first person's
+    // account and mix two strangers' debts. So the index below is a plain lookup index, and the
+    // service SURFACES an existing same-name account as information. Nothing merges, ever, and
+    // nothing is refused for sharing a name.
+    //
+    // 🔴 DELETION IS FORBIDDEN BY TRIGGER, archiving is `is_active`. Once a later slice links an
+    // obligation to a party, deleting the party would orphan a financial record; and even before
+    // that, an operator who typed a real person's name created a record of a real relationship.
+    // `catalog_categories` permits deletion while unused and that is right for a label; a party is
+    // not a label. Archive hides it from pickers and keeps it resolvable.
+    //
+    // 🔴 WHY `party_contact_history` AND NOT `audit_events`. Correcting a phone number must not
+    // rewrite history, so the change needs a durable record. `audit_events` is the natural home —
+    // and it cannot take one: its `event_type` and `entity_type` are CLOSED CHECK lists
+    // (migration 11), so admitting a party event means REBUILDING the audit table. That is a
+    // table rebuild of the audit trail, far outside an identity slice, so it is NOT done here.
+    // This table is a purpose-built, append-only history for the four editable fields, and wiring
+    // party events into `audit_events` stays an explicit follow-up with its own authorization.
+    // Recorded rather than quietly worked around.
+    //
+    // WHAT IS DELIBERATELY ABSENT: balances, currency, credit limits, obligations, settlements,
+    // opening balances, supplier bills, invoice links, captured images, tax identifiers,
+    // account merging, and any notion of a payment. Each is a later approved slice or an
+    // unapproved one, and each would need its own tables rather than a column here.
+    sql: `
+-- ── Parties: customers and suppliers, by durable id ───────────────────────────────────────────
+CREATE TABLE parties (
+  id            TEXT    PRIMARY KEY,
+  -- 'customer' owes the shop; 'supplier' is owed by the shop. One row is one side.
+  kind          TEXT    NOT NULL CHECK (kind IN ('customer', 'supplier')),
+  -- The only required field. A party with no name cannot be found again, so it is not a party.
+  display_name  TEXT    NOT NULL CHECK (length(trim(display_name)) > 0),
+  -- Optional, and NULL means "not given" rather than empty. A blank string is refused so the two
+  -- cannot both mean absent — the same rule 'catalog_categories.name_en' already follows.
+  phone         TEXT             CHECK (phone IS NULL OR length(trim(phone)) > 0),
+  address       TEXT             CHECK (address IS NULL OR length(trim(address)) > 0),
+  note          TEXT             CHECK (note IS NULL OR length(trim(note)) > 0),
+  -- Archived, never deleted. The DELETE trigger below enforces that.
+  is_active     INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+  -- Attribution without the audit table: who first named this party.
+  created_by    TEXT    NOT NULL REFERENCES operators(id),
+  created_at    TEXT    NOT NULL,
+  updated_at    TEXT    NOT NULL
+) STRICT;
+
+-- 🔴 A LOOKUP INDEX, NOT A UNIQUE ONE. See the note above: two customers may share a name.
+-- Case- and whitespace-insensitive so a search for " Ahmad " finds "ahmad".
+CREATE INDEX parties_kind_name ON parties (kind, lower(trim(display_name)));
+-- Finding an account by the number the merchant remembers. Also not unique: a household may share
+-- one phone, and two of its members are still two accounts.
+CREATE INDEX parties_kind_phone ON parties (kind, phone) WHERE phone IS NOT NULL;
+-- The picker's own order: one kind, active first.
+CREATE INDEX parties_kind_active ON parties (kind, is_active, id);
+
+CREATE TRIGGER parties_no_delete BEFORE DELETE ON parties
+BEGIN SELECT RAISE(ABORT, 'parties: an account is archived, never deleted'); END;
+
+-- 🔴 A PARTY'S KIND IS FIXED FOR LIFE. Flipping a customer into a supplier would silently move
+-- every obligation a later slice attached to it onto the wrong side of the ledger. A trader who
+-- becomes both gets a second row.
+CREATE TRIGGER parties_kind_immutable BEFORE UPDATE OF kind ON parties
+WHEN NEW.kind <> OLD.kind
+BEGIN SELECT RAISE(ABORT, 'parties: kind cannot change; create the other account'); END;
+
+-- ── Contact history: an edit is a ROW, not an overwrite ───────────────────────────────────────
+CREATE TABLE party_contact_history (
+  id          TEXT    PRIMARY KEY,
+  party_id    TEXT    NOT NULL REFERENCES parties(id),
+  field       TEXT    NOT NULL CHECK (field IN ('display_name', 'phone', 'address', 'note')),
+  -- Either may be NULL: NULL -> value is filling a blank, value -> NULL is clearing one.
+  old_value   TEXT,
+  new_value   TEXT,
+  changed_by  TEXT    NOT NULL REFERENCES operators(id),
+  changed_at  TEXT    NOT NULL,
+  -- A write that changed nothing is not history. 'IS NOT' so the NULL cases are compared too.
+  CHECK (old_value IS NOT new_value)
+) STRICT;
+
+CREATE INDEX party_contact_history_party ON party_contact_history (party_id, changed_at);
+
+CREATE TRIGGER party_contact_history_immutable_update BEFORE UPDATE ON party_contact_history
+BEGIN SELECT RAISE(ABORT, 'parties: contact history is append-only'); END;
+CREATE TRIGGER party_contact_history_immutable_delete BEFORE DELETE ON party_contact_history
+BEGIN SELECT RAISE(ABORT, 'parties: contact history cannot be deleted'); END;
+`,
+  },
 ];

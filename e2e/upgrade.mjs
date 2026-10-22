@@ -35,7 +35,10 @@
  * construction. 8 -> 10 (9 = product_master, 10 = product_master_audit), -> 11
  * (operator_product_create_capability: the per-operator right to add products).
  */
-const SCHEMA = 11;
+// 🔴 TRANSITION 11 -> 12 with migration 12 (party identity). The old value was 11, and this file's
+// own header explains why it is a literal rather than MIGRATIONS.length: these scripts assert what
+// the INSTALLED app did, so deriving it from the build under test would make the check circular.
+const SCHEMA = 12;
 
 import { _electron as electron } from "playwright-core";
 import { spawn, execFileSync } from "node:child_process";

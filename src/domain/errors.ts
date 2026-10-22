@@ -62,6 +62,9 @@ export type DomainErrorCode =
   | "INVALID_PIN"
   | "OPERATOR_NOT_FOUND"
   | "OPERATOR_INACTIVE"
+  // Migration 12 · an account id that names no party of the asked-for kind. A new ENTITY needs its
+  // own code: reusing PRODUCT_NOT_FOUND would tell a cashier the wrong thing about the wrong thing.
+  | "PARTY_NOT_FOUND"
   | "DUPLICATE_OPERATOR_NAME"
   | "SETUP_REQUIRED"
   | "SETUP_NOT_REQUIRED"

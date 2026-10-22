@@ -72,6 +72,7 @@ describe("schema is unchanged by this feature", () => {
       // revoking it. Migrations 1-10 are byte-identical after it, which the per-migration tests
       // check by checksum rather than by this list.
       [11, "operator_product_create_capability"],
+      [12, "party_identity"],
     ]);
   });
 
