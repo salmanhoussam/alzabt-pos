@@ -19,8 +19,9 @@ import type { OnlineCatalogSnapshot } from "../application/posService";
 import { MAX_QUANTITY_MILLI } from "../domain/quantity";
 import { assertPaymentMethod } from "../domain/sale";
 import type { SaleRecord } from "../domain/sale";
-import { isLanguage } from "../shared/i18n";
-import type { TerminalSettings } from "../shared/i18n";
+import { DEFAULT_TERMINAL_LANGUAGE, isLanguage } from "../shared/i18n";
+import type { Language, TerminalSettings } from "../shared/i18n";
+import { saleOutcomeError } from "./saleOutcomeText";
 import {
   MAX_BRAND,
   MAX_DESCRIPTION as MAX_PRODUCT_DESCRIPTION,
@@ -343,37 +344,61 @@ function noPayload(payload: unknown): void {
   if (payload !== undefined && payload !== null) invalid("This operation takes no payload");
 }
 
-const GENERIC_INTERNAL: IpcError = {
-  code: "INTERNAL",
-  message: "Unexpected error. Please try again; if it keeps happening, contact support.",
-};
+/**
+ * The fallback for an unexpected fault on ANY channel, in the operator's language.
+ *
+ * 🔴 IT WAS A FROZEN CONSTANT AND IS NOW A FUNCTION OF THE LANGUAGE. The old value was the exact
+ * English sentence now stored as `outcome.internal`, so English mode is unchanged; what changed is
+ * that an Arabic till no longer reads it in English. It still says nothing whatsoever about sales —
+ * that distinction is the whole reason `saleFailureTruth` exists separately.
+ */
+function genericInternal(lang: Language): IpcError {
+  return saleOutcomeError(lang, "internal");
+}
 
 /** What the cashier is told after an unexpected error in createSale, decided by reading the ledger. */
-export function saleFailureTruth(service: PosService, payload: unknown): IpcError {
+export function saleFailureTruth(service: PosService, payload: unknown, lang: Language): IpcError {
   const key =
     payload && typeof payload === "object" && typeof (payload as { idempotencyKey?: unknown }).idempotencyKey === "string"
       ? (payload as { idempotencyKey: string }).idempotencyKey
       : null;
-  if (key === null) return { code: "SALE_NOT_RECORDED", message: "Unexpected error — the sale was not recorded." };
+  // 🔴 NO KEY MEANS THE LEDGER CANNOT BE ASKED, so no retry is offered. `not_recorded_retry` below
+  // is the other half of the same code and DOES offer one, because there the ledger answered.
+  // Collapsing the two would leave the cashier without the one fact that decides whether pressing
+  // the button again is safe.
+  if (key === null) return saleOutcomeError(lang, "not_recorded");
   try {
     const sale = service.saleForIdempotencyKey(key);
+    // 🔴 THE RECEIPT NUMBER COMES OFF THE ROW, as a number, and is validated by
+    // `isReceiptNumber` before it is printed. It is never parsed back out of a sentence.
     return sale
-      ? {
-          code: "SALE_RECORDED",
-          message: `The sale WAS recorded (receipt #${sale.receiptNumber}) but an unexpected error followed. Check History — do not ring it up again.`,
-        }
-      : { code: "SALE_NOT_RECORDED", message: "Unexpected error — the sale was not recorded. You can try again." };
+      ? saleOutcomeError(lang, "recorded", sale.receiptNumber)
+      : saleOutcomeError(lang, "not_recorded_retry");
   } catch {
-    return {
-      code: "SALE_STATUS_UNKNOWN",
-      message: "Unexpected error — it is not known whether the sale was recorded. Check History before trying again.",
-    };
+    return saleOutcomeError(lang, "unknown");
   }
 }
 
 export function createIpcHandlers(service: PosService, options: IpcHandlerOptions = {}): Record<ChannelName, Handler> {
   const log = options.logger ?? nullLogger;
   const now = options.now ?? (() => new Date());
+
+  /**
+   * The language the operator reads, for the handful of messages composed here.
+   *
+   * 🔴 IT CANNOT THROW, BECAUSE EVERY CALLER IS ALREADY IN AN ERROR PATH. A settings file that has
+   * gone unreadable must not turn a truthful "the sale WAS recorded" into an unhandled exception
+   * that reaches the renderer as nothing at all. Arabic is the product's default
+   * (`DEFAULT_TERMINAL_LANGUAGE`), and `options.settings` is absent in tests and headless runs, so
+   * the fallback is the real default rather than a convenient English one.
+   */
+  function operatorLanguage(): Language {
+    try {
+      return options.settings?.get().terminalLanguage ?? DEFAULT_TERMINAL_LANGUAGE;
+    } catch {
+      return DEFAULT_TERMINAL_LANGUAGE;
+    }
+  }
 
   /**
    * 🔴 THE AUTHORIZATION GATE. It runs BEFORE the handler body, on every channel, for both the sync
@@ -417,7 +442,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
         log.error("ipc-internal-error", { channel, error: err });
         console.error("[pos] internal error", channel, err);
-        return { ok: false, error: onInternal ? onInternal(payload) : GENERIC_INTERNAL };
+        return { ok: false, error: onInternal ? onInternal(payload) : genericInternal(operatorLanguage()) };
       }
     };
   }
@@ -431,7 +456,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
         log.error("ipc-internal-error", { channel, error: err });
         console.error("[pos] internal error", channel, err);
-        return { ok: false, error: GENERIC_INTERNAL };
+        return { ok: false, error: genericInternal(operatorLanguage()) };
       }
     };
   }
@@ -620,7 +645,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         }
       }
       return { sale: toSaleDto(result.sale, invoiceNumberFor(result.sale)), duplicate: result.duplicate };
-    }, (p) => saleFailureTruth(service, p)),
+    }, (p) => saleFailureTruth(service, p, operatorLanguage())),
     voidSale: wrap("voidSale", (p) => {
       const o = exactObject(p, ["saleId", "reason"]);
       return toVoidDto(service.voidSale(str(o.saleId, "saleId", 64), str(o.reason, "reason", 400)));

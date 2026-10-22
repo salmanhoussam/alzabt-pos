@@ -18,6 +18,23 @@ function setup() {
   return { ...h, ipc: syncHandlers(createIpcHandlers(h.service)) };
 }
 
+/**
+ * The same harness with a real operator-language setting.
+ *
+ * 🔴 `setup()` passes NO settings, and that is now load-bearing rather than incidental: with no
+ * settings the handlers fall back to `DEFAULT_TERMINAL_LANGUAGE`, which is Arabic — the product's
+ * real default. So the unexpected-error assertions in `setup()`-based tests are Arabic on purpose,
+ * and this helper is how the English half is proven.
+ */
+function setupIn(lang: "ar" | "en") {
+  const h = makeHarness(t.dbPath, { login: false });
+  const settings = {
+    get: () => ({ terminalLanguage: lang, receiptLanguage: lang }) as const,
+    setTerminalLanguage: () => ({ terminalLanguage: lang, receiptLanguage: lang }) as const,
+  };
+  return { ...h, ipc: syncHandlers(createIpcHandlers(h.service, { settings })) };
+}
+
 function errCode(r: IpcResult<unknown>): string {
   if (r.ok) throw new Error(`expected failure, got ${JSON.stringify(r)}`);
   return r.error.code;
@@ -273,12 +290,18 @@ describe("IPC surface", () => {
     ipc.login({ cashierId: "cashier-01", pin: "1111" });
     db.close(); // force a non-domain error inside the service
     const r = ipc.getTodaySales(undefined);
+    // 🔴 TRANSITION. This asserted the English sentence verbatim:
+    //   "Unexpected error. Please try again; if it keeps happening, contact support."
+    // That exact string is preserved and is still asserted — in `setupIn("en")` below and in
+    // tests/main/saleOutcomeText.test.ts. What changed is that a terminal with NO settings reads
+    // the product's real default language, Arabic, instead of English.
     expect(r).toEqual({
       ok: false,
-      error: { code: "INTERNAL", message: "Unexpected error. Please try again; if it keeps happening, contact support." },
+      error: { code: "INTERNAL", message: "حدث خطأ غير متوقّع. حاول مرّة أخرى، وإذا تكرّر الأمر فاتّصل بالدعم." },
     });
     if (r.ok) throw new Error("unreachable");
     expect(r.error.message).not.toMatch(/sale/i);
+    expect(r.error.message).not.toContain("فاتورة");
   });
 
   it("createSale after an unexpected failure says NOT recorded only when the ledger has no such sale", () => {
@@ -306,7 +329,13 @@ describe("IPC surface", () => {
     const r = ipc.createSale(sale);
     expect(r).toMatchObject({ ok: false, error: { code: "SALE_RECORDED" } });
     if (r.ok) throw new Error("unreachable");
-    expect(r.error.message).toMatch(/WAS recorded \(receipt #1\)/);
+    // 🔴 TRANSITION. This asserted /WAS recorded \(receipt #1\)/ — the English wording, which is
+    // preserved and asserted in the English test below. Here, with no settings, the till is Arabic;
+    // what must survive the translation is the REAL receipt number and the do-not-repeat
+    // instruction, so both are asserted rather than the prose.
+    expect(r.error.message).toContain("إيصال رقم 1");
+    expect(r.error.message).toContain("لا تُعِد إدخالها");
+    expect(r.error.message).not.toContain("يمكنك إعادة المحاولة");
     expect(countRows(db).sales).toBe(1);
 
     // Retrying the same attempt is safe: it returns the recorded sale, no second sale.
@@ -322,6 +351,107 @@ describe("IPC surface", () => {
     ipc.login({ cashierId: "cashier-01", pin: "1111" });
     db.close();
     expect(ipc.createSale(goodSale())).toMatchObject({ ok: false, error: { code: "SALE_STATUS_UNKNOWN" } });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // The sale-outcome sentences ON THE WIRE, in both languages.
+  //
+  // 🔴 WHY THESE EXIST ALONGSIDE tests/main/saleOutcomeText.test.ts. That file proves the SENTENCES
+  // are right. These prove the right sentence actually reaches the renderer through the real
+  // channel, carrying the real receipt number off the real row — the seam where a wiring mistake
+  // (the wrong language read, the receipt number lost, the code and the text drifting apart) would
+  // live. A pure-function test cannot see any of those.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+  it("🔴 an ENGLISH till still reads the exact English sentences that shipped", () => {
+    const { db, repository, ipc } = setupIn("en");
+    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+
+    // A failure before the commit.
+    const commit = repository.commitSale.bind(repository);
+    repository.commitSale = () => {
+      throw new Error("disk exploded");
+    };
+    expect(ipc.createSale(goodSale())).toEqual({
+      ok: false,
+      error: { code: "SALE_NOT_RECORDED", message: "Unexpected error \u2014 the sale was not recorded. You can try again." },
+    });
+
+    // A failure after the commit: the receipt number must survive onto the wire.
+    repository.commitSale = commit;
+    const getSale = repository.getSale.bind(repository);
+    let calls = 0;
+    repository.getSale = (id: string) => {
+      calls += 1;
+      if (calls === 1) throw new Error("read-back exploded");
+      return getSale(id);
+    };
+    expect(ipc.createSale(goodSale())).toEqual({
+      ok: false,
+      error: {
+        code: "SALE_RECORDED",
+        message:
+          "The sale WAS recorded (receipt #1) but an unexpected error followed. Check History \u2014 do not ring it up again.",
+      },
+    });
+    repository.getSale = getSale;
+    db.close();
+  });
+
+  it("🔴 an ARABIC till reads Arabic, with the SAME codes and the SAME real receipt number", () => {
+    const { db, repository, ipc } = setupIn("ar");
+    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+
+    const commit = repository.commitSale.bind(repository);
+    repository.commitSale = () => {
+      throw new Error("disk exploded");
+    };
+    const notRecorded = ipc.createSale(goodSale());
+    expect(errCode(notRecorded)).toBe("SALE_NOT_RECORDED");
+    if (notRecorded.ok) throw new Error("unreachable");
+    expect(notRecorded.error.message).toContain("لم تُسجَّل الفاتورة");
+    expect(notRecorded.error.message).toContain("يمكنك إعادة المحاولة");
+    expect(notRecorded.error.message).not.toMatch(/[A-Za-z]/);
+
+    repository.commitSale = commit;
+    const getSale = repository.getSale.bind(repository);
+    let calls = 0;
+    repository.getSale = (id: string) => {
+      calls += 1;
+      if (calls === 1) throw new Error("read-back exploded");
+      return getSale(id);
+    };
+    const recorded = ipc.createSale(goodSale());
+    expect(errCode(recorded)).toBe("SALE_RECORDED");
+    if (recorded.ok) throw new Error("unreachable");
+    // 🔴 THE NUMBER IS THE LEDGER'S, NOT A GUESS. Each test opens its own harness, so this is the
+    // first committed sale and its receipt is 1 — the same row the retry below returns.
+    expect(recorded.error.message).toContain("إيصال رقم 1");
+    expect(recorded.error.message).toContain("لا تُعِد إدخالها");
+    expect(recorded.error.message).not.toContain("يمكنك إعادة المحاولة");
+    repository.getSale = getSale;
+    db.close();
+  });
+
+  it("🔴 a settings store that THROWS does not cost the cashier the truth about their sale", () => {
+    const h = makeHarness(t.dbPath, { login: false });
+    const ipc = syncHandlers(
+      createIpcHandlers(h.service, {
+        settings: {
+          get: () => {
+            throw new Error("settings.json is unreadable");
+          },
+          setTerminalLanguage: () => ({ terminalLanguage: "ar", receiptLanguage: "ar" }) as const,
+        },
+      }),
+    );
+    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    h.db.close();
+    const r = ipc.createSale(goodSale());
+    // Still a truthful, readable answer — in the default language — rather than a thrown error.
+    expect(errCode(r)).toBe("SALE_STATUS_UNKNOWN");
+    if (r.ok) throw new Error("unreachable");
+    expect(r.error.message).toContain("راجع السجلّ");
   });
 
   it("a product id at the import limit (77 chars) can be sold — import and sale share one limit", () => {

@@ -407,6 +407,25 @@ const AR: Dict = {
   "sell.placeholderPrice": "سعر مبدئي — اضبط السعر الحقيقي",
   "sell.priceUnknown": "سعر مبدئي",
 
+  // ── What a cashier reads when a sale ends in an unexpected error ───────────────────────────────
+  //
+  // 🔴 THESE SIX ARE THE ONLY MESSAGES IN THE PRODUCT THAT ASK FOR A DIFFERENT ACTION. Every other
+  // refusal says "no"; these say what happened to the MONEY and what is safe next. An instruction
+  // the reader cannot read is worse than a bare failure, because it reads as noise and is
+  // dismissed — which is how a recorded sale gets rung up twice.
+  //
+  // 🔴 AND THE TWO "recorded" WORDINGS MUST NEVER INVITE A RETRY, in either language. That is a
+  // test, not a hope — see tests/main/saleOutcomeText.test.ts.
+  "outcome.internal": "حدث خطأ غير متوقّع. حاول مرّة أخرى، وإذا تكرّر الأمر فاتّصل بالدعم.",
+  "outcome.saleNotRecorded": "حدث خطأ غير متوقّع — لم تُسجَّل الفاتورة.",
+  "outcome.saleNotRecordedRetry": "حدث خطأ غير متوقّع — لم تُسجَّل الفاتورة. يمكنك إعادة المحاولة.",
+  "outcome.saleRecorded":
+    "سُجِّلت الفاتورة فعلاً (إيصال رقم {receipt}) ثم حدث خطأ غير متوقّع. راجع السجلّ — لا تُعِد إدخالها.",
+  "outcome.saleRecordedNoNumber":
+    "سُجِّلت الفاتورة فعلاً ثم حدث خطأ غير متوقّع. راجع السجلّ — لا تُعِد إدخالها.",
+  "outcome.saleStatusUnknown":
+    "حدث خطأ غير متوقّع — لا نعرف إن كانت الفاتورة قد سُجِّلت. راجع السجلّ قبل إعادة المحاولة.",
+
   "pay.title": "الدفع",
   "pay.note": "سجّل كيف دفع الزبون. لا تتم أيّ عمليّة دفع هنا.",
   "pay.back": "رجوع إلى السلّة",
@@ -846,6 +865,18 @@ const EN: Dict = {
   "sell.quantityOf": "Quantity",
   "sell.placeholderPrice": "Placeholder price — set the real price",
   "sell.priceUnknown": "price?",
+
+  // The English wording is UNCHANGED from what shipped — see src/main/saleOutcomeText.ts for why
+  // these are strings in the dictionary rather than literals at the throw site.
+  "outcome.internal": "Unexpected error. Please try again; if it keeps happening, contact support.",
+  "outcome.saleNotRecorded": "Unexpected error \u2014 the sale was not recorded.",
+  "outcome.saleNotRecordedRetry": "Unexpected error \u2014 the sale was not recorded. You can try again.",
+  "outcome.saleRecorded":
+    "The sale WAS recorded (receipt #{receipt}) but an unexpected error followed. Check History \u2014 do not ring it up again.",
+  "outcome.saleRecordedNoNumber":
+    "The sale WAS recorded but an unexpected error followed. Check History \u2014 do not ring it up again.",
+  "outcome.saleStatusUnknown":
+    "Unexpected error \u2014 it is not known whether the sale was recorded. Check History before trying again.",
 
   "pay.title": "Payment",
   "pay.note": "Record how the customer paid. No payment is processed here.",
