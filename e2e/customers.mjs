@@ -355,7 +355,8 @@ try {
   {
     const db = new Database(LEDGER, { readonly: true });
     const n = (sql) => Number(db.prepare(sql).get().n);
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 12, "the installed app's ledger is at schema v12");
+    // 🔴 TRANSITION 12 -> 13 with migration 13 (obligations_and_settlements). The old value was 12.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 13, "the installed app's ledger is at schema v13");
     assert(n("SELECT count(*) AS n FROM parties") === 5, "five party rows, and no more");
     assert(n("SELECT count(*) AS n FROM party_contact_history") === 0, "and zero contact-history rows — nothing was edited");
     assert(n("SELECT count(*) AS n FROM sales") === 0, "🔴 and still not one sale, obligation or payment anywhere");

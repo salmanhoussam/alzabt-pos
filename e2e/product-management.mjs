@@ -282,7 +282,10 @@ await app.close();
     // 🔴 TRANSITION — this said 8, and it was already stale at migration 9: the gate failed at an
     // earlier step so nobody ever saw it. 9 = product_master, 10 = product_master_audit.
     // 🔴 TRANSITION 11 -> 12 with migration 12 (party identity). The old value was 11.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 12, "the installed app's ledger is at schema v12");
+    // 🔴 TRANSITION 12 -> 13 with migration 13 (obligations_and_settlements). The old value was
+    // 12 (party identity). A literal on purpose: deriving it from the build under test would make
+    // the check circular, and this asserts what the INSTALLED app actually wrote.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 13, "the installed app's ledger is at schema v13");
 
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
     const types = rows.map((r) => r.event_type);
