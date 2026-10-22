@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CustomerFinder } from "./CustomerFinder";
+import type { CustomerDto } from "../../shared/ipcContract";
 import { type CartLine, type PricedCart, addProduct, decrement, priceCart, removeProduct } from "../../domain/cart";
 import type { Catalog } from "../../domain/catalog";
 import { formatDecimal } from "../../domain/money";
@@ -100,6 +102,16 @@ export function SellScreen() {
 
   /** The product whose photo is open full size. Viewing only — it touches no cart and no data. */
   const [preview, setPreview] = useState<{ readonly name: string; readonly url: string } | null>(null);
+  /**
+   * The customer the operator picked, for their own reference.
+   *
+   * 🔴 IT IS NOT ATTACHED TO THE SALE, AND THE SCREEN SAYS SO. `CreateSaleRequest` carries no
+   * customer id — the sales contract has no such field until the credit/receivable slice lands — so
+   * pretending otherwise here would be the one thing worse than not having the feature: a cashier
+   * believing a debt was recorded when nothing was. It is a label beside the cart and nothing else.
+   */
+  const [customer, setCustomer] = useState<CustomerDto | null>(null);
+  const [findingCustomer, setFindingCustomer] = useState(false);
 
   /**
    * Commits a typed quantity. Invalid text is REFUSED with the domain's own message and the box
@@ -322,6 +334,19 @@ export function SellScreen() {
         </div>
       </section>
 
+      {/* 🔴 RENDERED BESIDE THE CART, NEVER INSTEAD OF IT. Everything above stays mounted, so the
+          cart, the product search text, the quantity drafts and the checkout idempotency key all
+          survive a customer being created mid-sale. */}
+      {findingCustomer && (
+        <CustomerFinder
+          onClose={() => setFindingCustomer(false)}
+          onPick={(c) => {
+            setCustomer(c);
+            setFindingCustomer(false);
+          }}
+        />
+      )}
+
       {preview !== null && (
         /* The same overlay/dialog the clear-cart and payment panes use — no new modal system. */
         <div className="overlay" data-testid="sell-photo-preview">
@@ -350,6 +375,34 @@ export function SellScreen() {
             <button className="btn danger ghost small" data-testid="clear-cart" onClick={() => setClearing(true)}>
               {t("sell.clearCart")}
             </button>
+          )}
+        </div>
+
+        {/* ── The customer, for reference only ──────────────────────────────────────────────────
+            🔴 THE SENTENCE UNDER IT IS LOAD-BEARING. Nothing here records a debt or links the
+            customer to the sale, and a cashier who assumed otherwise would stop chasing a real
+            receivable. The note says so in the shop's own language every time a customer is
+            chosen — not once in a tooltip. */}
+        <div className="cart-customer">
+          <button
+            className="btn ghost small"
+            onClick={() => setFindingCustomer(true)}
+            data-testid="sell-choose-customer"
+          >
+            {customer === null ? t("sell.chooseCustomer") : t("customers.edit")}
+          </button>
+          {customer !== null && (
+            <>
+              <span className="customer-chip" dir="auto" data-testid="sell-customer" data-customer={customer.id}>
+                {customer.displayName}
+              </span>
+              <button className="btn ghost small" onClick={() => setCustomer(null)} data-testid="sell-clear-customer">
+                {t("sell.clearCustomer")}
+              </button>
+              <p className="muted small" data-testid="sell-customer-not-attached">
+                {t("customers.notOnSaleYet")}
+              </p>
+            </>
           )}
         </div>
         {!priced && <p className="muted">{t("sell.empty")}</p>}

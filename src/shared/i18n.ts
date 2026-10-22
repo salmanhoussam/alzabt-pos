@@ -57,6 +57,7 @@ const AR: Dict = {
   "nav.today": "مبيعات اليوم",
   "nav.history": "السجل",
   "nav.products": "الأصناف",
+  "nav.customers": "الزبائن",
   "nav.tools": "أدوات",
   "action.logout": "خروج",
   "action.save": "حفظ",
@@ -416,6 +417,41 @@ const AR: Dict = {
   //
   // 🔴 AND THE TWO "recorded" WORDINGS MUST NEVER INVITE A RETRY, in either language. That is a
   // test, not a hope — see tests/main/saleOutcomeText.test.ts.
+
+  // ── Customer directory (S1B) ──────────────────────────────────────────────────────────────────
+  //
+  // 🔴 NOT ONE OF THESE MENTIONS A BALANCE, A DEBT OR AN AMOUNT. S1B ships a directory; the
+  // accounting slices come later, and a label promising a balance would be a promise the data
+  // cannot keep.
+  "customers.title": "الزبائن",
+  "customers.search": "ابحث بالاسم أو الرقم…",
+  "customers.new": "زبون جديد",
+  "customers.none": "لا زبائن بعد.",
+  "customers.noMatch": "لا زبون يطابق البحث.",
+  "customers.loading": "جارٍ التحميل…",
+  "customers.name": "الاسم",
+  "customers.nameRequired": "الاسم مطلوب",
+  "customers.phone": "الهاتف",
+  "customers.address": "العنوان",
+  "customers.note": "ملاحظة",
+  "customers.optional": "اختياري",
+  "customers.save": "حفظ",
+  "customers.saving": "جارٍ الحفظ…",
+  "customers.cancel": "إلغاء",
+  "customers.edit": "تعديل",
+  "customers.archive": "أرشفة",
+  "customers.restore": "إرجاع",
+  "customers.archived": "مؤرشف",
+  "customers.showArchived": "أظهر المؤرشفين",
+  "customers.created": "أُضيف الزبون.",
+  "customers.sameName": "يوجد زبون آخر بالاسم نفسه. تأكّد أنّهما شخصان مختلفان.",
+  "customers.sameNameHint": "الحسابان منفصلان ولم يُدمجا.",
+  "customers.ownerOnly": "التعديل والأرشفة للمالك فقط.",
+  // 🔴 THE SENTENCE THAT KEEPS S1B HONEST. Selecting a customer at the till records nothing yet.
+  "customers.notOnSaleYet": "اختيار الزبون للتذكير فقط — لا يُسجّل ديناً ولا يُربط بالفاتورة بعد.",
+  "sell.customer": "الزبون",
+  "sell.chooseCustomer": "اختر زبوناً",
+  "sell.clearCustomer": "بدون زبون",
   "outcome.internal": "حدث خطأ غير متوقّع. حاول مرّة أخرى، وإذا تكرّر الأمر فاتّصل بالدعم.",
   "outcome.saleNotRecorded": "حدث خطأ غير متوقّع — لم تُسجَّل الفاتورة.",
   "outcome.saleNotRecordedRetry": "حدث خطأ غير متوقّع — لم تُسجَّل الفاتورة. يمكنك إعادة المحاولة.",
@@ -536,6 +572,7 @@ const EN: Dict = {
   "nav.today": "Today's Sales",
   "nav.history": "History",
   "nav.products": "Products",
+  "nav.customers": "Customers",
   "nav.tools": "Tools",
   "action.logout": "Log out",
   "action.save": "Save",
@@ -888,6 +925,36 @@ const EN: Dict = {
 
   // The English wording is UNCHANGED from what shipped — see src/main/saleOutcomeText.ts for why
   // these are strings in the dictionary rather than literals at the throw site.
+
+  // ── Customer directory (S1B) ──────────────────────────────────────────────────────────────────
+  "customers.title": "Customers",
+  "customers.search": "Search by name or phone…",
+  "customers.new": "New customer",
+  "customers.none": "No customers yet.",
+  "customers.noMatch": "No customer matches the search.",
+  "customers.loading": "Loading…",
+  "customers.name": "Name",
+  "customers.nameRequired": "A name is required",
+  "customers.phone": "Phone",
+  "customers.address": "Address",
+  "customers.note": "Note",
+  "customers.optional": "optional",
+  "customers.save": "Save",
+  "customers.saving": "Saving…",
+  "customers.cancel": "Cancel",
+  "customers.edit": "Edit",
+  "customers.archive": "Archive",
+  "customers.restore": "Restore",
+  "customers.archived": "archived",
+  "customers.showArchived": "Show archived",
+  "customers.created": "Customer added.",
+  "customers.sameName": "Another customer has the same name. Check they are different people.",
+  "customers.sameNameHint": "The two accounts are separate and were not merged.",
+  "customers.ownerOnly": "Only the owner can edit or archive.",
+  "customers.notOnSaleYet": "Choosing a customer is a reminder only \u2014 it records no debt and is not linked to the sale yet.",
+  "sell.customer": "Customer",
+  "sell.chooseCustomer": "Choose a customer",
+  "sell.clearCustomer": "No customer",
   "outcome.internal": "Unexpected error. Please try again; if it keeps happening, contact support.",
   "outcome.saleNotRecorded": "Unexpected error \u2014 the sale was not recorded.",
   "outcome.saleNotRecordedRetry": "Unexpected error \u2014 the sale was not recorded. You can try again.",

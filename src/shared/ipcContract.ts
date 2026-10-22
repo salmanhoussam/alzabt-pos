@@ -44,6 +44,17 @@ export const CHANNELS = {
   listCategories: "pos:listCategories",
   listBrands: "pos:listBrands",
   createCategory: "pos:createCategory",
+  // ── Customer directory (migration 12, slice S1B) ──────────────────────────────────────────────
+  //
+  // 🔴 CUSTOMER-ONLY CHANNELS, AND NO `kind` PARAMETER ANYWHERE. The service handles both kinds,
+  // but the BRIDGE exposes only customers, so there is no supplier operation to reach from the
+  // renderer at all — not even a refused one. A shared `partyX({ kind })` channel would have made
+  // the supplier boundary a runtime check on an untrusted string; this makes it structural.
+  searchCustomers: "pos:searchCustomers",
+  getCustomer: "pos:getCustomer",
+  createCustomer: "pos:createCustomer",
+  updateCustomerContact: "pos:updateCustomerContact",
+  setCustomerActive: "pos:setCustomerActive",
   renameCategory: "pos:renameCategory",
   setCategoryActive: "pos:setCategoryActive",
   deleteCategory: "pos:deleteCategory",
@@ -588,6 +599,69 @@ export interface SetTerminalLanguageRequest {
   readonly language: Language;
 }
 
+// ── Customer directory (migration 12, slice S1B) ───────────────────────────────────────────────
+
+/**
+ * One customer, as the renderer sees it.
+ *
+ * 🔴 WHAT IS ABSENT IS THE CONTRACT: no balance, no amount owed, no obligation count, no currency.
+ * S1B ships identity only, and a field here would have to be invented.
+ */
+export interface CustomerDto {
+  readonly id: string;
+  readonly displayName: string;
+  readonly phone: string | null;
+  readonly address: string | null;
+  readonly note: string | null;
+  readonly isActive: boolean;
+  readonly createdAt: string;
+}
+
+export interface SearchCustomersRequest {
+  /** Matched against the name and the phone. Empty means "the whole directory". */
+  readonly query: string;
+  readonly includeArchived: boolean;
+}
+
+export interface CustomerIdRequest {
+  readonly customerId: string;
+}
+
+export interface CreateCustomerRequest {
+  readonly displayName: string;
+  readonly phone: string | null;
+  readonly address: string | null;
+  readonly note: string | null;
+}
+
+/**
+ * The new customer, AND the accounts that already read as the same name.
+ *
+ * 🔴 `sameName` IS INFORMATION, NOT A REFUSAL. Two customers may genuinely share a name, so the
+ * creation already succeeded; this lets the screen say "there is also another محمد علي" so the
+ * operator can tell them apart, without anything being merged or rejected.
+ */
+export interface CreateCustomerResponse {
+  readonly customer: CustomerDto;
+  readonly sameName: ReadonlyArray<CustomerDto>;
+}
+
+export interface UpdateCustomerContactRequest {
+  readonly customerId: string;
+  /** Only the keys present are changed. A key set to null clears that field. */
+  readonly patch: {
+    readonly displayName?: string;
+    readonly phone?: string | null;
+    readonly address?: string | null;
+    readonly note?: string | null;
+  };
+}
+
+export interface SetCustomerActiveRequest {
+  readonly customerId: string;
+  readonly isActive: boolean;
+}
+
 export interface IpcError {
   readonly code: string;
   readonly message: string;
@@ -1014,6 +1088,17 @@ export interface PosApi {
   listCategories(): Promise<IpcResult<CategoryDto[]>>;
   listBrands(): Promise<IpcResult<string[]>>;
   createCategory(req: CreateCategoryRequest): Promise<IpcResult<CategoryDto>>;
+
+  // ── Customer directory (S1B) ──────────────────────────────────────────────────────────────────
+  //
+  // 🔴 NO BALANCE, NO AMOUNT, NO OBLIGATION ANYWHERE IN THIS DTO. A customer created here has a
+  // DIRECTORY RECORD, not a posted account. Returning `balanceMinor: "0"` would have been a
+  // fabricated accounting statement, and the UI would have shown it as if a ledger had said it.
+  searchCustomers(req: SearchCustomersRequest): Promise<IpcResult<CustomerDto[]>>;
+  getCustomer(req: CustomerIdRequest): Promise<IpcResult<CustomerDto>>;
+  createCustomer(req: CreateCustomerRequest): Promise<IpcResult<CreateCustomerResponse>>;
+  updateCustomerContact(req: UpdateCustomerContactRequest): Promise<IpcResult<CustomerDto>>;
+  setCustomerActive(req: SetCustomerActiveRequest): Promise<IpcResult<CustomerDto>>;
   renameCategory(req: RenameCategoryRequest): Promise<IpcResult<CategoryDto>>;
   setCategoryActive(req: SetCategoryActiveRequest): Promise<IpcResult<CategoryDto>>;
   deleteCategory(req: CategoryIdRequest): Promise<IpcResult<{ readonly deletedId: string }>>;

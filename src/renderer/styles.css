@@ -809,3 +809,51 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
    and a second class for the same job is how two spacings drift apart. Only the top margin, which
    is specific to sitting under a QR, is added here. */
 .phone-dialog .phone-actions { margin-top: 16px; justify-content: center; }
+
+/* ── Customer directory (S1B) ──────────────────────────────────────────────────────────────────
+   Logical properties only (inline-start/inline-end, text-align: start), so Arabic RTL and English
+   LTR both lay out from the one rule set — the same discipline R3's thumbnails follow.
+
+   🔴 SIZED FOR 1024x640. The directory is two panes with a 320px list and a flexible detail pane,
+   and the finder panel is min(520px, calc(100vw - 32px)) — so at 1024 wide it is a panel and on a
+   narrow window it is the window minus the gutter, never a horizontally scrolling dialog. */
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+         padding: 16px; width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px);
+         overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.panel-head h2 { margin: 0; }
+.panel-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.customer-search { min-height: 48px; font-size: 16px; padding: 0 12px; text-align: start;
+                   border: 1px solid var(--border); border-radius: var(--radius); width: 100%; }
+
+.customer-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
+                 gap: 6px; overflow-y: auto; }
+.customer-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px;
+                padding: 0 12px; text-align: start; background: var(--surface);
+                border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; }
+.customer-row.selected { border-color: var(--accent); }
+.customer-row > span:first-child { flex: 1; }
+
+.customer-form { display: flex; flex-direction: column; gap: 10px; }
+.customer-form label { display: flex; flex-direction: column; gap: 6px; }
+.customer-form input { min-height: 48px; font-size: 16px; padding: 0 12px; text-align: start;
+                       border: 1px solid var(--border); border-radius: var(--radius); }
+
+.customers-screen { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+.customers-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+                     margin-bottom: 10px; }
+.customers-list-pane, .customers-detail-pane { min-width: 0; }
+.customer-detail dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 12px 0; }
+.customer-detail dt { color: var(--muted); }
+.customer-detail dd { margin: 0; }
+
+/* The chosen customer beside the cart. A chip, not a total — there is no amount to show. */
+.cart-customer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.customer-chip { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px;
+                 max-width: 100%; overflow-wrap: anywhere; }
+.cart-customer p { flex-basis: 100%; margin: 0; }
+
+@media (max-width: 900px) {
+  .customers-screen { grid-template-columns: 1fr; }
+}

@@ -20,9 +20,13 @@ import { MAX_QUANTITY_MILLI } from "../domain/quantity";
 import { assertPaymentMethod } from "../domain/sale";
 import type { SaleRecord } from "../domain/sale";
 import { DEFAULT_TERMINAL_LANGUAGE, isLanguage } from "../shared/i18n";
+import { MAX_PARTY_ADDRESS, MAX_PARTY_NAME, MAX_PARTY_NOTE, MAX_PARTY_PHONE } from "../domain/party";
 import type { Language, TerminalSettings } from "../shared/i18n";
 import { saleOutcomeError } from "./saleOutcomeText";
 import { invoiceOutcomeError } from "./invoiceOutcomeText";
+import type { PartyService } from "../application/partyService";
+import type { PartyRow } from "../persistence/partyRepository";
+import type { CustomerDto } from "../shared/ipcContract";
 import {
   MAX_BRAND,
   MAX_DESCRIPTION as MAX_PRODUCT_DESCRIPTION,
@@ -187,6 +191,11 @@ export interface IpcHandlerOptions {
    * own slice. While this is absent, `setProductImage` answers NOT_AVAILABLE.
    */
   readonly pickProductPhoto?: (productId: string) => PickedPhoto | null;
+  /**
+   * The customer/supplier directory (migration 12). Absent on a terminal without it, where every
+   * customer channel answers NOT_AVAILABLE — the same shape `invoices` already uses.
+   */
+  readonly parties?: PartyService;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -816,6 +825,59 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       noPayload(p);
       return service.listBrands();
     }),
+    // ── Customer directory (S1B) ────────────────────────────────────────────────────────────────
+    //
+    // 🔴 EVERY ONE OF THESE PASSES "customer" AS A LITERAL. The kind never comes from the payload,
+    // so the supplier half of the service is unreachable from the renderer — structurally, not by
+    // a validation that could be forgotten. The service checks authorization again regardless.
+    //
+    // 🔴 AND NOTHING HERE LOGS A NAME, A PHONE OR AN ADDRESS. A customer's contact details are the
+    // merchant's private data and a log file is the easiest place to leak them; the only thing any
+    // of these would log is nothing at all.
+    searchCustomers: wrap("searchCustomers", (p) => {
+      const o = exactObject(p, ["query", "includeArchived"]);
+      if (typeof o.includeArchived !== "boolean") invalid("'includeArchived' must be true or false");
+      if (typeof o.query !== "string" || o.query.length > 120) invalid("'query' must be text");
+      return customers().search("customer", o.query, o.includeArchived).map(toCustomerDto);
+    }),
+
+    getCustomer: wrap("getCustomer", (p) => {
+      const o = exactObject(p, ["customerId"]);
+      return toCustomerDto(customers().get("customer", str(o.customerId, "customerId", 100)));
+    }),
+
+    createCustomer: wrap("createCustomer", (p) => {
+      const o = exactObject(p, ["displayName", "phone", "address", "note"]);
+      const created = customers().create({
+        kind: "customer",
+        displayName: str(o.displayName, "displayName", MAX_PARTY_NAME),
+        phone: optionalStr(o.phone, "phone", MAX_PARTY_PHONE),
+        address: optionalStr(o.address, "address", MAX_PARTY_ADDRESS),
+        note: optionalStr(o.note, "note", MAX_PARTY_NOTE),
+      });
+      return { customer: toCustomerDto(created.party), sameName: created.sameName.map(toCustomerDto) };
+    }),
+
+    updateCustomerContact: wrap("updateCustomerContact", (p) => {
+      const o = exactObject(p, ["customerId", "patch"]);
+      // 🔴 A PATCH, NOT A WHOLE RECORD. Only the keys the operator actually changed are sent, so a
+      // field edited on another screen while this form was open is not reverted to what this form
+      // happened to be showing — the same rule the invoice header patch already follows.
+      const patch = patchObject(o.patch, ["displayName", "phone", "address", "note"]);
+      const draft: Record<string, string | null> = {};
+      if (patch.displayName !== undefined) draft.displayName = str(patch.displayName, "displayName", MAX_PARTY_NAME);
+      if (patch.phone !== undefined) draft.phone = optionalStr(patch.phone, "phone", MAX_PARTY_PHONE);
+      if (patch.address !== undefined) draft.address = optionalStr(patch.address, "address", MAX_PARTY_ADDRESS);
+      if (patch.note !== undefined) draft.note = optionalStr(patch.note, "note", MAX_PARTY_NOTE);
+      return toCustomerDto(customers().updateContact("customer", str(o.customerId, "customerId", 100), draft));
+    }),
+
+    setCustomerActive: wrap("setCustomerActive", (p) => {
+      const o = exactObject(p, ["customerId", "isActive"]);
+      if (typeof o.isActive !== "boolean") invalid("'isActive' must be true or false");
+      return toCustomerDto(customers().setActive("customer", str(o.customerId, "customerId", 100), o.isActive));
+    }),
+
     createCategory: wrap("createCategory", (p) => {
       const o = exactObject(p, ["nameAr", "nameEn"]);
       const row = toCategoryDto(
@@ -1258,6 +1320,32 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     if (sale.sourceType !== "invoice" || !sale.invoiceId || !options.invoices) return null;
     const number = options.invoices.invoiceNumberOf(sale.invoiceId);
     return number ?? null;
+  }
+
+  /**
+   * A party row as the renderer sees it.
+   *
+   * 🔴 IT DROPS `kind` AND `created_by`, AND ADDS NOTHING. `kind` is always "customer" on these
+   * channels, so sending it would invite a renderer to think it could ask for another; `created_by`
+   * is an operator id with no use on screen. And no balance is synthesized: see the DTO's own note.
+   */
+  function toCustomerDto(row: PartyRow): CustomerDto {
+    return {
+      id: row.id,
+      displayName: row.display_name,
+      phone: row.phone,
+      address: row.address,
+      note: row.note,
+      isActive: row.is_active === 1,
+      createdAt: row.created_at,
+    };
+  }
+
+  function customers(): PartyService {
+    if (!options.parties) {
+      throw new DomainError("NOT_AVAILABLE", "The customer directory is not available on this terminal");
+    }
+    return options.parties;
   }
 
   function invoices(): InvoiceService {

@@ -192,6 +192,20 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   //
   // 🔴 THE MUTATIONS ARE OWNER. Changing a product's photo is a master-data act, like its price.
   createCategory: "owner",
+  // ── Customer directory (S1B) ──────────────────────────────────────────────────────────────────
+  //
+  // 🔴 "session" FOR READ AND CREATE, "owner" FOR EVERY CHANGE. A cashier takes a new customer's
+  // name at the till, so searching, opening and creating are open to any signed-in operator;
+  // renaming, re-contacting and archiving an account that already exists are administration.
+  //
+  // 🔴 AND DELIBERATELY NOT "create-products". That level is a per-operator product capability, and
+  // whether an employee may add Products has nothing to do with whether they may write down a
+  // customer's name. Reusing it would have tied two unrelated permissions together forever.
+  searchCustomers: "session",
+  getCustomer: "session",
+  createCustomer: "session",
+  updateCustomerContact: "owner",
+  setCustomerActive: "owner",
   renameCategory: "owner",
   setCategoryActive: "owner",
   deleteCategory: "owner",

@@ -7,11 +7,13 @@
  * postings that are a LATER slice. A method called `balanceOf` would have to invent its answer
  * today, so there is none.
  *
- * 🔴 WHO MAY DO WHAT, AND WHY IT SPLITS AT THE SUPPLIER. Registering a CUSTOMER is part of serving
- * one — a cashier takes the name at the till — so any signed-in operator may do it. A SUPPLIER is
- * the shop's own purchasing relationship, which a cashier has no business creating, so it is
- * owner-only. The role is re-read LIVE on every call through `requireLiveRole`, so a demotion takes
- * effect on the next action with no logout, exactly as the existing channels behave.
+ * 🔴 WHO MAY DO WHAT — IT SPLITS TWICE. Registering a CUSTOMER is part of serving one, so any
+ * signed-in operator may create and read customers. A SUPPLIER is the shop's own purchasing
+ * relationship, so every supplier operation is owner-only. And CHANGING an account that already
+ * exists — renaming, re-contacting, archiving — is owner-only for BOTH kinds, because once a later
+ * slice hangs obligations off these ids a quietly renamed account is a quietly altered financial
+ * relationship. The role is re-read LIVE on every call, so a demotion takes effect on the next
+ * action with no logout, exactly as the existing channels behave.
  *
  * 🔴 NOTHING EVER MERGES. `findDuplicateNames` exists so a UI can say "an account with this name
  * already exists" and let the operator decide. Creation is never refused for a shared name and two
@@ -95,6 +97,25 @@ export class PartyService {
   private requireFor(kind: PartyKind): PartyActor {
     const actor = this.requireOperator();
     if (kind === "supplier" && actor.role !== "owner") {
+      throw new DomainError("NOT_AUTHORIZED", "Only the shop owner can do that");
+    }
+    return actor;
+  }
+
+  /**
+   * The operator allowed to CHANGE an account that already exists — owner only, for both kinds.
+   *
+   * 🔴 S1B NARROWED THIS, AND THE NARROWING IS THE POINT. S1A had one gate: any signed-in operator
+   * could do anything to a customer, including renaming or archiving one. Taking a new customer's
+   * name at the till is part of serving them, so CREATING stays open to a cashier — but editing or
+   * archiving an account that already exists is administration, and once a later slice hangs
+   * obligations off these ids, a quietly renamed or archived account is a quietly altered financial
+   * relationship. So reading and creating use `requireFor`; everything that mutates an existing row
+   * uses this. The change only ever REMOVES permission from a cashier.
+   */
+  private requireMutator(kind: PartyKind): PartyActor {
+    const actor = this.requireFor(kind);
+    if (actor.role !== "owner") {
       throw new DomainError("NOT_AUTHORIZED", "Only the shop owner can do that");
     }
     return actor;
@@ -186,7 +207,7 @@ export class PartyService {
    */
   updateContact(kind: PartyKind, id: unknown, patch: PartyContactPatch): PartyRow {
     const existing = this.get(kind, id);
-    const actor = this.requireFor(kind);
+    const actor = this.requireMutator(kind);
     const now = this.now().toISOString();
 
     const next: Partial<Record<PartyContactField, string | null>> = {};
@@ -236,7 +257,7 @@ export class PartyService {
    */
   setActive(kind: PartyKind, id: unknown, isActive: unknown): PartyRow {
     const existing = this.get(kind, id);
-    this.requireFor(kind);
+    this.requireMutator(kind);
     if (typeof isActive !== "boolean") throw new DomainError("INVALID_INPUT", "'isActive' must be true or false");
     const now = this.now().toISOString();
     return this.deps.transact(() => this.deps.parties.update(existing.id, { isActive }, now));

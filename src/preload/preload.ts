@@ -143,6 +143,11 @@ const CH = {
   listCategories: "pos:listCategories",
   listBrands: "pos:listBrands",
   createCategory: "pos:createCategory",
+  searchCustomers: "pos:searchCustomers",
+  getCustomer: "pos:getCustomer",
+  createCustomer: "pos:createCustomer",
+  updateCustomerContact: "pos:updateCustomerContact",
+  setCustomerActive: "pos:setCustomerActive",
   renameCategory: "pos:renameCategory",
   setCategoryActive: "pos:setCategoryActive",
   deleteCategory: "pos:deleteCategory",
@@ -232,6 +237,25 @@ const api: PosApi = {
   listCategories: () => ipcRenderer.invoke(CH.listCategories),
   listBrands: () => ipcRenderer.invoke(CH.listBrands),
   createCategory: (req) => ipcRenderer.invoke(CH.createCategory, { nameAr: req.nameAr, nameEn: req.nameEn }),
+  // ── Customer directory (S1B) ──────────────────────────────────────────────────────────────────
+  //
+  // 🔴 EVERY FIELD IS NAMED, as every other method here does. A spread would forward whatever the
+  // renderer attached, and the main process refuses unexpected keys — so a stray field would turn
+  // into an INVALID_INPUT the operator cannot act on, instead of being dropped here.
+  searchCustomers: (req) =>
+    ipcRenderer.invoke(CH.searchCustomers, { query: req.query, includeArchived: req.includeArchived }),
+  getCustomer: (req) => ipcRenderer.invoke(CH.getCustomer, { customerId: req.customerId }),
+  createCustomer: (req) =>
+    ipcRenderer.invoke(CH.createCustomer, {
+      displayName: req.displayName,
+      phone: req.phone,
+      address: req.address,
+      note: req.note,
+    }),
+  updateCustomerContact: (req) =>
+    ipcRenderer.invoke(CH.updateCustomerContact, { customerId: req.customerId, patch: req.patch }),
+  setCustomerActive: (req) =>
+    ipcRenderer.invoke(CH.setCustomerActive, { customerId: req.customerId, isActive: req.isActive }),
   renameCategory: (req) =>
     ipcRenderer.invoke(CH.renameCategory, { categoryId: req.categoryId, nameAr: req.nameAr, nameEn: req.nameEn }),
   setCategoryActive: (req) =>

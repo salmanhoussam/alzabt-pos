@@ -81,6 +81,14 @@ describe("IPC surface", () => {
   it("exposes only the fixed business channels — no SQL, query, file or generic invoke", () => {
     expect(CHANNEL_NAMES.sort()).toEqual(
       [
+        // 🔴 S1B adds five CUSTOMER channels and no supplier one. Listed here by name, with every
+        // earlier entry untouched, because this list failing on each addition is what proves no
+        // channel was added without a reviewer seeing it.
+        "createCustomer",
+        "getCustomer",
+        "searchCustomers",
+        "setCustomerActive",
+        "updateCustomerContact",
         "createCategory",
         "createSale",
         "currentCashier",
@@ -167,7 +175,12 @@ describe("IPC surface", () => {
     //        named "...Status", which invoiceIpc.test.ts forbids on purpose)
     // -> 68 (migration 11: setOperatorMayCreateProducts — the owner grants one cashier the
     //        narrow right to add products; see channelPolicy for why it is owner-only itself)
-    expect(CHANNEL_NAMES).toHaveLength(68);
+    // 🔴 TRANSITION — SIXTY-EIGHT to SEVENTY-THREE with the customer directory (slice S1B). The
+    // five added: searchCustomers, getCustomer, createCustomer, updateCustomerContact,
+    // setCustomerActive. The old value was 68 and is named rather than replaced. They are
+    // CUSTOMER-only: there is deliberately no supplier channel and no `kind` parameter, so the
+    // supplier half of PartyService is unreachable from the renderer.
+    expect(CHANNEL_NAMES).toHaveLength(73);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

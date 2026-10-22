@@ -20,6 +20,8 @@ import { assertStorable, normalizeProductPhoto } from "./photoNormalize";
 import type { OnlineCatalogSnapshot } from "../application/posService";
 import type { OnlineCatalogExportDto } from "../shared/ipcContract";
 import { InvoiceService } from "../application/invoiceService";
+import { PartyService } from "../application/partyService";
+import { PartyRepository } from "../persistence/partyRepository";
 import { businessDateOf } from "../domain/businessDay";
 import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
@@ -65,6 +67,7 @@ const RENDERER_URL = pathToFileURL(RENDERER_INDEX).toString();
 let mainWindow: BrowserWindow | null = null;
 let db: Db | null = null;
 let invoices: InvoiceService | null = null;
+let parties: PartyService | null = null;
 let log: Logger = nullLogger;
 
 /**
@@ -785,11 +788,29 @@ function startTill(): void {
     terminal: FIXTURE_TERMINAL,
   });
 
+  // The customer/supplier directory (migration 12), on THIS connection and THIS transaction
+  // provider. Its actor comes from `service`, which owns the session and re-reads the live role —
+  // so the directory has no session of its own to drift out of step with the till's.
+  parties = new PartyService({
+    parties: new PartyRepository(db),
+    actor: () => {
+      const cashier = service.currentCashier();
+      if (!cashier) return null;
+      const role = service.currentRole();
+      return role === null ? null : { id: cashier.id, name: cashier.name, role };
+    },
+    transact: (fn) => {
+      if (!db) throw new Error("ledger is not open");
+      return db.transaction(fn).immediate();
+    },
+  });
+
   // The phone bridge reads this through its getter when a session starts.
   posService = service;
 
   registerIpc(service, {
     invoices,
+    parties,
     pickInvoiceLogo,
     pickProductPhoto,
     printInvoice: printInvoiceDocument,

@@ -154,6 +154,15 @@ jobs:
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
           node e2e/product-management.mjs
 
+      # Slice S1B. The five claims the customer directory is judged on, and the one that needed a
+      # real app: that building a cart, opening the customer panel and creating a customer leaves
+      # the cart, its total and the product search exactly as they were. No DOM-less unit test can
+      # assert that React kept its state across a panel opening.
+      - name: Customer directory against the INSTALLED app (owner, cashier, cart survival, restart)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/customers.mjs
+
       # 🔴 THE CODEC PREMISES FIRST. Every number in src/main/photoNormalize.ts rests on what
       # nativeImage does, and that was measured on Linux. If Chromium on Windows decodes a WEBP, or
       # applies EXIF orientation itself, or stops answering EMPTY for rubbish, the policy is wrong
