@@ -426,6 +426,26 @@ const AR: Dict = {
   "outcome.saleStatusUnknown":
     "حدث خطأ غير متوقّع — لا نعرف إن كانت الفاتورة قد سُجِّلت. راجع السجلّ قبل إعادة المحاولة.",
 
+  // ── And the same question for a MANUAL INVOICE, which is a different object to the cashier ────
+  //
+  // 🔴 THESE ARE NOT THE SALE SENTENCES REWORDED. Finalizing an invoice issues a numbered
+  // commercial document AND writes the sale it is, in one transaction. What the cashier must not do
+  // twice is ISSUE THE INVOICE — so the instruction names the invoice list, and the identity that
+  // matters first is the INVOICE NUMBER, which is what is printed on the paper in their hand.
+  // Forcing the SALE_* codes onto this would tell them to check the wrong screen for the wrong
+  // number.
+  "outcome.invoiceNotFinalized": "حدث خطأ غير متوقّع — لم تُصدَر الفاتورة.",
+  "outcome.invoiceNotFinalizedRetry":
+    "حدث خطأ غير متوقّع — لم تُصدَر الفاتورة، وهي ما تزال مسوّدة. يمكنك إعادة المحاولة.",
+  "outcome.invoiceFinalized":
+    "الفاتورة رقم {invoice} صُدِرت فعلاً ثم حدث خطأ غير متوقّع. راجع قائمة الفواتير — لا تُصدرها مرّة أخرى.",
+  "outcome.invoiceFinalizedWithReceipt":
+    "الفاتورة رقم {invoice} صُدِرت فعلاً (إيصال رقم {receipt}) ثم حدث خطأ غير متوقّع. راجع قائمة الفواتير — لا تُصدرها مرّة أخرى.",
+  "outcome.invoiceFinalizedNoNumber":
+    "الفاتورة صُدِرت فعلاً ثم حدث خطأ غير متوقّع. راجع قائمة الفواتير — لا تُصدرها مرّة أخرى.",
+  "outcome.invoiceStatusUnknown":
+    "حدث خطأ غير متوقّع — لا نعرف إن كانت الفاتورة قد صُدِرت. راجع قائمة الفواتير قبل إعادة المحاولة.",
+
   "pay.title": "الدفع",
   "pay.note": "سجّل كيف دفع الزبون. لا تتم أيّ عمليّة دفع هنا.",
   "pay.back": "رجوع إلى السلّة",
@@ -877,6 +897,20 @@ const EN: Dict = {
     "The sale WAS recorded but an unexpected error followed. Check History \u2014 do not ring it up again.",
   "outcome.saleStatusUnknown":
     "Unexpected error \u2014 it is not known whether the sale was recorded. Check History before trying again.",
+
+  // English for the invoice outcomes. New wording, because no English sentence existed for them —
+  // every one of these cases read "Unexpected error. Please try again..." before this slice.
+  "outcome.invoiceNotFinalized": "Unexpected error \u2014 the invoice was not issued.",
+  "outcome.invoiceNotFinalizedRetry":
+    "Unexpected error \u2014 the invoice was not issued and is still a draft. You can try again.",
+  "outcome.invoiceFinalized":
+    "Invoice #{invoice} WAS issued but an unexpected error followed. Check the invoice list \u2014 do not issue it again.",
+  "outcome.invoiceFinalizedWithReceipt":
+    "Invoice #{invoice} WAS issued (receipt #{receipt}) but an unexpected error followed. Check the invoice list \u2014 do not issue it again.",
+  "outcome.invoiceFinalizedNoNumber":
+    "The invoice WAS issued but an unexpected error followed. Check the invoice list \u2014 do not issue it again.",
+  "outcome.invoiceStatusUnknown":
+    "Unexpected error \u2014 it is not known whether the invoice was issued. Check the invoice list before trying again.",
 
   "pay.title": "Payment",
   "pay.note": "Record how the customer paid. No payment is processed here.",

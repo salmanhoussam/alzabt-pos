@@ -22,6 +22,7 @@ import type { SaleRecord } from "../domain/sale";
 import { DEFAULT_TERMINAL_LANGUAGE, isLanguage } from "../shared/i18n";
 import type { Language, TerminalSettings } from "../shared/i18n";
 import { saleOutcomeError } from "./saleOutcomeText";
+import { invoiceOutcomeError } from "./invoiceOutcomeText";
 import {
   MAX_BRAND,
   MAX_DESCRIPTION as MAX_PRODUCT_DESCRIPTION,
@@ -376,6 +377,56 @@ export function saleFailureTruth(service: PosService, payload: unknown, lang: La
       : saleOutcomeError(lang, "not_recorded_retry");
   } catch {
     return saleOutcomeError(lang, "unknown");
+  }
+}
+
+/**
+ * What the cashier is told after an unexpected error in `finalizeInvoice`, decided by READING the
+ * ledger rather than by guessing from the exception.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 THE DEFECT THIS CLOSES. `finalizeInvoice` had no `onInternal`, so every unexpected fault —
+ * before the commit, during it, or after it — produced `GENERIC_INTERNAL`: "Unexpected error.
+ * Please try again…". For a fault AFTER the commit that sentence is false in the direction that
+ * costs the merchant work: the invoice has a number, the sale is in the ledger, and the operator
+ * is being invited to issue it again.
+ *
+ * 🔴 WHY THE SALE ROW IS A SOUND PROXY FOR "THE COMMIT HAPPENED". `invoiceService.finalizeInvoice`
+ * runs its whole body inside ONE `transact` — reread, validate, allocate the number, freeze the
+ * issuer, write the finalized row, write the sale, write the reconciliation — and returns from
+ * inside it. SQLite commits all of it or none of it. So "a sale exists for this invoice" is a
+ * faithful statement about the transaction's outcome, and it is read through
+ * `invoiceService.saleForInvoice`, which already existed for exactly this kind of question and is
+ * documented read-only.
+ *
+ * 🔴 IT NEVER RE-FINALIZES ANYTHING. Two read-only calls, no write, no transaction. Diagnosing an
+ * error must not change what it is diagnosing.
+ *
+ * 🔴 AND IT CANNOT CLAIM "NOT ISSUED" WITHOUT EVIDENCE. A payload that never named an invoice gets
+ * the blind wording with no retry offered — the same split the sale path makes — because that
+ * branch has read nothing. A lookup that throws becomes "unknown", never "not issued".
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export function invoiceFinalizeTruth(invoices: InvoiceService, payload: unknown, lang: Language): IpcError {
+  const id =
+    payload && typeof payload === "object" && typeof (payload as { invoiceId?: unknown }).invoiceId === "string"
+      ? (payload as { invoiceId: string }).invoiceId
+      : null;
+  // No id means nothing can be looked up. `invoiceId()` would have refused such a payload with a
+  // DomainError before the service ran, so reaching here with no id means the service was never
+  // entered — but the wording still offers no retry, because this branch has read no evidence.
+  if (id === null) return invoiceOutcomeError(lang, "not_finalized");
+  try {
+    const sale = invoices.saleForInvoice(id);
+    if (!sale) return invoiceOutcomeError(lang, "not_finalized_retry");
+    // 🔴 BOTH NUMBERS COME OFF REAL ROWS. `invoiceNumberOf` returns undefined for a draft or an
+    // unknown id, and `invoiceOutcomeError` prints neither number unless it really is one.
+    return invoiceOutcomeError(lang, "finalized", {
+      invoiceNumber: invoices.invoiceNumberOf(id),
+      receiptNumber: sale.receiptNumber,
+    });
+  } catch {
+    return invoiceOutcomeError(lang, "unknown");
   }
 }
 
@@ -1063,7 +1114,17 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         lines: view.lines.length,
       });
       return toInvoiceViewDto(view);
-    }),
+    },
+    // 🔴 `options.invoices` DIRECTLY, NOT `invoices()`. This callback runs INSIDE `wrap`'s catch
+    // block, and `invoices()` throws when the terminal has no invoice service. A throw here would
+    // escape the catch and leave the renderer with a rejected promise and no message at all —
+    // strictly worse than the generic sentence it was meant to improve on. Reaching this callback
+    // normally implies the service exists (the handler body used it), but `authorize()` can also
+    // fail with a non-DomainError before the body runs, so the guard is real.
+    (p) =>
+      options.invoices
+        ? invoiceFinalizeTruth(options.invoices, p, operatorLanguage())
+        : genericInternal(operatorLanguage())),
 
     listInvoices: wrap("listInvoices", (p) => {
       const o = search(p);
