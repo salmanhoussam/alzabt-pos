@@ -21,7 +21,9 @@ import type { OnlineCatalogSnapshot } from "../application/posService";
 import type { OnlineCatalogExportDto } from "../shared/ipcContract";
 import { InvoiceService } from "../application/invoiceService";
 import { PartyService } from "../application/partyService";
+import { LedgerService } from "../application/ledgerService";
 import { PartyRepository } from "../persistence/partyRepository";
+import { LedgerRepository } from "../persistence/ledgerRepository";
 import { businessDateOf } from "../domain/businessDay";
 import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
@@ -68,6 +70,7 @@ let mainWindow: BrowserWindow | null = null;
 let db: Db | null = null;
 let invoices: InvoiceService | null = null;
 let parties: PartyService | null = null;
+let ledgerService: LedgerService | null = null;
 let log: Logger = nullLogger;
 
 /**
@@ -805,12 +808,39 @@ function startTill(): void {
     },
   });
 
+  // The ledger (migration 13), on the SAME connection, the SAME transaction provider and the SAME
+  // actor as the directory above — so "who is acting" cannot drift between the two, and a
+  // statement is read inside the same database session that wrote the rows.
+  ledgerService = new LedgerService({
+    ledger: new LedgerRepository(db),
+    parties: new PartyRepository(db),
+    actor: () => {
+      const cashier = service.currentCashier();
+      if (!cashier) return null;
+      const role = service.currentRole();
+      return role === null ? null : { id: cashier.id, name: cashier.name, role };
+    },
+    transact: (fn) => {
+      if (!db) throw new Error("ledger is not open");
+      return db.transaction(fn).immediate();
+    },
+    terminal: { timeZone: FIXTURE_TERMINAL.timeZone },
+    saleCurrency: (saleId) => {
+      if (!db) return null;
+      const row = db.prepare("SELECT currency FROM sales WHERE id = ?").get(saleId) as
+        | { currency: string }
+        | undefined;
+      return row?.currency ?? null;
+    },
+  });
+
   // The phone bridge reads this through its getter when a session starts.
   posService = service;
 
   registerIpc(service, {
     invoices,
     parties,
+    ledger: ledgerService,
     pickInvoiceLogo,
     pickProductPhoto,
     printInvoice: printInvoiceDocument,

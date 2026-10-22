@@ -89,6 +89,10 @@ describe("IPC surface", () => {
         "searchCustomers",
         "setCustomerActive",
         "updateCustomerContact",
+        // 🔴 S3B adds exactly ONE, and it is a READ. There is still no channel here that posts an
+        // obligation, records a settlement or sets a balance — the renderer cannot write money at
+        // all, which is why this list is the right place to notice if that ever changes.
+        "getCustomerStatement",
         "createCategory",
         "createSale",
         "currentCashier",
@@ -180,7 +184,10 @@ describe("IPC surface", () => {
     // setCustomerActive. The old value was 68 and is named rather than replaced. They are
     // CUSTOMER-only: there is deliberately no supplier channel and no `kind` parameter, so the
     // supplier half of PartyService is unreachable from the renderer.
-    expect(CHANNEL_NAMES).toHaveLength(73);
+    // 🔴 TRANSITION — SEVENTY-THREE to SEVENTY-FOUR with the account statement (slice S3B). The
+    // one added: getCustomerStatement. The old value was 73 and is named rather than replaced. It
+    // is a READ, owner-classified, and it is still the case that no channel here writes money.
+    expect(CHANNEL_NAMES).toHaveLength(74);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

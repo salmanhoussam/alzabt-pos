@@ -858,6 +858,24 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
                  max-width: 100%; overflow-wrap: anywhere; }
 .cart-customer p { flex-basis: 100%; margin: 0; }
 
+/* ── S3B · the account statement ──────────────────────────────────────────────────────────────
+   Logical properties throughout (inline-start, not left) so one rule serves Arabic RTL and
+   English LTR. Amounts are wrapped in <bdi dir="ltr"> in the markup, which keeps a figure reading
+   left-to-right inside an RTL column without moving the box it sits in. */
+.customer-statement { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 12px; }
+.customer-statement h3 { margin: 0 0 6px; font-size: 15px; }
+.statement-balances { list-style: none; margin: 8px 0; padding: 0; display: flex; gap: 14px;
+                      flex-wrap: wrap; }
+.statement-obligations { list-style: none; margin: 10px 0 0; padding: 0; display: flex;
+                         flex-direction: column; gap: 10px; }
+.statement-obligation { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px;
+                        min-width: 0; }
+.statement-row { display: flex; gap: 10px; align-items: baseline; justify-content: space-between;
+                 min-width: 0; overflow-wrap: anywhere; }
+.statement-settlements { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 6px; }
+.statement-settlements ul { list-style: none; margin: 4px 0 0; padding: 0; display: flex;
+                            flex-direction: column; gap: 4px; }
+
 @media (max-width: 900px) {
   .customers-screen { grid-template-columns: 1fr; }
 }

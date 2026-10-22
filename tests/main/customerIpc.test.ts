@@ -63,18 +63,39 @@ const create = (displayName: string, phone: string | null = null) =>
 
 describe("the customer channels", () => {
   // ── Surface ─────────────────────────────────────────────────────────────────────────────────
-  it("🔴 the preload surface grew from 68 to 73, and these are the five", () => {
-    // 🔴 TRANSITION. The old value was 68 and is named here rather than silently replaced. The five
-    // are customer-only: there is deliberately no supplier channel and no `kind` parameter.
+  it("🔴 the preload surface grew 68 -> 73 (S1B) -> 74 (S3B), and these are the six", () => {
+    // 🔴 TRANSITION. The old values were 68, then 73, named here rather than silently replaced.
+    // The five S1B channels are customer-only: there is deliberately no supplier channel and no
+    // `kind` parameter. S3B adds exactly ONE, and it is a READ.
     const added: ChannelName[] = [
       "searchCustomers",
       "getCustomer",
       "createCustomer",
       "updateCustomerContact",
       "setCustomerActive",
+      "getCustomerStatement",
     ];
     for (const name of added) expect(Object.keys(CHANNELS)).toContain(name);
-    expect(Object.keys(CHANNELS)).toHaveLength(73);
+    expect(Object.keys(CHANNELS)).toHaveLength(74);
+  });
+
+  it("🔴 S3B added a READ and nothing else — no channel on this bridge writes money", () => {
+    // The whole financial-write surface, stated as an absence that fails loudly if one appears.
+    const names = Object.keys(CHANNELS);
+    for (const forbidden of [
+      "postObligation",
+      "createObligation",
+      "settle",
+      "recordSettlement",
+      "recordPayment",
+      "payCustomer",
+      "setCustomerBalance",
+      "adjustBalance",
+    ]) {
+      expect(names, `a financial WRITE channel appeared: ${forbidden}`).not.toContain(forbidden);
+    }
+    // And the one financial channel that does exist is owner-classified.
+    expect(accessFor("getCustomerStatement")).toBe("owner");
   });
 
   it("🔴 every channel is classified, and the customer ones carry the intended level", () => {

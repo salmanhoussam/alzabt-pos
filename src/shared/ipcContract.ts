@@ -55,6 +55,10 @@ export const CHANNELS = {
   createCustomer: "pos:createCustomer",
   updateCustomerContact: "pos:updateCustomerContact",
   setCustomerActive: "pos:setCustomerActive",
+  // 🔴 S3B — THE ONLY FINANCIAL CHANNEL ON THE BRIDGE, AND IT IS READ-ONLY. There is no channel
+  // that posts an obligation or records a payment: those exist in the service and are reachable
+  // only from main. One owner-classified read, bound to a durable customer id.
+  getCustomerStatement: "pos:getCustomerStatement",
   renameCategory: "pos:renameCategory",
   setCategoryActive: "pos:setCategoryActive",
   deleteCategory: "pos:deleteCategory",
@@ -617,6 +621,58 @@ export interface CustomerDto {
   readonly createdAt: string;
 }
 
+/**
+ * One posted payment, as a statement shows it.
+ *
+ * 🔴 EVERY AMOUNT HERE IS A `MoneyDto` — minor units as a STRING, with its currency beside it.
+ * Never a number: a float cannot represent 0.1 exactly, and a statement is the one screen where
+ * that would be read as the shop's own word on what a customer owes.
+ */
+export interface StatementSettlementDto {
+  readonly id: string;
+  readonly amount: MoneyDto;
+  readonly method: "cash" | "card" | "external" | "other";
+  readonly settledAt: string;
+}
+
+/** One posted debt, its payments, and what is left on it. */
+export interface StatementObligationDto {
+  readonly id: string;
+  /** What was originally owed. Immutable, straight from the posted row. */
+  readonly amount: MoneyDto;
+  /**
+   * 🔴 CALCULATED BY THE LEDGER, NEVER STORED. `amount − sum(settlements)`, computed in main by
+   * S3A's own `outstanding()`. The renderer does no money arithmetic at all — it prints what it
+   * is given, so a UI bug cannot change what a customer appears to owe.
+   */
+  readonly outstanding: MoneyDto;
+  readonly fullyPaid: boolean;
+  readonly sourceKind: "sale" | "manual";
+  readonly sourceRef: string;
+  /** The sale this debt came from, when it came from one. Null for a manual entry. */
+  readonly saleId: string | null;
+  readonly postedAt: string;
+  readonly settlements: readonly StatementSettlementDto[];
+}
+
+/**
+ * A customer's account statement. Read-only.
+ *
+ * 🔴 `balances` IS A LIST, ONE ENTRY PER CURRENCY, AND IT IS NEVER SUMMED. There is no exchange
+ * rate anywhere in this product, so a customer who owes 50 USD and 2,000,000 LBP owes exactly
+ * that — two facts. One blended figure would require inventing a rate, and a wrong rate in a
+ * merchant's books is worse than two numbers.
+ *
+ * 🔴 AN EMPTY `obligations` IS NOT A ZERO BALANCE. It means nothing has been posted, and the
+ * screen says so in those words rather than printing "0.00", which would read as an authoritative
+ * accounting statement that the ledger never made.
+ */
+export interface CustomerStatementDto {
+  readonly customer: CustomerDto;
+  readonly obligations: readonly StatementObligationDto[];
+  readonly balances: readonly MoneyDto[];
+}
+
 export interface SearchCustomersRequest {
   /** Matched against the name and the phone. Empty means "the whole directory". */
   readonly query: string;
@@ -1099,6 +1155,12 @@ export interface PosApi {
   createCustomer(req: CreateCustomerRequest): Promise<IpcResult<CreateCustomerResponse>>;
   updateCustomerContact(req: UpdateCustomerContactRequest): Promise<IpcResult<CustomerDto>>;
   setCustomerActive(req: SetCustomerActiveRequest): Promise<IpcResult<CustomerDto>>;
+  /**
+   * 🔴 OWNER ONLY, AND READ-ONLY. The one financial channel on this bridge. It returns what the
+   * ledger has posted; there is no channel anywhere that creates a debt or records a payment, so
+   * an untrusted renderer cannot write money at all — not even a refused attempt.
+   */
+  getCustomerStatement(req: CustomerIdRequest): Promise<IpcResult<CustomerStatementDto>>;
   renameCategory(req: RenameCategoryRequest): Promise<IpcResult<CategoryDto>>;
   setCategoryActive(req: SetCategoryActiveRequest): Promise<IpcResult<CategoryDto>>;
   deleteCategory(req: CategoryIdRequest): Promise<IpcResult<{ readonly deletedId: string }>>;

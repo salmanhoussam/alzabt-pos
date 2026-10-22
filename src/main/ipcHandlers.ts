@@ -25,8 +25,9 @@ import type { Language, TerminalSettings } from "../shared/i18n";
 import { saleOutcomeError } from "./saleOutcomeText";
 import { invoiceOutcomeError } from "./invoiceOutcomeText";
 import type { PartyService } from "../application/partyService";
+import type { LedgerService } from "../application/ledgerService";
 import type { PartyRow } from "../persistence/partyRepository";
-import type { CustomerDto } from "../shared/ipcContract";
+import type { CustomerDto, CustomerStatementDto } from "../shared/ipcContract";
 import {
   MAX_BRAND,
   MAX_DESCRIPTION as MAX_PRODUCT_DESCRIPTION,
@@ -196,6 +197,8 @@ export interface IpcHandlerOptions {
    * customer channel answers NOT_AVAILABLE — the same shape `invoices` already uses.
    */
   readonly parties?: PartyService;
+  /** S3B: the read-only statement source. Absent on a terminal without the ledger. */
+  readonly ledger?: LedgerService;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -872,6 +875,16 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       return toCustomerDto(customers().updateContact("customer", str(o.customerId, "customerId", 100), draft));
     }),
 
+    // 🔴 READ-ONLY, OWNER-ONLY. Classified "owner" in channelPolicy AND refused again by
+    // `LedgerService.requireOwner`. A supplier id comes back as PARTY_NOT_FOUND rather than as a
+    // different error, so this reply cannot confirm that a supplier exists.
+    getCustomerStatement: wrap("getCustomerStatement", (p) => {
+      const o = exactObject(p, ["customerId"]);
+      const id = str(o.customerId, "customerId", 100);
+      const statement = ledger().statementFor(id);
+      return toStatementDto(customers().get("customer", id), statement);
+    }),
+
     setCustomerActive: wrap("setCustomerActive", (p) => {
       const o = exactObject(p, ["customerId", "isActive"]);
       if (typeof o.isActive !== "boolean") invalid("'isActive' must be true or false");
@@ -1338,6 +1351,46 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       note: row.note,
       isActive: row.is_active === 1,
       createdAt: row.created_at,
+    };
+  }
+
+  function ledger(): LedgerService {
+    if (!options.ledger) {
+      throw new DomainError("NOT_AVAILABLE", "Customer accounts are not available on this terminal");
+    }
+    return options.ledger;
+  }
+
+  /**
+   * The statement DTO.
+   *
+   * 🔴 EVERY FIGURE IS ALREADY DECIDED BY THE LEDGER. This maps bigints to strings and nothing
+   * else — no addition, no rounding, no "0" substituted for an absent value. A mapper that did
+   * arithmetic would be a second place where what a customer owes is computed.
+   */
+  function toStatementDto(customer: PartyRow, s: ReturnType<LedgerService["statementFor"]>): CustomerStatementDto {
+    return {
+      customer: toCustomerDto(customer),
+      obligations: s.obligations.map((row) => ({
+        id: row.obligation.id,
+        amount: { minor: row.obligation.amountMinor.toString(), currency: row.obligation.currency },
+        outstanding: { minor: row.outstandingMinor.toString(), currency: row.obligation.currency },
+        fullyPaid: row.outstandingMinor === 0n,
+        sourceKind: row.obligation.sourceKind,
+        sourceRef: row.obligation.sourceRef,
+        saleId: row.obligation.saleId,
+        postedAt: row.obligation.postedAt,
+        settlements: row.settlements.map((st) => ({
+          id: st.id,
+          amount: { minor: st.amountMinor.toString(), currency: st.currency },
+          method: st.method,
+          settledAt: st.settledAt,
+        })),
+      })),
+      // One entry per currency, in a stable order so the screen does not reshuffle between reads.
+      balances: [...s.balances.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([currency, minor]) => ({ minor: minor.toString(), currency })),
     };
   }
 

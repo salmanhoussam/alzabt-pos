@@ -206,6 +206,10 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   createCustomer: "session",
   updateCustomerContact: "owner",
   setCustomerActive: "owner",
+  // 🔴 OWNER. A cashier may search and create customers (S1B) and must not learn what any of them
+  // owes. Classified here AND refused again by `LedgerService.requireOwner`, because one gate that
+  // someone later reclassifies by accident is not a boundary worth having on money.
+  getCustomerStatement: "owner",
   renameCategory: "owner",
   setCategoryActive: "owner",
   deleteCategory: "owner",

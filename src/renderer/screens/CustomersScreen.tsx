@@ -12,6 +12,7 @@ import { useT } from "../i18n";
 import type { CustomerDto } from "../../shared/ipcContract";
 import { contactPatch, disambiguator, mayMutateCustomers, nameIsValid, sameNamed } from "../customerDirectory";
 import { CustomerFinder } from "./CustomerFinder";
+import { CustomerStatement } from "./CustomerStatement";
 
 interface Props {
   // `role` is optional on CashierDto, so it is optional here; `mayMutateCustomers` treats an
@@ -249,6 +250,11 @@ export function CustomersScreen({ operator }: Props) {
                 {t("customers.ownerOnly")}
               </p>
             )}
+            {/* 🔴 OWNER ONLY, and the gate is NOT this condition — `getCustomerStatement` is
+                classified "owner" and `LedgerService.requireOwner` re-reads the live role, so a
+                cashier reaching the channel directly is refused. This only avoids offering a
+                panel that would be refused. Read-only: nothing here can post a debt or a payment. */}
+            {mayMutate && <CustomerStatement customerId={selected.id} />}
           </div>
         )}
       </div>

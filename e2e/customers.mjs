@@ -364,7 +364,152 @@ try {
   }
   await restarted.close().catch(() => undefined);
 
-  log("customer directory E2E complete");
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // S3B · the read-only account statement
+  //
+  // 🔴 THE DEBTS BELOW ARE SEEDED DIRECTLY INTO THIS RUN'S DISPOSABLE LEDGER, and they have to be:
+  // S3B is READ-ONLY, so there is no screen and no channel that could create one. That is the
+  // feature, not a shortcut. These are fixture rows in a temp profile — not a merchant's books.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  let statementCustomerId;
+  let emptyCustomerId;
+  {
+    const db = new Database(LEDGER);
+    const op = db.prepare("SELECT id FROM operators WHERE role = 'owner' LIMIT 1").get().id;
+    // The two «محمد علي» rows differ only by phone — seed against ONE of them on purpose, so the
+    // screenshot proves the statement follows the id and not the name.
+    statementCustomerId = db.prepare("SELECT id FROM parties WHERE phone = '0111111'").get().id;
+    emptyCustomerId = db.prepare("SELECT id FROM parties WHERE phone = '0222222'").get().id;
+    const obligation = db.prepare(
+      `INSERT INTO obligations (id, party_id, party_kind, direction, source_kind, source_ref,
+                                sale_id, currency, amount_minor, posted_by, posted_at, business_date)
+       VALUES (?, ?, 'customer', 'receivable', 'manual', ?, NULL, ?, ?, ?, ?, ?)`,
+    );
+    const settle = db.prepare(
+      `INSERT INTO settlements (id, obligation_id, currency, idempotency_key, request_fingerprint,
+                                amount_minor, method, settled_by, settled_at, business_date)
+       VALUES (?, ?, ?, ?, 'e2e', ?, ?, ?, ?, ?)`,
+    );
+    // 1 · unpaid USD 25.00   2 · part-paid USD 40.00 (10.00 cash)   3 · fully paid LBP 300000
+    obligation.run("o-unpaid", statementCustomerId, "FIX-001", "USD", 2500, op, "2026-10-20T08:00:00.000Z", "2026-10-20");
+    obligation.run("o-part", statementCustomerId, "FIX-002", "USD", 4000, op, "2026-10-21T08:00:00.000Z", "2026-10-21");
+    settle.run("s-part", "o-part", "USD", "e2e-pay-0001", 1000, "cash", op, "2026-10-21T09:00:00.000Z", "2026-10-21");
+    obligation.run("o-lbp", statementCustomerId, "FIX-003", "LBP", 300000, op, "2026-10-22T08:00:00.000Z", "2026-10-22");
+    settle.run("s-lbp", "o-lbp", "LBP", "e2e-pay-0002", 300000, "card", op, "2026-10-22T09:00:00.000Z", "2026-10-22");
+    db.close();
+  }
+
+  const owner2 = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+  const p3 = await owner2.firstWindow();
+  await signIn(p3, "Cashier One", "1111");
+  await p3.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+  await p3.locator('[data-testid="tab-customers"]').click();
+  await testid(p3, "customers-search").fill("0111111");
+  await p3.locator(`[data-customer="${statementCustomerId}"]`).first().click();
+  await testid(p3, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+
+  // The statement answered for the customer that was asked for, not the same-named one.
+  assert(
+    (await testid(p3, "customer-statement").getAttribute("data-customer")) === statementCustomerId,
+    "🔴 the statement names the customer it was asked for, by id",
+  );
+  const obligations = await p3.$$('[data-testid="statement-obligation"]');
+  assert(obligations.length === 3, `three seeded obligations are listed (${obligations.length})`);
+
+  // 🔴 TWO BALANCES, NEVER ONE. 25.00 unpaid + 30.00 still owed on the part-paid = 55.00 USD, and
+  // the LBP debt is fully settled at 0. Blending them would need a rate this product has none of.
+  const balances = await p3.$$eval('[data-testid="statement-balance"]', (els) =>
+    els.map((e) => ({ currency: e.getAttribute("data-currency"), text: e.innerText.replace(/\s+/g, " ").trim() })),
+  );
+  assert(balances.length === 2, `two balances, one per currency (${balances.length})`);
+  const usd = balances.find((b) => b.currency === "USD");
+  const lbp = balances.find((b) => b.currency === "LBP");
+  assert(usd && usd.text.includes("55.00"), `🔴 the USD balance is 55.00 (got "${usd && usd.text}")`);
+  assert(lbp && lbp.text.includes("0.00"), `🔴 the LBP debt reads 0.00 — it was settled in full (got "${lbp && lbp.text}")`);
+  assert(
+    !balances.some((b) => b.text.includes("300055") || b.text.includes("3000.55")),
+    "🔴 and nothing anywhere is the two currencies added together",
+  );
+
+  const settled = await p3.$$('[data-testid="statement-settled"]');
+  assert(settled.length === 1, `exactly one obligation shows as paid in full (${settled.length})`);
+  const noSettlements = await p3.$$('[data-testid="statement-no-settlements"]');
+  assert(noSettlements.length === 1, `and exactly one shows no payments yet (${noSettlements.length})`);
+  assert((await testid(p3, "statement-read-only").count()) === 1, "🔴 the screen says it is read-only");
+  await p3.screenshot({ path: SHOTS + "S3B-A1-statement-arabic.png" });
+
+  // English LTR, same statement.
+  await testid(p3, "lang-toggle").click();
+  await p3.waitForFunction(() => document.documentElement.dir === "ltr", undefined, { timeout: 20000 });
+  await testid(p3, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+  await p3.screenshot({ path: SHOTS + "S3B-A2-statement-english.png" });
+  await testid(p3, "lang-toggle").click();
+  await p3.waitForFunction(() => document.documentElement.dir === "rtl", undefined, { timeout: 20000 });
+
+  // The OTHER «محمد علي» — same name, no debts. The empty state, not a fabricated zero.
+  await testid(p3, "customers-search").fill("0222222");
+  await p3.locator(`[data-customer="${emptyCustomerId}"]`).first().click();
+  await testid(p3, "statement-empty").waitFor({ state: "visible", timeout: 30000 });
+  assert(
+    (await p3.$$('[data-testid="statement-obligation"]')).length === 0,
+    "🔴 the same-named customer has NO obligations — the two never shared a balance",
+  );
+  const emptyText = (await testid(p3, "statement-empty").innerText()).trim();
+  assert(emptyText === "لا ديون مسجّلة.", `🔴 it says "no posted debts", not a zero (got "${emptyText}")`);
+  assert((await p3.$$('[data-testid="statement-balance"]')).length === 0, "and shows no balance figure at all");
+  await p3.screenshot({ path: SHOTS + "S3B-A3-statement-empty-arabic.png" });
+
+  // 1024x640, the narrowest supported window.
+  // main.ts pins minWidth 1024 / minHeight 640. Resize the REAL BrowserWindow, which is what a
+  // shop actually does — `setViewportSize` is a browser-context call and does not move an Electron
+  // window. Pattern taken from e2e/product-master.mjs, which already proves it works here.
+  await owner2.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows()[0];
+    w.setSize(1024, 640);
+  });
+  await p3.waitForFunction(() => window.innerWidth <= 1024, undefined, { timeout: 10000 });
+  await testid(p3, "customers-search").fill("0111111");
+  await p3.locator(`[data-customer="${statementCustomerId}"]`).first().click();
+  await testid(p3, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+  const overflow = await p3.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  assert(overflow <= 0, `🔴 no horizontal overflow at 1024x640 (${overflow}px)`);
+  await p3.screenshot({ path: SHOTS + "S3B-A4-statement-1024x640.png" });
+  await owner2.close().catch(() => undefined);
+
+  // ── The cashier sees none of it, and cannot fetch it either ──────────────────────────────────
+  const cash2 = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+  const p4 = await cash2.firstWindow();
+  await signIn(p4, "Cashier Two", "2222");
+  await p4.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+  await p4.locator('[data-testid="tab-customers"]').click();
+  await testid(p4, "customers-search").fill("0111111");
+  await p4.locator(`[data-customer="${statementCustomerId}"]`).first().click();
+  await testid(p4, "customers-owner-only").waitFor({ timeout: 30000 });
+  assert((await p4.$$('[data-testid="customer-statement"]')).length === 0, "🔴 a cashier is shown NO statement panel");
+  assert((await p4.$$('[data-testid="statement-balance"]')).length === 0, "🔴 and no balance anywhere on the screen");
+  await p4.screenshot({ path: SHOTS + "S3B-B1-cashier-no-statement.png" });
+
+  // 🔴 AND THE BRIDGE REFUSES IT, which is the real guard — hiding a panel is not authorization.
+  const refused = await direct(p4, "getCustomerStatement", { customerId: statementCustomerId });
+  assert(refused.ok === false, "🔴 the bridge refuses a cashier's statement request");
+  assert(refused.error.code === "NOT_AUTHORIZED", `🔴 with NOT_AUTHORIZED (got ${refused.error.code})`);
+  const bridge = await p4.evaluate(() => Object.keys(window.pos).filter((k) => /obligation|settle|payment|balance/i.test(k)));
+  assert(JSON.stringify(bridge) === "[]", `🔴 there is NO financial WRITE channel on the bridge at all (${JSON.stringify(bridge)})`);
+  await cash2.close().catch(() => undefined);
+
+  // ── Nothing was written by any of the reading above ──────────────────────────────────────────
+  {
+    const db = new Database(LEDGER, { readonly: true });
+    const n = (sql) => Number(db.prepare(sql).get().n);
+    assert(n("SELECT count(*) AS n FROM obligations") === 3, "the three seeded obligations are unchanged");
+    assert(n("SELECT count(*) AS n FROM settlements") === 2, "and the two seeded settlements");
+    assert(n("SELECT count(*) AS n FROM sales") === 0, "🔴 still not one sale");
+    assert(n("SELECT count(*) AS n FROM invoices") === 0, "and not one invoice");
+    assert(n("SELECT count(*) AS n FROM parties") === 5, "and the directory is untouched at five");
+    db.close();
+  }
+
+  log("customer statement E2E complete");
 } finally {
   await app?.close().catch(() => undefined);
 }

@@ -148,6 +148,7 @@ const CH = {
   createCustomer: "pos:createCustomer",
   updateCustomerContact: "pos:updateCustomerContact",
   setCustomerActive: "pos:setCustomerActive",
+  getCustomerStatement: "pos:getCustomerStatement",
   renameCategory: "pos:renameCategory",
   setCategoryActive: "pos:setCategoryActive",
   deleteCategory: "pos:deleteCategory",
@@ -256,6 +257,9 @@ const api: PosApi = {
     ipcRenderer.invoke(CH.updateCustomerContact, { customerId: req.customerId, patch: req.patch }),
   setCustomerActive: (req) =>
     ipcRenderer.invoke(CH.setCustomerActive, { customerId: req.customerId, isActive: req.isActive }),
+  // 🔴 READ-ONLY. It sends one id and receives a statement. There is no counterpart that posts a
+  // debt or records a payment — those are not on this bridge at all.
+  getCustomerStatement: (req) => ipcRenderer.invoke(CH.getCustomerStatement, { customerId: req.customerId }),
   renameCategory: (req) =>
     ipcRenderer.invoke(CH.renameCategory, { categoryId: req.categoryId, nameAr: req.nameAr, nameEn: req.nameEn }),
   setCategoryActive: (req) =>

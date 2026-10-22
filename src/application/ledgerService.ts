@@ -169,6 +169,53 @@ export class LedgerService {
     return balancesByCurrency(obligations, (id) => this.deps.ledger.listSettlements(id));
   }
 
+  /**
+   * One CUSTOMER's whole statement, composed for a screen. Read-only.
+   *
+   * 🔴 IT ADDS NO REPOSITORY OPERATION AND NO POSTING SEMANTICS. Every figure comes from the S3A
+   * reads above — `obligationsOf`, `listSettlements`, `outstanding` — so there is exactly one
+   * definition of what a customer owes and this is not a second one.
+   *
+   * 🔴 CUSTOMERS ONLY, AND A SUPPLIER ID IS REFUSED AS "NOT FOUND". `obligationsOf` would happily
+   * serve a supplier's payables, so the kind is checked HERE rather than left to the caller. The
+   * refusal deliberately does not distinguish "no such party" from "that is a supplier": the
+   * renderer has no supplier channel at all, so confirming one exists would be the only thing this
+   * reply could leak.
+   *
+   * 🔴 ONE CALL, NOT N+1. A screen that asked for obligations and then looped for each one's
+   * settlements would read a ledger that could change between calls and could render a debt beside
+   * someone else's payments. Composing in main means the statement is one consistent read.
+   */
+  statementFor(customerId: string): {
+    readonly obligations: ReadonlyArray<{
+      readonly obligation: ObligationRecord;
+      readonly settlements: readonly SettlementRecord[];
+      readonly outstandingMinor: bigint;
+    }>;
+    readonly balances: ReadonlyMap<string, bigint>;
+  } {
+    this.requireOwner();
+    const party = this.deps.parties.findById(customerId);
+    if (!party || party.kind !== "customer") {
+      throw new DomainError("PARTY_NOT_FOUND", "That account no longer exists");
+    }
+    const rows = this.deps.ledger.listObligations(customerId, "receivable").map((obligation) => {
+      const settlements = this.deps.ledger.listSettlements(obligation.id);
+      return {
+        obligation,
+        settlements,
+        outstandingMinor: outstanding(obligation, settlements).minor,
+      };
+    });
+    return {
+      obligations: rows,
+      balances: balancesByCurrency(
+        rows.map((r) => r.obligation),
+        (id) => rows.find((r) => r.obligation.id === id)?.settlements ?? [],
+      ),
+    };
+  }
+
   // ── Posting ─────────────────────────────────────────────────────────────────────────────────
 
   /**
