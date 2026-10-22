@@ -18,9 +18,19 @@ import { saleOutcomeError } from "../../src/main/saleOutcomeText";
 
 describe("errorText", () => {
   it("shows the main process's message for an ApiError", () => {
-    expect(errorText(new ApiError("TOTAL_MISMATCH", "The displayed total no longer matches"))).toBe(
+    // 🔴 TRANSITION. This asserted the English sentence from the no-argument call:
+    //   errorText(new ApiError("TOTAL_MISMATCH", "The displayed total no longer matches"))
+    //     === "The displayed total no longer matches"
+    // `TOTAL_MISMATCH` is now one of the 18 codes with an Arabic sentence, and with no DOM the
+    // language falls back to DEFAULT_TERMINAL_LANGUAGE (Arabic). The old English value is preserved
+    // and is asserted on the next line, explicitly in English.
+    expect(errorText(new ApiError("TOTAL_MISMATCH", "The displayed total no longer matches"), "en")).toBe(
       "The displayed total no longer matches",
     );
+    // An UNMAPPED code still shows exactly what main sent, in either language — which is what this
+    // test was really protecting.
+    expect(errorText(new ApiError("DUPLICATE_SKU", "'SKU-1' already exists"), "ar")).toBe("'SKU-1' already exists");
+    expect(errorText(new ApiError("DUPLICATE_SKU", "'SKU-1' already exists"), "en")).toBe("'SKU-1' already exists");
   });
 
   it("shows a DomainError the renderer raised itself", () => {
