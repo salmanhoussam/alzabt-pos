@@ -1657,4 +1657,216 @@ CREATE TRIGGER settlements_immutable_delete BEFORE DELETE ON settlements
 BEGIN SELECT RAISE(ABORT, 'ledger: a recorded settlement cannot be deleted'); END;
 `,
   },
+  {
+    version: 14,
+    name: "credit_sale_identity_and_unpaid_state",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 14 — make a future, fully unpaid POS sale representable without recording a tender.
+    //
+    // This is schema-only. It creates no obligations and adds no checkout or payment path.
+    //
+    // SALES HAS FOUR LIVE CHILD-REFERENCE PATHS. `sale_lines.sale_id`, `voids.sale_id`, and
+    // `obligations.sale_id` all reference `sales`; settlements then reference obligations. Migration
+    // 7's three-table rebuild is not copied here. This migration was exercised on populated child
+    // rows with the real runner, foreign_keys=ON, SQLite 3.53.4, and `BEGIN IMMEDIATE`.
+    //
+    // The swap relies on the exact same-name order below: defer FK checks for this transaction;
+    // remove only the three sale-line triggers that read `sales`; copy sales to a staging table;
+    // drop `sales`; create the replacement directly under the original name; copy its rows back;
+    // drop staging; then restore indexes and all affected triggers. Never rename the old parent or
+    // rename staging over `sales`: SQLite can rewrite surviving child FK targets during renames.
+    //
+    // `parties_id_kind` was created by migration 13 and is the actual UNIQUE parent key for the
+    // generated child key below. The generated constant is not a CHECK pretending to validate
+    // party kind: the composite FK enforces it. New credit rows additionally require an active
+    // customer and a name snapshot equal to that party's current name.
+    //
+    // A v13-legal POS row with `payment_status='unpaid'` and a non-NULL method is contradictory,
+    // but historical. Preserve it unchanged during the copy. The replacement CHECK continues to
+    // accept it; a prospective INSERT trigger refuses creating another such row. The only new
+    // `payment_method IS NULL` POS representation is a fully unpaid sale with a durable customer.
+    sql: `
+PRAGMA defer_foreign_keys = ON;
+
+DROP TRIGGER sale_lines_closed_sale;
+DROP TRIGGER sale_lines_pos_shape;
+DROP TRIGGER sale_lines_invoice_shape;
+
+CREATE TABLE sales_m14 (
+  id                  TEXT    PRIMARY KEY,
+  receipt_number      INTEGER NOT NULL UNIQUE CHECK (receipt_number > 0),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL,
+  source_type         TEXT    NOT NULL CHECK (source_type IN ('pos', 'invoice')),
+  invoice_id          TEXT    UNIQUE REFERENCES invoices (id),
+  cashier_id          TEXT    NOT NULL,
+  cashier_name        TEXT    NOT NULL,
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  subtotal_minor      INTEGER NOT NULL CHECK (subtotal_minor >= 0),
+  tax_minor           INTEGER NOT NULL CHECK (tax_minor >= 0),
+  total_minor         INTEGER NOT NULL CHECK (total_minor >= 0),
+  paid_minor          INTEGER NOT NULL CHECK (paid_minor >= 0),
+  balance_due_minor   INTEGER NOT NULL CHECK (balance_due_minor >= 0),
+  payment_status      TEXT    NOT NULL CHECK (payment_status IN ('paid', 'partial', 'unpaid')),
+  payment_method      TEXT    CHECK (payment_method IS NULL
+                                     OR payment_method IN ('cash', 'card', 'external', 'other')),
+  line_count          INTEGER NOT NULL CHECK (line_count > 0),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  completed_at        TEXT    NOT NULL,
+  created_at          TEXT    NOT NULL,
+  customer_id         TEXT,
+  customer_name_snapshot TEXT
+      CHECK (customer_name_snapshot IS NULL OR length(trim(customer_name_snapshot)) > 0),
+  customer_kind       TEXT    GENERATED ALWAYS AS ('customer') STORED,
+  CHECK (total_minor = subtotal_minor + tax_minor),
+  CHECK (paid_minor + balance_due_minor = total_minor),
+  CHECK (
+    (payment_status = 'paid'    AND balance_due_minor = 0)
+    OR (payment_status = 'unpaid'  AND paid_minor = 0 AND balance_due_minor > 0)
+    OR (payment_status = 'partial' AND paid_minor > 0 AND balance_due_minor > 0)
+  ),
+  CHECK (source_type = 'invoice' OR payment_method IS NOT NULL
+      OR (payment_status = 'unpaid' AND paid_minor = 0
+          AND balance_due_minor = total_minor AND customer_id IS NOT NULL
+          AND customer_name_snapshot IS NOT NULL)),
+  CHECK ((source_type = 'invoice' AND invoice_id IS NOT NULL)
+      OR (source_type = 'pos' AND invoice_id IS NULL)),
+  CHECK ((customer_id IS NULL AND customer_name_snapshot IS NULL)
+      OR (source_type = 'pos' AND customer_id IS NOT NULL
+          AND customer_name_snapshot IS NOT NULL)),
+  FOREIGN KEY (customer_id, customer_kind) REFERENCES parties (id, kind)
+) STRICT;
+
+INSERT INTO sales_m14 (
+  id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+  cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+  balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+  created_at, customer_id, customer_name_snapshot
+)
+SELECT
+  id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+  cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+  balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+  created_at, NULL, NULL
+FROM sales;
+
+DROP TABLE sales;
+
+CREATE TABLE sales (
+  id                  TEXT    PRIMARY KEY,
+  receipt_number      INTEGER NOT NULL UNIQUE CHECK (receipt_number > 0),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL,
+  source_type         TEXT    NOT NULL CHECK (source_type IN ('pos', 'invoice')),
+  invoice_id          TEXT    UNIQUE REFERENCES invoices (id),
+  cashier_id          TEXT    NOT NULL,
+  cashier_name        TEXT    NOT NULL,
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  subtotal_minor      INTEGER NOT NULL CHECK (subtotal_minor >= 0),
+  tax_minor           INTEGER NOT NULL CHECK (tax_minor >= 0),
+  total_minor         INTEGER NOT NULL CHECK (total_minor >= 0),
+  paid_minor          INTEGER NOT NULL CHECK (paid_minor >= 0),
+  balance_due_minor   INTEGER NOT NULL CHECK (balance_due_minor >= 0),
+  payment_status      TEXT    NOT NULL CHECK (payment_status IN ('paid', 'partial', 'unpaid')),
+  payment_method      TEXT    CHECK (payment_method IS NULL
+                                     OR payment_method IN ('cash', 'card', 'external', 'other')),
+  line_count          INTEGER NOT NULL CHECK (line_count > 0),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  completed_at        TEXT    NOT NULL,
+  created_at          TEXT    NOT NULL,
+  customer_id         TEXT,
+  customer_name_snapshot TEXT
+      CHECK (customer_name_snapshot IS NULL OR length(trim(customer_name_snapshot)) > 0),
+  customer_kind       TEXT    GENERATED ALWAYS AS ('customer') STORED,
+  CHECK (total_minor = subtotal_minor + tax_minor),
+  CHECK (paid_minor + balance_due_minor = total_minor),
+  CHECK (
+    (payment_status = 'paid'    AND balance_due_minor = 0)
+    OR (payment_status = 'unpaid'  AND paid_minor = 0 AND balance_due_minor > 0)
+    OR (payment_status = 'partial' AND paid_minor > 0 AND balance_due_minor > 0)
+  ),
+  CHECK (source_type = 'invoice' OR payment_method IS NOT NULL
+      OR (payment_status = 'unpaid' AND paid_minor = 0
+          AND balance_due_minor = total_minor AND customer_id IS NOT NULL
+          AND customer_name_snapshot IS NOT NULL)),
+  CHECK ((source_type = 'invoice' AND invoice_id IS NOT NULL)
+      OR (source_type = 'pos' AND invoice_id IS NULL)),
+  CHECK ((customer_id IS NULL AND customer_name_snapshot IS NULL)
+      OR (source_type = 'pos' AND customer_id IS NOT NULL
+          AND customer_name_snapshot IS NOT NULL)),
+  FOREIGN KEY (customer_id, customer_kind) REFERENCES parties (id, kind)
+) STRICT;
+
+INSERT INTO sales (
+  id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+  cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+  balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+  created_at, customer_id, customer_name_snapshot
+)
+SELECT
+  id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+  cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+  balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+  created_at, customer_id, customer_name_snapshot
+FROM sales_m14;
+
+DROP TABLE sales_m14;
+
+CREATE INDEX sales_business_date ON sales (business_date);
+CREATE INDEX sales_source_type ON sales (source_type, completed_at DESC);
+
+CREATE TRIGGER sales_immutable_update BEFORE UPDATE ON sales
+BEGIN SELECT RAISE(ABORT, 'ledger: completed sales are immutable'); END;
+CREATE TRIGGER sales_immutable_delete BEFORE DELETE ON sales
+BEGIN SELECT RAISE(ABORT, 'ledger: completed sales cannot be deleted'); END;
+
+CREATE TRIGGER sale_lines_closed_sale BEFORE INSERT ON sale_lines
+WHEN (SELECT count(*) FROM sale_lines WHERE sale_id = NEW.sale_id)
+     >= (SELECT line_count FROM sales WHERE id = NEW.sale_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: sale already holds all of its lines'); END;
+
+CREATE TRIGGER sale_lines_pos_shape BEFORE INSERT ON sale_lines
+WHEN (SELECT source_type FROM sales WHERE id = NEW.sale_id) = 'pos'
+ AND (NEW.product_id IS NULL
+      OR NEW.sku IS NULL
+      OR NEW.sale_unit IS NULL
+      OR NEW.invoice_line_id IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'ledger: a POS sale line requires its product, sku and unit'); END;
+
+CREATE TRIGGER sale_lines_invoice_shape BEFORE INSERT ON sale_lines
+WHEN (SELECT source_type FROM sales WHERE id = NEW.sale_id) = 'invoice'
+ AND (NEW.invoice_line_id IS NULL OR length(trim(NEW.product_name)) = 0)
+BEGIN SELECT RAISE(ABORT, 'ledger: an invoice-origin sale line must name its invoice line and description'); END;
+
+CREATE TRIGGER sales_pos_unpaid_requires_no_tender BEFORE INSERT ON sales
+WHEN NEW.source_type = 'pos' AND NEW.payment_status = 'unpaid'
+ AND NEW.payment_method IS NOT NULL AND NEW.paid_minor = 0
+ AND NEW.balance_due_minor = NEW.total_minor
+ AND NEW.total_minor = NEW.subtotal_minor + NEW.tax_minor
+BEGIN SELECT RAISE(ABORT, 'ledger: an unpaid POS sale cannot record a tender'); END;
+
+CREATE TRIGGER sales_credit_requires_active_customer BEFORE INSERT ON sales
+WHEN NEW.source_type = 'pos' AND NEW.payment_status = 'unpaid'
+ AND NEW.payment_method IS NULL AND NEW.paid_minor = 0
+ AND NEW.balance_due_minor = NEW.total_minor
+ AND NEW.total_minor = NEW.subtotal_minor + NEW.tax_minor
+ AND NOT EXISTS (
+   SELECT 1 FROM parties
+   WHERE id = NEW.customer_id AND kind = 'customer' AND is_active = 1
+     AND display_name = NEW.customer_name_snapshot
+ )
+BEGIN SELECT RAISE(ABORT, 'ledger: a credit sale requires its active customer snapshot'); END;
+
+CREATE TRIGGER obligations_sale_customer_match BEFORE INSERT ON obligations
+WHEN NEW.source_kind = 'sale'
+ AND EXISTS (
+   SELECT 1 FROM sales AS s
+   WHERE s.id = NEW.sale_id AND s.source_type = 'pos' AND s.customer_id IS NOT NULL
+     AND (s.customer_id <> NEW.party_id OR s.currency <> NEW.currency
+          OR s.balance_due_minor <> NEW.amount_minor
+          OR NEW.direction <> 'receivable' OR NEW.party_kind <> 'customer')
+ )
+BEGIN SELECT RAISE(ABORT, 'ledger: sale obligation does not match sale identity or balance'); END;
+`,
+  },
 ];

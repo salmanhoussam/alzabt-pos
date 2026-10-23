@@ -142,12 +142,13 @@ describe("migration 13 — obligations and settlements", () => {
   });
 
   it("🔴 is the thirteenth migration, and 1-12 are byte-identical after it", () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
-    expect(MIGRATIONS).toHaveLength(13);
+    const migrationsThroughV13 = MIGRATIONS.slice(0, V13);
+    expect(migrationsThroughV13.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(migrationsThroughV13).toHaveLength(13);
     expect(MIGRATIONS[12]!.name).toBe("obligations_and_settlements");
     // The upgrade path records all thirteen, in order, with no gap.
     v12LedgerWithRows();
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, migrationsThroughV13);
     const applied = db.prepare(`SELECT version FROM schema_migrations ORDER BY version`).all() as Array<{
       version: bigint | number;
     }>;
@@ -178,7 +179,7 @@ describe("migration 13 — obligations and settlements", () => {
     const { snapshotDatabase } = await import("../../src/persistence/backup");
     const { join } = await import("node:path");
     const { operatorId, partyId } = v12LedgerWithRows();
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, MIGRATIONS.slice(0, V13));
     db.prepare(
       `INSERT INTO obligations (id, party_id, party_kind, direction, source_kind, source_ref,
                                 sale_id, currency, amount_minor, posted_by, posted_at, business_date)
@@ -203,7 +204,7 @@ describe("migration 13 — obligations and settlements", () => {
   it("🔴 an OLDER build refuses a v13 ledger and leaves it byte-for-byte unchanged", () => {
     // The rollback truth: installing an old EXE does not downgrade a database. It refuses it.
     v12LedgerWithRows();
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, MIGRATIONS.slice(0, V13));
     expect(schemaVersion(db)).toBe(V13);
     db.close();
 
@@ -219,8 +220,9 @@ describe("migration 13 — obligations and settlements", () => {
 
   it("🔴 verifyAppliedMigrations accepts the v13 ledger it just wrote", () => {
     v12LedgerWithRows();
-    const db = openDatabase(t.dbPath, MIGRATIONS);
-    expect(() => verifyAppliedMigrations(db, MIGRATIONS)).not.toThrow();
+    const migrationsThroughV13 = MIGRATIONS.slice(0, V13);
+    const db = openDatabase(t.dbPath, migrationsThroughV13);
+    expect(() => verifyAppliedMigrations(db, migrationsThroughV13)).not.toThrow();
     db.close();
   });
 });

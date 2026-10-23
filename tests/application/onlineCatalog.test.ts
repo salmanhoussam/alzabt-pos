@@ -550,7 +550,12 @@ describe("🔴 privacy — the canary test", () => {
         expect(Object.prototype.hasOwnProperty.call(template, key), `${table}.${key} must be a real column`).toBe(true);
       }
       const clone = { ...template, ...overrides };
-      const columns = Object.keys(clone);
+      const generatedColumns = new Set(
+        (h.db.pragma(`table_xinfo('${table}')`) as Array<{ name: string; hidden: number | bigint }>)
+          .filter((column) => Number(column.hidden) === 2 || Number(column.hidden) === 3)
+          .map((column) => column.name),
+      );
+      const columns = Object.keys(clone).filter((column) => !generatedColumns.has(column));
       const result = h.db
         .prepare(`INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`)
         .run(...columns.map((c) => clone[c]));

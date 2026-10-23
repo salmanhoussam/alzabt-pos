@@ -456,8 +456,8 @@ try {
   {
     const db = new Database(LEDGER, { readonly: true });
     const n = (sql) => Number(db.prepare(sql).get().n);
-    // 🔴 TRANSITION 12 -> 13 with migration 13 (obligations_and_settlements). The old value was 12.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 13, "the installed app's ledger is at schema v13");
+    // 🔴 TRANSITION 13 -> 14 with migration 14 (credit_sale_identity_and_unpaid_state). The old value was 13.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 14, "the installed app's ledger is at schema v14");
     assert(n("SELECT count(*) AS n FROM parties") === 5, "five party rows, and no more");
     assert(n("SELECT count(*) AS n FROM party_contact_history") === 0, "and zero contact-history rows — nothing was edited");
     assert(n("SELECT count(*) AS n FROM sales") === 0, "🔴 and still not one sale, obligation or payment anywhere");
@@ -787,7 +787,7 @@ try {
     const o = db.prepare("SELECT amount_minor, posted_at FROM obligations WHERE id = 'o-unpaid'").get();
     assert(Number(o.amount_minor) === 2500, `the original amount is still 2500 (${o.amount_minor})`);
     assert(o.posted_at === "2026-10-20T08:00:00.000Z", "and its posting time is untouched");
-    assert(n("SELECT count(*) AS n FROM schema_migrations") === 13, "the ledger is still at schema v13");
+    assert(n("SELECT count(*) AS n FROM schema_migrations") === 14, "the ledger is still at schema v14");
     db.close();
   }
 

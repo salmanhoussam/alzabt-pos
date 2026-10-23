@@ -47,7 +47,7 @@ const wrench = {
 // below now state what changed, when, and what must STILL be absent.
 
 describe("schema is unchanged by this feature", () => {
-  it("has exactly eleven migrations, and offline product management still contributed none of them", () => {
+  it("pins the current migration registry, and offline product management contributed none of them", () => {
     // Was three until migration 4 (exact_sale_quantity), four until migration 5
     // (durable_local_audit), five until migration 6 (manual_invoices), and six until migration 7
     // (invoice_sales_integration), and seven until migration 8 (operator_accounts).
@@ -77,6 +77,9 @@ describe("schema is unchanged by this feature", () => {
       // this product that hold a debt. Purely additive: migrations 1-12 are byte-identical after
       // it, which the per-migration tests check by checksum rather than by this list.
       [13, "obligations_and_settlements"],
+      // Migration 14 adds only immutable customer identity and the unpaid POS sale representation;
+      // it does not change the product-management schema.
+      [14, "credit_sale_identity_and_unpaid_state"],
     ]);
   });
 

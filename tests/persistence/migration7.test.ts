@@ -176,9 +176,9 @@ function v6Ledger(): Array<Record<string, unknown>> {
 describe("migration 7 — v6 to v7", () => {
   it("is the seventh migration, and 1-6 are byte-identical after it", () => {
     // 7 -> 8 operator accounts -> 9 product master -> 10 product master audit
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     expect(MIGRATIONS[6]!.name).toBe("invoice_sales_integration");
-    expect(MIGRATIONS).toHaveLength(13); // was 12 before migration 13 (obligations_and_settlements) // was 10 before migration 11 (operator_product_create_capability)
+    expect(MIGRATIONS).toHaveLength(14); // was 13 before migration 14 (credit_sale_identity_and_unpaid_state)
 
     // The released fingerprints of 1-6. A ledger upgraded by this build must still recognise every
     // one of them, or openDatabase refuses the file — which is what the next test proves.
@@ -346,7 +346,12 @@ describe("migration 7 — v6 to v7", () => {
       expect(db.pragma("integrity_check", { simple: true })).toBe("ok");
       expect(db.pragma("foreign_key_check")).toEqual([]);
 
-      expect(objects(db, "trigger", "sales")).toEqual(["sales_immutable_delete", "sales_immutable_update"]);
+      expect(objects(db, "trigger", "sales")).toEqual([
+        "sales_credit_requires_active_customer",
+        "sales_immutable_delete",
+        "sales_immutable_update",
+        "sales_pos_unpaid_requires_no_tender",
+      ]);
       expect(objects(db, "trigger", "sale_lines")).toEqual([
         "sale_lines_closed_sale",
         "sale_lines_immutable_delete",
