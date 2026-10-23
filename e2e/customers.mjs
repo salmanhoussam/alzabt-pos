@@ -65,12 +65,37 @@ async function launch() {
   return { app, page };
 }
 
-/** Creates a customer through the real panel. Returns its id, read off the screen. */
-async function createThroughPanel(page, { name, phone }) {
+/**
+ * Creates a customer through the real panel, and WAITS FOR THE APP TO SETTLE.
+ *
+ * 🔴 IT USED TO RETURN ON THE CLICK. That is what failed Windows gate 39933933238 at the
+ * duplicate-name assertion: the warning is rendered only once `createCustomer` has come back, and
+ * the caller counted it immediately. It had been winning that race, not asserting a settled state
+ * — the green gate had the warning within 449ms, the failed one still did not at 600ms.
+ *
+ * 🔴 THE SETTLED STATE IS NOT THE SAME IN BOTH CASES, which is why this takes an explicit option
+ * rather than waiting for one universal thing. `CustomerFinder` calls `onPick` ONLY when the new
+ * name is unique (`created.sameName.length === 0`), which closes the panel. When another account
+ * already carries that name the panel deliberately STAYS OPEN so the operator reads the warning.
+ * So:
+ *
+ *   expect "picked"   (default) -> the panel is gone: the customer was created and handed back
+ *   expect "sameName"           -> the warning is on screen: created, and reported as a twin
+ *
+ * 🔴 NEITHER WAIT CAN HIDE A FAILED CREATION. If the save is refused the panel stays open AND no
+ * warning appears, so both branches time out and the test fails loudly. A warning alone is also
+ * never treated as proof the record exists — the caller proves that separately, by identity.
+ */
+async function createThroughPanel(page, { name, phone, expect: expected = "picked" }) {
   await testid(page, "customer-new").click();
   await testid(page, "customer-field-name").fill(name);
   if (phone) await testid(page, "customer-field-phone").fill(phone);
   await testid(page, "customer-save").click();
+  if (expected === "sameName") {
+    await testid(page, "customer-same-name").waitFor({ state: "visible", timeout: 30000 });
+  } else {
+    await testid(page, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
+  }
   return name;
 }
 
@@ -254,10 +279,19 @@ try {
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   await testid(page, "customers-search").fill("");
   await testid(page, "customers-add").click();
+  // The FIRST «محمد علي» is unique at this moment, so the panel closes and hands it back.
   await createThroughPanel(page, { name: "محمد علي", phone: "0111111" });
   await testid(page, "customers-add").click();
-  await createThroughPanel(page, { name: "محمد علي", phone: "0222222" });
-  // The second creation reports the first rather than merging or refusing.
+  // 🔴 AND THE PANEL IS FRESH. Asserted before the save, so a warning left over from a previous
+  // interaction cannot be what satisfies the assertion below. The panel unmounts on `onPick`, so
+  // this should hold — the point is that it is checked rather than assumed.
+  assert(
+    (await testid(page, "customer-same-name").count()) === 0,
+    "🔴 no stale duplicate-name warning is on screen before the second creation",
+  );
+  // The second creation reports the first rather than merging or refusing — and this now WAITS for
+  // that warning rather than counting it the instant the Save click returns.
+  await createThroughPanel(page, { name: "محمد علي", phone: "0222222", expect: "sameName" });
   assert(
     (await testid(page, "customer-same-name").count()) === 1,
     "🔴 the second same-named customer is ACCEPTED, with a warning that another exists",
