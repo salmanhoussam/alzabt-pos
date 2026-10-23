@@ -17,6 +17,54 @@ import { parseQuantity } from "../../src/domain/quantity";
 import { saleOutcomeError } from "../../src/main/saleOutcomeText";
 
 describe("errorText", () => {
+  it("localizes only the typed customer-payment overpayment context with its validated amount", () => {
+    const context = {
+      reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING",
+      outstandingMinor: "3000",
+      currency: "USD",
+    };
+    const refusal = new ApiError("INVALID_AMOUNT", "That is more than is owed; 30.00 USD remains", context);
+    expect(errorText(refusal, "en")).toBe("That is more than is owed; 30.00 USD remains");
+    expect(errorText(refusal, "ar")).toBe("المبلغ المدخل أكبر من المتبقي على هذا الدَّين. المتبقي: \u206830.00 USD\u2069.");
+
+    expect(
+      errorText(
+        new ApiError("INVALID_AMOUNT", "The selling price must be greater than zero"),
+        "ar",
+      ),
+    ).toBe("The selling price must be greater than zero");
+    expect(
+      errorText(
+        new ApiError("INVALID_AMOUNT", "Unrelated amount error", {
+          reason: "SOME_OTHER_REASON",
+          outstandingMinor: "3000",
+          currency: "USD",
+        }),
+        "ar",
+      ),
+    ).toBe("Unrelated amount error");
+  });
+
+  it("ignores absent or malformed optional overpayment context without fabricating money", () => {
+    const base = "That is more than is owed; 30.00 USD remains";
+    for (const context of [
+      undefined,
+      { reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING", outstandingMinor: "30.00", currency: "USD" },
+      { reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING", outstandingMinor: "3000", currency: "XXX" },
+      { reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING", outstandingMinor: "1000000000000001", currency: "USD" },
+      {
+        reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING",
+        outstandingMinor: "3000",
+        currency: "USD",
+        message: "injected",
+      },
+    ]) {
+      const error = new ApiError("INVALID_AMOUNT", base, context);
+      expect(errorText(error, "ar")).toBe(base);
+      expect(errorText(error, "en")).toBe(base);
+    }
+  });
+
   it("shows the main process's message for an ApiError", () => {
     // 🔴 TRANSITION. This asserted the English sentence from the no-argument call:
     //   errorText(new ApiError("TOTAL_MISMATCH", "The displayed total no longer matches"))

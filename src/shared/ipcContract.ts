@@ -775,6 +775,14 @@ export interface SetCustomerActiveRequest {
 export interface IpcError {
   readonly code: string;
   readonly message: string;
+  readonly context?: CustomerPaymentOverpaymentErrorContext;
+}
+
+export interface CustomerPaymentOverpaymentErrorContext {
+  readonly reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING";
+  /** Decimal string of minor units; BigInt never crosses the IPC boundary. */
+  readonly outstandingMinor: string;
+  readonly currency: string;
 }
 
 export type IpcResult<T> = { readonly ok: true; readonly data: T } | { readonly ok: false; readonly error: IpcError };

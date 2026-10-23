@@ -63,6 +63,7 @@ import {
   type AppInfoDto,
   CHANNELS,
   type ChannelName,
+  type CustomerPaymentOverpaymentErrorContext,
   INVOICE_HEADER_PATCH_KEYS,
   type InvoiceHeaderPatchKey,
   type IpcError,
@@ -532,13 +533,40 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     }
   }
 
+  function toIpcError(error: DomainError, channel: ChannelName): IpcError {
+    const result: IpcError = { code: error.code, message: error.message };
+    if (
+      channel !== "recordCustomerPayment" ||
+      error.code !== "INVALID_AMOUNT" ||
+      error.reason !== "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING" ||
+      error.context === undefined ||
+      typeof error.context.outstandingMinor !== "bigint" ||
+      typeof error.context.currency !== "string"
+    ) {
+      return result;
+    }
+
+    try {
+      const outstanding = money(error.context.outstandingMinor, error.context.currency);
+      const context: CustomerPaymentOverpaymentErrorContext = {
+        reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING",
+        outstandingMinor: outstanding.minor.toString(),
+        currency: outstanding.currency,
+      };
+      return { ...result, context };
+    } catch (validationError) {
+      if (validationError instanceof DomainError) return result;
+      throw validationError;
+    }
+  }
+
   function wrap(channel: ChannelName, fn: (payload: unknown) => unknown, onInternal?: (payload: unknown) => IpcError): Handler {
     return (payload) => {
       try {
         authorize(channel);
         return { ok: true, data: fn(payload) };
       } catch (err) {
-        if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
+        if (err instanceof DomainError) return { ok: false, error: toIpcError(err, channel) };
         log.error("ipc-internal-error", { channel, error: err });
         console.error("[pos] internal error", channel, err);
         return { ok: false, error: onInternal ? onInternal(payload) : genericInternal(operatorLanguage()) };
@@ -552,7 +580,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         authorize(channel);
         return { ok: true, data: await fn(payload) };
       } catch (err) {
-        if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
+        if (err instanceof DomainError) return { ok: false, error: toIpcError(err, channel) };
         log.error("ipc-internal-error", { channel, error: err });
         console.error("[pos] internal error", channel, err);
         return { ok: false, error: genericInternal(operatorLanguage()) };

@@ -46,6 +46,8 @@
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 import type { Language } from "../shared/i18n";
+import { DomainError } from "../domain/errors";
+import { formatDecimal, money } from "../domain/money";
 
 /**
  * The codes this map may NEVER contain: each one's Arabic is already composed where the structured
@@ -122,4 +124,48 @@ export function arabicRefusal(lang: Language, code: string): string | null {
   // The first version of this function used `AR[code] ?? null` and the test for a code named
   // "toString" caught it. An own-property check closes the whole class, not just that one name.
   return Object.hasOwn(AR, code) ? (AR[code] ?? null) : null;
+}
+
+/**
+ * Localizes the one data-bearing INVALID_AMOUNT refusal whose exact meaning and amount cross IPC
+ * as validated structured context. Every other INVALID_AMOUNT keeps its original message.
+ */
+export function customerPaymentOverpaymentRefusal(
+  lang: Language,
+  code: string,
+  context: unknown,
+): string | null {
+  if (code !== "INVALID_AMOUNT" || typeof context !== "object" || context === null || Array.isArray(context)) {
+    return null;
+  }
+
+  const record = context as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (
+    keys.length !== 3 ||
+    keys[0] !== "currency" ||
+    keys[1] !== "outstandingMinor" ||
+    keys[2] !== "reason" ||
+    record.reason !== "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING" ||
+    typeof record.outstandingMinor !== "string" ||
+    !/^(0|[1-9]\d{0,15})$/.test(record.outstandingMinor) ||
+    typeof record.currency !== "string" ||
+    !/^[A-Z]{3}$/.test(record.currency)
+  ) {
+    return null;
+  }
+
+  let amount: string;
+  try {
+    amount = `${formatDecimal(money(BigInt(record.outstandingMinor), record.currency))} ${record.currency}`;
+  } catch (validationError) {
+    if (validationError instanceof DomainError) return null;
+    throw validationError;
+  }
+
+  if (lang === "en") return `That is more than is owed; ${amount} remains`;
+  if (lang === "ar") {
+    return `المبلغ المدخل أكبر من المتبقي على هذا الدَّين. المتبقي: \u2068${amount}\u2069.`;
+  }
+  return null;
 }

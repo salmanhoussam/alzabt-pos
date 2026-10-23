@@ -733,23 +733,41 @@ try {
   await settledBadge.scrollIntoViewIfNeeded();
   await p5.screenshot({ path: SHOTS + "S3C-A3-settled-badge-arabic.png" });
 
-  // ── D · the same screen in English ───────────────────────────────────────────────────────────
+  // ── D · the Arabic overpayment refusal preserves the authoritative balance ──────────────────
+  await card("o-part").locator('[data-testid="collect-open"]').click();
+  await testid(p5, "collect-amount").fill("999.00");
+  await testid(p5, "collect-confirm").click();
+  await testid(p5, "collect-error").waitFor({ state: "visible", timeout: 30000 });
+  const arabicRefusalText = (await testid(p5, "collect-error").innerText()).trim();
+  assert(
+    arabicRefusalText === "المبلغ المدخل أكبر من المتبقي على هذا الدَّين. المتبقي: \u206830.00 USD\u2069.",
+    `🔴 Arabic overpayment refusal preserves the exact outstanding amount (${arabicRefusalText})`,
+  );
+  assert(!arabicRefusalText.includes("3000 USD"), `🔴 Arabic never presents raw minor units (${arabicRefusalText})`);
+  await p5.screenshot({ path: SHOTS + "S3C-A4-overpayment-refused-arabic.png" });
+  await testid(p5, "collect-cancel").click();
+
+  // ── E · the same screen in English ───────────────────────────────────────────────────────────
   await p5.locator('[data-testid="lang-toggle"]').click();
   await testid(p5, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
   await card("o-part").locator('[data-testid="collect-open"]').click();
   await testid(p5, "collect-form").waitFor({ state: "visible", timeout: 30000 });
   await p5.screenshot({ path: SHOTS + "S3C-A4-collect-form-english.png" });
 
-  // ── E · an overpayment is refused, on screen, and writes nothing ─────────────────────────────
+  // ── F · an overpayment is refused in English, on screen, and writes nothing ─────────────────
   await testid(p5, "collect-amount").fill("999.00");
   await testid(p5, "collect-confirm").click();
   await testid(p5, "collect-error").waitFor({ state: "visible", timeout: 30000 });
   const refusalText = (await testid(p5, "collect-error").innerText()).trim();
-  assert(refusalText.length > 0, `🔴 an overpayment is refused with a real sentence (${refusalText})`);
+  assert(
+    refusalText === "That is more than is owed; 30.00 USD remains",
+    `🔴 English overpayment refusal preserves the exact outstanding amount (${refusalText})`,
+  );
+  assert(!refusalText.includes("3000 USD"), `🔴 English never presents raw minor units (${refusalText})`);
   await p5.screenshot({ path: SHOTS + "S3C-A5-overpayment-refused-english.png" });
   await owner3.close().catch(() => undefined);
 
-  // ── F · the ledger agrees, and nothing else moved ────────────────────────────────────────────
+  // ── G · the ledger agrees, and nothing else moved ────────────────────────────────────────────
   {
     const db = new Database(LEDGER, { readonly: true });
     const n = (sql) => Number(db.prepare(sql).get().n);

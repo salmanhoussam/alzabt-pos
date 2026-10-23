@@ -1,8 +1,8 @@
 import { DomainError } from "../domain/errors";
 import { DEFAULT_TERMINAL_LANGUAGE, type Language, isLanguage } from "../shared/i18n";
-import { arabicRefusal } from "./refusalText";
+import { arabicRefusal, customerPaymentOverpaymentRefusal } from "./refusalText";
 import type { IpcResult, PosApi } from "../shared/ipcContract";
-import { formatDecimal } from "../domain/money";
+import { formatDecimal, money } from "../domain/money";
 import { fromMoneyDto } from "../shared/dto";
 import type { MoneyDto } from "../shared/ipcContract";
 
@@ -16,6 +16,7 @@ export class ApiError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly context?: unknown,
   ) {
     super(message);
   }
@@ -24,7 +25,7 @@ export class ApiError extends Error {
 /** Unwraps an IpcResult or throws an ApiError carrying the main process's error code. */
 export async function call<T>(promise: Promise<IpcResult<T>>): Promise<T> {
   const result = await promise;
-  if (!result.ok) throw new ApiError(result.error.code, result.error.message);
+  if (!result.ok) throw new ApiError(result.error.code, result.error.message, result.error.context);
   return result.data;
 }
 
@@ -74,7 +75,13 @@ export function errorText(err: unknown, lang: Language = currentLanguage()): str
   // every sale and invoice OUTCOME code, whose Arabic is already composed in the main process with
   // the real receipt and invoice numbers. A null means "show what the main process sent", which is
   // the behaviour this function has always had.
-  if (err instanceof ApiError) return arabicRefusal(lang, err.code) ?? err.message;
+  if (err instanceof ApiError) {
+    return (
+      customerPaymentOverpaymentRefusal(lang, err.code, err.context) ??
+      arabicRefusal(lang, err.code) ??
+      err.message
+    );
+  }
   if (err instanceof DomainError) return arabicRefusal(lang, err.code) ?? err.message;
   return "Unexpected error";
 }

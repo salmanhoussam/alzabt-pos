@@ -26,6 +26,7 @@ import { LedgerRepository } from "../../src/persistence/ledgerRepository";
 import { PartyRepository } from "../../src/persistence/partyRepository";
 import { accessFor } from "../../src/main/channelPolicy";
 import type { CustomerStatementDto, RecordPaymentResponse } from "../../src/shared/ipcContract";
+import { call, errorText } from "../../src/renderer/api";
 import { type Harness, type TempDir, makeHarness, tempDir } from "../helpers/harness";
 
 let t: TempDir;
@@ -337,6 +338,42 @@ describe("an unexpected fault after the attempt", () => {
 // ══════════════════════════════════════════════════════════════════════════════════════════════
 
 describe("what the ledger refuses", () => {
+  it("formats 3000 USD minor units and carries only the typed overpayment context across IPC", async () => {
+    const c = customer("زبون");
+    const o = owe(c.id, "bill-1", 3000n);
+    const result = ipc.recordCustomerPayment(payReq(c.id, o.id, "key-over-format-01", "3001"));
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "INVALID_AMOUNT",
+        message: "That is more than is owed; 30.00 USD remains",
+        context: {
+          reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING",
+          outstandingMinor: "3000",
+          currency: "USD",
+        },
+      },
+    });
+    expect(JSON.parse(JSON.stringify(result))).toEqual(result);
+    expect(settlementRows()).toBe(0);
+
+    for (const [language, expected] of [
+      ["en", "That is more than is owed; 30.00 USD remains"],
+      ["ar", "المبلغ المدخل أكبر من المتبقي على هذا الدَّين. المتبقي: \u206830.00 USD\u2069."],
+    ] as const) {
+      let shown = "";
+      try {
+        await call(Promise.resolve(result));
+      } catch (error) {
+        shown = errorText(error, language);
+      }
+      expect(shown).toBe(expected);
+      expect(shown).not.toContain("3000 USD");
+    }
+    expect(settlementRows()).toBe(0);
+  });
+
   it("🔴 refuses OVERPAYMENT, and nothing is written", () => {
     const c = customer("زبون");
     const o = owe(c.id, "bill-1", 1000n);
@@ -355,6 +392,9 @@ describe("what the ledger refuses", () => {
   it("🔴 refuses ZERO and NEGATIVE amounts", () => {
     const c = customer("زبون");
     const o = owe(c.id, "bill-1", 1000n);
+    const zero = ipc.recordCustomerPayment(payReq(c.id, o.id, "key-z-zero-01", "0"));
+    expect(errCode(zero)).toBe("INVALID_AMOUNT");
+    if (!zero.ok) expect(zero.error).not.toHaveProperty("context");
     for (const bad of ["0", "-100", "-1"]) {
       expect(errCode(ipc.recordCustomerPayment(payReq(c.id, o.id, `key-z-${bad}-x`, bad)))).toBeTruthy();
     }

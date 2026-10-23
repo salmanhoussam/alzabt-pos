@@ -32,6 +32,7 @@
 import { createHash } from "node:crypto";
 import { businessDateOf } from "../domain/businessDay";
 import { DomainError } from "../domain/errors";
+import { formatDecimal, money } from "../domain/money";
 import {
   type ObligationDirection,
   type ObligationRecord,
@@ -386,9 +387,12 @@ export class LedgerService {
 
       const paid = this.deps.ledger.settledTotal(obligation.id);
       if (paid + amount.minor > obligation.amountMinor) {
+        const outstandingMinor = obligation.amountMinor - paid;
         throw new DomainError(
           "INVALID_AMOUNT",
-          `That is more than is owed; ${obligation.amountMinor - paid} ${obligation.currency} remains`,
+          `That is more than is owed; ${formatDecimal(money(outstandingMinor, obligation.currency))} ${obligation.currency} remains`,
+          "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING",
+          { outstandingMinor, currency: obligation.currency },
         );
       }
 

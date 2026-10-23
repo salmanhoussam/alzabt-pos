@@ -82,6 +82,12 @@ export type DomainErrorCode =
   // about one operator missing a valid ticket; this is about the TERMINAL not being claimed yet.
   | "OWNER_SETUP_REQUIRED";
 
+/** Internal data for the one data-bearing customer-payment refusal; IPC serializes its bigint as text. */
+export interface CustomerPaymentOverpaymentContext {
+  readonly outstandingMinor: bigint;
+  readonly currency: string;
+}
+
 export class DomainError extends Error {
   /**
    * An OPTIONAL machine tag naming WHICH refusal this is, for presentation layers that must say
@@ -97,12 +103,28 @@ export class DomainError extends Error {
    * It is additive and optional: every existing throw site, code, message and behaviour is
    * unchanged, and a consumer that ignores it sees exactly what it saw before.
    */
+  readonly code: DomainErrorCode;
+  readonly reason?: string;
+  readonly context?: CustomerPaymentOverpaymentContext;
+
+  constructor(code: DomainErrorCode, message: string);
+  constructor(code: DomainErrorCode, message: string, reason: string);
   constructor(
-    readonly code: DomainErrorCode,
+    code: DomainErrorCode,
     message: string,
-    readonly reason?: string,
+    reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING",
+    context: CustomerPaymentOverpaymentContext,
+  );
+  constructor(
+    code: DomainErrorCode,
+    message: string,
+    reason?: string,
+    context?: CustomerPaymentOverpaymentContext,
   ) {
     super(message);
+    this.code = code;
+    this.reason = reason;
+    this.context = context;
     this.name = "DomainError";
   }
 }

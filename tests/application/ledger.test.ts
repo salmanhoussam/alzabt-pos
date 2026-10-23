@@ -14,6 +14,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LedgerService, type LedgerActor } from "../../src/application/ledgerService";
+import { DomainError } from "../../src/domain/errors";
 import { PartyService } from "../../src/application/partyService";
 import { LedgerRepository } from "../../src/persistence/ledgerRepository";
 import { PartyRepository } from "../../src/persistence/partyRepository";
@@ -288,7 +289,19 @@ describe("settlement", () => {
     const c = customer("سمير");
     const { record } = owe(c.id, "bill-1", 1000n);
     pay(record.id, c.id, "pay-00001", 400n);
-    expect(code(() => pay(record.id, c.id, "pay-00002", 601n))).toBe("INVALID_AMOUNT");
+    let refusal: unknown;
+    try {
+      pay(record.id, c.id, "pay-00002", 601n);
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(DomainError);
+    expect(refusal).toMatchObject({
+      code: "INVALID_AMOUNT",
+      reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING",
+      message: "That is more than is owed; 6.00 USD remains",
+      context: { outstandingMinor: 600n, currency: "USD" },
+    });
     expect(ledger.outstandingOf(record.id).minor).toBe(600n);
   });
 
