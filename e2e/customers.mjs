@@ -113,11 +113,78 @@ try {
     (await testid(page, "customers-detail-phone").innerText()).trim() === "0100100",
     "with the phone that was typed",
   );
-  // 🔴 NO BALANCE IS SHOWN, because none exists. S1B is a directory.
-  const detailText = await testid(page, "customers-detail").innerText();
-  for (const word of ["0.00", "USD", "رصيد", "دين", "Balance"]) {
-    assert(!detailText.includes(word), `the detail pane shows no "${word}" — there is no balance to show`);
+  // 🔴 NO FABRICATED BALANCE IN THE DIRECTORY RECORD. S1B is a directory: a customer's identity
+  //    and contact fields must never claim that a balance exists.
+  //
+  //    🔴 THE SCOPE CHANGED FOR S3B, DELIBERATELY, AND THE OLD VALUE IS NAMED. This assertion used
+  //    to scan ALL of `customers-detail` for money words, which was exactly right while that
+  //    container held nothing but the directory record. S3B mounts the owner-only Customer
+  //    Statement inside the same container, and that statement TRUTHFULLY says «لا ديون مسجّلة» —
+  //    a sentence in which "دين" appears as a substring of "ديون". That is what failed gate
+  //    39911215149 at step 21: the assertion fired on the very sentence stating there are NO
+  //    debts. A statement rendered beside the record is not a balance ON the record.
+  //
+  //    So the scope is now "everything in the detail pane EXCEPT the statement subtree". The
+  //    original guarantee still covers the heading, the contact fields and the action buttons;
+  //    the statement owns its own figures, and lines 409+ below are what hold it to them.
+  //
+  //    The exclusion selector is the CLASS `.customer-statement`, not the test id, because the
+  //    component renders that class on its root in ALL THREE of its states — loaded, loading and
+  //    error — while `data-testid="customer-statement"` exists only on the loaded one. Excluding
+  //    by test id would leave the loading and error states inside the scanned region.
+  //
+  //    Wait for the settled empty state FIRST, so the exclusion is deterministic rather than a
+  //    race against a statement that may still be loading — the same lesson as `customers-empty`.
+  await testid(page, "statement-empty").waitFor({ state: "visible", timeout: 30000 });
+  const FORBIDDEN_IN_RECORD = ["0.00", "USD", "رصيد", "دين", "Balance"];
+  const scoped = await page.evaluate(() => {
+    const detail = document.querySelector('[data-testid="customers-detail"]');
+    if (!detail) return null;
+    const clone = detail.cloneNode(true);
+    const statements = clone.querySelectorAll(".customer-statement");
+    const removed = statements.length;
+    statements.forEach((n) => n.remove());
+    // 🔴 textContent, NOT innerText: a detached clone has no layout, so innerText would come back
+    // empty and every negative check below would pass vacuously. textContent is also the STRICTER
+    // choice for a negative assertion — it sees text innerText would skip.
+    return { record: clone.textContent ?? "", removed, live: detail.textContent ?? "" };
+  });
+  assert(scoped !== null, "the customer detail pane exists, so the scoped read is reading something real");
+  // 🔴 ANTI-VACUITY, THREE WAYS. A negative loop over an empty or wrong node passes while proving
+  // nothing — which is precisely how a narrowed assertion goes quietly blind.
+  assert(scoped.removed === 1, `exactly one statement subtree was excluded (removed ${scoped.removed})`);
+  assert(
+    scoped.record.includes("أبو خالد التجاري") && scoped.record.includes("0100100"),
+    "the scoped record still holds the customer's name and phone — the right region, not an empty node",
+  );
+  assert(
+    scoped.live.includes("لا ديون مسجّلة"),
+    "🔴 the statement WAS rendered and then excluded — not merely absent, which would make this trivial",
+  );
+  for (const word of FORBIDDEN_IN_RECORD) {
+    assert(
+      !scoped.record.includes(word),
+      `the customer-directory record shows no "${word}" — identity and contact carry no balance`,
+    );
   }
+  // 🔴 AND THE CHECK STILL BITES. The identical extraction, run against a record that DOES carry a
+  // fabricated balance, must catch every forbidden term. Without this control the loop above would
+  // keep passing even if the scoping were widened until it excluded the record itself.
+  const control = await page.evaluate((words) => {
+    const d = document.createElement("div");
+    d.innerHTML =
+      "<h2>أبو خالد التجاري</h2><dl><dt>الهاتف</dt><dd>0100100</dd>" +
+      "<dt>الرصيد</dt><dd>رصيد 0.00 USD · دين · Balance</dd></dl>" +
+      '<section class="customer-statement"><p>لا ديون مسجّلة.</p></section>';
+    d.querySelectorAll(".customer-statement").forEach((n) => n.remove());
+    const text = d.textContent ?? "";
+    return words.filter((w) => text.includes(w));
+  }, FORBIDDEN_IN_RECORD);
+  assert(
+    control.length === FORBIDDEN_IN_RECORD.length,
+    `the scoped check catches every forbidden term when one is really present ` +
+      `(caught ${control.length}/${FORBIDDEN_IN_RECORD.length}: ${JSON.stringify(control)})`,
+  );
   // 🔴 MEASURED, NOT ASSERTED FROM A SELECTOR. The defect the first gate shipped was invisible to
   // every text assertion: the phone number was present, correct and readable — it just sat ~600px
   // from its own label, because `dir="auto"` on the <dd> took its direction from the digits inside
