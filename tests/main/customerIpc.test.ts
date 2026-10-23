@@ -63,10 +63,12 @@ const create = (displayName: string, phone: string | null = null) =>
 
 describe("the customer channels", () => {
   // ── Surface ─────────────────────────────────────────────────────────────────────────────────
-  it("🔴 the preload surface grew 68 -> 73 (S1B) -> 74 (S3B), and these are the six", () => {
-    // 🔴 TRANSITION. The old values were 68, then 73, named here rather than silently replaced.
-    // The five S1B channels are customer-only: there is deliberately no supplier channel and no
-    // `kind` parameter. S3B adds exactly ONE, and it is a READ.
+  it("🔴 the preload surface grew 68 -> 73 (S1B) -> 74 (S3B) -> 75 (S3C), and these are the seven", () => {
+    // 🔴 TRANSITION. The old values were 68, then 73, then 74 — named here rather than silently
+    // replaced. The five S1B channels are customer-only: there is deliberately no supplier channel
+    // and no `kind` parameter. S3B added exactly ONE and it is a READ. S3C adds exactly ONE and it
+    // is the FIRST financial WRITE on this bridge — it settles an existing debt and cannot create
+    // one, which is what the next test holds it to.
     const added: ChannelName[] = [
       "searchCustomers",
       "getCustomer",
@@ -74,12 +76,18 @@ describe("the customer channels", () => {
       "updateCustomerContact",
       "setCustomerActive",
       "getCustomerStatement",
+      "recordCustomerPayment",
     ];
     for (const name of added) expect(Object.keys(CHANNELS)).toContain(name);
-    expect(Object.keys(CHANNELS)).toHaveLength(74);
+    expect(Object.keys(CHANNELS)).toHaveLength(75);
   });
 
-  it("🔴 S3B added a READ and nothing else — no channel on this bridge writes money", () => {
+  it("🔴 S3C adds ONE money write — a SETTLEMENT — and still no way to CREATE a debt", () => {
+    // 🔴 TRANSITION, AND THE OLD ASSERTION IS NAMED. Through S3B this test was called "S3B added a
+    // READ and nothing else — no channel on this bridge writes money", and that was true then.
+    // S3C deliberately ends it: `recordCustomerPayment` writes a settlement. What has NOT changed,
+    // and is the whole point, is that nothing here can POST an obligation — so the only direction
+    // a customer's debt can move from the renderer is DOWN.
     // The whole financial-write surface, stated as an absence that fails loudly if one appears.
     const names = Object.keys(CHANNELS);
     for (const forbidden of [
@@ -94,8 +102,13 @@ describe("the customer channels", () => {
     ]) {
       expect(names, `a financial WRITE channel appeared: ${forbidden}`).not.toContain(forbidden);
     }
-    // And the one financial channel that does exist is owner-classified.
+    // 🔴 THE WRITE THAT DOES EXIST IS THE ONLY ONE, AND IT IS OWNER-CLASSIFIED.
     expect(accessFor("getCustomerStatement")).toBe("owner");
+    expect(accessFor("recordCustomerPayment")).toBe("owner");
+    // 🔴 EXACTLY ONE CHANNEL MENTIONS PAYMENT OR SETTLEMENT. If a second financial write is ever
+    // added, this count moves and whoever adds it has to come and say so here.
+    const financial = names.filter((n) => /payment|settle|obligation|balance|debt/i.test(n));
+    expect(financial).toEqual(["recordCustomerPayment"]);
   });
 
   it("🔴 every channel is classified, and the customer ones carry the intended level", () => {

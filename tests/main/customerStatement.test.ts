@@ -139,11 +139,22 @@ describe("the statement channel", () => {
     for (const name of Object.keys(CHANNELS) as ChannelName[]) expect(() => accessFor(name)).not.toThrow();
   });
 
-  it("🔴 no channel on this bridge writes money, and none mentions a supplier", () => {
+  it("🔴 the ONE money write is a settlement; nothing creates a debt, nothing mentions a supplier", () => {
+    // 🔴 TRANSITION, AND THE OLD ASSERTION IS NAMED. Through S3B this read "no channel on this
+    // bridge writes money" and forbade "Payment" outright. S3C deliberately ends that: exactly one
+    // channel, `recordCustomerPayment`, now writes a settlement.
+    //
+    // 🔴 WHAT SURVIVES IS THE PART THAT MATTERS. "Obligation", "Balance" and every supplier word
+    // are STILL forbidden, so the renderer still cannot create a debt, cannot edit a balance, and
+    // cannot reach the supplier half of the ledger at all. Only the direction DOWN was opened.
     const names = Object.keys(CHANNELS).join(" ");
-    for (const forbidden of ["Obligation", "settle", "Settlement", "Payment", "Balance", "Supplier", "supplier"]) {
+    for (const forbidden of ["Obligation", "settle", "Settlement", "Balance", "Supplier", "supplier"]) {
       expect(names, `a channel mentioning ${forbidden} exists`).not.toContain(forbidden);
     }
+    // 🔴 "Payment" is allowed now — for EXACTLY ONE channel, named in full. A second one appearing
+    // is a financial-surface change and has to be argued for here.
+    const paymentish = Object.keys(CHANNELS).filter((n) => /payment/i.test(n));
+    expect(paymentish).toEqual(["recordCustomerPayment"]);
   });
 });
 

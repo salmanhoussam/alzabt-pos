@@ -560,8 +560,25 @@ try {
   const refused = await direct(p4, "getCustomerStatement", { customerId: statementCustomerId });
   assert(refused.ok === false, "🔴 the bridge refuses a cashier's statement request");
   assert(refused.error.code === "NOT_AUTHORIZED", `🔴 with NOT_AUTHORIZED (got ${refused.error.code})`);
+  // 🔴 TRANSITION, AND THE OLD ASSERTION IS NAMED. Through S3B this asserted the list was EMPTY —
+  // there was no financial write channel at all. S3C adds exactly one, `recordCustomerPayment`, so
+  // the assertion becomes "exactly one, and it is that one". A second name appearing here is a
+  // financial-surface change that has to be argued for.
   const bridge = await p4.evaluate(() => Object.keys(window.pos).filter((k) => /obligation|settle|payment|balance/i.test(k)));
-  assert(JSON.stringify(bridge) === "[]", `🔴 there is NO financial WRITE channel on the bridge at all (${JSON.stringify(bridge)})`);
+  assert(
+    JSON.stringify(bridge) === '["recordCustomerPayment"]',
+    `🔴 exactly ONE financial channel exists on the bridge (${JSON.stringify(bridge)})`,
+  );
+  // 🔴 AND THE CASHIER IS REFUSED BY IT. Its presence on the bridge is not permission to use it.
+  const refusedPay = await direct(p4, "recordCustomerPayment", {
+    customerId: statementCustomerId,
+    obligationId: "o-unpaid",
+    idempotencyKey: "e2e-cashier-attempt",
+    amountMinor: "100",
+    method: "cash",
+  });
+  assert(refusedPay.ok === false, "🔴 the bridge refuses a cashier's PAYMENT");
+  assert(refusedPay.error.code === "NOT_AUTHORIZED", `🔴 with NOT_AUTHORIZED (got ${refusedPay.error.code})`);
   await cash2.close().catch(() => undefined);
 
   // ── Nothing was written by any of the reading above ──────────────────────────────────────────
@@ -576,6 +593,153 @@ try {
     db.close();
   }
 
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // S3C · the OWNER records cash against an existing debt
+  //
+  // 🔴 EVERY DEBT HERE WAS SEEDED ABOVE. S3C collects against obligations that already exist; it
+  // still cannot create one, and there is no channel that could. The money only moves DOWN.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  const owner3 = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+  const p5 = await owner3.firstWindow();
+  await signIn(p5, "Cashier One", "1111");
+  await p5.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+  await p5.locator('[data-testid="tab-customers"]').click();
+  await testid(p5, "customers-search").fill("0111111");
+  await p5.locator(`[data-customer="${statementCustomerId}"]`).first().click();
+  await testid(p5, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+
+  const card = (id) => p5.locator(`[data-obligation="${id}"]`);
+  const outstandingText = async (id) => (await card(id).locator('[data-testid="statement-outstanding"]').innerText()).trim();
+  const usdBalance = async () =>
+    (await p5.locator('[data-testid="statement-balance"][data-currency="USD"]').innerText()).trim();
+
+  assert((await outstandingText("o-unpaid")).includes("25.00"), `the unpaid debt starts at 25.00 (${await outstandingText("o-unpaid")})`);
+  assert((await usdBalance()).includes("55.00"), `🔴 the USD balance starts at 55.00 (${await usdBalance()})`);
+
+  // ── A · a PARTIAL payment ───────────────────────────────────────────────────────────────────
+  await card("o-unpaid").locator('[data-testid="collect-open"]').click();
+  await testid(p5, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+  assert(
+    (await testid(p5, "collect-outstanding").innerText()).includes("25.00"),
+    "the form shows what is outstanding on THIS debt",
+  );
+  assert((await testid(p5, "collect-method").innerText()).trim().length > 0, "and names the method it will record");
+  await p5.screenshot({ path: SHOTS + "S3C-A1-collect-form-arabic.png" });
+
+  await testid(p5, "collect-amount").fill("10.00");
+  await testid(p5, "collect-confirm").click();
+  await testid(p5, "collect-done").waitFor({ state: "visible", timeout: 30000 });
+
+  assert(
+    (await outstandingText("o-unpaid")).includes("15.00"),
+    `🔴 the debt fell 25.00 -> 15.00 (${await outstandingText("o-unpaid")})`,
+  );
+  assert((await usdBalance()).includes("45.00"), `🔴 and the USD balance fell 55.00 -> 45.00 (${await usdBalance()})`);
+  const paid = await card("o-unpaid").locator('[data-testid="statement-settlement"]').allInnerTexts();
+  assert(paid.length === 1, `the payment is in the history (${paid.length})`);
+  assert(paid[0].includes("10.00"), `🔴 and it reads 10.00 (${paid[0]})`);
+  // 🔴 THE LBP DEBT IS UNTOUCHED BY A USD PAYMENT — the currencies never mix.
+  const lbpAfter = (await p5.locator('[data-testid="statement-balance"][data-currency="LBP"]').innerText()).trim();
+  assert(lbpAfter.includes("0.00"), `🔴 the LBP balance is still its own figure (${lbpAfter})`);
+  await p5.screenshot({ path: SHOTS + "S3C-A2-after-partial-arabic.png" });
+
+  // ── B · the SAME attempt replayed through the bridge posts exactly once ──────────────────────
+  const dupReq = {
+    customerId: statementCustomerId,
+    obligationId: "o-unpaid",
+    idempotencyKey: "e2e-retry-key-0001",
+    amountMinor: "200",
+    method: "cash",
+  };
+  const once = await direct(p5, "recordCustomerPayment", dupReq);
+  assert(once.ok === true && once.data.duplicate === false, "a fresh key posts a real payment");
+  const twice = await direct(p5, "recordCustomerPayment", dupReq);
+  assert(twice.ok === true, "🔴 the replay is answered, not refused");
+  assert(twice.data.duplicate === true, "🔴 and it is flagged as a DUPLICATE, not a second payment");
+  assert(
+    twice.data.settlement.id === once.data.settlement.id,
+    "🔴 the SAME settlement row comes back — the money was taken once",
+  );
+  // 🔴 AND A CHANGED AMOUNT UNDER THAT KEY IS REFUSED.
+  const clash = await direct(p5, "recordCustomerPayment", { ...dupReq, amountMinor: "300" });
+  assert(clash.ok === false, "🔴 the same key with a different amount is refused");
+  assert(clash.error.code === "IDEMPOTENCY_CONFLICT", `🔴 with IDEMPOTENCY_CONFLICT (got ${clash.error.code})`);
+
+  // ── C · settle it IN FULL, and show the paid badge ───────────────────────────────────────────
+  // 🔴 NOT `page.reload()`. The two payments above went through the bridge, so the statement on
+  // screen is stale — but reloading an Electron window risks the session this test is signed into.
+  // Selecting the OTHER «محمد علي» and coming back changes `customerId` twice, which is what the
+  // component's own effect watches, so it refetches for the real reason rather than by force.
+  await testid(p5, "customers-search").fill("0222222");
+  await p5.locator(`[data-customer="${emptyCustomerId}"]`).first().click();
+  await testid(p5, "statement-empty").waitFor({ state: "visible", timeout: 30000 });
+  await testid(p5, "customers-search").fill("0111111");
+  await p5.locator(`[data-customer="${statementCustomerId}"]`).first().click();
+  await testid(p5, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+  assert(
+    (await outstandingText("o-unpaid")).includes("13.00"),
+    `after the 2.00 bridge payment the debt is 13.00 (${await outstandingText("o-unpaid")})`,
+  );
+
+  await card("o-unpaid").locator('[data-testid="collect-open"]').click();
+  await testid(p5, "collect-amount").fill("13.00");
+  await testid(p5, "collect-confirm").click();
+  await testid(p5, "collect-done").waitFor({ state: "visible", timeout: 30000 });
+
+  const settledBadge = card("o-unpaid").locator('[data-testid="statement-settled"]');
+  await settledBadge.waitFor({ state: "visible", timeout: 30000 });
+  assert((await settledBadge.innerText()).trim().length > 0, "🔴 the debt now shows as PAID IN FULL");
+  assert(
+    (await card("o-unpaid").locator('[data-testid="statement-outstanding"]').count()) === 0,
+    "🔴 and no outstanding figure is printed beside it",
+  );
+  assert((await usdBalance()).includes("30.00"), `🔴 the USD balance is now 30.00 (${await usdBalance()})`);
+  // 🔴 SCROLLED INTO VIEW BEFORE THE SHOT, so the settled badge is genuinely IN the screenshot
+  // rather than below the fold — the S3B review could only verify that one by assertion.
+  await settledBadge.scrollIntoViewIfNeeded();
+  await p5.screenshot({ path: SHOTS + "S3C-A3-settled-badge-arabic.png" });
+
+  // ── D · the same screen in English ───────────────────────────────────────────────────────────
+  await p5.locator('[data-testid="lang-toggle"]').click();
+  await testid(p5, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+  await card("o-part").locator('[data-testid="collect-open"]').click();
+  await testid(p5, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+  await p5.screenshot({ path: SHOTS + "S3C-A4-collect-form-english.png" });
+
+  // ── E · an overpayment is refused, on screen, and writes nothing ─────────────────────────────
+  await testid(p5, "collect-amount").fill("999.00");
+  await testid(p5, "collect-confirm").click();
+  await testid(p5, "collect-error").waitFor({ state: "visible", timeout: 30000 });
+  const refusalText = (await testid(p5, "collect-error").innerText()).trim();
+  assert(refusalText.length > 0, `🔴 an overpayment is refused with a real sentence (${refusalText})`);
+  await p5.screenshot({ path: SHOTS + "S3C-A5-overpayment-refused-english.png" });
+  await owner3.close().catch(() => undefined);
+
+  // ── F · the ledger agrees, and nothing else moved ────────────────────────────────────────────
+  {
+    const db = new Database(LEDGER, { readonly: true });
+    const n = (sql) => Number(db.prepare(sql).get().n);
+    // 2 seeded + 3 recorded by S3C (10.00 UI, 2.00 bridge, 13.00 UI) = 5. The refused duplicate,
+    // the conflict and the overpayment each wrote nothing.
+    assert(n("SELECT count(*) AS n FROM settlements") === 5, `five settlements exist (${n("SELECT count(*) AS n FROM settlements")})`);
+    assert(n("SELECT count(*) AS n FROM obligations") === 3, "🔴 and still exactly three obligations — none was CREATED");
+    assert(
+      n("SELECT sum(amount_minor) AS n FROM settlements WHERE obligation_id = 'o-unpaid'") === 2500,
+      "🔴 the settled debt is paid to exactly its original 2500 minor units, never beyond",
+    );
+    assert(n("SELECT count(*) AS n FROM sales") === 0, "🔴 not one sale was touched");
+    assert(n("SELECT count(*) AS n FROM invoices") === 0, "and not one invoice");
+    assert(n("SELECT count(*) AS n FROM parties") === 5, "and the directory is still five");
+    // 🔴 THE ORIGINAL DEBT ROW IS UNCHANGED. A payment reduces what is OUTSTANDING; it never
+    // rewrites what was owed.
+    const o = db.prepare("SELECT amount_minor, posted_at FROM obligations WHERE id = 'o-unpaid'").get();
+    assert(Number(o.amount_minor) === 2500, `the original amount is still 2500 (${o.amount_minor})`);
+    assert(o.posted_at === "2026-10-20T08:00:00.000Z", "and its posting time is untouched");
+    assert(n("SELECT count(*) AS n FROM schema_migrations") === 13, "the ledger is still at schema v13");
+    db.close();
+  }
+
+  log("customer collection E2E complete");
   log("customer statement E2E complete");
 } finally {
   await app?.close().catch(() => undefined);

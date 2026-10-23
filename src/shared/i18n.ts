@@ -468,7 +468,30 @@ const AR: Dict = {
   "statement.method.external": "تحويل",
   "statement.method.other": "أخرى",
   // 🔴 SAID ON THE SCREEN, every time. This slice READS; it cannot create a debt or take a payment.
-  "statement.readOnly": "كشف للاطّلاع فقط — لا يمكن تسجيل دين أو دفعة من هنا.",
+  // 🔴 S3C CHANGED THIS SENTENCE, AND THE OLD ONE IS NAMED. It used to end "لا يمكن تسجيل دين أو
+  // دفعة من هنا" — true in S3B, when the screen could only read. An owner can now record a
+  // PAYMENT here, but still cannot create a DEBT, so the sentence now says exactly that. Leaving
+  // the old wording would have made the screen lie about what its own button does.
+  "statement.readOnly": "لا يمكن تسجيل دين من هنا — يمكن تسجيل دفعة على دين قائم فقط.",
+  "collect.action": "تسجيل دفعة",
+  "collect.title": "تسجيل دفعة نقديّة",
+  "collect.customer": "الزبون",
+  "collect.reference": "الدين",
+  "collect.outstanding": "المتبقّي على هذا الدين",
+  "collect.amount": "مبلغ الدفعة",
+  "collect.method": "طريقة الدفع",
+  "collect.methodCash": "نقداً",
+  "collect.confirm": "تأكيد الدفعة",
+  "collect.cancel": "إلغاء",
+  "collect.posting": "جارٍ التسجيل…",
+  // 🔴 "سُجِّلت"، لا "تمّ الحفظ": الدفعة دخلت الدفتر فعلاً.
+  "collect.done": "سُجِّلت الدفعة.",
+  // 🔴 THE RETRY ANSWER. Said when the ledger hands back a payment this key already committed —
+  // so the owner learns the money was taken ONCE, not that a second one succeeded.
+  "collect.alreadyDone": "هذه الدفعة مسجّلة من قبل — لم تُحتسب مرّتين.",
+  "collect.invalidAmount": "أدخل مبلغاً أكبر من صفر.",
+  "collect.tooMuch": "المبلغ أكبر من المتبقّي على هذا الدين.",
+
   // 🔴 THE SENTENCE THAT KEEPS S1B HONEST. Selecting a customer at the till records nothing yet.
   "customers.notOnSaleYet": "اختيار الزبون للتذكير فقط — لا يُسجّل ديناً ولا يُربط بالفاتورة بعد.",
   "sell.customer": "الزبون",
@@ -487,6 +510,21 @@ const AR: Dict = {
     "سُجِّلت الفاتورة فعلاً ثم حدث خطأ غير متوقّع. راجع السجلّ — لا تُعِد إدخالها.",
   "outcome.saleStatusUnknown":
     "حدث خطأ غير متوقّع — لا نعرف إن كانت الفاتورة قد سُجِّلت. راجع السجلّ قبل إعادة المحاولة.",
+
+  // ── And the same five answers for a CUSTOMER COLLECTION (S3C) ─────────────────────────────────
+  //
+  // 🔴 EVERY ONE OF THESE DECIDES WHETHER THE SHOP TAKES THE MONEY A SECOND TIME. "recorded" and
+  // "unknown" both forbid collecting again; only "...Retry" invites another attempt, and it is
+  // said ONLY after the ledger was actually read and answered "no such payment".
+  "outcome.paymentNotRecorded": "حدث خطأ غير متوقّع — لم تُسجَّل الدفعة.",
+  "outcome.paymentNotRecordedRetry":
+    "حدث خطأ غير متوقّع — لم تُسجَّل الدفعة. يمكنك إعادة المحاولة بنفس المبلغ.",
+  "outcome.paymentRecorded":
+    "سُجِّلت الدفعة فعلاً ({amount}) ثم حدث خطأ غير متوقّع. راجع كشف الحساب — لا تُحصّل المبلغ مرّة أخرى.",
+  "outcome.paymentRecordedNoAmount":
+    "سُجِّلت الدفعة فعلاً ثم حدث خطأ غير متوقّع. راجع كشف الحساب — لا تُحصّل المبلغ مرّة أخرى.",
+  "outcome.paymentStatusUnknown":
+    "حدث خطأ غير متوقّع — لا نعرف إن كانت الدفعة قد سُجِّلت. راجع كشف الحساب قبل إعادة المحاولة، ولا تُحصّل المبلغ مرّة أخرى.",
 
   // ── And the same question for a MANUAL INVOICE, which is a different object to the cashier ────
   //
@@ -994,7 +1032,25 @@ const EN: Dict = {
   "statement.method.card": "Card",
   "statement.method.external": "Transfer",
   "statement.method.other": "Other",
-  "statement.readOnly": "Read-only statement \u2014 no debt or payment can be recorded here.",
+  // 🔴 S3C CHANGED THIS SENTENCE — the old one said no payment could be recorded here, which was
+  // true in S3B. An owner can now record a payment, but still cannot create a debt.
+  "statement.readOnly": "No debt can be recorded here \u2014 only a payment against an existing debt.",
+  "collect.action": "Record payment",
+  "collect.title": "Record a cash payment",
+  "collect.customer": "Customer",
+  "collect.reference": "Debt",
+  "collect.outstanding": "Outstanding on this debt",
+  "collect.amount": "Payment amount",
+  "collect.method": "Method",
+  "collect.methodCash": "Cash",
+  "collect.confirm": "Confirm payment",
+  "collect.cancel": "Cancel",
+  "collect.posting": "Recording\u2026",
+  "collect.done": "Payment recorded.",
+  "collect.alreadyDone": "This payment was already recorded \u2014 it has not been counted twice.",
+  "collect.invalidAmount": "Enter an amount greater than zero.",
+  "collect.tooMuch": "That is more than is outstanding on this debt.",
+
   "customers.notOnSaleYet": "Choosing a customer is a reminder only \u2014 it records no debt and is not linked to the sale yet.",
   "sell.customer": "Customer",
   "sell.chooseCustomer": "Choose a customer",
@@ -1009,6 +1065,17 @@ const EN: Dict = {
     "The sale WAS recorded but an unexpected error followed. Check History \u2014 do not ring it up again.",
   "outcome.saleStatusUnknown":
     "Unexpected error \u2014 it is not known whether the sale was recorded. Check History before trying again.",
+
+  // ── And the same five answers for a CUSTOMER COLLECTION (S3C) ─────────────────────────────────
+  "outcome.paymentNotRecorded": "Unexpected error \u2014 the payment was not recorded.",
+  "outcome.paymentNotRecordedRetry":
+    "Unexpected error \u2014 the payment was not recorded. You can try again with the same amount.",
+  "outcome.paymentRecorded":
+    "The payment WAS recorded ({amount}) but an unexpected error followed. Check the statement \u2014 do not collect it again.",
+  "outcome.paymentRecordedNoAmount":
+    "The payment WAS recorded but an unexpected error followed. Check the statement \u2014 do not collect it again.",
+  "outcome.paymentStatusUnknown":
+    "Unexpected error \u2014 it is not known whether the payment was recorded. Check the statement before trying again, and do not collect it again.",
 
   // English for the invoice outcomes. New wording, because no English sentence existed for them —
   // every one of these cases read "Unexpected error. Please try again..." before this slice.

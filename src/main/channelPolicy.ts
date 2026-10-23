@@ -210,6 +210,7 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // owes. Classified here AND refused again by `LedgerService.requireOwner`, because one gate that
   // someone later reclassifies by accident is not a boundary worth having on money.
   getCustomerStatement: "owner",
+  recordCustomerPayment: "owner",
   renameCategory: "owner",
   setCategoryActive: "owner",
   deleteCategory: "owner",

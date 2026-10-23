@@ -59,6 +59,7 @@ export const CHANNELS = {
   // that posts an obligation or records a payment: those exist in the service and are reachable
   // only from main. One owner-classified read, bound to a durable customer id.
   getCustomerStatement: "pos:getCustomerStatement",
+  recordCustomerPayment: "pos:recordCustomerPayment",
   renameCategory: "pos:renameCategory",
   setCategoryActive: "pos:setCategoryActive",
   deleteCategory: "pos:deleteCategory",
@@ -673,6 +674,59 @@ export interface CustomerStatementDto {
   readonly balances: readonly MoneyDto[];
 }
 
+/**
+ * An OWNER recording a payment against ONE already-posted debt. S3C.
+ *
+ * 🔴 THIS DOES NOT CREATE A DEBT. `obligationId` must already exist; there is no channel on this
+ * contract that posts an obligation, so a payment can only ever reduce something the ledger
+ * already holds. Selecting a customer still creates nothing.
+ *
+ * 🔴 `customerId` IS SENT AND IS CHECKED, not trusted. `LedgerService.settle` compares it to the
+ * obligation's own `partyId` and refuses a mismatch, so a screen that has drifted onto another
+ * account cannot pay the wrong person — and two customers really can share a name, which is why
+ * the id is what travels.
+ *
+ * 🔴 NO CURRENCY FIELD, DELIBERATELY. The settlement's currency is taken from the obligation
+ * itself in main. A caller cannot name one, so a wrong-currency payment is not merely refused —
+ * it is unrepresentable.
+ *
+ * 🔴 `amountMinor` IS A DECIMAL STRING OF MINOR UNITS, like every other amount on this contract.
+ * A JS number cannot hold 0.1 exactly and a payment is the last place to discover that.
+ *
+ * 🔴 `method` IS ONLY "cash" IN S3C. The ledger's own column accepts more, but this slice records
+ * cash collection and nothing else — Whish and Credit are a separate, still-unauthorized decision,
+ * and a method this screen cannot truthfully take must not be offerable through it.
+ */
+export interface RecordPaymentRequest {
+  readonly customerId: string;
+  readonly obligationId: string;
+  /**
+   * Caller-supplied and MANDATORY — main never invents one. The same key replayed with the same
+   * payload returns the committed payment with `duplicate: true` instead of taking the money
+   * twice; the same key with a different amount or method is refused outright.
+   */
+  readonly idempotencyKey: string;
+  readonly amountMinor: string;
+  readonly method: "cash";
+}
+
+/**
+ * What the owner gets back after recording a payment.
+ *
+ * 🔴 THE REFRESHED STATEMENT TRAVELS WITH IT, computed by S3A after the commit. The screen never
+ * subtracts anything to show the new balance — it replaces what it is holding. That removes the
+ * one window in which a renderer could display a balance the ledger does not agree with.
+ *
+ * 🔴 `duplicate` IS THE RETRY ANSWER, not an error. True means this exact payment was already
+ * committed and is being handed back, so a lost response can be retried safely and the operator is
+ * told the money was already taken once — never twice.
+ */
+export interface RecordPaymentResponse {
+  readonly settlement: StatementSettlementDto;
+  readonly duplicate: boolean;
+  readonly statement: CustomerStatementDto;
+}
+
 export interface SearchCustomersRequest {
   /** Matched against the name and the phone. Empty means "the whole directory". */
   readonly query: string;
@@ -1161,6 +1215,7 @@ export interface PosApi {
    * an untrusted renderer cannot write money at all — not even a refused attempt.
    */
   getCustomerStatement(req: CustomerIdRequest): Promise<IpcResult<CustomerStatementDto>>;
+  recordCustomerPayment(req: RecordPaymentRequest): Promise<IpcResult<RecordPaymentResponse>>;
   renameCategory(req: RenameCategoryRequest): Promise<IpcResult<CategoryDto>>;
   setCategoryActive(req: SetCategoryActiveRequest): Promise<IpcResult<CategoryDto>>;
   deleteCategory(req: CategoryIdRequest): Promise<IpcResult<{ readonly deletedId: string }>>;

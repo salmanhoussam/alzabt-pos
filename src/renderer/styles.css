@@ -879,3 +879,12 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 @media (max-width: 900px) {
   .customers-screen { grid-template-columns: 1fr; }
 }
+
+/* S3C — the owner's cash collection form, inside one obligation card.
+   `.notice` is NOT redefined here: it already exists above and this screen reuses it. */
+.collect-form { margin-top: 10px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius);
+  display: flex; flex-direction: column; gap: 6px; }
+.collect-form h4 { margin: 0 0 2px; font-size: 14px; }
+.collect-form label { display: flex; flex-direction: column; gap: 4px; }
+/* Digits read left-to-right in both languages, and tabular figures keep columns from jittering. */
+.collect-amount { direction: ltr; text-align: start; padding: 6px 8px; font-variant-numeric: tabular-nums; }

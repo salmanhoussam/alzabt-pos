@@ -149,6 +149,7 @@ const CH = {
   updateCustomerContact: "pos:updateCustomerContact",
   setCustomerActive: "pos:setCustomerActive",
   getCustomerStatement: "pos:getCustomerStatement",
+  recordCustomerPayment: "pos:recordCustomerPayment",
   renameCategory: "pos:renameCategory",
   setCategoryActive: "pos:setCategoryActive",
   deleteCategory: "pos:deleteCategory",
@@ -260,6 +261,16 @@ const api: PosApi = {
   // 🔴 READ-ONLY. It sends one id and receives a statement. There is no counterpart that posts a
   // debt or records a payment — those are not on this bridge at all.
   getCustomerStatement: (req) => ipcRenderer.invoke(CH.getCustomerStatement, { customerId: req.customerId }),
+  // 🔴 EVERY FIELD NAMED EXPLICITLY, like every other method here — the renderer cannot smuggle an
+  // extra property (a currency, a party override) through by spreading its own object.
+  recordCustomerPayment: (req) =>
+    ipcRenderer.invoke(CH.recordCustomerPayment, {
+      customerId: req.customerId,
+      obligationId: req.obligationId,
+      idempotencyKey: req.idempotencyKey,
+      amountMinor: req.amountMinor,
+      method: req.method,
+    }),
   renameCategory: (req) =>
     ipcRenderer.invoke(CH.renameCategory, { categoryId: req.categoryId, nameAr: req.nameAr, nameEn: req.nameEn }),
   setCategoryActive: (req) =>

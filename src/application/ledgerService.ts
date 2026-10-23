@@ -186,6 +186,23 @@ export class LedgerService {
    * settlements would read a ledger that could change between calls and could render a debt beside
    * someone else's payments. Composing in main means the statement is one consistent read.
    */
+  /**
+   * The settlement a given idempotency key already committed, or null.
+   *
+   * 🔴 THIS EXISTS FOR ONE REASON: telling an owner the TRUTH after an unexpected fault. If the
+   * IPC response is lost after the commit, the only honest way to answer "was my payment taken?"
+   * is to ASK THE LEDGER by the key the caller sent — not to guess from the exception, which is
+   * how a shop ends up collecting the same debt twice. `saleOutcomeText.ts` established this
+   * shape for sales; this is the same discipline for a collection.
+   *
+   * It is a READ. It posts nothing, and it is owner-gated like every other read here.
+   */
+  settlementForIdempotencyKey(key: string): SettlementRecord | null {
+    this.requireOwner();
+    if (typeof key !== "string" || key.length === 0) return null;
+    return this.deps.ledger.findSettlementByIdempotencyKey(key)?.settlement ?? null;
+  }
+
   statementFor(customerId: string): {
     readonly obligations: ReadonlyArray<{
       readonly obligation: ObligationRecord;

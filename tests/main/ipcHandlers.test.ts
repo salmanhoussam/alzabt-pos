@@ -93,6 +93,7 @@ describe("IPC surface", () => {
         // obligation, records a settlement or sets a balance — the renderer cannot write money at
         // all, which is why this list is the right place to notice if that ever changes.
         "getCustomerStatement",
+        "recordCustomerPayment",
         "createCategory",
         "createSale",
         "currentCashier",
@@ -186,8 +187,12 @@ describe("IPC surface", () => {
     // supplier half of PartyService is unreachable from the renderer.
     // 🔴 TRANSITION — SEVENTY-THREE to SEVENTY-FOUR with the account statement (slice S3B). The
     // one added: getCustomerStatement. The old value was 73 and is named rather than replaced. It
-    // is a READ, owner-classified, and it is still the case that no channel here writes money.
-    expect(CHANNEL_NAMES).toHaveLength(74);
+    // is a READ, owner-classified.
+    // 🔴 TRANSITION — SEVENTY-FOUR to SEVENTY-FIVE with owner cash collection (slice S3C). The one
+    // added: recordCustomerPayment. The old value was 74. It is this bridge's FIRST money write,
+    // owner-classified, and it can only SETTLE an existing obligation — there is still no channel
+    // anywhere here that creates one.
+    expect(CHANNEL_NAMES).toHaveLength(75);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

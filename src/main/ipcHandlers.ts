@@ -18,12 +18,14 @@ import { DomainError } from "../domain/errors";
 import type { OnlineCatalogSnapshot } from "../application/posService";
 import { MAX_QUANTITY_MILLI } from "../domain/quantity";
 import { assertPaymentMethod } from "../domain/sale";
+import { formatDecimal, money } from "../domain/money";
 import type { SaleRecord } from "../domain/sale";
 import { DEFAULT_TERMINAL_LANGUAGE, isLanguage } from "../shared/i18n";
 import { MAX_PARTY_ADDRESS, MAX_PARTY_NAME, MAX_PARTY_NOTE, MAX_PARTY_PHONE } from "../domain/party";
 import type { Language, TerminalSettings } from "../shared/i18n";
 import { saleOutcomeError } from "./saleOutcomeText";
 import { invoiceOutcomeError } from "./invoiceOutcomeText";
+import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
 import type { LedgerService } from "../application/ledgerService";
 import type { PartyRow } from "../persistence/partyRepository";
@@ -389,6 +391,40 @@ export function saleFailureTruth(service: PosService, payload: unknown, lang: La
       : saleOutcomeError(lang, "not_recorded_retry");
   } catch {
     return saleOutcomeError(lang, "unknown");
+  }
+}
+
+/**
+ * What the OWNER is told after an unexpected error in `recordCustomerPayment`, decided by READING
+ * the ledger rather than by guessing from the exception.
+ *
+ * 🔴 AN ERROR THROWN AFTER THE COMMIT LOOKS IDENTICAL TO ONE THROWN BEFORE IT. The only thing that
+ * can tell them apart is the ledger itself, asked by the key the caller sent. Guessing "not
+ * recorded" is how a shop collects the same debt twice; guessing "recorded" is how a real payment
+ * goes missing. So this asks, and when it cannot ask it says so.
+ *
+ * Same shape as `saleFailureTruth` immediately above, deliberately — see `paymentOutcomeText.ts`.
+ */
+export function paymentFailureTruth(ledger: LedgerService, payload: unknown, lang: Language): IpcError {
+  const key =
+    payload && typeof payload === "object" && typeof (payload as { idempotencyKey?: unknown }).idempotencyKey === "string"
+      ? (payload as { idempotencyKey: string }).idempotencyKey
+      : null;
+  // 🔴 NO KEY MEANS THE LEDGER CANNOT BE ASKED, so no retry is offered — the other half of this
+  // same code DOES offer one, because there the ledger answered.
+  if (key === null) return paymentOutcomeError(lang, "not_recorded");
+  try {
+    const settled = ledger.settlementForIdempotencyKey(key);
+    // 🔴 THE AMOUNT COMES OFF THE ROW, formatted from its own minor units and currency. It is
+    // never parsed back out of a sentence and never taken from the request.
+    return settled
+      // 🔴 FORMATTED, NOT RAW MINOR UNITS. The first draft printed `amountMinor` directly, so a
+      // 4.00 payment was reported to the shop as "400 USD" — a hundred times too large, in the one
+      // sentence whose whole job is to be exact about money. `formatDecimal` is the domain's own.
+      ? paymentOutcomeError(lang, "recorded", `${formatDecimal(money(settled.amountMinor, settled.currency))} ${settled.currency}`)
+      : paymentOutcomeError(lang, "not_recorded_retry");
+  } catch {
+    return paymentOutcomeError(lang, "unknown");
   }
 }
 
@@ -884,6 +920,62 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       const statement = ledger().statementFor(id);
       return toStatementDto(customers().get("customer", id), statement);
     }),
+
+    /**
+     * An OWNER records a payment against ONE existing posted debt. S3C.
+     *
+     * 🔴 THIS CHANNEL CANNOT CREATE A DEBT. It calls `settle` and nothing else; there is no
+     * obligation-posting channel on this contract at all. The amount only ever goes down.
+     *
+     * 🔴 THE CURRENCY IS NOT A PARAMETER. `LedgerService.settle` reads it off the obligation, so a
+     * wrong-currency payment is unrepresentable rather than merely refused.
+     *
+     * 🔴 THE REFRESHED STATEMENT IS READ BACK AFTER THE COMMIT and returned with the result, so
+     * the screen replaces what it holds instead of subtracting anything itself.
+     */
+    recordCustomerPayment: wrap(
+      "recordCustomerPayment",
+      (p) => {
+        const o = exactObject(p, ["customerId", "obligationId", "idempotencyKey", "amountMinor", "method"]);
+        const customerId = str(o.customerId, "customerId", 100);
+        const obligationId = str(o.obligationId, "obligationId", 100);
+        const idempotencyKey = str(o.idempotencyKey, "idempotencyKey", 100);
+        // 🔴 S3C RECORDS CASH AND NOTHING ELSE. The ledger column accepts more, but a method this
+        // screen cannot truthfully take must not be reachable through it — Whish and Credit are a
+        // separate, still-unauthorized decision.
+        if (o.method !== "cash") invalid("'method' must be 'cash'");
+        const amountMinor = parseMinor(o.amountMinor);
+
+        // 🔴 THE CUSTOMER IS RESOLVED **BEFORE** THE SETTLE, AND THAT ORDER IS THE WHOLE POINT.
+        // The first draft settled first and read the customer afterwards, to build the response.
+        // `settle` only checks that the party id matches the obligation's — which a SUPPLIER's own
+        // payable satisfies perfectly — so a supplier debt was settled and COMMITTED, and only then
+        // did the customer lookup throw. The caller saw an error; the ledger had already moved. A
+        // test for exactly that found it. Resolving the customer first makes the whole thing refuse
+        // before any write.
+        const party = customers().get("customer", customerId);
+
+        const result = ledger().settle({
+          obligationId,
+          partyId: customerId,
+          idempotencyKey,
+          amountMinor,
+          method: "cash",
+        });
+
+        const statement = ledger().statementFor(customerId);
+        const dto = toStatementDto(party, statement);
+        const settlement = {
+          id: result.record.id,
+          amount: { minor: result.record.amountMinor.toString(), currency: result.record.currency },
+          method: result.record.method,
+          settledAt: result.record.settledAt,
+        } as const;
+        log.info("customer-payment-recorded", { id: result.record.id, duplicate: result.duplicate });
+        return { settlement, duplicate: result.duplicate, statement: dto };
+      },
+      (p) => paymentFailureTruth(ledger(), p, operatorLanguage()),
+    ),
 
     setCustomerActive: wrap("setCustomerActive", (p) => {
       const o = exactObject(p, ["customerId", "isActive"]);
