@@ -15,15 +15,37 @@
 import type { PosService } from "../application/posService";
 import { MAX_PRODUCT_ID_LENGTH } from "../domain/catalog";
 import { DomainError } from "../domain/errors";
+import type { OnlineCatalogSnapshot } from "../application/posService";
 import { MAX_QUANTITY_MILLI } from "../domain/quantity";
 import { assertPaymentMethod } from "../domain/sale";
+import { formatDecimal, money } from "../domain/money";
 import type { SaleRecord } from "../domain/sale";
-import { isLanguage } from "../shared/i18n";
-import type { TerminalSettings } from "../shared/i18n";
-import { MAX_PRODUCT_NAME, MAX_SKU, type ProductDraft } from "../domain/productDraft";
+import { DEFAULT_TERMINAL_LANGUAGE, isLanguage } from "../shared/i18n";
+import { MAX_PARTY_ADDRESS, MAX_PARTY_NAME, MAX_PARTY_NOTE, MAX_PARTY_PHONE } from "../domain/party";
+import type { Language, TerminalSettings } from "../shared/i18n";
+import { saleOutcomeError } from "./saleOutcomeText";
+import { invoiceOutcomeError } from "./invoiceOutcomeText";
+import { paymentOutcomeError } from "./paymentOutcomeText";
+import type { PartyService } from "../application/partyService";
+import type { LedgerService } from "../application/ledgerService";
+import type { PartyRow } from "../persistence/partyRepository";
+import type { CustomerDto, CustomerStatementDto } from "../shared/ipcContract";
+import {
+  MAX_BRAND,
+  MAX_DESCRIPTION as MAX_PRODUCT_DESCRIPTION,
+  MAX_PRODUCT_NAME,
+  MAX_SKU,
+  type ProductDraft,
+  type ProductMasterDraft,
+} from "../domain/productDraft";
+import { MAX_CATEGORY_NAME } from "../domain/category";
+import { MAX_BARCODE } from "../domain/barcode";
+import type { PhoneSessionSpec } from "../domain/phoneSession";
 import {
   parseMinor,
   toAdminProductDto,
+  toCategoryDto,
+  toProductImageMetaDto,
   toCatalogDto,
   toCompanyProfileDto,
   toInvoiceDto,
@@ -41,10 +63,16 @@ import {
   type AppInfoDto,
   CHANNELS,
   type ChannelName,
+  type CustomerPaymentOverpaymentErrorContext,
   INVOICE_HEADER_PATCH_KEYS,
   type InvoiceHeaderPatchKey,
   type IpcError,
   type IpcResult,
+  PRODUCT_MASTER_PATCH_KEYS,
+  type ProductMasterPatchKey,
+  OnlineCatalogExportDto,
+  type PhoneSessionDto,
+  type PhoneSessionState,
 } from "../shared/ipcContract";
 import { type Logger, nullLogger } from "./logger";
 import { accessFor } from "./channelPolicy";
@@ -68,6 +96,36 @@ export interface SavedFile {
   readonly fileName: string;
 }
 
+/**
+ * A photo main has already read AND normalized, on its way to the service.
+ *
+ * No path and no original filename: the shop owns these bytes from here on, and the file the
+ * operator picked may be deleted, renamed or on a USB stick that is gone by tomorrow. Storing
+ * where it came from would be storing a promise the product cannot keep — the same reason the
+ * invoice logo is copied into the app's own folder rather than referenced where it was found.
+ */
+export interface PickedPhoto {
+  readonly bytes: Buffer;
+  readonly mime: "image/jpeg" | "image/png";
+  readonly widthPx: number;
+  readonly heightPx: number;
+  readonly origin: "desktop" | "phone";
+}
+
+/**
+ * Opening and closing the temporary phone surface.
+ *
+ * One session at a time, by contract: `start` replaces whatever was open, because two QRs on one
+ * till is a state nobody can reason about and the desktop only ever shows one.
+ */
+export interface PhoneSessionBridge {
+  readonly start: (spec: PhoneSessionSpec) => Promise<PhoneSessionDto>;
+  /** True when something was actually closed; false when nothing was open. */
+  readonly cancel: () => Promise<boolean>;
+  /** Slice H2. What the desktop dialog polls. Reports a save exactly once. */
+  readonly status: () => PhoneSessionState;
+}
+
 export interface IpcHandlerOptions {
   /** Shows the native "open file" dialog. Absent (tests, headless) means import is unavailable. */
   readonly pickCatalogFile?: () => PickedFile | null;
@@ -75,6 +133,25 @@ export interface IpcHandlerOptions {
   readonly saveCatalogExport?: (suggestedName: string, contents: string) => SavedFile | null;
   /** Native "save as" dialog + verified consistent snapshot of the ledger. Absent means unavailable. */
   readonly exportBackup?: () => SavedFile | null;
+  /**
+   * Shows the native "choose a folder" dialog and writes the Online Catalog package into it.
+   *
+   * 🔴 THE WHOLE OPERATION LIVES IN MAIN, deliberately. The renderer cannot name a destination,
+   * cannot see a path, and cannot write a byte; it asks for an export and is told what happened.
+   * Absent (a headless test, a terminal without a window) answers NOT_AVAILABLE rather than
+   * half-working.
+   */
+  readonly exportOnlineCatalog?: (snapshot: OnlineCatalogSnapshot) => OnlineCatalogExportDto | null;
+  /**
+   * The phone-entry LAN bridge (slice H1). Absent means this terminal cannot open one at all, and
+   * the channel answers NOT_AVAILABLE — which is what every headless test gets, so no test
+   * accidentally opens a socket.
+   *
+   * 🔴 IT TAKES AN ALREADY-AUTHORIZED SPEC. The handler calls `service.authorizePhoneSession`
+   * first; this seam is the mechanism, never the permission. Giving it the raw request would move
+   * the owner check into main, where the listener could not re-use it.
+   */
+  readonly phoneSessions?: PhoneSessionBridge;
   /** Version/build identity of this installation. */
   readonly appInfo?: () => AppInfoDto;
   /** Called after a NEW sale is committed (the daily-backup trigger). Must not throw. */
@@ -91,14 +168,40 @@ export interface IpcHandlerOptions {
    * loads the frozen document itself and owns the print dialog. There is deliberately no channel
    * that accepts HTML, a path, or anything else executable from the renderer.
    */
-  readonly printInvoice?: (invoiceId: string) => Promise<"printed" | "cancelled">;
+  /**
+   * `logoMissing` is true when the invoice NAMED a frozen logo asset that is not on disk, so the
+   * document printed without its own branding. It is reported, never silently substituted — see
+   * src/main/invoiceLogo.ts.
+   */
+  readonly printInvoice?: (
+    invoiceId: string,
+  ) => Promise<{ readonly status: "printed" | "cancelled"; readonly logoMissing: boolean }>;
   /** Save-as dialog + printToPDF of the frozen invoice. Null when the operator cancelled. */
-  readonly saveInvoicePdf?: (invoiceId: string) => Promise<SavedFile | null>;
+  readonly saveInvoicePdf?: (
+    invoiceId: string,
+  ) => Promise<(SavedFile & { readonly logoMissing: boolean }) | null>;
   /**
    * Native image picker. Main copies the chosen file into its own branding folder and returns a
    * BARE FILE NAME; the renderer never sees or supplies a path.
    */
   readonly pickInvoiceLogo?: () => string | null;
+  /**
+   * Native photo picker for a product. Main shows the dialog, reads the file and NORMALIZES it
+   * (decode, re-encode, bound the dimensions), then returns the bytes it produced — so the only
+   * thing that crosses the IPC bridge in the other direction is a product id.
+   *
+   * 🔴 ABSENT UNTIL SLICE F. Product Master's authorization, channel and service boundary land
+   * first (slice D); the `nativeImage` pipeline that can actually prove a file is an image is its
+   * own slice. While this is absent, `setProductImage` answers NOT_AVAILABLE.
+   */
+  readonly pickProductPhoto?: (productId: string) => PickedPhoto | null;
+  /**
+   * The customer/supplier directory (migration 12). Absent on a terminal without it, where every
+   * customer channel answers NOT_AVAILABLE — the same shape `invoices` already uses.
+   */
+  readonly parties?: PartyService;
+  /** S3B: the read-only statement source. Absent on a terminal without the ledger. */
+  readonly ledger?: LedgerService;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -115,6 +218,30 @@ function exactObject(payload: unknown, keys: readonly string[]): Record<string, 
   const actual = Object.keys(payload);
   const extra = actual.filter((k) => !keys.includes(k));
   const missing = keys.filter((k) => !actual.includes(k));
+  if (extra.length || missing.length) {
+    invalid(`Unexpected fields [${extra.join(", ")}] / missing fields [${missing.join(", ")}]`);
+  }
+  return payload as Record<string, unknown>;
+}
+
+/**
+ * An object whose `required` keys must all be present and whose `optional` keys may be absent.
+ * Unknown keys are refused, exactly as `exactObject` refuses them.
+ *
+ * 🔴 Why this exists rather than widening `exactObject`'s key list: a product draft's five
+ * selling fields are genuinely required — a payload missing a price is malformed — while the
+ * enrichment group must be omittable, because omitting it is what every caller that predates
+ * Product Master means. One function cannot express both with a single flat key list.
+ */
+function objectWithOptional(
+  payload: unknown,
+  required: readonly string[],
+  optional: readonly string[],
+): Record<string, unknown> {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) invalid("Expected an object");
+  const actual = Object.keys(payload);
+  const extra = actual.filter((k) => !required.includes(k) && !optional.includes(k));
+  const missing = required.filter((k) => !actual.includes(k));
   if (extra.length || missing.length) {
     invalid(`Unexpected fields [${extra.join(", ")}] / missing fields [${missing.join(", ")}]`);
   }
@@ -169,51 +296,209 @@ function bool(value: unknown, field: string): boolean {
  * payload that is not the right shape, so a malformed IPC call never reaches the service.
  */
 function productDraft(value: unknown): ProductDraft {
-  const d = exactObject(value, ["nameAr", "nameEn", "sku", "price", "baseUnit"]);
-  return {
+  // 🔴 `master` IS OPTIONAL AND EVERY OTHER KEY IS REQUIRED, which is why this is not a plain
+  // `exactObject`. An exact object would refuse a legacy caller that omits `master` (the import
+  // path, invoice reconciliation) and force it to invent one — and a caller that invents an
+  // enrichment group sends nulls, which CLEAR fields. The optional key is what keeps absence
+  // expressible all the way from the renderer to `keep()` in the repository.
+  const d = objectWithOptional(value, ["nameAr", "nameEn", "sku", "price", "baseUnit"], ["master"]);
+  const base = {
     nameAr: str(d.nameAr, "nameAr", MAX_PRODUCT_NAME),
     nameEn: optionalStr(d.nameEn, "nameEn", MAX_PRODUCT_NAME),
     sku: optionalStr(d.sku, "sku", MAX_SKU),
     price: str(d.price, "price", 32),
     baseUnit: str(d.baseUnit, "baseUnit", 32),
   };
+  return d.master === undefined ? base : { ...base, master: productMasterPatch(d.master) };
+}
+
+/**
+ * The Product Master enrichment patch.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 BUILT KEY BY KEY, AND ABSENCE IS CARRIED, NOT NORMALIZED AWAY. A key the caller did not send
+ * must still be MISSING from the object this returns — not present holding `undefined`, and
+ * certainly not present holding `null`. Spreading, defaulting with `??`, or listing the six keys
+ * unconditionally would each turn "I am not touching the description" into "clear the
+ * description", and a re-import would silently wipe what the owner typed.
+ *
+ * 🔴 A key present with `undefined` is treated as ABSENT. Electron's structured clone preserves a
+ * property whose value is `undefined`, so `{ brand: undefined }` arrives with the key present — and
+ * a renderer building an object from optional React state produces exactly that. The `in` test
+ * alone would read it as "clear the brand".
+ *
+ * MEANING is still the domain's job: `validateProductMaster` canonicalizes the barcode and trims
+ * the text. This refuses a payload that is the wrong SHAPE, so a malformed call never gets that far.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+function productMasterPatch(value: unknown): ProductMasterDraft {
+  const m = patchObject(value, PRODUCT_MASTER_PATCH_KEYS);
+  const out: {
+    categoryId?: string | null;
+    barcode?: string | null;
+    brand?: string | null;
+    descriptionAr?: string | null;
+    descriptionEn?: string | null;
+    isOnlineVisible?: boolean;
+  } = {};
+  const sent = (key: ProductMasterPatchKey) => key in m && m[key] !== undefined;
+
+  if (sent("categoryId")) out.categoryId = optionalStr(m.categoryId, "categoryId", MAX_PRODUCT_ID_LENGTH);
+  if (sent("barcode")) out.barcode = optionalStr(m.barcode, "barcode", MAX_BARCODE);
+  if (sent("brand")) out.brand = optionalStr(m.brand, "brand", MAX_BRAND);
+  if (sent("descriptionAr")) {
+    out.descriptionAr = optionalStr(m.descriptionAr, "descriptionAr", MAX_PRODUCT_DESCRIPTION);
+  }
+  if (sent("descriptionEn")) {
+    out.descriptionEn = optionalStr(m.descriptionEn, "descriptionEn", MAX_PRODUCT_DESCRIPTION);
+  }
+  if (sent("isOnlineVisible")) out.isOnlineVisible = bool(m.isOnlineVisible, "isOnlineVisible");
+  return out;
 }
 
 function noPayload(payload: unknown): void {
   if (payload !== undefined && payload !== null) invalid("This operation takes no payload");
 }
 
-const GENERIC_INTERNAL: IpcError = {
-  code: "INTERNAL",
-  message: "Unexpected error. Please try again; if it keeps happening, contact support.",
-};
+/**
+ * The fallback for an unexpected fault on ANY channel, in the operator's language.
+ *
+ * 🔴 IT WAS A FROZEN CONSTANT AND IS NOW A FUNCTION OF THE LANGUAGE. The old value was the exact
+ * English sentence now stored as `outcome.internal`, so English mode is unchanged; what changed is
+ * that an Arabic till no longer reads it in English. It still says nothing whatsoever about sales —
+ * that distinction is the whole reason `saleFailureTruth` exists separately.
+ */
+function genericInternal(lang: Language): IpcError {
+  return saleOutcomeError(lang, "internal");
+}
 
 /** What the cashier is told after an unexpected error in createSale, decided by reading the ledger. */
-export function saleFailureTruth(service: PosService, payload: unknown): IpcError {
+export function saleFailureTruth(service: PosService, payload: unknown, lang: Language): IpcError {
   const key =
     payload && typeof payload === "object" && typeof (payload as { idempotencyKey?: unknown }).idempotencyKey === "string"
       ? (payload as { idempotencyKey: string }).idempotencyKey
       : null;
-  if (key === null) return { code: "SALE_NOT_RECORDED", message: "Unexpected error — the sale was not recorded." };
+  // 🔴 NO KEY MEANS THE LEDGER CANNOT BE ASKED, so no retry is offered. `not_recorded_retry` below
+  // is the other half of the same code and DOES offer one, because there the ledger answered.
+  // Collapsing the two would leave the cashier without the one fact that decides whether pressing
+  // the button again is safe.
+  if (key === null) return saleOutcomeError(lang, "not_recorded");
   try {
     const sale = service.saleForIdempotencyKey(key);
+    // 🔴 THE RECEIPT NUMBER COMES OFF THE ROW, as a number, and is validated by
+    // `isReceiptNumber` before it is printed. It is never parsed back out of a sentence.
     return sale
-      ? {
-          code: "SALE_RECORDED",
-          message: `The sale WAS recorded (receipt #${sale.receiptNumber}) but an unexpected error followed. Check History — do not ring it up again.`,
-        }
-      : { code: "SALE_NOT_RECORDED", message: "Unexpected error — the sale was not recorded. You can try again." };
+      ? saleOutcomeError(lang, "recorded", sale.receiptNumber)
+      : saleOutcomeError(lang, "not_recorded_retry");
   } catch {
-    return {
-      code: "SALE_STATUS_UNKNOWN",
-      message: "Unexpected error — it is not known whether the sale was recorded. Check History before trying again.",
-    };
+    return saleOutcomeError(lang, "unknown");
+  }
+}
+
+/**
+ * What the OWNER is told after an unexpected error in `recordCustomerPayment`, decided by READING
+ * the ledger rather than by guessing from the exception.
+ *
+ * 🔴 AN ERROR THROWN AFTER THE COMMIT LOOKS IDENTICAL TO ONE THROWN BEFORE IT. The only thing that
+ * can tell them apart is the ledger itself, asked by the key the caller sent. Guessing "not
+ * recorded" is how a shop collects the same debt twice; guessing "recorded" is how a real payment
+ * goes missing. So this asks, and when it cannot ask it says so.
+ *
+ * Same shape as `saleFailureTruth` immediately above, deliberately — see `paymentOutcomeText.ts`.
+ */
+export function paymentFailureTruth(ledger: LedgerService, payload: unknown, lang: Language): IpcError {
+  const key =
+    payload && typeof payload === "object" && typeof (payload as { idempotencyKey?: unknown }).idempotencyKey === "string"
+      ? (payload as { idempotencyKey: string }).idempotencyKey
+      : null;
+  // 🔴 NO KEY MEANS THE LEDGER CANNOT BE ASKED, so no retry is offered — the other half of this
+  // same code DOES offer one, because there the ledger answered.
+  if (key === null) return paymentOutcomeError(lang, "not_recorded");
+  try {
+    const settled = ledger.settlementForIdempotencyKey(key);
+    // 🔴 THE AMOUNT COMES OFF THE ROW, formatted from its own minor units and currency. It is
+    // never parsed back out of a sentence and never taken from the request.
+    return settled
+      // 🔴 FORMATTED, NOT RAW MINOR UNITS. The first draft printed `amountMinor` directly, so a
+      // 4.00 payment was reported to the shop as "400 USD" — a hundred times too large, in the one
+      // sentence whose whole job is to be exact about money. `formatDecimal` is the domain's own.
+      ? paymentOutcomeError(lang, "recorded", `${formatDecimal(money(settled.amountMinor, settled.currency))} ${settled.currency}`)
+      : paymentOutcomeError(lang, "not_recorded_retry");
+  } catch {
+    return paymentOutcomeError(lang, "unknown");
+  }
+}
+
+/**
+ * What the cashier is told after an unexpected error in `finalizeInvoice`, decided by READING the
+ * ledger rather than by guessing from the exception.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 THE DEFECT THIS CLOSES. `finalizeInvoice` had no `onInternal`, so every unexpected fault —
+ * before the commit, during it, or after it — produced `GENERIC_INTERNAL`: "Unexpected error.
+ * Please try again…". For a fault AFTER the commit that sentence is false in the direction that
+ * costs the merchant work: the invoice has a number, the sale is in the ledger, and the operator
+ * is being invited to issue it again.
+ *
+ * 🔴 WHY THE SALE ROW IS A SOUND PROXY FOR "THE COMMIT HAPPENED". `invoiceService.finalizeInvoice`
+ * runs its whole body inside ONE `transact` — reread, validate, allocate the number, freeze the
+ * issuer, write the finalized row, write the sale, write the reconciliation — and returns from
+ * inside it. SQLite commits all of it or none of it. So "a sale exists for this invoice" is a
+ * faithful statement about the transaction's outcome, and it is read through
+ * `invoiceService.saleForInvoice`, which already existed for exactly this kind of question and is
+ * documented read-only.
+ *
+ * 🔴 IT NEVER RE-FINALIZES ANYTHING. Two read-only calls, no write, no transaction. Diagnosing an
+ * error must not change what it is diagnosing.
+ *
+ * 🔴 AND IT CANNOT CLAIM "NOT ISSUED" WITHOUT EVIDENCE. A payload that never named an invoice gets
+ * the blind wording with no retry offered — the same split the sale path makes — because that
+ * branch has read nothing. A lookup that throws becomes "unknown", never "not issued".
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export function invoiceFinalizeTruth(invoices: InvoiceService, payload: unknown, lang: Language): IpcError {
+  const id =
+    payload && typeof payload === "object" && typeof (payload as { invoiceId?: unknown }).invoiceId === "string"
+      ? (payload as { invoiceId: string }).invoiceId
+      : null;
+  // No id means nothing can be looked up. `invoiceId()` would have refused such a payload with a
+  // DomainError before the service ran, so reaching here with no id means the service was never
+  // entered — but the wording still offers no retry, because this branch has read no evidence.
+  if (id === null) return invoiceOutcomeError(lang, "not_finalized");
+  try {
+    const sale = invoices.saleForInvoice(id);
+    if (!sale) return invoiceOutcomeError(lang, "not_finalized_retry");
+    // 🔴 BOTH NUMBERS COME OFF REAL ROWS. `invoiceNumberOf` returns undefined for a draft or an
+    // unknown id, and `invoiceOutcomeError` prints neither number unless it really is one.
+    return invoiceOutcomeError(lang, "finalized", {
+      invoiceNumber: invoices.invoiceNumberOf(id),
+      receiptNumber: sale.receiptNumber,
+    });
+  } catch {
+    return invoiceOutcomeError(lang, "unknown");
   }
 }
 
 export function createIpcHandlers(service: PosService, options: IpcHandlerOptions = {}): Record<ChannelName, Handler> {
   const log = options.logger ?? nullLogger;
   const now = options.now ?? (() => new Date());
+
+  /**
+   * The language the operator reads, for the handful of messages composed here.
+   *
+   * 🔴 IT CANNOT THROW, BECAUSE EVERY CALLER IS ALREADY IN AN ERROR PATH. A settings file that has
+   * gone unreadable must not turn a truthful "the sale WAS recorded" into an unhandled exception
+   * that reaches the renderer as nothing at all. Arabic is the product's default
+   * (`DEFAULT_TERMINAL_LANGUAGE`), and `options.settings` is absent in tests and headless runs, so
+   * the fallback is the real default rather than a convenient English one.
+   */
+  function operatorLanguage(): Language {
+    try {
+      return options.settings?.get().terminalLanguage ?? DEFAULT_TERMINAL_LANGUAGE;
+    } catch {
+      return DEFAULT_TERMINAL_LANGUAGE;
+    }
+  }
 
   /**
    * 🔴 THE AUTHORIZATION GATE. It runs BEFORE the handler body, on every channel, for both the sync
@@ -239,6 +524,40 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       // only arrive from a hand-edited database. It is NOT an owner, and lands here.
       throw new DomainError("NOT_AUTHORIZED", "Only the shop owner can do that");
     }
+    // 🔴 ASKED OF THE SERVICE, NOT COMPUTED HERE. The per-operator half of this answer lives in
+    // the durable row, and `canCreateProducts()` is the one method that reads it — so this guard
+    // and the service's own `requireProductCreator()` cannot drift into disagreeing. The service
+    // checks again regardless: this layer stops the call early and politely, it does not decide.
+    if (access === "create-products" && !service.canCreateProducts()) {
+      throw new DomainError("NOT_AUTHORIZED", "You are not allowed to add products");
+    }
+  }
+
+  function toIpcError(error: DomainError, channel: ChannelName): IpcError {
+    const result: IpcError = { code: error.code, message: error.message };
+    if (
+      channel !== "recordCustomerPayment" ||
+      error.code !== "INVALID_AMOUNT" ||
+      error.reason !== "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING" ||
+      error.context === undefined ||
+      typeof error.context.outstandingMinor !== "bigint" ||
+      typeof error.context.currency !== "string"
+    ) {
+      return result;
+    }
+
+    try {
+      const outstanding = money(error.context.outstandingMinor, error.context.currency);
+      const context: CustomerPaymentOverpaymentErrorContext = {
+        reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING",
+        outstandingMinor: outstanding.minor.toString(),
+        currency: outstanding.currency,
+      };
+      return { ...result, context };
+    } catch (validationError) {
+      if (validationError instanceof DomainError) return result;
+      throw validationError;
+    }
   }
 
   function wrap(channel: ChannelName, fn: (payload: unknown) => unknown, onInternal?: (payload: unknown) => IpcError): Handler {
@@ -247,10 +566,10 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         authorize(channel);
         return { ok: true, data: fn(payload) };
       } catch (err) {
-        if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
+        if (err instanceof DomainError) return { ok: false, error: toIpcError(err, channel) };
         log.error("ipc-internal-error", { channel, error: err });
         console.error("[pos] internal error", channel, err);
-        return { ok: false, error: onInternal ? onInternal(payload) : GENERIC_INTERNAL };
+        return { ok: false, error: onInternal ? onInternal(payload) : genericInternal(operatorLanguage()) };
       }
     };
   }
@@ -261,10 +580,10 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         authorize(channel);
         return { ok: true, data: await fn(payload) };
       } catch (err) {
-        if (err instanceof DomainError) return { ok: false, error: { code: err.code, message: err.message } };
+        if (err instanceof DomainError) return { ok: false, error: toIpcError(err, channel) };
         log.error("ipc-internal-error", { channel, error: err });
         console.error("[pos] internal error", channel, err);
-        return { ok: false, error: GENERIC_INTERNAL };
+        return { ok: false, error: genericInternal(operatorLanguage()) };
       }
     };
   }
@@ -282,6 +601,20 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
    * A role from the renderer. 'admin' is refused HERE as well as in the service: it is reserved in
    * the schema so widening the CHECK later costs no rebuild, and it has no v1 behaviour.
    */
+  /**
+   * The phone session's action, from the renderer.
+   *
+   * 🔴 An enumerated check rather than a cast: the action is the ONLY thing that decides whether a
+   * token may create a product or touch an existing one, so a third value must be refused here
+   * rather than reaching the session as something `switch` quietly ignores.
+   */
+  function phoneAction(value: unknown): "NEW_PRODUCT" | "EDIT_PRODUCT" {
+    if (value !== "NEW_PRODUCT" && value !== "EDIT_PRODUCT") {
+      invalid("'action' must be NEW_PRODUCT or EDIT_PRODUCT");
+    }
+    return value;
+  }
+
   function role(value: unknown): "owner" | "cashier" {
     if (value !== "owner" && value !== "cashier") invalid("'role' must be owner or cashier");
     return value;
@@ -290,7 +623,18 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   /** The login/session shape, with the role the UI uses to hide what the service would refuse. */
   function cashierDto(c: { id: string; name: string }) {
     const r = service.currentRole();
-    return r ? { id: c.id, name: c.name, role: r } : { id: c.id, name: c.name };
+    if (!r) return { id: c.id, name: c.name };
+    // 🔴 CONVENIENCE, NOT AUTHORITY. The Products screen uses this to decide whether drawing the
+    // create actions is worth it; the service re-reads the durable row on every create regardless,
+    // so a stale `true` here earns a refusal rather than a product. Read defensively: a terminal
+    // whose operator store is unavailable answers `false` and the screen simply offers less.
+    let mayCreateProducts = false;
+    try {
+      mayCreateProducts = service.canCreateProducts();
+    } catch {
+      mayCreateProducts = false;
+    }
+    return { id: c.id, name: c.name, role: r, mayCreateProducts };
   }
 
   return {
@@ -371,6 +715,15 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         role(o.role),
       );
     }),
+
+    setOperatorMayCreateProducts: wrap("setOperatorMayCreateProducts", (p) => {
+      const o = exactObject(p, ["operatorId", "mayCreateProducts"]);
+      return operators().setMayCreateProducts(
+        service.requireOperatorSession(),
+        str(o.operatorId, "operatorId", 100),
+        bool(o.mayCreateProducts, "mayCreateProducts"),
+      );
+    }),
     logout: wrap("logout", (p) => {
       noPayload(p);
       service.logout();
@@ -419,7 +772,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         }
       }
       return { sale: toSaleDto(result.sale, invoiceNumberFor(result.sale)), duplicate: result.duplicate };
-    }, (p) => saleFailureTruth(service, p)),
+    }, (p) => saleFailureTruth(service, p, operatorLanguage())),
     voidSale: wrap("voidSale", (p) => {
       const o = exactObject(p, ["saleId", "reason"]);
       return toVoidDto(service.voidSale(str(o.saleId, "saleId", 64), str(o.reason, "reason", 400)));
@@ -459,6 +812,31 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       log.info("catalog-export", { products: productCount });
       return { status: "saved", fileName: saved.fileName, productCount };
     }),
+    /**
+     * Export Online Catalog — owner only, and the authorization is NOT merely this channel's.
+     *
+     * `onlineCatalogSnapshot()` calls `requireOwner()` itself, so a cashier is refused by the
+     * service even on a terminal where `channelPolicy` were somehow bypassed — the same
+     * belt-and-braces every other owner operation here uses, and the reason slice H's LAN listener
+     * can call the service directly without inheriting a hole.
+     */
+    exportOnlineCatalog: wrap("exportOnlineCatalog", (p) => {
+      noPayload(p);
+      const run = options.exportOnlineCatalog;
+      if (!run) throw new DomainError("NOT_AVAILABLE", "Exporting the online catalogue is not available here");
+      const snapshot = service.onlineCatalogSnapshot();
+      const result = run(snapshot);
+      // The owner cancelled the folder picker. Nothing was written, and that is not an error.
+      if (result === null) return null;
+      log.info("online-catalog-export", {
+        folder: result.folderName,
+        products: result.products,
+        images: result.images,
+        incomplete: result.incomplete,
+      });
+      return result;
+    }),
+
     exportBackup: wrap("exportBackup", (p) => {
       noPayload(p);
       if (!service.currentCashier()) throw new DomainError("NOT_LOGGED_IN", "A cashier must be logged in");
@@ -475,7 +853,12 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     // ── Product administration ──────────────────────────────────────────────────────────────────
     listProducts: wrap("listProducts", (p) => {
       noPayload(p);
-      return service.listProducts().map(toAdminProductDto);
+      // 🔴 TWO SMALL READS, NEVER A JOIN THAT CARRIES BLOBS. `primaryPhotoIndex` is one query over
+      // an index returning metadata — an id, a MIME and a content hash per photographed product.
+      // Reading the image row itself alongside each product would load the shop's entire photo
+      // library to render a list that shows each one at forty pixels.
+      const photos = service.primaryPhotoIndex();
+      return service.listProducts().map((row) => toAdminProductDto(row, photos.get(row.id) ?? null));
     }),
     createProduct: wrap("createProduct", (p) => {
       const o = exactObject(p, ["draft"]);
@@ -498,6 +881,280 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       );
       log.info("product-active-changed", { id: row.id, isActive: row.isActive });
       return row;
+    }),
+
+    // ── Product Master: categories, brands and photos (migration 9) ─────────────────────────────
+    listCategories: wrap("listCategories", (p) => {
+      noPayload(p);
+      return service.listCategories().map(toCategoryDto);
+    }),
+    listBrands: wrap("listBrands", (p) => {
+      noPayload(p);
+      return service.listBrands();
+    }),
+    // ── Customer directory (S1B) ────────────────────────────────────────────────────────────────
+    //
+    // 🔴 EVERY ONE OF THESE PASSES "customer" AS A LITERAL. The kind never comes from the payload,
+    // so the supplier half of the service is unreachable from the renderer — structurally, not by
+    // a validation that could be forgotten. The service checks authorization again regardless.
+    //
+    // 🔴 AND NOTHING HERE LOGS A NAME, A PHONE OR AN ADDRESS. A customer's contact details are the
+    // merchant's private data and a log file is the easiest place to leak them; the only thing any
+    // of these would log is nothing at all.
+    searchCustomers: wrap("searchCustomers", (p) => {
+      const o = exactObject(p, ["query", "includeArchived"]);
+      if (typeof o.includeArchived !== "boolean") invalid("'includeArchived' must be true or false");
+      if (typeof o.query !== "string" || o.query.length > 120) invalid("'query' must be text");
+      return customers().search("customer", o.query, o.includeArchived).map(toCustomerDto);
+    }),
+
+    getCustomer: wrap("getCustomer", (p) => {
+      const o = exactObject(p, ["customerId"]);
+      return toCustomerDto(customers().get("customer", str(o.customerId, "customerId", 100)));
+    }),
+
+    createCustomer: wrap("createCustomer", (p) => {
+      const o = exactObject(p, ["displayName", "phone", "address", "note"]);
+      const created = customers().create({
+        kind: "customer",
+        displayName: str(o.displayName, "displayName", MAX_PARTY_NAME),
+        phone: optionalStr(o.phone, "phone", MAX_PARTY_PHONE),
+        address: optionalStr(o.address, "address", MAX_PARTY_ADDRESS),
+        note: optionalStr(o.note, "note", MAX_PARTY_NOTE),
+      });
+      return { customer: toCustomerDto(created.party), sameName: created.sameName.map(toCustomerDto) };
+    }),
+
+    updateCustomerContact: wrap("updateCustomerContact", (p) => {
+      const o = exactObject(p, ["customerId", "patch"]);
+      // 🔴 A PATCH, NOT A WHOLE RECORD. Only the keys the operator actually changed are sent, so a
+      // field edited on another screen while this form was open is not reverted to what this form
+      // happened to be showing — the same rule the invoice header patch already follows.
+      const patch = patchObject(o.patch, ["displayName", "phone", "address", "note"]);
+      const draft: Record<string, string | null> = {};
+      if (patch.displayName !== undefined) draft.displayName = str(patch.displayName, "displayName", MAX_PARTY_NAME);
+      if (patch.phone !== undefined) draft.phone = optionalStr(patch.phone, "phone", MAX_PARTY_PHONE);
+      if (patch.address !== undefined) draft.address = optionalStr(patch.address, "address", MAX_PARTY_ADDRESS);
+      if (patch.note !== undefined) draft.note = optionalStr(patch.note, "note", MAX_PARTY_NOTE);
+      return toCustomerDto(customers().updateContact("customer", str(o.customerId, "customerId", 100), draft));
+    }),
+
+    // 🔴 READ-ONLY, OWNER-ONLY. Classified "owner" in channelPolicy AND refused again by
+    // `LedgerService.requireOwner`. A supplier id comes back as PARTY_NOT_FOUND rather than as a
+    // different error, so this reply cannot confirm that a supplier exists.
+    getCustomerStatement: wrap("getCustomerStatement", (p) => {
+      const o = exactObject(p, ["customerId"]);
+      const id = str(o.customerId, "customerId", 100);
+      const statement = ledger().statementFor(id);
+      return toStatementDto(customers().get("customer", id), statement);
+    }),
+
+    /**
+     * An OWNER records a payment against ONE existing posted debt. S3C.
+     *
+     * 🔴 THIS CHANNEL CANNOT CREATE A DEBT. It calls `settle` and nothing else; there is no
+     * obligation-posting channel on this contract at all. The amount only ever goes down.
+     *
+     * 🔴 THE CURRENCY IS NOT A PARAMETER. `LedgerService.settle` reads it off the obligation, so a
+     * wrong-currency payment is unrepresentable rather than merely refused.
+     *
+     * 🔴 THE REFRESHED STATEMENT IS READ BACK AFTER THE COMMIT and returned with the result, so
+     * the screen replaces what it holds instead of subtracting anything itself.
+     */
+    recordCustomerPayment: wrap(
+      "recordCustomerPayment",
+      (p) => {
+        const o = exactObject(p, ["customerId", "obligationId", "idempotencyKey", "amountMinor", "method"]);
+        const customerId = str(o.customerId, "customerId", 100);
+        const obligationId = str(o.obligationId, "obligationId", 100);
+        const idempotencyKey = str(o.idempotencyKey, "idempotencyKey", 100);
+        // 🔴 S3C RECORDS CASH AND NOTHING ELSE. The ledger column accepts more, but a method this
+        // screen cannot truthfully take must not be reachable through it — Whish and Credit are a
+        // separate, still-unauthorized decision.
+        if (o.method !== "cash") invalid("'method' must be 'cash'");
+        const amountMinor = parseMinor(o.amountMinor);
+
+        // 🔴 THE CUSTOMER IS RESOLVED **BEFORE** THE SETTLE, AND THAT ORDER IS THE WHOLE POINT.
+        // The first draft settled first and read the customer afterwards, to build the response.
+        // `settle` only checks that the party id matches the obligation's — which a SUPPLIER's own
+        // payable satisfies perfectly — so a supplier debt was settled and COMMITTED, and only then
+        // did the customer lookup throw. The caller saw an error; the ledger had already moved. A
+        // test for exactly that found it. Resolving the customer first makes the whole thing refuse
+        // before any write.
+        const party = customers().get("customer", customerId);
+
+        const result = ledger().settle({
+          obligationId,
+          partyId: customerId,
+          idempotencyKey,
+          amountMinor,
+          method: "cash",
+        });
+
+        const statement = ledger().statementFor(customerId);
+        const dto = toStatementDto(party, statement);
+        const settlement = {
+          id: result.record.id,
+          amount: { minor: result.record.amountMinor.toString(), currency: result.record.currency },
+          method: result.record.method,
+          settledAt: result.record.settledAt,
+        } as const;
+        log.info("customer-payment-recorded", { id: result.record.id, duplicate: result.duplicate });
+        return { settlement, duplicate: result.duplicate, statement: dto };
+      },
+      (p) => paymentFailureTruth(ledger(), p, operatorLanguage()),
+    ),
+
+    setCustomerActive: wrap("setCustomerActive", (p) => {
+      const o = exactObject(p, ["customerId", "isActive"]);
+      if (typeof o.isActive !== "boolean") invalid("'isActive' must be true or false");
+      return toCustomerDto(customers().setActive("customer", str(o.customerId, "customerId", 100), o.isActive));
+    }),
+
+    createCategory: wrap("createCategory", (p) => {
+      const o = exactObject(p, ["nameAr", "nameEn"]);
+      const row = toCategoryDto(
+        service.createCategory(str(o.nameAr, "nameAr", MAX_CATEGORY_NAME), optionalStr(o.nameEn, "nameEn", MAX_CATEGORY_NAME)),
+      );
+      log.info("category-created", { id: row.id });
+      return row;
+    }),
+    renameCategory: wrap("renameCategory", (p) => {
+      const o = exactObject(p, ["categoryId", "nameAr", "nameEn"]);
+      const row = toCategoryDto(
+        service.renameCategory(
+          str(o.categoryId, "categoryId", MAX_PRODUCT_ID_LENGTH),
+          str(o.nameAr, "nameAr", MAX_CATEGORY_NAME),
+          optionalStr(o.nameEn, "nameEn", MAX_CATEGORY_NAME),
+        ),
+      );
+      log.info("category-renamed", { id: row.id });
+      return row;
+    }),
+    setCategoryActive: wrap("setCategoryActive", (p) => {
+      const o = exactObject(p, ["categoryId", "isActive"]);
+      const row = toCategoryDto(
+        service.setCategoryActive(str(o.categoryId, "categoryId", MAX_PRODUCT_ID_LENGTH), bool(o.isActive, "isActive")),
+      );
+      log.info("category-active-changed", { id: row.id, isActive: row.isActive });
+      return row;
+    }),
+    deleteCategory: wrap("deleteCategory", (p) => {
+      const o = exactObject(p, ["categoryId"]);
+      const result = service.deleteCategoryIfUnused(str(o.categoryId, "categoryId", MAX_PRODUCT_ID_LENGTH));
+      log.info("category-deleted", { id: result.deletedId });
+      return result;
+    }),
+
+    getProductImageMeta: wrap("getProductImageMeta", (p) => {
+      const o = exactObject(p, ["productId"]);
+      const meta = service.productImageMeta(str(o.productId, "productId", MAX_PRODUCT_ID_LENGTH));
+      return meta === null ? null : toProductImageMetaDto(meta);
+    }),
+    getProductImageBytes: wrap("getProductImageBytes", (p) => {
+      const o = exactObject(p, ["imageId"]);
+      const { meta, bytes } = service.productImageBytes(str(o.imageId, "imageId", MAX_PRODUCT_ID_LENGTH));
+      // A fresh Uint8Array over a COPY: handing the renderer a view onto the Buffer better-sqlite3
+      // returned would share memory with whatever that row is backed by.
+      return { meta: toProductImageMetaDto(meta), bytes: new Uint8Array(bytes) };
+    }),
+    /**
+     * 🔴 THIS CHANNEL ACCEPTS NO IMAGE DATA — only which product the owner means. Main runs the
+     * picker, reads the file, decodes and normalizes it, and hands the service the result; the
+     * renderer never supplies a path or a buffer. That is the same shape `pickInvoiceLogo` has
+     * used since migration 6, for the same reason: a renderer-supplied path is a filesystem read
+     * primitive, and renderer-supplied bytes are an unvalidated blob straight into the ledger.
+     *
+     * 🔴 AND THE PRODUCER DOES NOT EXIST YET. `pickProductPhoto` is slice F's `nativeImage`
+     * pipeline. Until it is wired this answers NOT_AVAILABLE — the same fail-closed shape every
+     * other optional main-process capability here uses, rather than a channel that half-works.
+     */
+    setProductImage: wrap("setProductImage", (p) => {
+      const o = exactObject(p, ["productId"]);
+      const productId = str(o.productId, "productId", MAX_PRODUCT_ID_LENGTH);
+      const pick = options.pickProductPhoto;
+      if (!pick) {
+        throw new DomainError("NOT_AVAILABLE", "Adding a product photo is not available on this terminal yet");
+      }
+      const picked = pick(productId);
+      // The operator cancelled the dialog. Not an error, and nothing was written.
+      if (picked === null) return null;
+      const meta = toProductImageMetaDto(
+        service.setProductPrimaryImage({
+          productId,
+          bytes: picked.bytes,
+          mime: picked.mime,
+          widthPx: picked.widthPx,
+          heightPx: picked.heightPx,
+          origin: picked.origin,
+        }),
+      );
+      log.info("product-photo-set", { productId, byteSize: meta.byteSize, origin: meta.origin });
+      return meta;
+    }),
+    removeProductImage: wrap("removeProductImage", (p) => {
+      const o = exactObject(p, ["productId"]);
+      const productId = str(o.productId, "productId", MAX_PRODUCT_ID_LENGTH);
+      const result = service.removeProductPrimaryImage(productId);
+      log.info("product-photo-removed", { productId, removed: result.removed });
+      return result;
+    }),
+
+    // ── Phone entry over the LAN (slice H1) ─────────────────────────────────────────────────────
+    //
+    // 🔴 THE AUTHORIZATION HAPPENS TWICE AND THAT IS THE DESIGN. `wrap` refuses a cashier from the
+    // channel table before the payload is examined; `service.authorizePhoneSession` refuses one
+    // again from inside the service, because the listener this opens calls the service directly.
+    //
+    // 🔴 MAIN OWNS THE SURFACE. The renderer cannot name a port, an address, a token or an expiry.
+    // It asks for an action and is handed a picture to show.
+    startPhoneSession: wrapAsync("startPhoneSession", async (p) => {
+      const o = objectWithOptional(p, ["action"], ["productId"]);
+      const action = phoneAction(o.action);
+      const productId =
+        "productId" in o && o.productId !== undefined && o.productId !== null
+          ? str(o.productId, "productId", MAX_PRODUCT_ID_LENGTH)
+          : null;
+
+      const open = options.phoneSessions;
+      if (!open) {
+        throw new DomainError("NOT_AVAILABLE", "Entering a product from a phone is not available on this terminal");
+      }
+      // The service decides WHO and WHAT. It opens nothing.
+      const spec = service.authorizePhoneSession(action, productId);
+      const dto = await open.start(spec);
+      log.info("phone-session-started", {
+        action: spec.action,
+        editing: spec.productId !== null,
+        host: dto.host,
+        port: dto.port,
+        ambiguous: dto.addressAmbiguous,
+      });
+      return dto;
+    }),
+    /**
+     * 🔴 SYNCHRONOUS AND READ-ONLY. It touches no socket and performs no save — it reports state
+     * the bridge already holds, so the dialog can poll it every second or two without queuing work
+     * behind a server operation.
+     */
+    phoneSessionState: wrap("phoneSessionState", (p) => {
+      noPayload(p);
+      const open = options.phoneSessions;
+      if (!open) {
+        return { state: "closed", savedProductId: null, action: null, expiresAt: null, claimed: false };
+      }
+      return open.status();
+    }),
+    cancelPhoneSession: wrapAsync("cancelPhoneSession", async (p) => {
+      noPayload(p);
+      // 🔴 Cancellation is authorized but NOT gated on a session existing: answering "there was
+      // nothing open" honestly is better than an error the owner cannot act on, and a desktop that
+      // cancels twice (a click plus a navigation) must not show a failure the second time.
+      const open = options.phoneSessions;
+      if (!open) return { closed: false };
+      const closed = await open.cancel();
+      if (closed) log.info("phone-session-cancelled", {});
+      return { closed };
     }),
 
     // ── Operator settings ───────────────────────────────────────────────────────────────────────
@@ -615,7 +1272,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       return toInvoiceViewDto(invoices().addLine(str(o.invoiceId, "invoiceId", 100), invoiceLine(o.line)));
     }),
     addInvoiceLines: wrap("addInvoiceLines", (p) => {
-      const o = exactObject(p, ["invoiceId", "lines"]);
+      const o = exactObject(p, ["invoiceId", "lines", "idempotencyKey"]);
       if (!Array.isArray(o.lines) || o.lines.length === 0) {
         invalid("'lines' must be a non-empty array");
       }
@@ -623,6 +1280,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         invoices().addLines(
           str(o.invoiceId, "invoiceId", 100),
           o.lines.map((l) => invoiceLine(l)),
+          str(o.idempotencyKey, "idempotencyKey", 100),
         ),
       );
     }),
@@ -652,7 +1310,17 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         lines: view.lines.length,
       });
       return toInvoiceViewDto(view);
-    }),
+    },
+    // 🔴 `options.invoices` DIRECTLY, NOT `invoices()`. This callback runs INSIDE `wrap`'s catch
+    // block, and `invoices()` throws when the terminal has no invoice service. A throw here would
+    // escape the catch and leave the renderer with a rejected promise and no message at all —
+    // strictly worse than the generic sentence it was meant to improve on. Reaching this callback
+    // normally implies the service exists (the handler body used it), but `authorize()` can also
+    // fail with a non-DomainError before the body runs, so the guard is real.
+    (p) =>
+      options.invoices
+        ? invoiceFinalizeTruth(options.invoices, p, operatorLanguage())
+        : genericInternal(operatorLanguage())),
 
     listInvoices: wrap("listInvoices", (p) => {
       const o = search(p);
@@ -759,14 +1427,17 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       const id = invoiceId(p);
       if (!options.printInvoice) return { status: "unavailable" as const };
       requireFinalized(id);
-      return { status: await options.printInvoice(id) };
+      const printed = await options.printInvoice(id);
+      return { status: printed.status, logoMissing: printed.logoMissing };
     }),
     saveInvoicePdf: wrapAsync("saveInvoicePdf", async (p) => {
       const id = invoiceId(p);
       if (!options.saveInvoicePdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
       requireFinalized(id);
       const saved = await options.saveInvoicePdf(id);
-      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+      return saved
+        ? { status: "saved" as const, fileName: saved.fileName, logoMissing: saved.logoMissing }
+        : { status: "cancelled" as const };
     }),
   };
 
@@ -783,6 +1454,72 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     if (sale.sourceType !== "invoice" || !sale.invoiceId || !options.invoices) return null;
     const number = options.invoices.invoiceNumberOf(sale.invoiceId);
     return number ?? null;
+  }
+
+  /**
+   * A party row as the renderer sees it.
+   *
+   * 🔴 IT DROPS `kind` AND `created_by`, AND ADDS NOTHING. `kind` is always "customer" on these
+   * channels, so sending it would invite a renderer to think it could ask for another; `created_by`
+   * is an operator id with no use on screen. And no balance is synthesized: see the DTO's own note.
+   */
+  function toCustomerDto(row: PartyRow): CustomerDto {
+    return {
+      id: row.id,
+      displayName: row.display_name,
+      phone: row.phone,
+      address: row.address,
+      note: row.note,
+      isActive: row.is_active === 1,
+      createdAt: row.created_at,
+    };
+  }
+
+  function ledger(): LedgerService {
+    if (!options.ledger) {
+      throw new DomainError("NOT_AVAILABLE", "Customer accounts are not available on this terminal");
+    }
+    return options.ledger;
+  }
+
+  /**
+   * The statement DTO.
+   *
+   * 🔴 EVERY FIGURE IS ALREADY DECIDED BY THE LEDGER. This maps bigints to strings and nothing
+   * else — no addition, no rounding, no "0" substituted for an absent value. A mapper that did
+   * arithmetic would be a second place where what a customer owes is computed.
+   */
+  function toStatementDto(customer: PartyRow, s: ReturnType<LedgerService["statementFor"]>): CustomerStatementDto {
+    return {
+      customer: toCustomerDto(customer),
+      obligations: s.obligations.map((row) => ({
+        id: row.obligation.id,
+        amount: { minor: row.obligation.amountMinor.toString(), currency: row.obligation.currency },
+        outstanding: { minor: row.outstandingMinor.toString(), currency: row.obligation.currency },
+        fullyPaid: row.outstandingMinor === 0n,
+        sourceKind: row.obligation.sourceKind,
+        sourceRef: row.obligation.sourceRef,
+        saleId: row.obligation.saleId,
+        postedAt: row.obligation.postedAt,
+        settlements: row.settlements.map((st) => ({
+          id: st.id,
+          amount: { minor: st.amountMinor.toString(), currency: st.currency },
+          method: st.method,
+          settledAt: st.settledAt,
+        })),
+      })),
+      // One entry per currency, in a stable order so the screen does not reshuffle between reads.
+      balances: [...s.balances.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([currency, minor]) => ({ minor: minor.toString(), currency })),
+    };
+  }
+
+  function customers(): PartyService {
+    if (!options.parties) {
+      throw new DomainError("NOT_AVAILABLE", "The customer directory is not available on this terminal");
+    }
+    return options.parties;
   }
 
   function invoices(): InvoiceService {

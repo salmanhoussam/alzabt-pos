@@ -236,7 +236,11 @@ await page.screenshot({ path: SHOTS + "P5-products-english-ltr.png" });
 assert((await rows(page).first().innerText()).includes("مفتاح أحمر"), "the Arabic product name is unchanged in the English UI");
 
 // ── 6 · Deactivate, and the restart ─────────────────────────────────────────────────────────────
-await page.locator('[data-testid="product-row"]').first().getByRole("button").nth(1).click();
+// 🔴 BY NAME, NOT BY POSITION. This was `getByRole("button").nth(1)` and it broke the moment
+// slice H2 added "Continue on Phone" to the row: index 1 became the phone button, this script
+// clicked it, and the wait for OK/حسناً below timed out after 30 seconds against a pairing dialog.
+// The button now carries `product-deactivate`, which no future control can displace.
+await page.locator('[data-testid="product-row"]').first().locator('[data-testid="product-deactivate"]').click();
 await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 await page.waitForFunction(() => document.querySelectorAll(".row-inactive").length === 1);
 await page.screenshot({ path: SHOTS + "P6-deactivated.png" });
@@ -275,7 +279,14 @@ await app.close();
     // Was 5 before migration 6 (manual invoices), then 7 after migration 7, now 8 after migration 8
     // (operator accounts). The version this build migrates a ledger TO is a transition, not an
     // invariant, so every old value is named here the way upgrade.mjs names its own.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 8, "the installed app's ledger is at schema v8");
+    // 🔴 TRANSITION — this said 8, and it was already stale at migration 9: the gate failed at an
+    // earlier step so nobody ever saw it. 9 = product_master, 10 = product_master_audit.
+    // 🔴 TRANSITION 11 -> 12 with migration 12 (party identity). The old value was 11.
+    // 🔴 TRANSITION 13 -> 14 with migration 14 (credit_sale_identity_and_unpaid_state). The old
+    // value was 13 (obligations_and_settlements). A literal on purpose: deriving it from the build
+    // under test would make the check circular, and this asserts what the INSTALLED app actually wrote.
+    // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 15, "the installed app's ledger is at schema v15");
 
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
     const types = rows.map((r) => r.event_type);

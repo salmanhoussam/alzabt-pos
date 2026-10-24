@@ -35,12 +35,18 @@ export interface OperatorRow {
   readonly pin_hash_hex: string;
   readonly must_reset_pin: number;
   readonly is_active: number;
+  /**
+   * 🔴 A CAPABILITY, NOT A RANK. 1 means this operator may CREATE new products — and nothing else.
+   * It is never consulted for an owner, whose authority comes from `role`. Migration 11 defaults it
+   * to 0, so an upgrade grants nobody anything.
+   */
+  readonly may_create_products: number;
   readonly created_at: string;
   readonly updated_at: string;
 }
 
 const COLUMNS = `id, name, role, pin_salt_hex, pin_hash_hex, must_reset_pin, is_active,
-                 created_at, updated_at`;
+                 may_create_products, created_at, updated_at`;
 
 /** A row as the rest of the app sees it — bigints normalised, secrets still present. */
 function normalise(row: Record<string, unknown> | undefined): OperatorRow | null {
@@ -53,6 +59,7 @@ function normalise(row: Record<string, unknown> | undefined): OperatorRow | null
     pin_hash_hex: row.pin_hash_hex as string,
     must_reset_pin: Number(row.must_reset_pin),
     is_active: Number(row.is_active),
+    may_create_products: Number(row.may_create_products),
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
   };
@@ -205,8 +212,13 @@ export class OperatorRepository {
   }): OperatorRow {
     this.db
       .prepare(
-        `INSERT INTO operators (${COLUMNS})
-         VALUES (@id, @name, @role, @pinSaltHex, @pinHashHex, @mustResetPin, 1, @now, @now)`,
+        // 🔴 SPELLED OUT, NOT `${COLUMNS}`. The read list and the insert list are different
+        // things: reusing one for the other meant that adding `may_create_products` to what we
+        // SELECT silently left this INSERT naming ten columns and supplying nine. A new operator
+        // starts with the create permission OFF — the grant is an act, never a default.
+        `INSERT INTO operators (id, name, role, pin_salt_hex, pin_hash_hex, must_reset_pin,
+                                is_active, may_create_products, created_at, updated_at)
+         VALUES (@id, @name, @role, @pinSaltHex, @pinHashHex, @mustResetPin, 1, 0, @now, @now)`,
       )
       .run({ ...row, mustResetPin: row.mustResetPin ? 1 : 0 });
     return this.findById(row.id)!;
@@ -259,6 +271,20 @@ export class OperatorRepository {
 
   setRole(id: string, role: OperatorRole, now: string): OperatorRow {
     this.db.prepare("UPDATE operators SET role = ?, updated_at = ? WHERE id = ?").run(role, now, id);
+    return this.findById(id)!;
+  }
+
+  /**
+   * Grant or revoke the narrow "may create products" capability.
+   *
+   * Durable by construction: it lives on the row, so it survives a rename, a restart and a
+   * backup/restore, and it is read fresh on every authorization decision rather than captured into
+   * a session.
+   */
+  setMayCreateProducts(id: string, allowed: boolean, now: string): OperatorRow {
+    this.db
+      .prepare("UPDATE operators SET may_create_products = ?, updated_at = ? WHERE id = ?")
+      .run(allowed ? 1 : 0, now, id);
     return this.findById(id)!;
   }
 }

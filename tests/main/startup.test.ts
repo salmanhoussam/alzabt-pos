@@ -97,7 +97,11 @@ describe("startup failure classification and message", () => {
     const raw = new Database(t.dbPath); // a rollback-journal file, as an older tool might leave
     raw.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT, checksum TEXT, applied_at TEXT)");
     const ins = raw.prepare("INSERT INTO schema_migrations VALUES (?, 'f', 'x', 'y')");
-    for (let v = 1; v <= 9; v++) ins.run(v);
+    // 🔴 DERIVED, not a literal. This said `v <= 9` while the app had 8 migrations, so the
+    // seeded ledger was "newer" by exactly one — and then migration 9 landed and it was no
+    // longer newer at all, which made the test fail for the right reason at the wrong time.
+    // One past whatever this build knows is the fact being set up; the number was never it.
+    for (let v = 1; v <= MIGRATIONS.length + 1; v++) ins.run(v);
     raw.close();
     const before = readFileSync(t.dbPath);
     const err = startupError(() => openDatabase(t.dbPath, MIGRATIONS, { fileMustExist: true }));

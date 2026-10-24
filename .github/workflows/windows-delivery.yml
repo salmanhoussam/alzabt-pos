@@ -154,6 +154,45 @@ jobs:
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
           node e2e/product-management.mjs
 
+      # Slice S1B. The five claims the customer directory is judged on, and the one that needed a
+      # real app: that building a cart, opening the customer panel and creating a customer leaves
+      # the cart, its total and the product search exactly as they were. No DOM-less unit test can
+      # assert that React kept its state across a panel opening.
+      - name: Customer directory against the INSTALLED app (owner, cashier, cart survival, restart)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/customers.mjs
+
+      # 🔴 THE CODEC PREMISES FIRST. Every number in src/main/photoNormalize.ts rests on what
+      # nativeImage does, and that was measured on Linux. If Chromium on Windows decodes a WEBP, or
+      # applies EXIF orientation itself, or stops answering EMPTY for rubbish, the policy is wrong
+      # here and no unit test can see it — they run against a model codec by necessity. So this runs
+      # before the two scripts that depend on it, and its failure stops the gate early.
+      - name: Photo codec premises re-measured in the INSTALLED app
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/photo-codec.mjs
+
+      - name: Desktop product photo against the INSTALLED app (real files through the real picker)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/product-photo.mjs
+
+      - name: Product Master against the INSTALLED app (thumbnails, sections, categories, barcode, screenshots)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/product-master.mjs
+
+      - name: Online Catalogue export against the INSTALLED app (three origins, package on disk)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/online-catalog.mjs
+
+      - name: Phone entry against the INSTALLED app (QR decoded from the screen, LAN save, screenshots)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/phone-entry.mjs
+
       - name: Manual invoice against the INSTALLED app (draft -> finalize -> review -> PDF -> restart)
         run: |
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE

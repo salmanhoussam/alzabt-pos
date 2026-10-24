@@ -101,13 +101,51 @@ assert(surface.require === "undefined" && surface.process === "undefined" && sur
 // It went 19 -> 44 with manual invoices (migration 6), 45 with per-invoice tax (setInvoiceTax),
 // and 46 on 2026-10-10 with addInvoiceLines, then 53 with operator accounts (migration 8).
 //
+// 🔴 74 -> 75 with slice S3C's owner cash collection. The one: recordCustomerPayment — this
+// bridge's FIRST money write. It SETTLES an existing obligation and cannot create one, so the only
+// direction a debt moves from the renderer is down. The old value was 74 and the list below is
+// extended rather than rewritten.
+// 🔴 73 -> 74 with slice S3B's read-only customer statement. The one: getCustomerStatement,
+// owner-only and a READ — it posts nothing. The old value was 73 and the list below is extended
+// rather than rewritten, so every earlier method is still named.
+// 🔴 68 -> 73 with slice S1B's customer directory. The five: searchCustomers, getCustomer,
+// createCustomer, updateCustomerContact, setCustomerActive. The old value was 68 and the list below
+// is extended rather than rewritten, so every earlier method is still named.
+// 🔴 67 -> 68 with migration 11's operator capability. The one:
+// setOperatorMayCreateProducts — the owner granting ONE cashier the narrow right to add
+// products. It is owner-only itself, or the permission could grant itself onwards.
+// 🔴 66 -> 67 with the phone FORM (slice H2). The one: phoneSessionState, which the desktop QR
+// dialog polls. It is deliberately NOT named "...Status" — invoiceIpc.test.ts forbids that
+// substring so the renderer can never set a reconciliation status.
+// 🔴 64 -> 66 with the phone LAN bridge (slice H1). The two: startPhoneSession,
+// cancelPhoneSession. Neither returns the session token — main owns it, and the only place it
+// appears is inside the encoded QR symbol.
+// 🔴 63 -> 64 with the Online Catalogue export (slice G3). The one: exportOnlineCatalog.
+// 🔴 53 -> 63 with Product Master (migration 9). The ten: listCategories, listBrands,
+// createCategory, renameCategory, setCategoryActive, deleteCategory, getProductImageMeta,
+// getProductImageBytes, setProductImage, removeProductImage.
+//
+// 🔴 AND IT DID ITS JOB AGAIN. This assertion is what failed the first Windows gate of this
+// branch: the ten channels were in the contract, the handlers, the preload, the policy table and
+// three unit-level surface tests, and not here. Note what is still ABSENT from the list — no
+// channel takes image bytes or a filesystem path; setProductImage names a product and main owns
+// the file.
+//
 // 🔴 This assertion did its job. It FAILED the first Windows gate for migration 6, because the
 // channels had been added to the contract, the handlers, the preload and the unit-level surface
 // test — and not here. That is exactly why it is written by name: the one place that is not
 // derived from the contract is the one place a human has to notice.
 assert(
-  JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","addInvoiceLines","completeBootstrapSetup","createInvoiceDraft","createOperator","createProduct","createSale","currentCashier","discardInvoiceDraft","exportBackup","exportCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getInvoice","getSaleHistory","getSettings","getTodaySales","importCatalog","listCashiers","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","pickInvoiceLogo","printInvoice","removeInvoiceLine","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchInvoices","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorRole","setProductActive","setTerminalLanguage","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
-  `window.pos exposes exactly the 53 business methods, and nothing else (got ${surface.posKeys.length})`,
+  JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","addInvoiceLines","cancelPhoneSession","completeBootstrapSetup","createCategory","createCustomer","createInvoiceDraft","createOperator","createProduct","createSale","currentCashier","deleteCategory","discardInvoiceDraft","exportBackup","exportCatalog","exportOnlineCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getCustomer","getCustomerStatement","getInvoice","getProductImageBytes","getProductImageMeta","getSaleHistory","getSettings","getTodaySales","importCatalog","listBrands","listCashiers","listCategories","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","phoneSessionState","pickInvoiceLogo","printInvoice","recordCustomerPayment","removeInvoiceLine","removeProductImage","renameCategory","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchCustomers","searchInvoices","setCategoryActive","setCustomerActive","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorMayCreateProducts","setOperatorRole","setProductActive","setProductImage","setTerminalLanguage","startPhoneSession","updateCustomerContact","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
+  // 🔴 THE MESSAGE NAMES THE DIFFERENCE, because reporting only the length is useless exactly when
+  // the length is right. This assertion failed the G3 gate with "got 64" against an expected 64 —
+  // the count matched and one NAME was missing, and the message could not say which.
+  (() => {
+    const expected = ["addInvoiceLine","addInvoiceLines","cancelPhoneSession","completeBootstrapSetup","createCategory","createCustomer","createInvoiceDraft","createOperator","createProduct","createSale","currentCashier","deleteCategory","discardInvoiceDraft","exportBackup","exportCatalog","exportOnlineCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getCustomer","getCustomerStatement","getInvoice","getProductImageBytes","getProductImageMeta","getSaleHistory","getSettings","getTodaySales","importCatalog","listBrands","listCashiers","listCategories","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","phoneSessionState","pickInvoiceLogo","printInvoice","recordCustomerPayment","removeInvoiceLine","removeProductImage","renameCategory","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchCustomers","searchInvoices","setCategoryActive","setCustomerActive","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorMayCreateProducts","setOperatorRole","setProductActive","setProductImage","setTerminalLanguage","startPhoneSession","updateCustomerContact","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"];
+    const missing = expected.filter((k) => !surface.posKeys.includes(k));
+    const extra = surface.posKeys.filter((k) => !expected.includes(k));
+    return `window.pos exposes exactly the 75 business methods, and nothing else (got ${surface.posKeys.length}; missing: ${JSON.stringify(missing)}; unexpected: ${JSON.stringify(extra)})`;
+  })(),
 );
 await page.screenshot({ path: SHOTS + "01-login.png" });
 

@@ -18,6 +18,9 @@ import type { Harness } from "../helpers/harness";
 
 let t: TempDir;
 let h: Harness;
+let keySeq = 0;
+const nextKey = () => `batch-test-${++keySeq}-key`;
+
 
 beforeEach(() => {
   t = tempDir();
@@ -47,7 +50,7 @@ describe("adding several rows at once", () => {
       row("صنف أوّل", "2", "10.00"),
       row("صنف ثانٍ", "1", "5.50"),
       row("صنف ثالث", "3", "1.00"),
-    ]);
+    ], nextKey());
 
     expect(view.lines.map((l) => l.description)).toEqual(["صنف أوّل", "صنف ثانٍ", "صنف ثالث"]);
     expect(view.lines.map((l) => l.line_no)).toEqual([1n, 2n, 3n]);
@@ -60,7 +63,7 @@ describe("adding several rows at once", () => {
       row("صنف أوّل", "2", "10.00"),
       row("صنف ثانٍ", "1", "5.50"),
       row("صنف ثالث", "3", "1.00"),
-    ]);
+    ], nextKey());
     expect(view.invoice.subtotal_minor).toBe(2850n);
     expect(view.invoice.total_minor).toBe(2850n);
   });
@@ -68,7 +71,7 @@ describe("adding several rows at once", () => {
   it("appends after rows that are already on the invoice, without disturbing them", () => {
     const { invoice } = h.invoices.createDraft();
     h.invoices.addLine(invoice.id, row("صنف محفوظ", "1", "7.00"));
-    const view = h.invoices.addLines(invoice.id, [row("صنف جديد", "1", "3.00")]);
+    const view = h.invoices.addLines(invoice.id, [row("صنف جديد", "1", "3.00")], nextKey());
 
     expect(view.lines.map((l) => l.description)).toEqual(["صنف محفوظ", "صنف جديد"]);
     expect(view.lines.map((l) => l.line_no)).toEqual([1n, 2n]);
@@ -86,7 +89,7 @@ describe("adding several rows at once", () => {
         row("صنف أوّل", "1", "1.00"),
         row("صنف ثانٍ", "1", "2.00"),
         row("صنف فاسد", "1", "not-a-price"),
-      ]),
+      ], nextKey()),
     ).toThrow(DomainError);
 
     // The invoice is exactly as it was: the one previously saved line, and its total.
@@ -102,7 +105,7 @@ describe("adding several rows at once", () => {
     // One existing line + MAX rows is one too many. The ceiling is checked against the SUM, not
     // against the batch alone — checking the batch alone would let two batches walk past it.
     const many = Array.from({ length: MAX_INVOICE_LINES }, (_, i) => row(`صنف ${i}`, "1", "1.00"));
-    expect(() => h.invoices.addLines(invoice.id, many)).toThrow(DomainError);
+    expect(() => h.invoices.addLines(invoice.id, many, nextKey())).toThrow(DomainError);
     expect(countLines(invoice.id)).toBe(1);
   });
 
@@ -112,7 +115,7 @@ describe("adding several rows at once", () => {
     h.invoices.addLine(invoice.id, row("صنف اختباري", "1", "10.00"));
     h.invoices.finalizeInvoice(invoice.id);
 
-    expect(() => h.invoices.addLines(invoice.id, [row("صنف متأخّر", "1", "1.00")])).toThrow(DomainError);
+    expect(() => h.invoices.addLines(invoice.id, [row("صنف متأخّر", "1", "1.00")], nextKey())).toThrow(DomainError);
     expect(countLines(invoice.id)).toBe(1);
   });
 });

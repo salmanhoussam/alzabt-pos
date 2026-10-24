@@ -18,6 +18,14 @@
  */
 import type { Db } from "./db";
 
+export interface LineBatchRow {
+  readonly id: string;
+  readonly invoice_id: string;
+  readonly idempotency_key: string;
+  readonly request_fingerprint: string;
+  readonly line_count: number | bigint;
+}
+
 export interface InvoiceRow {
   readonly id: string;
   readonly status: string;
@@ -244,6 +252,7 @@ export class InvoiceRepository {
 
   /** Discards a draft and its lines. The triggers make this impossible once final. */
   deleteDraft(id: string): void {
+    this.db.prepare("DELETE FROM invoice_line_batches WHERE invoice_id = ?").run(id);
     this.db.prepare("DELETE FROM invoice_lines WHERE invoice_id = ?").run(id);
     this.db.prepare("DELETE FROM invoices WHERE id = ?").run(id);
   }
@@ -262,6 +271,27 @@ export class InvoiceRepository {
         | InvoiceLineRow
         | undefined) ?? null
     );
+  }
+
+  /** The recorded identity of a line batch, or null when this key was never used. */
+  findLineBatch(key: string): LineBatchRow | null {
+    return (
+      (this.db
+        .prepare(
+          `SELECT id, invoice_id, idempotency_key, request_fingerprint, line_count
+           FROM invoice_line_batches WHERE idempotency_key = ?`,
+        )
+        .get(key) as LineBatchRow | undefined) ?? null
+    );
+  }
+
+  insertLineBatch(row: LineBatchRow, now: Date): void {
+    this.db
+      .prepare(
+        `INSERT INTO invoice_line_batches (id, invoice_id, idempotency_key, request_fingerprint, line_count, created_at)
+         VALUES (@id, @invoice_id, @idempotency_key, @request_fingerprint, @line_count, @now)`,
+      )
+      .run({ ...row, now: now.toISOString() });
   }
 
   countLines(invoiceId: string): number {

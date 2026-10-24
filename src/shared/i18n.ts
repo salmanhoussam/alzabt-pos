@@ -57,6 +57,7 @@ const AR: Dict = {
   "nav.today": "مبيعات اليوم",
   "nav.history": "السجل",
   "nav.products": "الأصناف",
+  "nav.customers": "الزبائن",
   "nav.tools": "أدوات",
   "action.logout": "خروج",
   "action.save": "حفظ",
@@ -66,10 +67,12 @@ const AR: Dict = {
   "action.edit": "تعديل",
   "action.activate": "تفعيل",
   "action.deactivate": "إيقاف",
+  "action.delete": "حذف",
+  "action.close": "إغلاق",
   "lang.toggle": "English",
   "products.title": "الأصناف",
-  "products.search": "ابحث بالاسم أو الرمز",
-  "products.searchHint": "البحث يتجاهل التشكيل والتطويل، ويوحّد أ إ آ مع ا، و ى مع ي، والأرقام العربية مع 0-9.",
+  "products.search": "ابحث بالاسم أو الرمز أو الباركود",
+  "products.searchHint": "البحث بالاسم أو الرمز أو الباركود. يُوحّد تلقائياً اختلافات الكتابة العربية والأرقام العربية.",
   "products.count": "صنفاً",
   "products.countShown": "معروض",
   "products.empty": "لا أصناف بعد. أضف أوّل صنف.",
@@ -83,8 +86,6 @@ const AR: Dict = {
   "products.active": "مفعَّل",
   "products.inactive": "موقوف",
   "products.priceNeedsReview": "السعر للمراجعة",
-  "products.source.manual": "يدوي",
-  "products.source.import": "مستورد",
   "products.fractionsAllowed": "تُباع بكمّيّاتٍ كسريّةٍ حتى ثلاثِ منازلَ عشريّة — مثلاً 2.5 أو 0.333.",
   "form.addTitle": "صنف جديد",
   "form.editTitle": "تعديل صنف",
@@ -97,6 +98,77 @@ const AR: Dict = {
   "form.required": "مطلوب",
   "form.optional": "اختياري",
   "form.state": "الحالة",
+  // ── Product Master (migration 9/10) ──────────────────────────────────────────────────────────
+  "form.secBasic": "المعلومات الأساسيّة",
+  "form.secOnline": "الكاتالوج الإلكتروني",
+  "form.secPhoto": "صورة الصنف",
+  "form.barcode": "الباركود (اختياري)",
+  "form.barcodeHint": "امسح الباركود أو اكتبه. يُحفظ بصيغة واحدة موحّدة.",
+  "form.brand": "الماركة (اختياري)",
+  "form.brandHint": "اكتب الماركة، أو اختر واحدة سبق استعمالها.",
+  "form.category": "التصنيف",
+  "form.categoryNone": "بلا تصنيف",
+  "form.categoryRetired": "متوقّف",
+  "form.categoryManage": "إدارة التصنيفات",
+  "form.descAr": "الوصف بالعربية (اختياري)",
+  "form.descEn": "الوصف بالإنجليزية (اختياري)",
+  "form.onlineVisible": "أظهِر هذا الصنف في الكاتالوج الإلكتروني",
+  "form.onlineHint": "لا يُرفع شيء إلى الإنترنت الآن. هذا يحدّد ما سيُصدَّر لاحقاً فقط.",
+  "form.photoNone": "لا توجد صورة لهذا الصنف",
+  "form.photoAdd": "أضف صورة",
+  "form.photoReplace": "استبدل الصورة",
+  "form.photoRemove": "احذف الصورة",
+  "products.exportOnline": "تصدير الكاتالوج الإلكتروني",
+  "products.exportOnlineHint": "يحفظ مجلّداً فيه ملفّ الكاتالوج وصور الأصناف المعروضة إلكترونيّاً. لا يرفع شيئاً إلى الإنترنت.",
+  "products.exportOnlineDone": "تمّ تصدير حزمة الكاتالوج الإلكتروني.",
+  "products.exportOnlineSummary": "الأصناف: {products} · الصور: {images} · المجلّد: {folder}",
+  "products.exportOnlineIncomplete": "{count} صنفاً صُدِّر ببيانات إلكترونيّة ناقصة.",
+  "products.exportOnlineEmpty": "لا يوجد صنف معروض إلكترونيّاً بعد. فعّل «معروض في الكاتالوج» على الأصناف المطلوبة.",
+  // ── Phone entry over the LAN (slice H2) ──────────────────────────────────────────────────────
+  //
+  // 🔴 THE WORDING SAYS "FROM THE PHONE", NEVER "UPLOAD" OR "SYNC". Nothing leaves the shop: the
+  // till itself serves the page over the local network. A word implying the Internet would be a
+  // lie the merchant plans around, and the same discipline the export button's wording follows.
+  "phone.add": "إضافة صنف من الهاتف",
+  "phone.edit": "أكمل من الهاتف",
+  "phone.editHint": "تابع تعديل هذا الصنف على الهاتف",
+  "phone.title": "امسح الرمز بكاميرا الهاتف",
+  "phone.explain": "افتح كاميرا الهاتف ووجّهها إلى الرمز. يجب أن يكون الهاتف على نفس شبكة المحلّ. لا تحتاج إلى إنترنت.",
+  "phone.address": "العنوان على الشبكة",
+  "phone.expiresIn": "تنتهي صلاحية الرمز بعد {mins}:{secs}",
+  "phone.expired": "انتهت صلاحية الرمز. اطلب رمزاً جديداً.",
+  "phone.claimed": "تم فتح الصفحة على الهاتف. أكمل الإدخال هناك.",
+  "phone.waiting": "في انتظار مسح الرمز…",
+  "phone.doneTitleNew": "تمّت إضافة الصنف",
+  "phone.doneTitleEdit": "تمّ تحديث الصنف",
+  "phone.savedNew": "تم إضافة الصنف من الهاتف.",
+  "phone.savedEdit": "تم تحديث الصنف من الهاتف.",
+  "phone.cancel": "إلغاء",
+  "phone.close": "إغلاق",
+  "phone.failed": "تعذّر فتح الجلسة.",
+  "phone.ambiguous": "هذا الصندوق موصول بأكثر من شبكة. إذا لم يستطع الهاتف الوصول، جرّب عنواناً آخر:",
+  "phone.firewall": "إذا سألك ويندوز عن السماح للتطبيق بالاتصال بالشبكة، اختر «الشبكات الخاصة» ثم السماح.",
+  "form.photoFormats": "اختر صورة JPEG أو PNG.",
+  "form.photoAfterSave": "احفظ الصنف أوّلاً، بعدها فيك تضيف له صورة.",
+  "form.photoFailed": "لم يتم تحميل الصورة.",
+  "form.localOnly": "الصنف يُباع بدون تصنيف ولا ماركة ولا وصف ولا صورة. هذه الحقول للكاتالوج الإلكتروني فقط.",
+  "products.colPhoto": "صورة",
+  "products.colCategory": "التصنيف",
+  "products.colOnline": "إلكتروني",
+  "products.online": "إلكتروني",
+  "products.hasPhoto": "فيها صورة",
+  "products.noPhoto": "بلا صورة",
+  "products.photoBroken": "الصورة غير مقروءة",
+  "cat.title": "التصنيفات",
+  "cat.add": "تصنيف جديد",
+  "cat.nameAr": "الاسم بالعربية",
+  "cat.nameEn": "الاسم بالإنجليزية (اختياري)",
+  "cat.inUse": "مستعمل",
+  "cat.deleteBlocked": "لا يمكن حذف تصنيف مستعمل. أوقِفه أو انقل أصنافه أوّلاً.",
+  "cat.empty": "لا توجد تصنيفات بعد.",
+  "cat.created": "تمّ إنشاء التصنيف.",
+  "cat.renamed": "تمّ تعديل التصنيف.",
+  "cat.deleted": "تمّ حذف التصنيف.",
   "setup.title": "إعداد الحساب — مطلوب",
   "setup.why": "هذا الحساب يستعمل رمزاً مؤقّتاً جاء مع التركيب. اكتب اسمك ورمزك الخاصّ قبل الدخول؛ لا يمكن تخطّي هذه الخطوة.",
   "setup.name": "اسمك",
@@ -123,6 +195,10 @@ const AR: Dict = {
   "ops.activate": "تنشيط",
   "ops.makeOwner": "اجعله مالكاً",
   "ops.makeCashier": "اجعله كاشير",
+  // Migration 11 — the narrow grant, named as what the cashier may DO rather than as a rank.
+  "ops.allowCreate": "السماح بإضافة أصناف",
+  "ops.denyCreate": "منع إضافة أصناف",
+  "ops.mayCreate": "يضيف أصنافاً",
   "ops.newName": "الاسم",
   "ops.newPin": "رمز مؤقّت (يغيّره هو عند أوّل دخول)",
   "ops.noPinShown": "لا يُعرض رمز أيّ مستخدم ولا يمكن استرجاعه — التصفير فقط.",
@@ -201,6 +277,11 @@ const AR: Dict = {
   "inv.sheet.missing.quantity": "اكتب الكمّيّة",
   "inv.sheet.missing.unitPrice": "اكتب السعر",
   "inv.sheet.unsavedRows": "أسطر غير محفوظة",
+  "inv.sheet.rowsIncomplete": "يوجد سطر غير مكتمل. أكمله أو احذفه قبل حفظ الفاتورة أو مغادرتها.",
+  "inv.sheet.flushUnknown": "تعذّر التأكّد من حفظ الأسطر الأخيرة. اضغط حفظ مرّة أخرى للتحقّق منها. وإن أُغلقت النافذة أو التطبيق فافتح المسوّدة من قائمة المسوّدات وراجع الأسطر المحفوظة قبل إعادة إدخال أيّ شيء.",
+  "inv.sheet.rowSaving": "هذا السطر قيد الحفظ. انتظر حتى ينتهي.",
+  "inv.sheet.partialSaved": "حُفظت الأسطر المكتملة، لكن خطوة لاحقة لم تنجح:",
+  "inv.sheet.rowChangedAfterSave": "حُفظ هذا السطر بقيمه السابقة قبل تعديله. راجع أسطر الفاتورة وعدّل السطر المحفوظ أو احذفه.",
   "inv.sheet.finalizeIncomplete": "فيه سطرٌ غير مكتمل — أكمِله أو احذِفه قبل الإصدار.",
   "inv.sheet.rowsCount": "عدد الأسطر",
   "inv.sheet.remove": "حذف",
@@ -230,7 +311,7 @@ const AR: Dict = {
   "inv.sheet.save": "حفظ",
   "inv.sheet.leave": "خروج",
   "inv.exit.title": "في تعديلات غير محفوظة",
-  "inv.exit.body": "تعديلاتك على بيانات الفاتورة لم تُحفظ بعد.",
+  "inv.exit.body": "تغييرات بيانات الفاتورة أو أسطرها لم تُحفظ بعد.",
   "inv.exit.saveAndLeave": "حفظ والخروج",
   "inv.exit.leaveWithout": "الخروج بدون حفظ",
   "inv.sheet.saved": "حُفظت المسودّة",
@@ -244,6 +325,7 @@ const AR: Dict = {
   "inv.sheet.lineCount": "عدد الأسطر",
   "inv.sheet.print": "طباعة",
   "inv.sheet.savePdf": "حفظ PDF",
+  "inv.sheet.logoMissing": "طُبعت هذه الفاتورة بلا شعار: ملفّ الشعار المؤرشف لهذه الفاتورة غير موجود. لم يُستبدل بالشعار الحالي، وبيانات الفاتورة لم تتغيّر.",
   "inv.sheet.finalized": "صدرت الفاتورة",
   "inv.sheet.reviewNow": "راجع الآن",
   "inv.sheet.later": "لاحقاً",
@@ -311,6 +393,8 @@ const AR: Dict = {
   "login.backspace": "حذف آخر رقم",
   "login.submit": "دخول",
 
+  "sell.photoOpen": "عرض صورة الصنف",
+  "sell.photoNone": "بدون صورة",
   "sell.currentSale": "البيع الحالي",
   "sell.total": "الإجمالي",
   "sell.empty": "اختر صنفاً لإضافته.",
@@ -328,6 +412,145 @@ const AR: Dict = {
   "sell.quantityOf": "الكمية",
   "sell.placeholderPrice": "سعر مبدئي — اضبط السعر الحقيقي",
   "sell.priceUnknown": "سعر مبدئي",
+
+  // ── What a cashier reads when a sale ends in an unexpected error ───────────────────────────────
+  //
+  // 🔴 THESE SIX ARE THE ONLY MESSAGES IN THE PRODUCT THAT ASK FOR A DIFFERENT ACTION. Every other
+  // refusal says "no"; these say what happened to the MONEY and what is safe next. An instruction
+  // the reader cannot read is worse than a bare failure, because it reads as noise and is
+  // dismissed — which is how a recorded sale gets rung up twice.
+  //
+  // 🔴 AND THE TWO "recorded" WORDINGS MUST NEVER INVITE A RETRY, in either language. That is a
+  // test, not a hope — see tests/main/saleOutcomeText.test.ts.
+
+  // ── Customer directory (S1B) ──────────────────────────────────────────────────────────────────
+  //
+  // 🔴 NOT ONE OF THESE MENTIONS A BALANCE, A DEBT OR AN AMOUNT. S1B ships a directory; the
+  // accounting slices come later, and a label promising a balance would be a promise the data
+  // cannot keep.
+  "customers.title": "الزبائن",
+  "customers.search": "ابحث بالاسم أو الرقم…",
+  "customers.new": "زبون جديد",
+  "customers.none": "لا زبائن بعد.",
+  "customers.noMatch": "لا زبون يطابق البحث.",
+  "customers.loading": "جارٍ التحميل…",
+  "customers.name": "الاسم",
+  "customers.nameRequired": "الاسم مطلوب",
+  "customers.phone": "الهاتف",
+  "customers.address": "العنوان",
+  "customers.note": "ملاحظة",
+  "customers.optional": "اختياري",
+  "customers.save": "حفظ",
+  "customers.saving": "جارٍ الحفظ…",
+  "customers.saveExplanation": "حفظ العميل يضيفه إلى دليل العملاء فقط. لا يُكمل عملية بيع ولا يُنشئ ديناً.",
+  "customers.cancel": "إلغاء",
+  "customers.edit": "تعديل",
+  "customers.archive": "أرشفة",
+  "customers.restore": "إرجاع",
+  "customers.archived": "مؤرشف",
+  "customers.showArchived": "أظهر المؤرشفين",
+  "customers.created": "أُضيف الزبون.",
+  "customers.sameName": "يوجد زبون آخر بالاسم نفسه. تأكّد أنّهما شخصان مختلفان.",
+  "customers.sameNameHint": "الحسابان منفصلان ولم يُدمجا.",
+  "customers.ownerOnly": "التعديل والأرشفة للمالك فقط.",
+  // ── S3B · the account statement. Read-only, owner only. ──────────────────────────────────────
+  "statement.title": "كشف الحساب",
+  "statement.loading": "جارٍ التحميل…",
+  // 🔴 "لا ديون مسجّلة" — NOT "الرصيد ٠". An empty ledger has posted nothing, and printing a zero
+  // would be this screen inventing an accounting statement the ledger never made.
+  "statement.none": "لا ديون مسجّلة.",
+  "statement.outstandingTotal": "المتبقّي",
+  "statement.amount": "المبلغ",
+  "statement.outstanding": "المتبقّي",
+  "statement.paid": "مسدّد بالكامل",
+  "statement.postedAt": "تاريخ التسجيل",
+  "statement.source": "المرجع",
+  "statement.sourceSale": "بيعة",
+  "statement.sourceManual": "مستند خارجي",
+  "statement.settlements": "الدفعات",
+  "statement.noSettlements": "لا دفعات بعد.",
+  "statement.method.cash": "نقداً",
+  "statement.method.card": "بطاقة",
+  "statement.method.external": "تحويل",
+  "statement.method.other": "أخرى",
+  // 🔴 SAID ON THE SCREEN, every time. This slice READS; it cannot create a debt or take a payment.
+  // 🔴 S3C CHANGED THIS SENTENCE, AND THE OLD ONE IS NAMED. It used to end "لا يمكن تسجيل دين أو
+  // دفعة من هنا" — true in S3B, when the screen could only read. An owner can now record a
+  // PAYMENT here, but still cannot create a DEBT, so the sentence now says exactly that. Leaving
+  // the old wording would have made the screen lie about what its own button does.
+  "statement.readOnly": "لا يمكن تسجيل دين من هنا — يمكن تسجيل دفعة على دين قائم فقط.",
+  "collect.action": "تسجيل دفعة",
+  "collect.title": "تسجيل دفعة نقديّة",
+  "collect.customer": "الزبون",
+  "collect.reference": "الدين",
+  "collect.outstanding": "المتبقّي على هذا الدين",
+  "collect.amount": "مبلغ الدفعة",
+  "collect.method": "طريقة الدفع",
+  "collect.methodCash": "نقداً",
+  "collect.confirm": "تأكيد الدفعة",
+  "collect.cancel": "إلغاء",
+  "collect.posting": "جارٍ التسجيل…",
+  // 🔴 "سُجِّلت"، لا "تمّ الحفظ": الدفعة دخلت الدفتر فعلاً.
+  "collect.done": "سُجِّلت الدفعة.",
+  // 🔴 THE RETRY ANSWER. Said when the ledger hands back a payment this key already committed —
+  // so the owner learns the money was taken ONCE, not that a second one succeeded.
+  "collect.alreadyDone": "هذه الدفعة مسجّلة من قبل — لم تُحتسب مرّتين.",
+  "collect.invalidAmount": "أدخل مبلغاً أكبر من صفر.",
+  "collect.tooMuch": "المبلغ أكبر من المتبقّي على هذا الدين.",
+
+  // 🔴 THE SENTENCE THAT KEEPS S1B HONEST. Selecting a customer at the till records nothing yet.
+  "customers.notOnSaleYet": "اختيار الزبون للتذكير فقط — لا يُسجّل ديناً ولا يُربط بالفاتورة بعد.",
+  "sell.customer": "الزبون",
+  "sell.chooseCustomer": "اختر زبوناً",
+  // 🔴 ITS OWN KEY, NOT `customers.edit`. This button reopens the PICKER; it edits no record, and
+  // a cashier — who may never edit a customer — sees it. Borrowing the edit label said the
+  // opposite of what the button does. See rules/text-context-rule.md rule 2.
+  "sell.changeCustomer": "تغيير الزبون",
+  "sell.clearCustomer": "بدون زبون",
+  "outcome.internal": "حدث خطأ غير متوقّع. حاول مرّة أخرى، وإذا تكرّر الأمر فاتّصل بالدعم.",
+  "outcome.saleNotRecorded": "حدث خطأ غير متوقّع — لم تُسجَّل الفاتورة.",
+  "outcome.saleNotRecordedRetry": "حدث خطأ غير متوقّع — لم تُسجَّل الفاتورة. يمكنك إعادة المحاولة.",
+  "outcome.saleRecorded":
+    "سُجِّلت الفاتورة فعلاً (إيصال رقم {receipt}) ثم حدث خطأ غير متوقّع. راجع السجلّ — لا تُعِد إدخالها.",
+  "outcome.saleRecordedNoNumber":
+    "سُجِّلت الفاتورة فعلاً ثم حدث خطأ غير متوقّع. راجع السجلّ — لا تُعِد إدخالها.",
+  "outcome.saleStatusUnknown":
+    "حدث خطأ غير متوقّع — لا نعرف إن كانت الفاتورة قد سُجِّلت. راجع السجلّ قبل إعادة المحاولة.",
+
+  // ── And the same five answers for a CUSTOMER COLLECTION (S3C) ─────────────────────────────────
+  //
+  // 🔴 EVERY ONE OF THESE DECIDES WHETHER THE SHOP TAKES THE MONEY A SECOND TIME. "recorded" and
+  // "unknown" both forbid collecting again; only "...Retry" invites another attempt, and it is
+  // said ONLY after the ledger was actually read and answered "no such payment".
+  "outcome.paymentNotRecorded": "حدث خطأ غير متوقّع — لم تُسجَّل الدفعة.",
+  "outcome.paymentNotRecordedRetry":
+    "حدث خطأ غير متوقّع — لم تُسجَّل الدفعة. يمكنك إعادة المحاولة بنفس المبلغ.",
+  "outcome.paymentRecorded":
+    "سُجِّلت الدفعة فعلاً ({amount}) ثم حدث خطأ غير متوقّع. راجع كشف الحساب — لا تُحصّل المبلغ مرّة أخرى.",
+  "outcome.paymentRecordedNoAmount":
+    "سُجِّلت الدفعة فعلاً ثم حدث خطأ غير متوقّع. راجع كشف الحساب — لا تُحصّل المبلغ مرّة أخرى.",
+  "outcome.paymentStatusUnknown":
+    "حدث خطأ غير متوقّع — لا نعرف إن كانت الدفعة قد سُجِّلت. راجع كشف الحساب قبل إعادة المحاولة، ولا تُحصّل المبلغ مرّة أخرى.",
+
+  // ── And the same question for a MANUAL INVOICE, which is a different object to the cashier ────
+  //
+  // 🔴 THESE ARE NOT THE SALE SENTENCES REWORDED. Finalizing an invoice issues a numbered
+  // commercial document AND writes the sale it is, in one transaction. What the cashier must not do
+  // twice is ISSUE THE INVOICE — so the instruction names the invoice list, and the identity that
+  // matters first is the INVOICE NUMBER, which is what is printed on the paper in their hand.
+  // Forcing the SALE_* codes onto this would tell them to check the wrong screen for the wrong
+  // number.
+  "outcome.invoiceNotFinalized": "حدث خطأ غير متوقّع — لم تُصدَر الفاتورة.",
+  "outcome.invoiceNotFinalizedRetry":
+    "حدث خطأ غير متوقّع — لم تُصدَر الفاتورة، وهي ما تزال مسوّدة. يمكنك إعادة المحاولة.",
+  "outcome.invoiceFinalized":
+    "الفاتورة رقم {invoice} صُدِرت فعلاً ثم حدث خطأ غير متوقّع. راجع قائمة الفواتير — لا تُصدرها مرّة أخرى.",
+  "outcome.invoiceFinalizedWithReceipt":
+    "الفاتورة رقم {invoice} صُدِرت فعلاً (إيصال رقم {receipt}) ثم حدث خطأ غير متوقّع. راجع قائمة الفواتير — لا تُصدرها مرّة أخرى.",
+  "outcome.invoiceFinalizedNoNumber":
+    "الفاتورة صُدِرت فعلاً ثم حدث خطأ غير متوقّع. راجع قائمة الفواتير — لا تُصدرها مرّة أخرى.",
+  "outcome.invoiceStatusUnknown":
+    "حدث خطأ غير متوقّع — لا نعرف إن كانت الفاتورة قد صُدِرت. راجع قائمة الفواتير قبل إعادة المحاولة.",
 
   "pay.title": "الدفع",
   "pay.note": "سجّل كيف دفع الزبون. لا تتم أيّ عمليّة دفع هنا.",
@@ -398,10 +621,14 @@ const AR: Dict = {
   "tools.version": "الإصدار",
   "tools.build": "البناء",
   "tools.importCatalog": "استيراد الأصناف",
-  "tools.exportCatalog": "تصدير الأصناف",
-  "tools.exportBackup": "تصدير نسخة احتياطيّة",
-  "tools.catalogNote": "صدِّر قائمة الأصناف، صحّح الأسعار في إكسل (احفظ بصيغة CSV UTF-8)، ثمّ استوردها. تُطابَق الأصناف بالرمز المصدري، وما لم يتغيّر يبقى كما هو.",
-  "tools.backupNote": "تُؤخذ نسخة احتياطيّة موثّقة تلقائيّاً مرّة كلّ يوم وقبل كلّ تحديث لقاعدة البيانات. صدِّر نسخة لتحفظها في مكان آخر، على ذاكرة USB مثلاً.",
+  "tools.exportCatalog": "تصدير قائمة الأسعار (CSV)",
+  "tools.exportBackup": "نسخة احتياطيّة لقاعدة البيانات",
+  "tools.catalogNote": "صدِّر قائمة الأسعار، صحّح الأسعار في إكسل (احفظ بصيغة CSV UTF-8)، ثمّ استوردها. تُطابَق الأصناف بالرمز المصدري، وما لم يتغيّر يبقى كما هو.",
+  "tools.noticeTag": "تنبيه",
+  "tools.catalogNotBackup": "هذا الملفّ ليس نسخة احتياطيّة: لا يحوي الأصناف المضافة يدويّاً، ولا الصور، ولا المبيعات والفواتير.",
+  "tools.backupNote": "تحوي كلّ المبيعات والفواتير والأصناف وصور الأصناف. تُؤخذ نسخة موثّقة تلقائيّاً مرّة كلّ يوم وقبل كلّ تحديث لقاعدة البيانات. صدِّر نسخة لتحفظها في مكان آخر، على ذاكرة USB مثلاً.",
+  "tools.backupExcludes": "لا تحوي ملفّات شعار الفواتير المؤرشفة — فهي محفوظة خارج قاعدة البيانات.",
+  "tools.coldCopyNote": "لنسخة كاملة لكلّ بيانات المحل، بما فيها شعار الفواتير المؤرشف: أغلق البرنامج تماماً، ثمّ انسخ مجلّد بيانات البرنامج كلّه. الطريقة بالتفصيل في دليل الدعم.",
   "review.statusPending": "بانتظار المراجعة",
   "review.statusFailed": "فشلت",
   "review.statusDone": "تمّت",
@@ -415,6 +642,7 @@ const EN: Dict = {
   "nav.today": "Today's Sales",
   "nav.history": "History",
   "nav.products": "Products",
+  "nav.customers": "Customers",
   "nav.tools": "Tools",
   "action.logout": "Log out",
   "action.save": "Save",
@@ -424,10 +652,12 @@ const EN: Dict = {
   "action.edit": "Edit",
   "action.activate": "Activate",
   "action.deactivate": "Deactivate",
+  "action.delete": "Delete",
+  "action.close": "Close",
   "lang.toggle": "العربية",
   "products.title": "Products",
-  "products.search": "Search by name or SKU",
-  "products.searchHint": "Search ignores tashkeel and tatweel, folds أ إ آ to ا and ى to ي, and reads Arabic-Indic digits as 0-9.",
+  "products.search": "Search by name, SKU or barcode",
+  "products.searchHint": "Search by name, SKU or barcode. Arabic spelling variants and Arabic-Indic digits are normalized automatically.",
   "products.count": "products",
   "products.countShown": "shown",
   "products.empty": "No products yet. Add the first one.",
@@ -441,8 +671,6 @@ const EN: Dict = {
   "products.active": "Active",
   "products.inactive": "Inactive",
   "products.priceNeedsReview": "price?",
-  "products.source.manual": "manual",
-  "products.source.import": "imported",
   "products.fractionsAllowed": "Sold in fractional quantities, up to three decimal places — 2.5 or 0.333.",
   "form.addTitle": "New product",
   "form.editTitle": "Edit product",
@@ -455,6 +683,78 @@ const EN: Dict = {
   "form.required": "required",
   "form.optional": "optional",
   "form.state": "State",
+  // ── Product Master (migration 9/10) ──────────────────────────────────────────────────────────
+  "form.secBasic": "Basic information",
+  "form.secOnline": "Online catalogue",
+  "form.secPhoto": "Product photo",
+  "form.barcode": "Barcode (optional)",
+  "form.barcodeHint": "Scan or type the barcode. It is stored in one canonical form.",
+  "form.brand": "Brand (optional)",
+  "form.brandHint": "Type a brand, or pick one already used.",
+  "form.category": "Category",
+  "form.categoryNone": "No category",
+  "form.categoryRetired": "retired",
+  "form.categoryManage": "Manage categories",
+  "form.descAr": "Arabic description (optional)",
+  "form.descEn": "English description (optional)",
+  "form.onlineVisible": "Include this product in the online catalogue",
+  "form.onlineHint": "Nothing is uploaded now. This only decides what a later export includes.",
+  "form.photoNone": "This product has no photo",
+  "form.photoAdd": "Add photo",
+  "form.photoReplace": "Replace photo",
+  "form.photoRemove": "Remove photo",
+  "products.exportOnline": "Export Online Catalogue",
+  "products.exportOnlineHint": "Saves a folder with the catalogue file and the photos of products shown online. Nothing is uploaded.",
+  "products.exportOnlineDone": "Online catalogue package exported.",
+  "products.exportOnlineSummary": "Products: {products} \u00b7 Images: {images} \u00b7 Folder: {folder}",
+  "products.exportOnlineIncomplete": "{count} products exported with incomplete online information.",
+  // ── Phone entry over the LAN (slice H2) ──────────────────────────────────────────────────────
+  "phone.add": "Add Product from Phone",
+  /* 🔴 SHORT ON PURPOSE, AND MEASURED. The English run measured the actions column at 260px against
+     Arabic's 205px — longer labels, 109px of overflow instead of 37px — which pushed "Edit on Phone"
+     11px outside the visible table strip at the default window, i.e. the shop could not reach it
+     without scrolling. The meaning is not lost: `phone.editHint` below is the button's `title` and
+     still says it in full. */
+  "phone.edit": "Phone Edit",
+  "phone.editHint": "Carry on editing this product on a phone",
+  "phone.title": "Scan the code with the phone camera",
+  "phone.explain": "Open the phone camera and point it at the code. The phone must be on the same shop network. No Internet is needed.",
+  "phone.address": "Network address",
+  "phone.expiresIn": "The code expires in {mins}:{secs}",
+  "phone.expired": "The code has expired. Ask for a new one.",
+  "phone.claimed": "The page is open on the phone. Carry on there.",
+  "phone.waiting": "Waiting for the code to be scanned\u2026",
+  "phone.doneTitleNew": "Product added",
+  "phone.doneTitleEdit": "Product updated",
+  "phone.savedNew": "The product was added from the phone.",
+  "phone.savedEdit": "The product was updated from the phone.",
+  "phone.cancel": "Cancel",
+  "phone.close": "Close",
+  "phone.failed": "The session could not be opened.",
+  "phone.ambiguous": "This till is on more than one network. If the phone cannot reach it, try another address:",
+  "phone.firewall": "If Windows asks whether to allow the app on the network, choose Private networks and allow it.",
+  "products.exportOnlineEmpty": "No product is shown online yet. Turn on the online catalogue option for the products you want.",
+  "form.photoFormats": "Choose a JPEG or PNG image.",
+  "form.photoAfterSave": "Save the product first, then you can add a photo to it.",
+  "form.photoFailed": "That photo could not be loaded.",
+  "form.localOnly": "A product sells with no category, brand, description or photo. These fields are for the online catalogue only.",
+  "products.colPhoto": "Photo",
+  "products.colCategory": "Category",
+  "products.colOnline": "Online",
+  "products.online": "Online",
+  "products.hasPhoto": "Has a photo",
+  "products.noPhoto": "No photo",
+  "products.photoBroken": "Photo unreadable",
+  "cat.title": "Categories",
+  "cat.add": "New category",
+  "cat.nameAr": "Arabic name",
+  "cat.nameEn": "English name (optional)",
+  "cat.inUse": "in use",
+  "cat.deleteBlocked": "A category in use cannot be deleted. Deactivate it, or move its products first.",
+  "cat.empty": "No categories yet.",
+  "cat.created": "Category created.",
+  "cat.renamed": "Category updated.",
+  "cat.deleted": "Category deleted.",
   "setup.title": "Account setup — required",
   "setup.why": "This account is still using a temporary code that came with the installation. Enter your name and your own private PIN before continuing; this step cannot be skipped.",
   "setup.name": "Your name",
@@ -481,6 +781,9 @@ const EN: Dict = {
   "ops.activate": "Reactivate",
   "ops.makeOwner": "Make owner",
   "ops.makeCashier": "Make cashier",
+  "ops.allowCreate": "Allow adding products",
+  "ops.denyCreate": "Stop adding products",
+  "ops.mayCreate": "Adds products",
   "ops.newName": "Name",
   "ops.newPin": "Temporary PIN (they set their own on first login)",
   "ops.noPinShown": "No operator's PIN is ever shown and none can be recovered — reset only.",
@@ -559,6 +862,11 @@ const EN: Dict = {
   "inv.sheet.missing.quantity": "Enter a quantity",
   "inv.sheet.missing.unitPrice": "Enter a price",
   "inv.sheet.unsavedRows": "Unsaved rows",
+  "inv.sheet.rowsIncomplete": "A row is incomplete. Complete or remove it before saving the invoice or leaving.",
+  "inv.sheet.flushUnknown": "Could not confirm whether the last rows were saved. Press Save again to check them. If this window or the app was closed, reopen the draft from Drafts and review the saved lines before re-entering anything.",
+  "inv.sheet.rowSaving": "This row is being saved. Wait for it to finish.",
+  "inv.sheet.partialSaved": "The completed rows were saved, but a later step did not succeed:",
+  "inv.sheet.rowChangedAfterSave": "This row was saved with its earlier values before you changed it. Review the invoice lines and edit or delete the saved line.",
   "inv.sheet.finalizeIncomplete": "A row is incomplete — complete it or remove it before issuing.",
   "inv.sheet.rowsCount": "Rows",
   "inv.sheet.remove": "Remove",
@@ -588,7 +896,7 @@ const EN: Dict = {
   "inv.sheet.save": "Save",
   "inv.sheet.leave": "Leave",
   "inv.exit.title": "There are unsaved changes",
-  "inv.exit.body": "Your changes to the invoice header have not been saved yet.",
+  "inv.exit.body": "Your invoice details or rows have not been saved yet.",
   "inv.exit.saveAndLeave": "Save and leave",
   "inv.exit.leaveWithout": "Leave without saving",
   "inv.sheet.saved": "Draft saved",
@@ -602,6 +910,7 @@ const EN: Dict = {
   "inv.sheet.lineCount": "Rows",
   "inv.sheet.print": "Print",
   "inv.sheet.savePdf": "Save PDF",
+  "inv.sheet.logoMissing": "This invoice printed without a logo: its archived logo file is missing. The current logo was not substituted, and the invoice's own data is unchanged.",
   "inv.sheet.finalized": "Invoice issued",
   "inv.sheet.reviewNow": "Review now",
   "inv.sheet.later": "Later",
@@ -669,6 +978,8 @@ const EN: Dict = {
   "login.backspace": "Delete last digit",
   "login.submit": "Log in",
 
+  "sell.photoOpen": "View product photo",
+  "sell.photoNone": "No photo",
   "sell.currentSale": "Current sale",
   "sell.total": "Total",
   "sell.empty": "Tap a product to add it.",
@@ -686,6 +997,111 @@ const EN: Dict = {
   "sell.quantityOf": "Quantity",
   "sell.placeholderPrice": "Placeholder price — set the real price",
   "sell.priceUnknown": "price?",
+
+  // The English wording is UNCHANGED from what shipped — see src/main/saleOutcomeText.ts for why
+  // these are strings in the dictionary rather than literals at the throw site.
+
+  // ── Customer directory (S1B) ──────────────────────────────────────────────────────────────────
+  "customers.title": "Customers",
+  "customers.search": "Search by name or phone…",
+  "customers.new": "New customer",
+  "customers.none": "No customers yet.",
+  "customers.noMatch": "No customer matches the search.",
+  "customers.loading": "Loading…",
+  "customers.name": "Name",
+  "customers.nameRequired": "A name is required",
+  "customers.phone": "Phone",
+  "customers.address": "Address",
+  "customers.note": "Note",
+  "customers.optional": "optional",
+  "customers.save": "Save",
+  "customers.saving": "Saving…",
+  "customers.saveExplanation": "Saving adds the customer to the directory only. It does not complete a sale or create debt.",
+  "customers.cancel": "Cancel",
+  "customers.edit": "Edit",
+  "customers.archive": "Archive",
+  "customers.restore": "Restore",
+  "customers.archived": "archived",
+  "customers.showArchived": "Show archived",
+  "customers.created": "Customer added.",
+  "customers.sameName": "Another customer has the same name. Check they are different people.",
+  "customers.sameNameHint": "The two accounts are separate and were not merged.",
+  "customers.ownerOnly": "Only the owner can edit or archive.",
+  "statement.title": "Account statement",
+  "statement.loading": "Loading\u2026",
+  "statement.none": "No posted debts.",
+  "statement.outstandingTotal": "Outstanding",
+  "statement.amount": "Amount",
+  "statement.outstanding": "Outstanding",
+  "statement.paid": "Paid in full",
+  "statement.postedAt": "Posted",
+  "statement.source": "Reference",
+  "statement.sourceSale": "Sale",
+  "statement.sourceManual": "External document",
+  "statement.settlements": "Payments",
+  "statement.noSettlements": "No payments yet.",
+  "statement.method.cash": "Cash",
+  "statement.method.card": "Card",
+  "statement.method.external": "Transfer",
+  "statement.method.other": "Other",
+  // 🔴 S3C CHANGED THIS SENTENCE — the old one said no payment could be recorded here, which was
+  // true in S3B. An owner can now record a payment, but still cannot create a debt.
+  "statement.readOnly": "No debt can be recorded here \u2014 only a payment against an existing debt.",
+  "collect.action": "Record payment",
+  "collect.title": "Record a cash payment",
+  "collect.customer": "Customer",
+  "collect.reference": "Debt",
+  "collect.outstanding": "Outstanding on this debt",
+  "collect.amount": "Payment amount",
+  "collect.method": "Method",
+  "collect.methodCash": "Cash",
+  "collect.confirm": "Confirm payment",
+  "collect.cancel": "Cancel",
+  "collect.posting": "Recording\u2026",
+  "collect.done": "Payment recorded.",
+  "collect.alreadyDone": "This payment was already recorded \u2014 it has not been counted twice.",
+  "collect.invalidAmount": "Enter an amount greater than zero.",
+  "collect.tooMuch": "That is more than is outstanding on this debt.",
+
+  "customers.notOnSaleYet": "Choosing a customer is a reminder only \u2014 it records no debt and is not linked to the sale yet.",
+  "sell.customer": "Customer",
+  "sell.chooseCustomer": "Choose a customer",
+  "sell.changeCustomer": "Change customer",
+  "sell.clearCustomer": "No customer",
+  "outcome.internal": "Unexpected error. Please try again; if it keeps happening, contact support.",
+  "outcome.saleNotRecorded": "Unexpected error \u2014 the sale was not recorded.",
+  "outcome.saleNotRecordedRetry": "Unexpected error \u2014 the sale was not recorded. You can try again.",
+  "outcome.saleRecorded":
+    "The sale WAS recorded (receipt #{receipt}) but an unexpected error followed. Check History \u2014 do not ring it up again.",
+  "outcome.saleRecordedNoNumber":
+    "The sale WAS recorded but an unexpected error followed. Check History \u2014 do not ring it up again.",
+  "outcome.saleStatusUnknown":
+    "Unexpected error \u2014 it is not known whether the sale was recorded. Check History before trying again.",
+
+  // ── And the same five answers for a CUSTOMER COLLECTION (S3C) ─────────────────────────────────
+  "outcome.paymentNotRecorded": "Unexpected error \u2014 the payment was not recorded.",
+  "outcome.paymentNotRecordedRetry":
+    "Unexpected error \u2014 the payment was not recorded. You can try again with the same amount.",
+  "outcome.paymentRecorded":
+    "The payment WAS recorded ({amount}) but an unexpected error followed. Check the statement \u2014 do not collect it again.",
+  "outcome.paymentRecordedNoAmount":
+    "The payment WAS recorded but an unexpected error followed. Check the statement \u2014 do not collect it again.",
+  "outcome.paymentStatusUnknown":
+    "Unexpected error \u2014 it is not known whether the payment was recorded. Check the statement before trying again, and do not collect it again.",
+
+  // English for the invoice outcomes. New wording, because no English sentence existed for them —
+  // every one of these cases read "Unexpected error. Please try again..." before this slice.
+  "outcome.invoiceNotFinalized": "Unexpected error \u2014 the invoice was not issued.",
+  "outcome.invoiceNotFinalizedRetry":
+    "Unexpected error \u2014 the invoice was not issued and is still a draft. You can try again.",
+  "outcome.invoiceFinalized":
+    "Invoice #{invoice} WAS issued but an unexpected error followed. Check the invoice list \u2014 do not issue it again.",
+  "outcome.invoiceFinalizedWithReceipt":
+    "Invoice #{invoice} WAS issued (receipt #{receipt}) but an unexpected error followed. Check the invoice list \u2014 do not issue it again.",
+  "outcome.invoiceFinalizedNoNumber":
+    "The invoice WAS issued but an unexpected error followed. Check the invoice list \u2014 do not issue it again.",
+  "outcome.invoiceStatusUnknown":
+    "Unexpected error \u2014 it is not known whether the invoice was issued. Check the invoice list before trying again.",
 
   "pay.title": "Payment",
   "pay.note": "Record how the customer paid. No payment is processed here.",
@@ -754,10 +1170,14 @@ const EN: Dict = {
   "tools.version": "Version",
   "tools.build": "Build",
   "tools.importCatalog": "Import catalog",
-  "tools.exportCatalog": "Export catalog",
-  "tools.exportBackup": "Export backup",
-  "tools.catalogNote": "Export the product list, correct prices in Excel (save as CSV UTF-8), then import it again. Products are matched by their source id; unchanged rows stay unchanged.",
-  "tools.backupNote": "A verified backup is made automatically once a day and before every database update. Export a copy to keep somewhere else, e.g. on a USB drive.",
+  "tools.exportCatalog": "Export price list (CSV)",
+  "tools.exportBackup": "Database backup",
+  "tools.catalogNote": "Export the price list, correct prices in Excel (save as CSV UTF-8), then import it again. Products are matched by their source id; unchanged rows stay unchanged.",
+  "tools.noticeTag": "Note",
+  "tools.catalogNotBackup": "This file is not a backup: it does not include manually added products, photos, sales or invoices.",
+  "tools.backupNote": "Contains every sale, invoice, product and product photo. A verified backup is made automatically once a day and before every database update. Export a copy to keep somewhere else, e.g. on a USB drive.",
+  "tools.backupExcludes": "It does not contain the archived invoice-logo files — those are kept outside the database.",
+  "tools.coldCopyNote": "For a complete copy of all shop data, including the archived invoice logo: close the program completely, then copy its whole data folder. The full procedure is in the support runbook.",
   "review.statusPending": "Needs review",
   "review.statusFailed": "Failed",
   "review.statusDone": "Done",

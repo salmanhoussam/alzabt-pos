@@ -9,6 +9,8 @@ import { FIXTURE_CATALOG } from "../../src/fixtures/catalog";
 import { FIXTURE_TERMINAL, type TerminalConfig } from "../../src/fixtures/terminal";
 import { AuditRepository } from "../../src/persistence/auditRepository";
 import { CatalogRepository } from "../../src/persistence/catalogRepository";
+import { CategoryRepository } from "../../src/persistence/categoryRepository";
+import { ProductImageRepository } from "../../src/persistence/productImageRepository";
 import { type Db, openDatabase } from "../../src/persistence/db";
 import { MIGRATIONS } from "../../src/persistence/migrations";
 import { OperatorRepository } from "../../src/persistence/operatorRepository";
@@ -19,6 +21,10 @@ import { InvoiceService } from "../../src/application/invoiceService";
 import { CompanyProfileRepository } from "../../src/persistence/companyProfileRepository";
 import { InvoiceRepository } from "../../src/persistence/invoiceRepository";
 import { ReconciliationRepository } from "../../src/persistence/reconciliationRepository";
+import { PartyRepository } from "../../src/persistence/partyRepository";
+import { PartyService } from "../../src/application/partyService";
+import { LedgerRepository } from "../../src/persistence/ledgerRepository";
+import { LedgerService } from "../../src/application/ledgerService";
 
 export interface TempDir {
   readonly dir: string;
@@ -58,6 +64,10 @@ export interface Harness {
   readonly invoiceStore: InvoiceRepository;
   readonly reconciliationStore: ReconciliationRepository;
   readonly companyStore: CompanyProfileRepository;
+  readonly parties: PartyService;
+  readonly partyStore: PartyRepository;
+  readonly ledger: LedgerService;
+  readonly ledgerStore: LedgerRepository;
 }
 
 export function makeHarness(
@@ -67,14 +77,22 @@ export function makeHarness(
     catalogSource?: CatalogSource;
     clock?: TestClock;
     repository?: (db: Db) => SaleRepository;
+    ledgerRepository?: (db: Db) => LedgerRepository;
     terminal?: TerminalConfig;
     login?: boolean;
+    serviceTransact?: <T>(db: Db, fn: () => T) => T;
     /** Swap in a failing audit repository, or pass null to wire none at all (fail-closed tests). */
     auditStore?: AuditRepository | null;
     /** The diagnostic mirror, if a test wants to observe it. */
     auditSink?: (row: AuditRow) => void;
     /** A deterministic id source for the invoice stack. Default: a per-harness counter. */
     ids?: () => string;
+    /**
+     * Migration 9's category and photo tables, wired by default so harness tests run through the
+     * REAL wiring the installed app uses. Pass null to wire neither — the fail-closed path, which
+     * is what a terminal looked like before `main.ts` wired them and is worth a test of its own.
+     */
+    productMaster?: null;
   } = {},
 ): Harness {
   const db = openDatabase(dbPath);
@@ -132,13 +150,22 @@ export function makeHarness(
       terminal: opts.terminal ?? FIXTURE_TERMINAL,
       now: clock.now,
     });
+    let creditSaleServices: { readonly parties: PartyService; readonly ledger: LedgerService } | null = null;
     const service = new PosService({
       repository,
       pinStates: new PinStateRepository(db),
       catalog: opts.catalog ?? loadCatalog(opts.catalogSource ?? FIXTURE_CATALOG),
       catalogStore: new CatalogRepository(db),
+      // Wired by DEFAULT, matching main.ts. A test that wants the fail-closed shape asks for it.
+      ...(opts.productMaster === null
+        ? {}
+        : { categories: new CategoryRepository(db), productImages: new ProductImageRepository(db) }),
       auditStore: opts.auditStore === null ? undefined : (opts.auditStore ?? audit),
-      transact: (fn) => db.transaction(fn).immediate(),
+      transact: (fn) =>
+        opts.serviceTransact
+          ? opts.serviceTransact(db, fn)
+          : db.transaction(fn).immediate(),
+      creditSaleServices: () => creditSaleServices,
       cashiers: FIXTURE_CASHIERS,
       operators,
       terminal: opts.terminal ?? FIXTURE_TERMINAL,
@@ -148,6 +175,38 @@ export function makeHarness(
     const invoiceStore = new InvoiceRepository(db);
     const reconciliationStore = new ReconciliationRepository(db);
     const companyStore = new CompanyProfileRepository(db);
+    const partyStore = new PartyRepository(db);
+    const parties = new PartyService({
+      parties: partyStore,
+      actor: () => {
+        const cashier = service.currentCashier();
+        const role = service.currentRole();
+        return cashier && role ? { id: cashier.id, name: cashier.name, role } : null;
+      },
+      transact: (fn) => db.transaction(fn).immediate(),
+      now: clock.now,
+    });
+    const ledgerStore = opts.ledgerRepository?.(db) ?? new LedgerRepository(db);
+    const ledger = new LedgerService({
+      ledger: ledgerStore,
+      parties: partyStore,
+      actor: () => {
+        const cashier = service.currentCashier();
+        const role = service.currentRole();
+        return cashier && role ? { id: cashier.id, name: cashier.name, role } : null;
+      },
+      transact: (fn) => db.transaction(fn).immediate(),
+      terminal: { timeZone: (opts.terminal ?? FIXTURE_TERMINAL).timeZone },
+      saleCurrency: (saleId) => {
+        const row = db.prepare("SELECT currency FROM sales WHERE id = ?").get(saleId) as
+          | { currency: string }
+          | undefined;
+        return row?.currency ?? null;
+      },
+      now: clock.now,
+      newId: opts.ids,
+    });
+    creditSaleServices = { parties, ledger };
     let idSeq = 0;
     const invoices = new InvoiceService({
       invoices: invoiceStore,
@@ -164,7 +223,22 @@ export function makeHarness(
       newId: opts.ids ?? (() => `id-${(idSeq += 1).toString().padStart(4, "0")}`),
     });
     if (opts.login !== false) service.login("cashier-01", "1111");
-    return { db, repository, service, clock, audit, invoices, invoiceStore, reconciliationStore, companyStore, operators };
+    return {
+      db,
+      repository,
+      service,
+      clock,
+      audit,
+      invoices,
+      invoiceStore,
+      reconciliationStore,
+      companyStore,
+      operators,
+      parties,
+      partyStore,
+      ledger,
+      ledgerStore,
+    };
   } catch (err) {
     db.close(); // never leave a handle open on a failed setup (Windows cannot delete open files)
     throw err;

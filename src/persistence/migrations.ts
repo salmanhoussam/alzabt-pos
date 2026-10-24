@@ -1013,4 +1013,901 @@ WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
 BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
 `,
   },
+  {
+    version: 9,
+    name: "product_master",
+    // ── Product Master: the catalog becomes the shop's own product record ───────────────────────
+    //
+    // 🔴 WHAT WAS WRONG. `catalog_products` carried only what a 7-column import file could say:
+    // names, SKU, price, unit, active. A merchant could not record what the product IS — no
+    // category, no brand, no description, no photo — so the shop's own knowledge of its own
+    // products lived in the owner's head, and an online catalog had nothing to export.
+    //
+    // 🔴 WHY THIS IS ONE MIGRATION AND NOT THREE. The approved architecture proposed M9 categories,
+    // M10 online content, M11 images. Its own rollback paragraph is the argument against that
+    // split: SQLite on this project's pinned path cannot drop a column without a table rebuild, so
+    // rollback for every one of them is the same automatic pre-migration snapshot. Three
+    // migrations therefore buy ZERO additional rollback granularity, while costing three
+    // fingerprints, three populated-prior-schema upgrade tests and three seams — for one feature,
+    // behind one form, that is never shipped partially. Migration 7's lesson was one commit
+    // carrying five UNRELATED things; category, online content and the primary image are one.
+    //
+    // EVERYTHING HERE IS ADDITIVE. Two CREATE TABLEs and five ADD COLUMNs. No table is rebuilt, no
+    // row is rewritten, no backfill runs, and no released migration is touched. `catalog_products`
+    // is referenced by nothing — sale lines and invoice lines carry their own snapshots, which is
+    // the discipline that makes this safe — so ADD COLUMN on a STRICT table suffices.
+    //
+    // 🔴 AND EVERY NEW COLUMN IS NULLABLE OR DEFAULTED, because the shop's existing products must
+    // keep selling the moment this migration lands. A product with no category, no brand, no
+    // description and no photo is a perfectly valid product for the till. Online content is
+    // enrichment, never a precondition for trade.
+    //
+    // 🔴 BARCODE IS IN, approved 2026-10-11 while this migration was still unmerged. It is one
+    // additive column and one partial index on a table this migration is already touching, so it
+    // rides here rather than becoming a migration 10 for a single adjacent Product Master field.
+    // The fingerprint changed again with it, and the previous v9 value is not preserved as if it
+    // had been released — it never was.
+    //
+    // WHAT IS DELIBERATELY ABSENT: stock quantity, warehouses, suppliers, purchase accounting,
+    // a category TREE, a photo GALLERY, MULTIPLE barcodes per product, and specifications. Each is
+    // either a separate business domain or an unapproved phase. The image table's shape admits a
+    // future gallery without any of its UX existing now, and barcode's single column admits a
+    // child table later the same way.
+    sql: `
+-- ── Categories ────────────────────────────────────────────────────────────────────────────────
+--
+-- FLAT and owner-managed. No parent_id: a tree is not approved, and adding one later is an
+-- additive column on a table nothing references, which is exactly the position this table is in.
+--
+-- Names are compared case- and whitespace-insensitively by a UNIQUE INDEX below rather than by a
+-- CHECK, so "عدد" and " عدد " cannot both exist. The shop is Arabic-first, so name_ar is the
+-- required one and name_en is optional, matching the rule catalog naming already follows.
+CREATE TABLE catalog_categories (
+  id         TEXT    PRIMARY KEY,
+  name_ar    TEXT    NOT NULL CHECK (length(trim(name_ar)) > 0),
+  name_en    TEXT             CHECK (name_en IS NULL OR length(trim(name_en)) > 0),
+  -- Deactivated rather than deleted once a product has ever used it: the product keeps its link,
+  -- the owner stops being offered the category. Deletion is allowed ONLY while unused, which the
+  -- service enforces by counting referencing products inside the same transaction.
+  is_active  INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+  -- The owner's own display order. Not alphabetical: a hardware shop thinks "عدد" before "دهان".
+  sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+  created_at TEXT    NOT NULL,
+  updated_at TEXT    NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX catalog_categories_name_ar ON catalog_categories (lower(trim(name_ar)));
+CREATE INDEX catalog_categories_order ON catalog_categories (is_active, sort_order, id);
+
+-- ── Product Master columns ────────────────────────────────────────────────────────────────────
+--
+-- 🔴 ON DELETE SET NULL, chosen deliberately over RESTRICT. A category the owner is allowed to
+-- delete is one no product uses, so this clause should never fire; if a future path ever deletes a
+-- used category anyway, a product that loses its category is a product that still sells, whereas
+-- RESTRICT would abort a transaction the owner cannot diagnose from the till. The service refuses
+-- the delete first; this is the floor under it, not the rule.
+ALTER TABLE catalog_products ADD COLUMN category_id TEXT REFERENCES catalog_categories(id) ON DELETE SET NULL;
+
+-- The barcode the manufacturer printed on the box. SEPARATE FROM SKU, and that separation is the
+-- point: SKU is what the shop calls the product, barcode is what the world calls it. One shop's
+-- SKU-1 is another's; a barcode is global, so it is the field a website and a scanner both key on.
+--
+-- NULLABLE, because most of this shop's stock is building material sold loose and carries no
+-- barcode at all. Unique only WHEN PRESENT, by the partial index below, exactly as sku already is.
+--
+-- 🔴 STORED CANONICAL. src/domain/barcode.ts owns the one normalization contract: a 12-digit UPC-A
+-- is stored as its 13-digit EAN-13 form, because they are THE SAME SYMBOL and a shop that stored
+-- both would have two products for one box. That equivalence was found by execution during the
+-- mobile-LAN study, when the decoder read back a typed UPC-A as a zero-prefixed EAN-13.
+--
+-- V1 IS ONE BARCODE PER PRODUCT. A product with several (a box and its singles) needs a child
+-- table, which is a real shop requirement nobody has yet reported; one column is the truthful V1.
+ALTER TABLE catalog_products ADD COLUMN barcode TEXT;
+
+-- Free text with suggestions drawn from what the shop has already typed, per the approved study: a
+-- normalized brands table was measured and rejected as weight this product cannot yet justify.
+ALTER TABLE catalog_products ADD COLUMN brand TEXT;
+
+-- ONE description per language. The earlier draft had short + long per language, which the study
+-- revised: four fields invite three of them to be stale, and nothing in V1 renders two lengths.
+ALTER TABLE catalog_products ADD COLUMN description_ar TEXT;
+ALTER TABLE catalog_products ADD COLUMN description_en TEXT;
+
+-- 🔴 DEFAULT 0 — every existing product is OFF the website until the owner says otherwise.
+-- Opting a shop's whole catalog into publication by migration would be a decision made for them.
+ALTER TABLE catalog_products ADD COLUMN is_online_visible INTEGER NOT NULL DEFAULT 0;
+
+-- Shaped exactly like catalog_products_sku, deliberately. Two honest reasons, and one that is NOT
+-- a reason: SQLite treats NULLs as distinct in a PLAIN unique index as well (measured), so the
+-- WHERE clause is not what makes "unique when present" work. What it does is keep the index to the
+-- rows that actually have a barcode -- most of this catalog will not -- and say the intent in the
+-- schema where a reader meets it.
+CREATE UNIQUE INDEX catalog_products_barcode ON catalog_products (barcode) WHERE barcode IS NOT NULL;
+
+CREATE INDEX catalog_products_category ON catalog_products (category_id);
+CREATE INDEX catalog_products_online ON catalog_products (is_online_visible, is_active);
+
+-- ── Product images ────────────────────────────────────────────────────────────────────────────
+--
+-- 🔴 A CHILD TABLE, NOT COLUMNS ON catalog_products, and this is the one shape decision that is
+-- load-bearing rather than tidy. listProducts selects from catalog_products directly to render
+-- the products list; a BLOB column there means every list render reads every photo. Measured on
+-- the real repository: listAll() has no column list narrow enough to avoid it.
+--
+-- Bytes live in SQLite so the EXISTING backup contract already covers them — VACUUM INTO copies
+-- the database, and a photo stored beside it in the filesystem would be the frozen-logo gap again,
+-- at the scale of a whole catalog. Nothing stores the merchant's original Desktop path: the file
+-- they picked may be deleted the moment after import without affecting the product.
+--
+-- V1 SUPPORTS ONE PRIMARY IMAGE. The table admits many rows per product so a gallery needs no
+-- migration later, and is_primary with its partial UNIQUE index makes "the one current image"
+-- a fact the schema enforces rather than a convention the service remembers.
+CREATE TABLE catalog_product_images (
+  id           TEXT    PRIMARY KEY,
+  product_id   TEXT    NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+  -- The real bytes, already normalized by the application (resized and re-encoded) before arrival.
+  bytes        BLOB    NOT NULL CHECK (length(bytes) > 0),
+  mime         TEXT    NOT NULL CHECK (mime IN ('image/jpeg', 'image/png')),
+  -- SHA-256 of bytes, lower-case hex. The export contract verifies the file it writes against
+  -- this, so a silent corruption between database and website cannot pass unnoticed.
+  sha256_hex   TEXT    NOT NULL CHECK (length(sha256_hex) = 64
+                                       AND sha256_hex = lower(sha256_hex)),
+  byte_size    INTEGER NOT NULL CHECK (byte_size > 0),
+  width_px     INTEGER NOT NULL CHECK (width_px > 0),
+  height_px    INTEGER NOT NULL CHECK (height_px > 0),
+  -- 1 for the product's current image. The index below permits exactly one per product.
+  is_primary   INTEGER NOT NULL CHECK (is_primary IN (0, 1)),
+  -- How it arrived, so a support question has an answer: 'desktop' or 'phone'.
+  origin       TEXT    NOT NULL CHECK (origin IN ('desktop', 'phone')),
+  created_at   TEXT    NOT NULL,
+  updated_at   TEXT    NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX catalog_product_images_primary
+  ON catalog_product_images (product_id) WHERE is_primary = 1;
+CREATE INDEX catalog_product_images_product ON catalog_product_images (product_id);
+`,
+  },
+  {
+    version: 10,
+    name: "product_master_audit",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 10 — the durable trail learns about categories and product photos.
+    //
+    // 🔴 WHY A WHOLE MIGRATION FOR AN AUDIT VOCABULARY. Migration 9 gave the shop categories and
+    // product photos, and migration 9 could not audit them: three of audit_events' CHECKs
+    // ENUMERATE the event and entity types, so a CATEGORY_RENAMED row is refused by the database
+    // itself, not by a missing feature. Widening an enumerated CHECK in SQLite means rebuilding the
+    // table — ALTER TABLE cannot change one — and migration 9 is purely additive by assertion
+    // (migration9.test.ts asserts it contains no DROP TABLE, no INSERT INTO, and never names
+    // audit_events at all). So this is its own migration, and migrations 8 and 9 are untouched.
+    //
+    // 🔴 NOTHING ELSE IS IN HERE. No new table, no new column on any business table, no backfill.
+    // Slice D shipped the category and photo channels WITHOUT audit rows precisely so that this
+    // decision could be taken deliberately rather than smuggled into migration 9's fingerprint.
+    //
+    // THIS IS MIGRATION 8'S REBUILD, REUSED — the same table, the same reasoning, the same order:
+    //
+    //   audit_events is a LEAF table. Nothing references it, so DROP TABLE costs no dependent rows
+    //   and no deferred constraint — which is what made migration 7's rebuild expensive and makes
+    //   this one cheap.
+    //
+    //   DROP TABLE does not fire a BEFORE DELETE trigger, so the append-only trigger does not block
+    //   it. The copy is one INSERT ... SELECT * in seq order, with no expression anywhere in it:
+    //   every historical row keeps its id, its seq, its actor, its timestamps, its changed_json and
+    //   its app_version and schema_version EXACTLY. Nothing is normalised on the way through.
+    //
+    //   The triggers are recreated AFTER the copy, so audit_events_seq_monotonic does not fire once
+    //   per copied row and refuse the whole migration.
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    sql: `
+CREATE TABLE audit_events_v10 (
+  id             TEXT    PRIMARY KEY,
+  seq            INTEGER NOT NULL UNIQUE CHECK (seq > 0),
+  event_type     TEXT    NOT NULL CHECK (event_type IN
+                   ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED',
+                    'PRODUCT_DEACTIVATED', 'CATALOG_IMPORTED',
+                    'OPERATOR_CREATED', 'OPERATOR_RENAMED', 'OPERATOR_PIN_RESET',
+                    'OPERATOR_ACTIVATED', 'OPERATOR_DEACTIVATED', 'OPERATOR_ROLE_CHANGED',
+                    'CATEGORY_CREATED', 'CATEGORY_RENAMED', 'CATEGORY_ACTIVATED',
+                    'CATEGORY_DEACTIVATED', 'CATEGORY_DELETED',
+                    'PRODUCT_IMAGE_SET', 'PRODUCT_IMAGE_REPLACED', 'PRODUCT_IMAGE_REMOVED')),
+  entity_type    TEXT    NOT NULL CHECK (entity_type IN
+                   ('product', 'catalog', 'operator', 'category', 'product_image')),
+  entity_id      TEXT    NOT NULL CHECK (length(entity_id) > 0),
+  actor_id       TEXT    NOT NULL CHECK (length(actor_id) > 0),
+  actor_name     TEXT    NOT NULL CHECK (length(trim(actor_name)) > 0),
+  actor_tier     TEXT    NOT NULL CHECK (actor_tier IN
+                   ('owner', 'admin', 'cashier', 'system', 'unspecified')),
+  occurred_at    TEXT    NOT NULL CHECK (occurred_at GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date  TEXT    NOT NULL CHECK (business_date GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  changed_json   TEXT    NOT NULL CHECK (json_valid(changed_json)
+                                         AND json_type(changed_json) = 'object'),
+  metadata_json  TEXT             CHECK (metadata_json IS NULL
+                                         OR (json_valid(metadata_json)
+                                             AND json_type(metadata_json) = 'object')),
+  app_version    TEXT    NOT NULL CHECK (length(app_version) > 0),
+  schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+  -- The pairing, extended with two branches. A category event may only describe a category and a
+  -- photo event only a product's photo. The same pairing is enforced in src/domain/audit.ts; this
+  -- is the backstop no code path can talk past.
+  --
+  -- Note which entity a PRODUCT_IMAGE_* event names: the PRODUCT, not the image row. What an owner
+  -- asks months later is "what happened to this product's photo", and an image id that has since
+  -- been replaced is not something anyone can look up. The image ids travel inside changed_json.
+  CHECK (
+    (entity_type = 'product' AND event_type IN
+       ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED', 'PRODUCT_DEACTIVATED'))
+    OR (entity_type = 'catalog' AND event_type = 'CATALOG_IMPORTED')
+    OR (entity_type = 'operator' AND event_type IN
+       ('OPERATOR_CREATED', 'OPERATOR_RENAMED', 'OPERATOR_PIN_RESET',
+        'OPERATOR_ACTIVATED', 'OPERATOR_DEACTIVATED', 'OPERATOR_ROLE_CHANGED'))
+    OR (entity_type = 'category' AND event_type IN
+       ('CATEGORY_CREATED', 'CATEGORY_RENAMED', 'CATEGORY_ACTIVATED',
+        'CATEGORY_DEACTIVATED', 'CATEGORY_DELETED'))
+    OR (entity_type = 'product_image' AND event_type IN
+       ('PRODUCT_IMAGE_SET', 'PRODUCT_IMAGE_REPLACED', 'PRODUCT_IMAGE_REMOVED'))
+  )
+) STRICT;
+
+-- Byte for byte, in seq order. No expression, nothing invented, nothing dropped.
+INSERT INTO audit_events_v10 SELECT * FROM audit_events ORDER BY seq;
+
+DROP TABLE audit_events;
+ALTER TABLE audit_events_v10 RENAME TO audit_events;
+
+CREATE INDEX audit_events_entity ON audit_events (entity_type, entity_id, seq DESC);
+CREATE INDEX audit_events_type   ON audit_events (event_type, seq DESC);
+CREATE INDEX audit_events_actor  ON audit_events (actor_id, seq DESC);
+CREATE INDEX audit_events_date   ON audit_events (business_date, seq DESC);
+
+CREATE TRIGGER audit_events_immutable_update BEFORE UPDATE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: the audit trail is append-only'); END;
+CREATE TRIGGER audit_events_immutable_delete BEFORE DELETE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: audit events cannot be deleted'); END;
+CREATE TRIGGER audit_events_seq_monotonic BEFORE INSERT ON audit_events
+WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
+BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
+`,
+  },
+  {
+    version: 11,
+    name: "operator_product_create_capability",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 11 — one cashier may be allowed to create products, durably.
+    //
+    // 🔴 WHY A COLUMN AND NOT A CHECK IN CODE. The requirement is that ONE named employee may add
+    // new products while every other cashier may not. Nothing in the schema could express that:
+    // `operators` carries id, name, role and credentials, and authorization read `role` alone. The
+    // three ways to get there without a migration were each measured and each refused:
+    //
+    //   by display name   — `renameOperator` exists, so the permission would survive until someone
+    //                       corrected a spelling. A capability that a typo can revoke is not one.
+    //   by operator id    — `cashier-02` is a literal seeded by migration 8, but every operator
+    //                       created since gets a `randomUUID`. Hard-coding it would grant the
+    //                       capability to whoever happens to hold that row in any install, and
+    //                       silently deny it to the real second cashier hired next month.
+    //   by a new role     — `role` carries a CHECK constraint, so adding a value is a table
+    //                       rebuild. That is this migration either way, and it would make the
+    //                       capability a RANK rather than a permission: every future narrow grant
+    //                       would need another role, and the role would imply authority nobody
+    //                       asked to give.
+    //
+    // So it is a per-operator boolean, defaulting to 0. An existing cashier gains nothing by
+    // upgrading — the default is the refusal, and the grant is an act an owner performs on the
+    // record, not a side effect of installing a build.
+    //
+    // 🔴 THE OWNER DOES NOT USE THIS COLUMN. An owner's authority comes from `role = 'owner'` and
+    // is unchanged by anything here; the flag is read only when deciding whether a NON-owner may
+    // create. Storing it for the owner too (rather than a separate table keyed to cashiers) keeps
+    // one row per person and no join, and an owner row's value is simply never consulted.
+    //
+    // 🔴 AND THE AUDIT LEARNS THE ACT. A permission grant is exactly the kind of thing an owner
+    // needs to be able to ask about months later — "who allowed him to add products, and when" —
+    // and `audit_events.event_type` is a CHECK, so the vocabulary has to be extended for the event
+    // to be recordable at all. Reusing OPERATOR_ROLE_CHANGED was rejected: the role did not
+    // change, and an audit row that misnames what happened is worse than no row, because it will
+    // be believed. Two events, because granting and revoking are different acts and a reader
+    // should not have to open the payload to tell them apart.
+    //
+    // The rebuild follows migration 10's own pattern exactly: new table, INSERT ... SELECT * in
+    // seq order with no expression anywhere, drop, rename, then the indexes and triggers AFTER the
+    // copy so `audit_events_seq_monotonic` does not fire once per historical row and refuse the
+    // whole migration.
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    sql: `
+-- A capability, per operator, defaulting to REFUSED. Constant default, so SQLite rewrites no row.
+ALTER TABLE operators ADD COLUMN may_create_products INTEGER NOT NULL DEFAULT 0
+  CHECK (may_create_products IN (0, 1));
+
+CREATE TABLE audit_events_v11 (
+  id             TEXT    PRIMARY KEY,
+  seq            INTEGER NOT NULL UNIQUE CHECK (seq > 0),
+  event_type     TEXT    NOT NULL CHECK (event_type IN
+                   ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED',
+                    'PRODUCT_DEACTIVATED', 'CATALOG_IMPORTED',
+                    'OPERATOR_CREATED', 'OPERATOR_RENAMED', 'OPERATOR_PIN_RESET',
+                    'OPERATOR_ACTIVATED', 'OPERATOR_DEACTIVATED', 'OPERATOR_ROLE_CHANGED',
+                    'OPERATOR_PRODUCT_CREATE_GRANTED', 'OPERATOR_PRODUCT_CREATE_REVOKED',
+                    'CATEGORY_CREATED', 'CATEGORY_RENAMED', 'CATEGORY_ACTIVATED',
+                    'CATEGORY_DEACTIVATED', 'CATEGORY_DELETED',
+                    'PRODUCT_IMAGE_SET', 'PRODUCT_IMAGE_REPLACED', 'PRODUCT_IMAGE_REMOVED')),
+  entity_type    TEXT    NOT NULL CHECK (entity_type IN
+                   ('product', 'catalog', 'operator', 'category', 'product_image')),
+  entity_id      TEXT    NOT NULL CHECK (length(entity_id) > 0),
+  actor_id       TEXT    NOT NULL CHECK (length(actor_id) > 0),
+  actor_name     TEXT    NOT NULL CHECK (length(trim(actor_name)) > 0),
+  actor_tier     TEXT    NOT NULL CHECK (actor_tier IN
+                   ('owner', 'admin', 'cashier', 'system', 'unspecified')),
+  occurred_at    TEXT    NOT NULL CHECK (occurred_at GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date  TEXT    NOT NULL CHECK (business_date GLOB
+                   '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  changed_json   TEXT    NOT NULL CHECK (json_valid(changed_json)
+                                         AND json_type(changed_json) = 'object'),
+  metadata_json  TEXT             CHECK (metadata_json IS NULL
+                                         OR (json_valid(metadata_json)
+                                             AND json_type(metadata_json) = 'object')),
+  app_version    TEXT    NOT NULL CHECK (length(app_version) > 0),
+  schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+  -- The pairing, with the two new events landing on 'operator' where they belong: the thing that
+  -- changed is the PERSON's standing permission, not a product.
+  CHECK (
+    (entity_type = 'product' AND event_type IN
+       ('PRODUCT_CREATED', 'PRODUCT_UPDATED', 'PRODUCT_ACTIVATED', 'PRODUCT_DEACTIVATED'))
+    OR (entity_type = 'catalog' AND event_type = 'CATALOG_IMPORTED')
+    OR (entity_type = 'operator' AND event_type IN
+       ('OPERATOR_CREATED', 'OPERATOR_RENAMED', 'OPERATOR_PIN_RESET',
+        'OPERATOR_ACTIVATED', 'OPERATOR_DEACTIVATED', 'OPERATOR_ROLE_CHANGED',
+        'OPERATOR_PRODUCT_CREATE_GRANTED', 'OPERATOR_PRODUCT_CREATE_REVOKED'))
+    OR (entity_type = 'category' AND event_type IN
+       ('CATEGORY_CREATED', 'CATEGORY_RENAMED', 'CATEGORY_ACTIVATED',
+        'CATEGORY_DEACTIVATED', 'CATEGORY_DELETED'))
+    OR (entity_type = 'product_image' AND event_type IN
+       ('PRODUCT_IMAGE_SET', 'PRODUCT_IMAGE_REPLACED', 'PRODUCT_IMAGE_REMOVED'))
+  )
+) STRICT;
+
+-- Byte for byte, in seq order. No expression, nothing invented, nothing dropped.
+INSERT INTO audit_events_v11 SELECT * FROM audit_events ORDER BY seq;
+
+DROP TABLE audit_events;
+ALTER TABLE audit_events_v11 RENAME TO audit_events;
+
+CREATE INDEX audit_events_entity ON audit_events (entity_type, entity_id, seq DESC);
+CREATE INDEX audit_events_type   ON audit_events (event_type, seq DESC);
+CREATE INDEX audit_events_actor  ON audit_events (actor_id, seq DESC);
+CREATE INDEX audit_events_date   ON audit_events (business_date, seq DESC);
+
+CREATE TRIGGER audit_events_immutable_update BEFORE UPDATE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: the audit trail is append-only'); END;
+CREATE TRIGGER audit_events_immutable_delete BEFORE DELETE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit: audit events cannot be deleted'); END;
+CREATE TRIGGER audit_events_seq_monotonic BEFORE INSERT ON audit_events
+WHEN NEW.seq <= coalesce((SELECT max(seq) FROM audit_events), 0)
+BEGIN SELECT RAISE(ABORT, 'audit: seq must be monotonic'); END;
+`,
+  },
+  {
+    version: 12,
+    name: "party_identity",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 12 — WHO the shop owes and who owes the shop. Identity only.
+    //
+    // Purely ADDITIVE: two new tables, their indexes and their triggers. Migrations 1-11 are not
+    // touched, no existing table is rebuilt, no existing column changes, and NOTHING is
+    // synthesized — a migrated ledger has zero parties and zero contact history, which is the
+    // honest state of a shop that has not named a customer yet.
+    //
+    // 🔴 IDENTITY, AND DELIBERATELY NOT ACCOUNTING. There is no balance column, no currency, no
+    // opening figure and no total anywhere below, and that is the point rather than an omission. A
+    // stored balance is a second source of truth that drifts away from the rows it summarizes; the
+    // approved design derives every balance from auditable postings, and those postings
+    // (obligations, settlements, adjustments) are a LATER slice with their own authorization. A
+    // directory that quietly grew a `balance_minor` column would have pre-decided that design.
+    //
+    // 🔴 TWO KINDS IN ONE TABLE, AND A MERCHANT MAY BE BOTH — AS TWO ROWS. `kind` is on the row,
+    // not on a flag, so a hardware shop that both buys from and sells to the same trader holds two
+    // parties with two ids. Receivables and payables therefore cannot be mixed by accident: a
+    // future obligation names one party id, and that id already carries its side of the ledger.
+    // One row with two roles would have made "what does he owe me" ambiguous forever.
+    //
+    // 🔴 THE NAME IS NOT UNIQUE, AND THIS DIVERGES FROM `catalog_categories` ON PURPOSE. Category
+    // names are unique because two categories called "دهان" are a data-entry mistake. Two
+    // CUSTOMERS called "محمد علي" are two real people, and a UNIQUE index would refuse the second
+    // one — forcing the operator to invent "محمد علي 2" or, worse, to reuse the first person's
+    // account and mix two strangers' debts. So the index below is a plain lookup index, and the
+    // service SURFACES an existing same-name account as information. Nothing merges, ever, and
+    // nothing is refused for sharing a name.
+    //
+    // 🔴 DELETION IS FORBIDDEN BY TRIGGER, archiving is `is_active`. Once a later slice links an
+    // obligation to a party, deleting the party would orphan a financial record; and even before
+    // that, an operator who typed a real person's name created a record of a real relationship.
+    // `catalog_categories` permits deletion while unused and that is right for a label; a party is
+    // not a label. Archive hides it from pickers and keeps it resolvable.
+    //
+    // 🔴 WHY `party_contact_history` AND NOT `audit_events`. Correcting a phone number must not
+    // rewrite history, so the change needs a durable record. `audit_events` is the natural home —
+    // and it cannot take one: its `event_type` and `entity_type` are CLOSED CHECK lists
+    // (migration 11), so admitting a party event means REBUILDING the audit table. That is a
+    // table rebuild of the audit trail, far outside an identity slice, so it is NOT done here.
+    // This table is a purpose-built, append-only history for the four editable fields, and wiring
+    // party events into `audit_events` stays an explicit follow-up with its own authorization.
+    // Recorded rather than quietly worked around.
+    //
+    // WHAT IS DELIBERATELY ABSENT: balances, currency, credit limits, obligations, settlements,
+    // opening balances, supplier bills, invoice links, captured images, tax identifiers,
+    // account merging, and any notion of a payment. Each is a later approved slice or an
+    // unapproved one, and each would need its own tables rather than a column here.
+    sql: `
+-- ── Parties: customers and suppliers, by durable id ───────────────────────────────────────────
+CREATE TABLE parties (
+  id            TEXT    PRIMARY KEY,
+  -- 'customer' owes the shop; 'supplier' is owed by the shop. One row is one side.
+  kind          TEXT    NOT NULL CHECK (kind IN ('customer', 'supplier')),
+  -- The only required field. A party with no name cannot be found again, so it is not a party.
+  display_name  TEXT    NOT NULL CHECK (length(trim(display_name)) > 0),
+  -- Optional, and NULL means "not given" rather than empty. A blank string is refused so the two
+  -- cannot both mean absent — the same rule 'catalog_categories.name_en' already follows.
+  phone         TEXT             CHECK (phone IS NULL OR length(trim(phone)) > 0),
+  address       TEXT             CHECK (address IS NULL OR length(trim(address)) > 0),
+  note          TEXT             CHECK (note IS NULL OR length(trim(note)) > 0),
+  -- Archived, never deleted. The DELETE trigger below enforces that.
+  is_active     INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+  -- Attribution without the audit table: who first named this party.
+  created_by    TEXT    NOT NULL REFERENCES operators(id),
+  created_at    TEXT    NOT NULL,
+  updated_at    TEXT    NOT NULL
+) STRICT;
+
+-- 🔴 A LOOKUP INDEX, NOT A UNIQUE ONE. See the note above: two customers may share a name.
+-- Case- and whitespace-insensitive so a search for " Ahmad " finds "ahmad".
+CREATE INDEX parties_kind_name ON parties (kind, lower(trim(display_name)));
+-- Finding an account by the number the merchant remembers. Also not unique: a household may share
+-- one phone, and two of its members are still two accounts.
+CREATE INDEX parties_kind_phone ON parties (kind, phone) WHERE phone IS NOT NULL;
+-- The picker's own order: one kind, active first.
+CREATE INDEX parties_kind_active ON parties (kind, is_active, id);
+
+CREATE TRIGGER parties_no_delete BEFORE DELETE ON parties
+BEGIN SELECT RAISE(ABORT, 'parties: an account is archived, never deleted'); END;
+
+-- 🔴 A PARTY'S KIND IS FIXED FOR LIFE. Flipping a customer into a supplier would silently move
+-- every obligation a later slice attached to it onto the wrong side of the ledger. A trader who
+-- becomes both gets a second row.
+CREATE TRIGGER parties_kind_immutable BEFORE UPDATE OF kind ON parties
+WHEN NEW.kind <> OLD.kind
+BEGIN SELECT RAISE(ABORT, 'parties: kind cannot change; create the other account'); END;
+
+-- ── Contact history: an edit is a ROW, not an overwrite ───────────────────────────────────────
+CREATE TABLE party_contact_history (
+  id          TEXT    PRIMARY KEY,
+  party_id    TEXT    NOT NULL REFERENCES parties(id),
+  field       TEXT    NOT NULL CHECK (field IN ('display_name', 'phone', 'address', 'note')),
+  -- Either may be NULL: NULL -> value is filling a blank, value -> NULL is clearing one.
+  old_value   TEXT,
+  new_value   TEXT,
+  changed_by  TEXT    NOT NULL REFERENCES operators(id),
+  changed_at  TEXT    NOT NULL,
+  -- A write that changed nothing is not history. 'IS NOT' so the NULL cases are compared too.
+  CHECK (old_value IS NOT new_value)
+) STRICT;
+
+CREATE INDEX party_contact_history_party ON party_contact_history (party_id, changed_at);
+
+CREATE TRIGGER party_contact_history_immutable_update BEFORE UPDATE ON party_contact_history
+BEGIN SELECT RAISE(ABORT, 'parties: contact history is append-only'); END;
+CREATE TRIGGER party_contact_history_immutable_delete BEFORE DELETE ON party_contact_history
+BEGIN SELECT RAISE(ABORT, 'parties: contact history cannot be deleted'); END;
+`,
+  },
+  {
+    version: 13,
+    name: "obligations_and_settlements",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 13 — WHAT is owed, and WHAT has actually been paid against it.
+    //
+    // Purely ADDITIVE: two new tables, one unique index on an existing table, their own indexes and
+    // their triggers. Migrations 1-12 are not touched, no existing table is rebuilt, no existing
+    // column changes, and nothing in `sales`, `sale_lines`, `invoices` or `voids` is read, written
+    // or re-interpreted by anything here.
+    //
+    // 🔴 THIS IS THE SCHEMA MIGRATION 7 PROMISED. Its own comment said: "no accounts receivable,
+    // no credit note. `sales` stays immutable by trigger, so a balance recorded here can never be
+    // 'collected' later by an UPDATE — collecting payment is a future feature with its own schema,
+    // not a side effect of this one." This is that schema. `sales.paid_minor` and
+    // `sales.balance_due_minor` remain exactly what migration 7 called them: truthful fields ON
+    // THE DOCUMENT describing the moment of sale. Nothing here updates them, ever.
+    //
+    // ── THE DOUBLE-POSTING QUESTION, ANSWERED STRUCTURALLY ──────────────────────────────────────
+    //
+    // A finalized invoice and its sale must never produce two obligations for the same money. They
+    // cannot, and not because a service remembers to check:
+    //
+    //   1. `sales.invoice_id` has been UNIQUE since migration 7, so an invoice has AT MOST ONE
+    //      sale. A second sale for one invoice is already impossible at the database level.
+    //   2. An obligation names its source as (source_kind, source_ref), and that pair is UNIQUE
+    //      here. For a sale-sourced obligation `source_ref` IS the sale id, enforced by CHECK.
+    //
+    // So the chain invoice -> sale -> obligation is 1:1:1 the whole way down. The obligation is
+    // keyed to the SALE and never to the invoice, which is also why a DRAFT invoice cannot create
+    // a debt: a draft has no sale, so it has nothing to be keyed to. Selecting a customer at the
+    // till creates no row here either — there is no sale yet, and S1B writes nothing financial.
+    //
+    // ── CURRENCY: SEPARATED, NEVER CONVERTED ────────────────────────────────────────────────────
+    //
+    // `src/domain/money.ts` has refused to add or subtract across currencies since migration 1
+    // (`MIXED_CURRENCY`), and no exchange rate exists anywhere in this product. That refusal is
+    // carried into the ledger STRUCTURALLY rather than restated in a service: `obligations` is
+    // UNIQUE (id, currency) and `settlements` names a composite foreign key (obligation_id,
+    // currency) against it. A settlement in a different currency from its obligation cannot be
+    // inserted at all. A balance is therefore always a balance IN ONE CURRENCY, and a party who
+    // owes both USD and LBP has two obligations and two balances — never one blended number.
+    // Nothing here decides an exchange-rate policy, because nothing here needs one.
+    //
+    // ── THE BALANCE IS CALCULATED, NOT STORED ───────────────────────────────────────────────────
+    //
+    // There is deliberately NO `balance_minor`, no `paid_minor` and no `status` column on
+    // `obligations`. The outstanding amount is `amount_minor - sum(settlements.amount_minor)` and
+    // is computed on read. A stored balance is a second authoritative copy of the truth, and the
+    // first time it disagreed with the settlement rows nobody could say which was right. The cost
+    // is a SUM over a small, indexed set; the benefit is that the arithmetic cannot drift.
+    //
+    // ── WHAT IS DELIBERATELY ABSENT ─────────────────────────────────────────────────────────────
+    //
+    // No reversals, no adjustments, no credit notes, no write-offs, no opening balances, no credit
+    // limits, no ageing buckets, no interest, no `whish` payment method, and no link from a live
+    // POS checkout. Each is a real decision with its own authorization, and a column added "while
+    // we are here" would pre-decide it. `settlements.method` reuses migration 1's four values
+    // unchanged — `cash`, `card`, `external`, `other` — so no historical payment value is
+    // reinterpreted and no new tender is smuggled in.
+    sql: `
+-- ── the composite key the ledger hangs on ─────────────────────────────────────────────────────
+-- parties.id is already the PRIMARY KEY, so this index adds no new uniqueness; what it adds is a
+-- PARENT KEY that a composite foreign key can name. It is what makes "a payable always points at
+-- a supplier" a database guarantee instead of a service convention. Additive: an index on an
+-- existing table changes no row and no column.
+CREATE UNIQUE INDEX parties_id_kind ON parties (id, kind);
+
+-- ── obligations ───────────────────────────────────────────────────────────────────────────────
+CREATE TABLE obligations (
+  id            TEXT    PRIMARY KEY,
+  party_id      TEXT    NOT NULL,
+  -- Denormalised ONLY so the composite foreign key below can exist. It is not a second source of
+  -- truth: the FK makes it impossible for this to disagree with parties.kind.
+  party_kind    TEXT    NOT NULL CHECK (party_kind IN ('customer', 'supplier')),
+  -- Which way the money flows. 'receivable' = the customer owes the shop; 'payable' = the shop
+  -- owes the supplier. Never inferred from the sign of an amount: every amount here is positive.
+  direction     TEXT    NOT NULL CHECK (direction IN ('receivable', 'payable')),
+  -- WHERE the debt came from. 'sale' is a completed sale in this ledger and carries a real foreign
+  -- key. 'manual' is a debt the owner entered from a document that lives outside this app (a
+  -- supplier's paper bill), and its source_ref is that document's own reference.
+  source_kind   TEXT    NOT NULL CHECK (source_kind IN ('sale', 'manual')),
+  source_ref    TEXT    NOT NULL CHECK (length(trim(source_ref)) > 0),
+  sale_id       TEXT    REFERENCES sales (id),
+  currency      TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  -- STRICTLY POSITIVE. A zero obligation is not a debt and a negative one is a reversal, which is
+  -- a separate, unbuilt feature. The upper bound is migration 4's MAX_MINOR, unchanged.
+  amount_minor  INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  posted_by     TEXT    NOT NULL REFERENCES operators (id),
+  posted_at     TEXT    NOT NULL CHECK (posted_at GLOB
+                  '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  -- 🔴 A PAYABLE CAN NEVER POINT AT A CUSTOMER, AND A RECEIVABLE CAN NEVER POINT AT A SUPPLIER.
+  FOREIGN KEY (party_id, party_kind) REFERENCES parties (id, kind),
+  CHECK ((direction = 'receivable' AND party_kind = 'customer')
+      OR (direction = 'payable'    AND party_kind = 'supplier')),
+  -- 🔴 NO DOUBLE POSTING. One source, one obligation, forever.
+  UNIQUE (source_kind, source_ref),
+  -- The sale link exists exactly when the source is a sale, in both directions, and the source
+  -- reference IS the sale id rather than a copy that could drift from it.
+  CHECK ((source_kind = 'sale'   AND sale_id IS NOT NULL AND source_ref = sale_id)
+      OR (source_kind = 'manual' AND sale_id IS NULL)),
+  -- The parent key for settlements.currency. See the currency note above.
+  UNIQUE (id, currency)
+) STRICT;
+
+CREATE INDEX obligations_party     ON obligations (party_id, posted_at);
+CREATE INDEX obligations_direction ON obligations (direction, currency, posted_at);
+
+CREATE TRIGGER obligations_immutable_update BEFORE UPDATE ON obligations
+BEGIN SELECT RAISE(ABORT, 'ledger: a posted obligation is immutable'); END;
+CREATE TRIGGER obligations_immutable_delete BEFORE DELETE ON obligations
+BEGIN SELECT RAISE(ABORT, 'ledger: a posted obligation cannot be deleted'); END;
+
+-- ── settlements ───────────────────────────────────────────────────────────────────────────────
+CREATE TABLE settlements (
+  id                  TEXT    PRIMARY KEY,
+  obligation_id       TEXT    NOT NULL,
+  -- Carried so the composite foreign key can pin it to the obligation's own currency.
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  -- 🔴 RETRY SAFETY, the same two-part shape migration 7 uses for sales. The key makes a repeat
+  -- submission recognisable BEFORE it is attempted; the fingerprint makes a key reused for
+  -- DIFFERENT money a loud refusal instead of a silent second payment.
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  amount_minor        INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  -- Migration 1's four values, unchanged. No 'whish', no 'credit' — 'credit' is a STATE, never a
+  -- method, exactly as migration 7 wrote it.
+  method              TEXT    NOT NULL CHECK (method IN ('cash', 'card', 'external', 'other')),
+  settled_by          TEXT    NOT NULL REFERENCES operators (id),
+  settled_at          TEXT    NOT NULL CHECK (settled_at GLOB
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  -- 🔴 ONE CURRENCY, STRUCTURALLY. A settlement in another currency cannot be inserted.
+  FOREIGN KEY (obligation_id, currency) REFERENCES obligations (id, currency)
+) STRICT;
+
+CREATE INDEX settlements_obligation ON settlements (obligation_id, settled_at);
+
+-- 🔴 OVERPAYMENT IS REFUSED BY THE DATABASE, not only by the service. A SUM cannot live in a CHECK
+-- constraint, so this is the one rule that has to be a trigger. It fires on the row being inserted,
+-- inside the same transaction, so a concurrent second payment cannot slip past a service-side read.
+CREATE TRIGGER settlements_no_overpayment BEFORE INSERT ON settlements
+WHEN NEW.amount_minor
+     + coalesce((SELECT sum(amount_minor) FROM settlements WHERE obligation_id = NEW.obligation_id), 0)
+     > (SELECT amount_minor FROM obligations WHERE id = NEW.obligation_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a settlement cannot exceed what is owed'); END;
+
+CREATE TRIGGER settlements_immutable_update BEFORE UPDATE ON settlements
+BEGIN SELECT RAISE(ABORT, 'ledger: a recorded settlement is immutable'); END;
+CREATE TRIGGER settlements_immutable_delete BEFORE DELETE ON settlements
+BEGIN SELECT RAISE(ABORT, 'ledger: a recorded settlement cannot be deleted'); END;
+`,
+  },
+  {
+    version: 14,
+    name: "credit_sale_identity_and_unpaid_state",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 14 — make a future, fully unpaid POS sale representable without recording a tender.
+    //
+    // This is schema-only. It creates no obligations and adds no checkout or payment path.
+    //
+    // SALES HAS FOUR LIVE CHILD-REFERENCE PATHS. `sale_lines.sale_id`, `voids.sale_id`, and
+    // `obligations.sale_id` all reference `sales`; settlements then reference obligations. Migration
+    // 7's three-table rebuild is not copied here. This migration was exercised on populated child
+    // rows with the real runner, foreign_keys=ON, SQLite 3.53.4, and `BEGIN IMMEDIATE`.
+    //
+    // The swap relies on the exact same-name order below: defer FK checks for this transaction;
+    // remove only the three sale-line triggers that read `sales`; copy sales to a staging table;
+    // drop `sales`; create the replacement directly under the original name; copy its rows back;
+    // drop staging; then restore indexes and all affected triggers. Never rename the old parent or
+    // rename staging over `sales`: SQLite can rewrite surviving child FK targets during renames.
+    //
+    // `parties_id_kind` was created by migration 13 and is the actual UNIQUE parent key for the
+    // generated child key below. The generated constant is not a CHECK pretending to validate
+    // party kind: the composite FK enforces it. New credit rows additionally require an active
+    // customer and a name snapshot equal to that party's current name.
+    //
+    // A v13-legal POS row with `payment_status='unpaid'` and a non-NULL method is contradictory,
+    // but historical. Preserve it unchanged during the copy. The replacement CHECK continues to
+    // accept it; a prospective INSERT trigger refuses creating another such row. The only new
+    // `payment_method IS NULL` POS representation is a fully unpaid sale with a durable customer.
+    sql: `
+PRAGMA defer_foreign_keys = ON;
+
+DROP TRIGGER sale_lines_closed_sale;
+DROP TRIGGER sale_lines_pos_shape;
+DROP TRIGGER sale_lines_invoice_shape;
+
+CREATE TABLE sales_m14 (
+  id                  TEXT    PRIMARY KEY,
+  receipt_number      INTEGER NOT NULL UNIQUE CHECK (receipt_number > 0),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL,
+  source_type         TEXT    NOT NULL CHECK (source_type IN ('pos', 'invoice')),
+  invoice_id          TEXT    UNIQUE REFERENCES invoices (id),
+  cashier_id          TEXT    NOT NULL,
+  cashier_name        TEXT    NOT NULL,
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  subtotal_minor      INTEGER NOT NULL CHECK (subtotal_minor >= 0),
+  tax_minor           INTEGER NOT NULL CHECK (tax_minor >= 0),
+  total_minor         INTEGER NOT NULL CHECK (total_minor >= 0),
+  paid_minor          INTEGER NOT NULL CHECK (paid_minor >= 0),
+  balance_due_minor   INTEGER NOT NULL CHECK (balance_due_minor >= 0),
+  payment_status      TEXT    NOT NULL CHECK (payment_status IN ('paid', 'partial', 'unpaid')),
+  payment_method      TEXT    CHECK (payment_method IS NULL
+                                     OR payment_method IN ('cash', 'card', 'external', 'other')),
+  line_count          INTEGER NOT NULL CHECK (line_count > 0),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  completed_at        TEXT    NOT NULL,
+  created_at          TEXT    NOT NULL,
+  customer_id         TEXT,
+  customer_name_snapshot TEXT
+      CHECK (customer_name_snapshot IS NULL OR length(trim(customer_name_snapshot)) > 0),
+  customer_kind       TEXT    GENERATED ALWAYS AS ('customer') STORED,
+  CHECK (total_minor = subtotal_minor + tax_minor),
+  CHECK (paid_minor + balance_due_minor = total_minor),
+  CHECK (
+    (payment_status = 'paid'    AND balance_due_minor = 0)
+    OR (payment_status = 'unpaid'  AND paid_minor = 0 AND balance_due_minor > 0)
+    OR (payment_status = 'partial' AND paid_minor > 0 AND balance_due_minor > 0)
+  ),
+  CHECK (source_type = 'invoice' OR payment_method IS NOT NULL
+      OR (payment_status = 'unpaid' AND paid_minor = 0
+          AND balance_due_minor = total_minor AND customer_id IS NOT NULL
+          AND customer_name_snapshot IS NOT NULL)),
+  CHECK ((source_type = 'invoice' AND invoice_id IS NOT NULL)
+      OR (source_type = 'pos' AND invoice_id IS NULL)),
+  CHECK ((customer_id IS NULL AND customer_name_snapshot IS NULL)
+      OR (source_type = 'pos' AND customer_id IS NOT NULL
+          AND customer_name_snapshot IS NOT NULL)),
+  FOREIGN KEY (customer_id, customer_kind) REFERENCES parties (id, kind)
+) STRICT;
+
+INSERT INTO sales_m14 (
+  id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+  cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+  balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+  created_at, customer_id, customer_name_snapshot
+)
+SELECT
+  id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+  cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+  balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+  created_at, NULL, NULL
+FROM sales;
+
+DROP TABLE sales;
+
+CREATE TABLE sales (
+  id                  TEXT    PRIMARY KEY,
+  receipt_number      INTEGER NOT NULL UNIQUE CHECK (receipt_number > 0),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL,
+  source_type         TEXT    NOT NULL CHECK (source_type IN ('pos', 'invoice')),
+  invoice_id          TEXT    UNIQUE REFERENCES invoices (id),
+  cashier_id          TEXT    NOT NULL,
+  cashier_name        TEXT    NOT NULL,
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  subtotal_minor      INTEGER NOT NULL CHECK (subtotal_minor >= 0),
+  tax_minor           INTEGER NOT NULL CHECK (tax_minor >= 0),
+  total_minor         INTEGER NOT NULL CHECK (total_minor >= 0),
+  paid_minor          INTEGER NOT NULL CHECK (paid_minor >= 0),
+  balance_due_minor   INTEGER NOT NULL CHECK (balance_due_minor >= 0),
+  payment_status      TEXT    NOT NULL CHECK (payment_status IN ('paid', 'partial', 'unpaid')),
+  payment_method      TEXT    CHECK (payment_method IS NULL
+                                     OR payment_method IN ('cash', 'card', 'external', 'other')),
+  line_count          INTEGER NOT NULL CHECK (line_count > 0),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  completed_at        TEXT    NOT NULL,
+  created_at          TEXT    NOT NULL,
+  customer_id         TEXT,
+  customer_name_snapshot TEXT
+      CHECK (customer_name_snapshot IS NULL OR length(trim(customer_name_snapshot)) > 0),
+  customer_kind       TEXT    GENERATED ALWAYS AS ('customer') STORED,
+  CHECK (total_minor = subtotal_minor + tax_minor),
+  CHECK (paid_minor + balance_due_minor = total_minor),
+  CHECK (
+    (payment_status = 'paid'    AND balance_due_minor = 0)
+    OR (payment_status = 'unpaid'  AND paid_minor = 0 AND balance_due_minor > 0)
+    OR (payment_status = 'partial' AND paid_minor > 0 AND balance_due_minor > 0)
+  ),
+  CHECK (source_type = 'invoice' OR payment_method IS NOT NULL
+      OR (payment_status = 'unpaid' AND paid_minor = 0
+          AND balance_due_minor = total_minor AND customer_id IS NOT NULL
+          AND customer_name_snapshot IS NOT NULL)),
+  CHECK ((source_type = 'invoice' AND invoice_id IS NOT NULL)
+      OR (source_type = 'pos' AND invoice_id IS NULL)),
+  CHECK ((customer_id IS NULL AND customer_name_snapshot IS NULL)
+      OR (source_type = 'pos' AND customer_id IS NOT NULL
+          AND customer_name_snapshot IS NOT NULL)),
+  FOREIGN KEY (customer_id, customer_kind) REFERENCES parties (id, kind)
+) STRICT;
+
+INSERT INTO sales (
+  id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+  cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+  balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+  created_at, customer_id, customer_name_snapshot
+)
+SELECT
+  id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+  cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+  balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+  created_at, customer_id, customer_name_snapshot
+FROM sales_m14;
+
+DROP TABLE sales_m14;
+
+CREATE INDEX sales_business_date ON sales (business_date);
+CREATE INDEX sales_source_type ON sales (source_type, completed_at DESC);
+
+CREATE TRIGGER sales_immutable_update BEFORE UPDATE ON sales
+BEGIN SELECT RAISE(ABORT, 'ledger: completed sales are immutable'); END;
+CREATE TRIGGER sales_immutable_delete BEFORE DELETE ON sales
+BEGIN SELECT RAISE(ABORT, 'ledger: completed sales cannot be deleted'); END;
+
+CREATE TRIGGER sale_lines_closed_sale BEFORE INSERT ON sale_lines
+WHEN (SELECT count(*) FROM sale_lines WHERE sale_id = NEW.sale_id)
+     >= (SELECT line_count FROM sales WHERE id = NEW.sale_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: sale already holds all of its lines'); END;
+
+CREATE TRIGGER sale_lines_pos_shape BEFORE INSERT ON sale_lines
+WHEN (SELECT source_type FROM sales WHERE id = NEW.sale_id) = 'pos'
+ AND (NEW.product_id IS NULL
+      OR NEW.sku IS NULL
+      OR NEW.sale_unit IS NULL
+      OR NEW.invoice_line_id IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'ledger: a POS sale line requires its product, sku and unit'); END;
+
+CREATE TRIGGER sale_lines_invoice_shape BEFORE INSERT ON sale_lines
+WHEN (SELECT source_type FROM sales WHERE id = NEW.sale_id) = 'invoice'
+ AND (NEW.invoice_line_id IS NULL OR length(trim(NEW.product_name)) = 0)
+BEGIN SELECT RAISE(ABORT, 'ledger: an invoice-origin sale line must name its invoice line and description'); END;
+
+CREATE TRIGGER sales_pos_unpaid_requires_no_tender BEFORE INSERT ON sales
+WHEN NEW.source_type = 'pos' AND NEW.payment_status = 'unpaid'
+ AND NEW.payment_method IS NOT NULL AND NEW.paid_minor = 0
+ AND NEW.balance_due_minor = NEW.total_minor
+ AND NEW.total_minor = NEW.subtotal_minor + NEW.tax_minor
+BEGIN SELECT RAISE(ABORT, 'ledger: an unpaid POS sale cannot record a tender'); END;
+
+CREATE TRIGGER sales_credit_requires_active_customer BEFORE INSERT ON sales
+WHEN NEW.source_type = 'pos' AND NEW.payment_status = 'unpaid'
+ AND NEW.payment_method IS NULL AND NEW.paid_minor = 0
+ AND NEW.balance_due_minor = NEW.total_minor
+ AND NEW.total_minor = NEW.subtotal_minor + NEW.tax_minor
+ AND NOT EXISTS (
+   SELECT 1 FROM parties
+   WHERE id = NEW.customer_id AND kind = 'customer' AND is_active = 1
+     AND display_name = NEW.customer_name_snapshot
+ )
+BEGIN SELECT RAISE(ABORT, 'ledger: a credit sale requires its active customer snapshot'); END;
+
+CREATE TRIGGER obligations_sale_customer_match BEFORE INSERT ON obligations
+WHEN NEW.source_kind = 'sale'
+ AND EXISTS (
+   SELECT 1 FROM sales AS s
+   WHERE s.id = NEW.sale_id AND s.source_type = 'pos' AND s.customer_id IS NOT NULL
+     AND (s.customer_id <> NEW.party_id OR s.currency <> NEW.currency
+          OR s.balance_due_minor <> NEW.amount_minor
+          OR NEW.direction <> 'receivable' OR NEW.party_kind <> 'customer')
+ )
+BEGIN SELECT RAISE(ABORT, 'ledger: sale obligation does not match sale identity or balance'); END;
+`,
+  },
+  {
+    version: 15,
+    name: "invoice_line_batch_identity",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 15 — a durable identity for one batch of invoice-draft lines.
+    //
+    // `addInvoiceLines` used to have none. A batch that COMMITTED and then lost its response left a
+    // sheet that still held its rows as unsaved, and sending them again inserted them twice. The
+    // service cannot tell a repeat from a new batch by CONTENT — two identical lines are a
+    // legitimate invoice — so the caller now names the batch and the ledger remembers the name.
+    //
+    // One row per batch, written in the SAME transaction as the lines it covers, so a batch marker
+    // never exists without its lines and lines never exist without their marker. It records WHO/WHAT
+    // the batch was (key + sha256 fingerprint of the invoice id and the exact ordered payload) and
+    // how many lines it wrote; it does NOT reference individual lines. That is deliberate: a line
+    // may later be edited or removed, and a replay must report the batch as already recorded, never
+    // recreate what the operator deleted.
+    //
+    // Additive only. No existing table, trigger or row is touched, so every finalized invoice,
+    // number, total and historical line is unchanged. The marker survives finalization (it is
+    // history) and is removed only with its draft, by InvoiceRepository.deleteDraft.
+    sql: `
+CREATE TABLE invoice_line_batches (
+  id                  TEXT    PRIMARY KEY,
+  invoice_id          TEXT    NOT NULL REFERENCES invoices (id),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) = 64 AND request_fingerprint NOT GLOB '*[^0-9a-f]*'),
+  line_count          INTEGER NOT NULL CHECK (line_count > 0),
+  created_at          TEXT    NOT NULL
+);
+
+CREATE INDEX invoice_line_batches_invoice_id ON invoice_line_batches (invoice_id);
+
+CREATE TRIGGER invoice_line_batches_immutable BEFORE UPDATE ON invoice_line_batches
+BEGIN SELECT RAISE(ABORT, 'invoice: a line batch record is immutable'); END;
+
+CREATE TRIGGER invoice_line_batches_draft_only BEFORE INSERT ON invoice_line_batches
+WHEN (SELECT status FROM invoices WHERE id = NEW.invoice_id) IS NOT 'draft'
+BEGIN SELECT RAISE(ABORT, 'invoice: a line batch can only be recorded on a draft'); END;
+`,
+  },
 ];

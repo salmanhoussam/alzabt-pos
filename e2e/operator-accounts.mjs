@@ -429,6 +429,18 @@ for (const [channel, payload] of [
   // at all, which threw inside the PRELOAD and never reached the main process to be refused.)
   ["listReconciliationQueue", { filter: "unresolved", limit: 10 }],
   ["createProduct", { draft: { nameAr: "صنف مزيّف", nameEn: null, sku: null, price: "1.00", baseUnit: "piece" } }],
+  // 🔴 SLICE H1/H2 — THE PHONE LAN BRIDGE. These are added to THIS loop rather than given their own
+  // because this is the one place the "a cashier cannot reach an owner channel" claim is made
+  // against the installed app, and a second copy elsewhere would drift.
+  //
+  // `startPhoneSession` is the one that matters most: without its guard a cashier could open an
+  // inbound network surface on the shop's till. The payload is a shape the handler ACCEPTS
+  // (`action` is enumerated and `NEW_PRODUCT` is valid, with no productId, which is the legal
+  // combination) so that deleting the guard makes this line go green for the right reason rather
+  // than tripping payload validation and looking refused either way.
+  ["startPhoneSession", { action: "NEW_PRODUCT" }],
+  ["cancelPhoneSession", null],
+  ["phoneSessionState", null],
 ]) {
   const r = await direct(page, channel, payload);
   assert(r.ok === false, `a cashier calling window.pos.${channel} directly is REFUSED`);

@@ -18,6 +18,23 @@ function setup() {
   return { ...h, ipc: syncHandlers(createIpcHandlers(h.service)) };
 }
 
+/**
+ * The same harness with a real operator-language setting.
+ *
+ * 🔴 `setup()` passes NO settings, and that is now load-bearing rather than incidental: with no
+ * settings the handlers fall back to `DEFAULT_TERMINAL_LANGUAGE`, which is Arabic — the product's
+ * real default. So the unexpected-error assertions in `setup()`-based tests are Arabic on purpose,
+ * and this helper is how the English half is proven.
+ */
+function setupIn(lang: "ar" | "en") {
+  const h = makeHarness(t.dbPath, { login: false });
+  const settings = {
+    get: () => ({ terminalLanguage: lang, receiptLanguage: lang }) as const,
+    setTerminalLanguage: () => ({ terminalLanguage: lang, receiptLanguage: lang }) as const,
+  };
+  return { ...h, ipc: syncHandlers(createIpcHandlers(h.service, { settings })) };
+}
+
 function errCode(r: IpcResult<unknown>): string {
   if (r.ok) throw new Error(`expected failure, got ${JSON.stringify(r)}`);
   return r.error.code;
@@ -34,7 +51,26 @@ describe("IPC surface", () => {
   // The surface grew from THIRTEEN channels to NINETEEN when offline product management landed:
   // listProducts, createProduct, updateProduct, setProductActive, getSettings, setTerminalLanguage.
   // It then grew from NINETEEN to FORTY-FOUR with manual invoices (migration 6) — the twenty-five
-  // channels listed below the blank line.
+  // channels listed below the blank line. Operator accounts (migration 8) took it to FIFTY-THREE.
+  //
+  // 🔴 TRANSITION — FIFTY-THREE to SIXTY-THREE with Product Master (migration 9). The ten added:
+  // listCategories, listBrands, createCategory, renameCategory, setCategoryActive, deleteCategory,
+  // getProductImageMeta, getProductImageBytes, setProductImage, removeProductImage.
+  //
+  // 🔴 TRANSITION — SIXTY-FOUR to SIXTY-SIX with the phone LAN bridge (slice H1). The two added:
+  // startPhoneSession, cancelPhoneSession. The old value was 64 and is named rather than replaced.
+  //
+  // 🔴 AND WHAT IS STILL ABSENT IS AGAIN THE POINT. H1 opens this product's first inbound network
+  // surface, and the obvious channels to add — one that returns the session TOKEN, one that lets
+  // the renderer choose a port or an address, one that proxies a request from the phone to a named
+  // service method — are NOT here. `startPhoneSession` names an action; main owns the token, the
+  // port, the address and the socket, and the phone's own surface answers exactly one route.
+  //
+  // 🔴 AND WHAT IS STILL ABSENT IS THE POINT OF THE TRANSITION. Product Master stores PHOTOS, and
+  // the obvious channel to add — one that takes image bytes from the renderer — is NOT here.
+  // `setProductImage` names a product and nothing else; main runs the picker, reads the file and
+  // normalizes it, exactly as `pickInvoiceLogo` does. So the rule below still holds unbroken: no
+  // channel accepts a filesystem path, and none accepts a blob.
   //
   // The old values are named here on purpose — this assertion is the record of what the renderer
   // may ask for, so every addition has to be written down, and the shape rule below still holds:
@@ -45,22 +81,44 @@ describe("IPC surface", () => {
   it("exposes only the fixed business channels — no SQL, query, file or generic invoke", () => {
     expect(CHANNEL_NAMES.sort()).toEqual(
       [
+        // 🔴 S1B adds five CUSTOMER channels and no supplier one. Listed here by name, with every
+        // earlier entry untouched, because this list failing on each addition is what proves no
+        // channel was added without a reviewer seeing it.
+        "createCustomer",
+        "getCustomer",
+        "searchCustomers",
+        "setCustomerActive",
+        "updateCustomerContact",
+        // 🔴 S3B adds exactly ONE, and it is a READ. There is still no channel here that posts an
+        // obligation, records a settlement or sets a balance — the renderer cannot write money at
+        // all, which is why this list is the right place to notice if that ever changes.
+        "getCustomerStatement",
+        "recordCustomerPayment",
+        "createCategory",
         "createSale",
         "currentCashier",
         "exportBackup",
         "exportCatalog",
+        // Slice G3. An OWNER channel; it names no path in either direction.
+        "exportOnlineCatalog",
         "getAppInfo",
         "getCatalog",
         "getSaleHistory",
+        "getProductImageBytes",
+        "getProductImageMeta",
         "getSettings",
         "getTodaySales",
         "importCatalog",
+        "listBrands",
         "listCashiers",
+        "listCategories",
         "listProducts",
         "login",
         "logout",
         "createProduct",
+        "setCategoryActive",
         "setProductActive",
+        "setProductImage",
         "setTerminalLanguage",
         "updateProduct",
         "voidSale",
@@ -83,12 +141,16 @@ describe("IPC surface", () => {
         "completeBootstrapSetup",
         "createOperator",
         "listOperators",
+        "renameCategory",
         "renameOperator",
         "resetOperatorPin",
         "setOperatorActive",
+        "setOperatorMayCreateProducts",
         "setOperatorRole",
         "updateInvoiceLine",
         "removeInvoiceLine",
+        "removeProductImage",
+        "deleteCategory",
         "discardInvoiceDraft",
         "finalizeInvoice",
         "listInvoices",
@@ -106,9 +168,31 @@ describe("IPC surface", () => {
         "pickInvoiceLogo",
         "printInvoice",
         "saveInvoicePdf",
+        "startPhoneSession",
+        "cancelPhoneSession",
+        "phoneSessionState",
       ].sort(),
     );
-    expect(CHANNEL_NAMES).toHaveLength(53); // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8)
+    // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
+    // migration 9) -> 64 (exportOnlineCatalog, slice G3 — the old value is named, not replaced)
+    // -> 66 (slice H1: startPhoneSession, cancelPhoneSession)
+    // -> 67 (slice H2: phoneSessionState — the dialog's poll; see ipcContract for why it is not
+    //        named "...Status", which invoiceIpc.test.ts forbids on purpose)
+    // -> 68 (migration 11: setOperatorMayCreateProducts — the owner grants one cashier the
+    //        narrow right to add products; see channelPolicy for why it is owner-only itself)
+    // 🔴 TRANSITION — SIXTY-EIGHT to SEVENTY-THREE with the customer directory (slice S1B). The
+    // five added: searchCustomers, getCustomer, createCustomer, updateCustomerContact,
+    // setCustomerActive. The old value was 68 and is named rather than replaced. They are
+    // CUSTOMER-only: there is deliberately no supplier channel and no `kind` parameter, so the
+    // supplier half of PartyService is unreachable from the renderer.
+    // 🔴 TRANSITION — SEVENTY-THREE to SEVENTY-FOUR with the account statement (slice S3B). The
+    // one added: getCustomerStatement. The old value was 73 and is named rather than replaced. It
+    // is a READ, owner-classified.
+    // 🔴 TRANSITION — SEVENTY-FOUR to SEVENTY-FIVE with owner cash collection (slice S3C). The one
+    // added: recordCustomerPayment. The old value was 74. It is this bridge's FIRST money write,
+    // owner-classified, and it can only SETTLE an existing obligation — there is still no channel
+    // anywhere here that creates one.
+    expect(CHANNEL_NAMES).toHaveLength(75);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.
@@ -148,7 +232,13 @@ describe("IPC surface", () => {
     // a cashier here would now be refused with NOT_AUTHORIZED, which is the feature working.
     expect(ipc.login({ cashierId: "cashier-01", pin: "1111" })).toEqual({
       ok: true,
-      data: { status: "session", cashier: { id: "cashier-01", name: "Cashier One", role: "owner" } },
+      // 🔴 `mayCreateProducts` JOINED THE SESSION SHAPE WITH MIGRATION 11 — convenience for the
+      // Products screen, never authority. True here because this session is the owner, who may
+      // always. The old shape was { id, name, role }.
+      data: {
+        status: "session",
+        cashier: { id: "cashier-01", name: "Cashier One", role: "owner", mayCreateProducts: true },
+      },
     });
 
     const created = ipc.createSale(goodSale());
@@ -225,12 +315,18 @@ describe("IPC surface", () => {
     ipc.login({ cashierId: "cashier-01", pin: "1111" });
     db.close(); // force a non-domain error inside the service
     const r = ipc.getTodaySales(undefined);
+    // 🔴 TRANSITION. This asserted the English sentence verbatim:
+    //   "Unexpected error. Please try again; if it keeps happening, contact support."
+    // That exact string is preserved and is still asserted — in `setupIn("en")` below and in
+    // tests/main/saleOutcomeText.test.ts. What changed is that a terminal with NO settings reads
+    // the product's real default language, Arabic, instead of English.
     expect(r).toEqual({
       ok: false,
-      error: { code: "INTERNAL", message: "Unexpected error. Please try again; if it keeps happening, contact support." },
+      error: { code: "INTERNAL", message: "حدث خطأ غير متوقّع. حاول مرّة أخرى، وإذا تكرّر الأمر فاتّصل بالدعم." },
     });
     if (r.ok) throw new Error("unreachable");
     expect(r.error.message).not.toMatch(/sale/i);
+    expect(r.error.message).not.toContain("فاتورة");
   });
 
   it("createSale after an unexpected failure says NOT recorded only when the ledger has no such sale", () => {
@@ -258,7 +354,13 @@ describe("IPC surface", () => {
     const r = ipc.createSale(sale);
     expect(r).toMatchObject({ ok: false, error: { code: "SALE_RECORDED" } });
     if (r.ok) throw new Error("unreachable");
-    expect(r.error.message).toMatch(/WAS recorded \(receipt #1\)/);
+    // 🔴 TRANSITION. This asserted /WAS recorded \(receipt #1\)/ — the English wording, which is
+    // preserved and asserted in the English test below. Here, with no settings, the till is Arabic;
+    // what must survive the translation is the REAL receipt number and the do-not-repeat
+    // instruction, so both are asserted rather than the prose.
+    expect(r.error.message).toContain("إيصال رقم 1");
+    expect(r.error.message).toContain("لا تُعِد إدخالها");
+    expect(r.error.message).not.toContain("يمكنك إعادة المحاولة");
     expect(countRows(db).sales).toBe(1);
 
     // Retrying the same attempt is safe: it returns the recorded sale, no second sale.
@@ -274,6 +376,107 @@ describe("IPC surface", () => {
     ipc.login({ cashierId: "cashier-01", pin: "1111" });
     db.close();
     expect(ipc.createSale(goodSale())).toMatchObject({ ok: false, error: { code: "SALE_STATUS_UNKNOWN" } });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // The sale-outcome sentences ON THE WIRE, in both languages.
+  //
+  // 🔴 WHY THESE EXIST ALONGSIDE tests/main/saleOutcomeText.test.ts. That file proves the SENTENCES
+  // are right. These prove the right sentence actually reaches the renderer through the real
+  // channel, carrying the real receipt number off the real row — the seam where a wiring mistake
+  // (the wrong language read, the receipt number lost, the code and the text drifting apart) would
+  // live. A pure-function test cannot see any of those.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+  it("🔴 an ENGLISH till still reads the exact English sentences that shipped", () => {
+    const { db, repository, ipc } = setupIn("en");
+    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+
+    // A failure before the commit.
+    const commit = repository.commitSale.bind(repository);
+    repository.commitSale = () => {
+      throw new Error("disk exploded");
+    };
+    expect(ipc.createSale(goodSale())).toEqual({
+      ok: false,
+      error: { code: "SALE_NOT_RECORDED", message: "Unexpected error \u2014 the sale was not recorded. You can try again." },
+    });
+
+    // A failure after the commit: the receipt number must survive onto the wire.
+    repository.commitSale = commit;
+    const getSale = repository.getSale.bind(repository);
+    let calls = 0;
+    repository.getSale = (id: string) => {
+      calls += 1;
+      if (calls === 1) throw new Error("read-back exploded");
+      return getSale(id);
+    };
+    expect(ipc.createSale(goodSale())).toEqual({
+      ok: false,
+      error: {
+        code: "SALE_RECORDED",
+        message:
+          "The sale WAS recorded (receipt #1) but an unexpected error followed. Check History \u2014 do not ring it up again.",
+      },
+    });
+    repository.getSale = getSale;
+    db.close();
+  });
+
+  it("🔴 an ARABIC till reads Arabic, with the SAME codes and the SAME real receipt number", () => {
+    const { db, repository, ipc } = setupIn("ar");
+    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+
+    const commit = repository.commitSale.bind(repository);
+    repository.commitSale = () => {
+      throw new Error("disk exploded");
+    };
+    const notRecorded = ipc.createSale(goodSale());
+    expect(errCode(notRecorded)).toBe("SALE_NOT_RECORDED");
+    if (notRecorded.ok) throw new Error("unreachable");
+    expect(notRecorded.error.message).toContain("لم تُسجَّل الفاتورة");
+    expect(notRecorded.error.message).toContain("يمكنك إعادة المحاولة");
+    expect(notRecorded.error.message).not.toMatch(/[A-Za-z]/);
+
+    repository.commitSale = commit;
+    const getSale = repository.getSale.bind(repository);
+    let calls = 0;
+    repository.getSale = (id: string) => {
+      calls += 1;
+      if (calls === 1) throw new Error("read-back exploded");
+      return getSale(id);
+    };
+    const recorded = ipc.createSale(goodSale());
+    expect(errCode(recorded)).toBe("SALE_RECORDED");
+    if (recorded.ok) throw new Error("unreachable");
+    // 🔴 THE NUMBER IS THE LEDGER'S, NOT A GUESS. Each test opens its own harness, so this is the
+    // first committed sale and its receipt is 1 — the same row the retry below returns.
+    expect(recorded.error.message).toContain("إيصال رقم 1");
+    expect(recorded.error.message).toContain("لا تُعِد إدخالها");
+    expect(recorded.error.message).not.toContain("يمكنك إعادة المحاولة");
+    repository.getSale = getSale;
+    db.close();
+  });
+
+  it("🔴 a settings store that THROWS does not cost the cashier the truth about their sale", () => {
+    const h = makeHarness(t.dbPath, { login: false });
+    const ipc = syncHandlers(
+      createIpcHandlers(h.service, {
+        settings: {
+          get: () => {
+            throw new Error("settings.json is unreadable");
+          },
+          setTerminalLanguage: () => ({ terminalLanguage: "ar", receiptLanguage: "ar" }) as const,
+        },
+      }),
+    );
+    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    h.db.close();
+    const r = ipc.createSale(goodSale());
+    // Still a truthful, readable answer — in the default language — rather than a thrown error.
+    expect(errCode(r)).toBe("SALE_STATUS_UNKNOWN");
+    if (r.ok) throw new Error("unreachable");
+    expect(r.error.message).toContain("راجع السجلّ");
   });
 
   it("a product id at the import limit (77 chars) can be sold — import and sale share one limit", () => {

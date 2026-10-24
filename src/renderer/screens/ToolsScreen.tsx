@@ -24,6 +24,12 @@ export function ToolsScreen(props: {
       <section className="card">
         <h2>{t("tools.catalog")}</h2>
         <p className="muted small">{t("tools.catalogNote")}</p>
+        {/* 🔴 NOT MUTED, AND THAT IS THE POINT. A merchant who reads "export" as "backup" can lose
+            every hand-typed product and every photo believing they are safe. The legacy CSV is a
+            price list — the sentence that says so is ordinary text, not a de-emphasised footnote. */}
+        <p className="small" data-testid="catalog-not-backup">
+          <span className="badge warn">{t("tools.noticeTag")}</span> {t("tools.catalogNotBackup")}
+        </p>
         <div className="tool-actions">
           <button className="btn" data-testid="import-catalog" onClick={props.onImportCatalog}>
             {t("tools.importCatalog")}
@@ -36,6 +42,17 @@ export function ToolsScreen(props: {
       <section className="card">
         <h2>{t("tools.backup")}</h2>
         <p className="muted small">{t("tools.backupNote")}</p>
+        {/* What the database backup does NOT carry. Frozen invoice logos live outside the .sqlite
+            file, so a database-only restore can leave a historical invoice with no branding. */}
+        <p className="small" data-testid="backup-excludes">
+          <span className="badge warn">{t("tools.noticeTag")}</span> {t("tools.backupExcludes")}
+        </p>
+        {/* The third artifact, and the only complete one. It is deliberately NOT a button: it
+            cannot be done safely while the application is running (the ledger is in WAL mode), so
+            the honest thing to show is the procedure's existence, not a control that would lie. */}
+        <p className="muted small" data-testid="cold-copy-note">
+          {t("tools.coldCopyNote")}
+        </p>
         <div className="tool-actions">
           <button className="btn" data-testid="export-backup" onClick={props.onExportBackup}>
             {t("tools.exportBackup")}

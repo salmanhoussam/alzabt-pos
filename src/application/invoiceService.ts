@@ -618,10 +618,49 @@ export class InvoiceService {
    * Totals are rewritten ONCE at the end rather than per row — the same arithmetic, read by the
    * database's own CHECK constraints, done once instead of N times.
    */
-  addLines(invoiceId: string, drafts: ReadonlyArray<InvoiceLineDraft>): InvoiceView {
+  addLines(invoiceId: string, drafts: ReadonlyArray<InvoiceLineDraft>, idempotencyKey: string): InvoiceView {
     this.requireCashier();
+    if (typeof idempotencyKey !== "string" || !/^[A-Za-z0-9-]{8,100}$/.test(idempotencyKey)) {
+      throw new DomainError("INVALID_INPUT", "A valid batch idempotency key is required");
+    }
+    // 🔴 THE FINGERPRINT BINDS THE INVOICE AND THE EXACT ORDERED PAYLOAD, as received. Nothing is
+    // normalised: "2" and "2.0" hash differently, which can only ever produce a conflict, never a
+    // silent merge. It is never used to DEDUPLICATE rows — only to recognise the same request again.
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify({
+          v: 1,
+          invoiceId,
+          lines: drafts.map((d) => [
+            d.description ?? null,
+            d.unitLabel ?? null,
+            d.canonicalUnit ?? null,
+            d.productId ?? null,
+            d.quantity,
+            d.unitPrice,
+          ]),
+        }),
+      )
+      .digest("hex");
     const instant = this.now();
     return this.deps.transact(() => {
+      // 🔴 THE KEY IS READ INSIDE THE WRITE TRANSACTION, before anything else. A key that is already
+      // recorded NEVER writes again: it reports the invoice as it stands now, so lines the operator
+      // has since edited or removed are not recreated, and a batch whose invoice was meanwhile
+      // finalized is still answered rather than refused.
+      const prior = this.deps.invoices.findLineBatch(idempotencyKey);
+      if (prior) {
+        if (prior.request_fingerprint !== fingerprint || prior.invoice_id !== invoiceId) {
+          throw new DomainError("IDEMPOTENCY_CONFLICT", "This batch key was already used for different lines");
+        }
+        if (Number(prior.line_count) !== drafts.length) {
+          // Same fingerprint but a different recorded size cannot happen unless the record is damaged.
+          throw new DomainError("LEDGER_INTEGRITY", "The recorded line batch is inconsistent; check the invoice lines");
+        }
+        const existing = this.deps.invoices.findById(invoiceId);
+        if (!existing) throw new DomainError("INVOICE_NOT_FOUND", "This invoice no longer exists");
+        return { invoice: existing, lines: this.deps.invoices.listLines(invoiceId) };
+      }
       const invoice = this.requireDraft(invoiceId);
       const existing = this.deps.invoices.countLines(invoiceId);
       if (existing + drafts.length > MAX_INVOICE_LINES) {
@@ -633,6 +672,17 @@ export class InvoiceService {
       for (const input of parsed) {
         this.deps.invoices.addLine(this.newId(), invoiceId, this.deps.invoices.nextLineNo(invoiceId), input, instant);
       }
+      // The marker is written in the SAME transaction as the lines: both commit or neither does.
+      this.deps.invoices.insertLineBatch(
+        {
+          id: this.newId(),
+          invoice_id: invoiceId,
+          idempotency_key: idempotencyKey,
+          request_fingerprint: fingerprint,
+          line_count: drafts.length,
+        },
+        instant,
+      );
       const updated = this.rewriteTotals(invoice, null, instant);
       return { invoice: updated, lines: this.deps.invoices.listLines(invoiceId) };
     });
@@ -891,6 +941,8 @@ export class InvoiceService {
         .digest("hex"),
       sourceType: "invoice",
       invoiceId: invoice.id,
+      customerId: null,
+      customerNameSnapshot: null,
       cashierId: cashier.id,
       cashierName: cashier.name,
       currency,
