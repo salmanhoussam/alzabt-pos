@@ -732,7 +732,11 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     }),
     currentCashier: wrap("currentCashier", (p) => {
       noPayload(p);
-      return service.currentCashier();
+      const cashier = service.currentCashier();
+      // A resumed session needs the SAME live role DTO as login and completeBootstrapSetup.
+      // Without cashierDto(), the invoice sheet always reads an absent role and hides Credit
+      // from a genuine owner. The service still authorizes every money write independently.
+      return cashier ? cashierDto(cashier) : null;
     }),
     getCatalog: wrap("getCatalog", (p) => {
       noPayload(p);

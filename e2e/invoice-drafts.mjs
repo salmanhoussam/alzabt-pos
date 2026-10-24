@@ -521,6 +521,15 @@ assert(accountArabic.includes("حساب العميل"), "the Arabic customer-acc
 assert(accountArabic.includes("اختيار حساب العميل"), "the Arabic «choose account» action is shown");
 assert(accountArabic.includes("لا يُنشئ ديناً"), "the Arabic hint says choosing an account creates no debt");
 assert((await testid(page, "account-issue").count()) === 0, "issue-on-account is not offered before an account is chosen");
+const currentSession = await page.evaluate(async () => {
+  const result = await window.pos.currentCashier();
+  if (!result?.ok) throw new Error(`currentCashier failed: ${result?.error?.code ?? "unknown"}`);
+  return result.data;
+});
+assert(
+  currentSession?.role === "owner",
+  `the installed M16 session exposes the live owner role (got ${currentSession?.role ?? "missing"})`,
+);
 
 // Choose an account by creating one in the directory (the picker is the ordinary customer finder).
 await testid(page, "account-choose").click();

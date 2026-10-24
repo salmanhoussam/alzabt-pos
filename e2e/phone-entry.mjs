@@ -1280,17 +1280,10 @@ try {
   // A session really exists, so the refusals below mean something rather than passing because
   // nobody is signed in — which is the only thing this needs to establish.
   //
-  // 🔴 IT DOES NOT READ A ROLE, AND THE REMOVED CHECK IS NAMED. There used to be a second
-  // assertion here, `who?.role === "cashier"`, and it FAILED the gate against a perfectly correct
-  // app: `currentCashier` returns `service.currentCashier()` raw (`ipcHandlers.ts:544`), so it
-  // carries `{id, name}` and no role. Only `login` goes through `cashierDto()`, which attaches
-  // one; `CashierDto.role` is declared optional and documented "Present on a SESSION". The test
-  // was asserting a field the channel never promised.
-  //
-  // It was also redundant. The five checks below prove the operator is a cashier the way that
-  // actually matters — the main process REFUSES every owner channel — and a behavioural refusal
-  // is stronger evidence than a label read back from a session object. So it is deleted rather
-  // than repaired, and no contract was widened to satisfy a test.
+  // The business proof below is the refusal of owner-only operations, not a cosmetic role.
+  // M16 now makes currentCashier use the same live-role DTO as login, so invoice account controls
+  // appear for owners after a restart too. Keep this check about SESSION existence; the owner-only
+  // authorization checks below are still the authority for this cashier.
   const who = await page.evaluate(async () => {
     const r = await window.pos.currentCashier();
     return r?.data ?? null;

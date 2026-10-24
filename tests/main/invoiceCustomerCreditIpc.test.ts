@@ -33,6 +33,20 @@ const prepared = () => {
   return { c, id: invoice.id };
 };
 
+describe("the role the invoice sheet reads from currentCashier", () => {
+  it("returns the live owner/cashier role, and null after logout — just like the login DTO", () => {
+    const owner = ok<{ id: string; role?: string }>(ipc.currentCashier(undefined));
+    expect(owner).toMatchObject({ id: "cashier-01", role: "owner" });
+
+    h.service.login("cashier-02", "2222");
+    const cashier = ok<{ id: string; role?: string }>(ipc.currentCashier(undefined));
+    expect(cashier).toMatchObject({ id: "cashier-02", role: "cashier" });
+
+    h.service.logout();
+    expect(ok<null>(ipc.currentCashier(undefined))).toBeNull();
+  });
+});
+
 describe("linking through the channel", () => {
   it("the header patch carries the chosen account id and returns it on the DTO", () => {
     const { c, id } = prepared();
