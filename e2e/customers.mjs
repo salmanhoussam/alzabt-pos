@@ -86,8 +86,17 @@ async function launch() {
  * warning appears, so both branches time out and the test fails loudly. A warning alone is also
  * never treated as proof the record exists — the caller proves that separately, by identity.
  */
-async function createThroughPanel(page, { name, phone, expect: expected = "picked" }) {
+async function createThroughPanel(page, { name, phone, expect: expected = "picked", checkExplanation = false }) {
   await testid(page, "customer-new").click();
+  if (checkExplanation) {
+    const explanation = testid(page, "customer-save-explanation");
+    await explanation.waitFor({ state: "visible", timeout: 30000 });
+    assert(
+      (await explanation.innerText()).trim() ===
+        "حفظ العميل يضيفه إلى دليل العملاء فقط. لا يُكمل عملية بيع ولا يُنشئ ديناً.",
+      "the customer Save action explicitly says it saves only the directory record",
+    );
+  }
   await testid(page, "customer-field-name").fill(name);
   if (phone) await testid(page, "customer-field-phone").fill(phone);
   await testid(page, "customer-save").click();
@@ -339,12 +348,7 @@ try {
   await testid(page, "customer-finder").waitFor({ timeout: 30000 });
   // 🔴 THE CART IS STILL ON SCREEN WHILE THE PANEL IS OPEN — not hidden, not unmounted.
   assert((await testid(page, "cart").count()) === 1, "🔴 the cart is still mounted while the panel is open");
-  assert(
-    (await testid(page, "customer-save-explanation").innerText()).trim() ===
-      "حفظ العميل يضيفه إلى دليل العملاء فقط. لا يُكمل عملية بيع ولا يُنشئ ديناً.",
-    "the customer Save action explicitly says it saves only the directory record",
-  );
-  await createThroughPanel(page, { name: "زبون من الكاشير", phone: "0333333" });
+  await createThroughPanel(page, { name: "زبون من الكاشير", phone: "0333333", checkExplanation: true });
   await testid(page, "sell-customer").waitFor({ timeout: 30000 });
 
   const afterLines = await page.locator('[data-testid="cart"] li.line').count();
