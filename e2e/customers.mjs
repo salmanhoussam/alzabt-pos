@@ -339,6 +339,11 @@ try {
   await testid(page, "customer-finder").waitFor({ timeout: 30000 });
   // 🔴 THE CART IS STILL ON SCREEN WHILE THE PANEL IS OPEN — not hidden, not unmounted.
   assert((await testid(page, "cart").count()) === 1, "🔴 the cart is still mounted while the panel is open");
+  assert(
+    (await testid(page, "customer-save-explanation").innerText()).trim() ===
+      "حفظ العميل يضيفه إلى دليل العملاء فقط. لا يُكمل عملية بيع ولا يُنشئ ديناً.",
+    "the customer Save action explicitly says it saves only the directory record",
+  );
   await createThroughPanel(page, { name: "زبون من الكاشير", phone: "0333333" });
   await testid(page, "sell-customer").waitFor({ timeout: 30000 });
 
@@ -373,6 +378,10 @@ try {
     assert(n("SELECT count(*) AS n FROM sales") === 0, "no sale was recorded by choosing a customer");
     assert(n("SELECT count(*) AS n FROM invoices") === 0, "and no invoice");
     assert(n("SELECT count(*) AS n FROM parties WHERE kind = 'customer'") === 4, "four customers exist in the ledger");
+    assert(
+      n("SELECT count(*) AS n FROM parties WHERE kind = 'customer' AND display_name = 'زبون من الكاشير'") === 1,
+      "the saved customer remains a directory record even though checkout was not completed",
+    );
     assert(n("SELECT count(*) AS n FROM parties WHERE kind = 'supplier'") === 0, "and zero suppliers — S1B creates none");
     db.close();
   }
@@ -457,7 +466,8 @@ try {
     const db = new Database(LEDGER, { readonly: true });
     const n = (sql) => Number(db.prepare(sql).get().n);
     // 🔴 TRANSITION 13 -> 14 with migration 14 (credit_sale_identity_and_unpaid_state). The old value was 13.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 14, "the installed app's ledger is at schema v14");
+    // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 15, "the installed app's ledger is at schema v15");
     assert(n("SELECT count(*) AS n FROM parties") === 5, "five party rows, and no more");
     assert(n("SELECT count(*) AS n FROM party_contact_history") === 0, "and zero contact-history rows — nothing was edited");
     assert(n("SELECT count(*) AS n FROM sales") === 0, "🔴 and still not one sale, obligation or payment anywhere");
@@ -787,7 +797,8 @@ try {
     const o = db.prepare("SELECT amount_minor, posted_at FROM obligations WHERE id = 'o-unpaid'").get();
     assert(Number(o.amount_minor) === 2500, `the original amount is still 2500 (${o.amount_minor})`);
     assert(o.posted_at === "2026-10-20T08:00:00.000Z", "and its posting time is untouched");
-    assert(n("SELECT count(*) AS n FROM schema_migrations") === 14, "the ledger is still at schema v14");
+    // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
+    assert(n("SELECT count(*) AS n FROM schema_migrations") === 15, "the ledger is still at schema v15");
     db.close();
   }
 

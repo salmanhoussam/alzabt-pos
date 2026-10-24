@@ -149,6 +149,9 @@ export function CustomerFinder({ onPick, onClose }: Props) {
                 {t("customers.nameRequired")}
               </p>
             )}
+            <p className="muted small" data-testid="customer-save-explanation">
+              {t("customers.saveExplanation")}
+            </p>
             {error && <p className="error" data-testid="customer-finder-error">{error}</p>}
             <div className="panel-actions">
               <button

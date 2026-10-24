@@ -14,6 +14,8 @@ import { type TempDir, tempDir } from "../helpers/harness";
 const V13 = 13;
 const V14 = 14;
 const MIGRATIONS_V13 = MIGRATIONS.slice(0, V13);
+// Migration 15 landed later; this file pins v14 as a historical target, so it runs the v14 registry.
+const MIGRATIONS_V14 = MIGRATIONS.slice(0, V14);
 const NEW_TRIGGERS = [
   "sales_pos_unpaid_requires_no_tender",
   "sales_credit_requires_active_customer",
@@ -357,7 +359,7 @@ describe("migration 14 — schema-only customer credit sale representation", () 
     );
 
     let backupCounts: Record<string, number> | undefined;
-    const db = openDatabase(t.dbPath, MIGRATIONS, {
+    const db = openDatabase(t.dbPath, MIGRATIONS_V14, {
       beforeMigrations: (connection, pending) => {
         expect(pending).toEqual({ fromVersion: V13, toVersion: V14 });
         backupCounts = snapshotDatabase(connection, `${t.dir}/pre-m14.sqlite`).counts;
@@ -540,7 +542,7 @@ describe("migration 14 — schema-only customer credit sale representation", () 
 
   it("preserves v13's historic unpaid/tender rows but rejects new contradictions and preserves invoice NULL methods", () => {
     const before = seedV13(t.dbPath);
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, MIGRATIONS_V14);
     try {
       expectHistoricalRowsPreserved(db, before.rows);
       expect(db.prepare("SELECT payment_method, payment_status FROM sales WHERE id='sale-legacy-unpaid-cash'").get()).toEqual({
@@ -688,7 +690,7 @@ describe("migration 14 — schema-only customer credit sale representation", () 
 
   it("fresh installs reach v14 and an already-migrated database is not rebuilt on reopen", () => {
     const freshPath = `${t.dir}/fresh.sqlite`;
-    const fresh = openDatabase(freshPath);
+    const fresh = openDatabase(freshPath, MIGRATIONS_V14);
     try {
       expect(schemaVersion(fresh)).toBe(V14);
       expect(fresh.pragma("foreign_key_check")).toEqual([]);
@@ -699,7 +701,7 @@ describe("migration 14 — schema-only customer credit sale representation", () 
     }
 
     seedV13(t.dbPath);
-    const first = openDatabase(t.dbPath);
+    const first = openDatabase(t.dbPath, MIGRATIONS_V14);
     const afterFirst = {
       rows: rowsByTable(first),
       objects: namedObjects(first),
@@ -707,7 +709,7 @@ describe("migration 14 — schema-only customer credit sale representation", () 
     };
     first.close();
     let backupCalls = 0;
-    const second = openDatabase(t.dbPath, MIGRATIONS, {
+    const second = openDatabase(t.dbPath, MIGRATIONS_V14, {
       beforeMigrations: () => {
         backupCalls += 1;
       },

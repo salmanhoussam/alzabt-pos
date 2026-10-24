@@ -80,6 +80,8 @@ describe("schema is unchanged by this feature", () => {
       // Migration 14 adds only immutable customer identity and the unpaid POS sale representation;
       // it does not change the product-management schema.
       [14, "credit_sale_identity_and_unpaid_state"],
+      // Migration 15 adds only the durable identity of an invoice-line batch; no product table.
+      [15, "invoice_line_batch_identity"],
     ]);
   });
 

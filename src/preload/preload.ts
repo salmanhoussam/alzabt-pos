@@ -345,7 +345,11 @@ const api: PosApi = {
     }),
   addInvoiceLine: (req) => ipcRenderer.invoke(CH.addInvoiceLine, { invoiceId: req.invoiceId, line: line(req.line) }),
   addInvoiceLines: (req) =>
-    ipcRenderer.invoke(CH.addInvoiceLines, { invoiceId: req.invoiceId, lines: req.lines.map(line) }),
+    ipcRenderer.invoke(CH.addInvoiceLines, {
+      invoiceId: req.invoiceId,
+      lines: req.lines.map(line),
+      idempotencyKey: req.idempotencyKey,
+    }),
   updateInvoiceLine: (req) =>
     ipcRenderer.invoke(CH.updateInvoiceLine, { invoiceId: req.invoiceId, lineId: req.lineId, line: line(req.line) }),
   removeInvoiceLine: (req) =>

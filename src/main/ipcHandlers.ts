@@ -1272,7 +1272,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       return toInvoiceViewDto(invoices().addLine(str(o.invoiceId, "invoiceId", 100), invoiceLine(o.line)));
     }),
     addInvoiceLines: wrap("addInvoiceLines", (p) => {
-      const o = exactObject(p, ["invoiceId", "lines"]);
+      const o = exactObject(p, ["invoiceId", "lines", "idempotencyKey"]);
       if (!Array.isArray(o.lines) || o.lines.length === 0) {
         invalid("'lines' must be a non-empty array");
       }
@@ -1280,6 +1280,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         invoices().addLines(
           str(o.invoiceId, "invoiceId", 100),
           o.lines.map((l) => invoiceLine(l)),
+          str(o.idempotencyKey, "idempotencyKey", 100),
         ),
       );
     }),

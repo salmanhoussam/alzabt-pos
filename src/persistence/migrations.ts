@@ -1869,4 +1869,45 @@ WHEN NEW.source_kind = 'sale'
 BEGIN SELECT RAISE(ABORT, 'ledger: sale obligation does not match sale identity or balance'); END;
 `,
   },
+  {
+    version: 15,
+    name: "invoice_line_batch_identity",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 15 — a durable identity for one batch of invoice-draft lines.
+    //
+    // `addInvoiceLines` used to have none. A batch that COMMITTED and then lost its response left a
+    // sheet that still held its rows as unsaved, and sending them again inserted them twice. The
+    // service cannot tell a repeat from a new batch by CONTENT — two identical lines are a
+    // legitimate invoice — so the caller now names the batch and the ledger remembers the name.
+    //
+    // One row per batch, written in the SAME transaction as the lines it covers, so a batch marker
+    // never exists without its lines and lines never exist without their marker. It records WHO/WHAT
+    // the batch was (key + sha256 fingerprint of the invoice id and the exact ordered payload) and
+    // how many lines it wrote; it does NOT reference individual lines. That is deliberate: a line
+    // may later be edited or removed, and a replay must report the batch as already recorded, never
+    // recreate what the operator deleted.
+    //
+    // Additive only. No existing table, trigger or row is touched, so every finalized invoice,
+    // number, total and historical line is unchanged. The marker survives finalization (it is
+    // history) and is removed only with its draft, by InvoiceRepository.deleteDraft.
+    sql: `
+CREATE TABLE invoice_line_batches (
+  id                  TEXT    PRIMARY KEY,
+  invoice_id          TEXT    NOT NULL REFERENCES invoices (id),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) = 64 AND request_fingerprint NOT GLOB '*[^0-9a-f]*'),
+  line_count          INTEGER NOT NULL CHECK (line_count > 0),
+  created_at          TEXT    NOT NULL
+);
+
+CREATE INDEX invoice_line_batches_invoice_id ON invoice_line_batches (invoice_id);
+
+CREATE TRIGGER invoice_line_batches_immutable BEFORE UPDATE ON invoice_line_batches
+BEGIN SELECT RAISE(ABORT, 'invoice: a line batch record is immutable'); END;
+
+CREATE TRIGGER invoice_line_batches_draft_only BEFORE INSERT ON invoice_line_batches
+WHEN (SELECT status FROM invoices WHERE id = NEW.invoice_id) IS NOT 'draft'
+BEGIN SELECT RAISE(ABORT, 'invoice: a line batch can only be recorded on a draft'); END;
+`,
+  },
 ];

@@ -143,8 +143,8 @@ function insertEvent(db: Db, over: Record<string, unknown>): void {
 
 describe("migration 10 — v9 to v10, on a populated ledger", () => {
   it("is the tenth migration, and 1-9 are byte-identical after it", () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
-    expect(MIGRATIONS).toHaveLength(14); // was 13 before migration 14 (credit_sale_identity_and_unpaid_state)
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(MIGRATIONS).toHaveLength(15); // was 14 before migration 15 (invoice_line_batch_identity)
     expect(MIGRATIONS[9]!.name).toBe("product_master_audit");
 
     // 🔴 THE RELEASED FINGERPRINTS. Editing any of these would make every real ledger on a shop

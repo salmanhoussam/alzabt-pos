@@ -100,8 +100,8 @@ const upgrade = () => openDatabase(t.dbPath, V11, { fileMustExist: true });
 
 describe("migration 11 — v10 to v11, on a populated ledger", () => {
   it("is the eleventh migration, and 1-10 are byte-identical after it", () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
-    expect(MIGRATIONS).toHaveLength(14); // was 13 before migration 14 (credit_sale_identity_and_unpaid_state)
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(MIGRATIONS).toHaveLength(15); // was 14 before migration 15 (invoice_line_batch_identity)
     expect(MIGRATIONS[10]!.name).toBe("operator_product_create_capability");
   });
 

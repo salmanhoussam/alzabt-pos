@@ -89,6 +89,10 @@ export const COUNTED_TABLES = [
   // silent-verification gap this list exists to close.
   "obligations",
   "settlements",
+  // Migration 15 — the durable identity of an invoice-line batch. Without it a snapshot would
+  // restore the lines but forget which batches produced them, so a replayed request after a
+  // restore would insert them a second time.
+  "invoice_line_batches",
   "schema_migrations",
 ] as const;
 const DAILY_RE = /^daily-(\d{4}-\d{2}-\d{2})\.sqlite$/;

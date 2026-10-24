@@ -991,6 +991,12 @@ export interface AddInvoiceLineRequest {
 export interface AddInvoiceLinesRequest {
   readonly invoiceId: string;
   readonly lines: ReadonlyArray<InvoiceLineRequest>;
+  /**
+   * Names THIS batch. The ledger remembers it, so a request whose response was lost can be sent
+   * again with the SAME key and never inserts twice. Generate one per batch, keep it across retries
+   * of that batch, and use a fresh one for the next.
+   */
+  readonly idempotencyKey: string;
 }
 
 export interface UpdateInvoiceLineRequest {
