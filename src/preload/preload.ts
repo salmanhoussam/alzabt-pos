@@ -272,6 +272,8 @@ const api: PosApi = {
       idempotencyKey: req.idempotencyKey,
       amountMinor: req.amountMinor,
       method: req.method,
+      reference: req.reference ?? null,
+      fundsConfirmed: req.fundsConfirmed === true,
     }),
   renameCategory: (req) =>
     ipcRenderer.invoke(CH.renameCategory, { categoryId: req.categoryId, nameAr: req.nameAr, nameEn: req.nameEn }),

@@ -118,12 +118,18 @@ const statementOf = (customerId: string): CustomerStatementDto => {
         id: st.id,
         amount: { minor: st.amountMinor.toString(), currency: st.currency },
         method: st.method,
+        // TRANSITION with migration 17: three new fields on every settlement, null on a plain cash row.
+        provider: st.provider,
+        reference: st.reference,
+        fundsConfirmed: st.fundsConfirmed,
         settledAt: st.settledAt,
       })),
     })),
     balances: [...s.balances.entries()]
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([currency, minor]) => ({ minor: minor.toString(), currency })),
+    // TRANSITION with migration 17: the statement carries the collections still open (none here).
+    pendingCollections: [],
   };
 };
 

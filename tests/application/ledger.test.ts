@@ -667,13 +667,23 @@ describe("posted history cannot be rewritten", () => {
       .filter((n) => n !== "constructor")
       .sort();
     expect(names).toEqual([
+      // Migration 17 (M17A) added READS (per-channel daily totals, the one-reference-one-collection
+      // lookup) and the collection-attempt bookkeeping (insert / find / list-open / resolve-once —
+      // a trigger lets an attempt be closed exactly once and nothing else about it change). Still
+      // no mutator of an obligation or a settlement beyond the two inserts.
+      "collectionTotals",
+      "findAttempt",
       "findObligationById",
       "findObligationBySource",
       "findSettlementByIdempotencyKey",
+      "findSettlementByProviderReference",
+      "insertAttempt",
       "insertObligation",
       "insertSettlement",
       "listObligations",
+      "listOpenAttempts",
       "listSettlements",
+      "resolveAttempt",
       "settledTotal",
     ]);
     // And the two that write only ever INSERT.
@@ -726,7 +736,7 @@ describe("domain guards", () => {
     };
     const foreign = {
       id: "s1", obligationId: "SOMEONE-ELSE", currency: "USD", idempotencyKey: "k",
-      amountMinor: 10n, method: "cash" as const, settledBy: "x", settledAt: "t", businessDate: "d",
+      amountMinor: 10n, method: "cash" as const, provider: null, reference: null, fundsConfirmed: null, settledBy: "x", settledAt: "t", businessDate: "d",
     };
     expect(code(() => outstanding(o, [foreign]))).toBe("LEDGER_INTEGRITY");
     expect(code(() => outstanding(o, [{ ...foreign, obligationId: "o1", currency: "LBP" }]))).toBe("MIXED_CURRENCY");

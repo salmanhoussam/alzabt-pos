@@ -77,6 +77,11 @@ export type DomainErrorCode =
   | "CREDIT_NEEDS_CUSTOMER"
   | "CREDIT_NEEDS_UNPAID"
   | "CREDIT_NOT_ISSUED"
+  // Migration 17 — collection details. Each its own sentence the owner can act on.
+  | "FUNDS_NOT_CONFIRMED"
+  | "DUPLICATE_PAYMENT_REFERENCE"
+  // An earlier collection for this customer is not yet settled one way or the other.
+  | "COLLECTION_UNRESOLVED"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

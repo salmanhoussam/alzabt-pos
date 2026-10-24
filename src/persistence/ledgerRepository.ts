@@ -20,6 +20,7 @@ import type {
   ObligationRecord,
   ObligationSource,
   SettlementMethod,
+  SettlementProvider,
   SettlementRecord,
 } from "../domain/ledger";
 
@@ -46,6 +47,9 @@ interface SettlementRow {
   readonly request_fingerprint: string;
   readonly amount_minor: bigint | number;
   readonly method: string;
+  readonly provider: string | null;
+  readonly reference: string | null;
+  readonly funds_confirmed: bigint | number | null;
   readonly settled_by: string;
   readonly settled_at: string;
   readonly business_date: string;
@@ -54,7 +58,7 @@ interface SettlementRow {
 const O_COLS = `id, party_id, party_kind, direction, source_kind, source_ref, sale_id, currency,
                 amount_minor, posted_by, posted_at, business_date`;
 const S_COLS = `id, obligation_id, currency, idempotency_key, request_fingerprint, amount_minor,
-                method, settled_by, settled_at, business_date`;
+                method, provider, reference, funds_confirmed, settled_by, settled_at, business_date`;
 
 /** Minor units come back from SQLite as bigint under the safe-integer threshold or beyond it. */
 const minor = (v: bigint | number): bigint => (typeof v === "bigint" ? v : BigInt(v));
@@ -86,6 +90,9 @@ function settlement(row: SettlementRow | undefined): SettlementRecord | null {
     idempotencyKey: row.idempotency_key,
     amountMinor: minor(row.amount_minor),
     method: row.method as SettlementMethod,
+    provider: (row.provider ?? null) as SettlementProvider | null,
+    reference: row.reference ?? null,
+    fundsConfirmed: row.funds_confirmed === null || row.funds_confirmed === undefined ? null : Number(row.funds_confirmed) === 1,
     settledBy: row.settled_by,
     settledAt: row.settled_at,
     businessDate: row.business_date,
@@ -115,9 +122,68 @@ export interface NewSettlement {
   readonly requestFingerprint: string;
   readonly amountMinor: bigint;
   readonly method: SettlementMethod;
+  /** Migration 17 details; absent means a plain, historical-shape settlement. */
+  readonly provider?: SettlementProvider | null;
+  readonly reference?: string | null;
+  readonly fundsConfirmed?: boolean | null;
   readonly settledBy: string;
   readonly settledAt: string;
   readonly businessDate: string;
+}
+
+/** The durable intent of one collection (migration 17). */
+export interface AttemptRecord {
+  readonly key: string;
+  readonly customerId: string;
+  readonly obligationId: string;
+  readonly currency: string;
+  readonly amountMinor: bigint;
+  readonly channel: "cash" | "card" | "whish" | "bank_transfer" | "other";
+  readonly reference: string | null;
+  readonly fundsConfirmed: boolean | null;
+  readonly fingerprint: string;
+  readonly createdBy: string;
+  readonly createdAt: string;
+}
+
+/** A read-back attempt carries its durable terminal state, unlike a new intent being inserted. */
+export interface StoredAttemptRecord extends AttemptRecord {
+  readonly resolution: "recorded" | "not_recorded" | null;
+}
+
+interface AttemptRow {
+  readonly idempotency_key: string;
+  readonly customer_id: string;
+  readonly obligation_id: string;
+  readonly currency: string;
+  readonly amount_minor: bigint | number;
+  readonly channel: string;
+  readonly reference: string | null;
+  readonly funds_confirmed: bigint | number | null;
+  readonly request_fingerprint: string;
+  readonly created_by: string;
+  readonly created_at: string;
+  readonly resolution: "recorded" | "not_recorded" | null;
+}
+
+const A_COLS = `idempotency_key, customer_id, obligation_id, currency, amount_minor, channel, reference,
+                funds_confirmed, request_fingerprint, created_by, created_at, resolution`;
+
+function attempt(row: AttemptRow): StoredAttemptRecord {
+  return {
+    key: row.idempotency_key,
+    customerId: row.customer_id,
+    obligationId: row.obligation_id,
+    currency: row.currency,
+    amountMinor: minor(row.amount_minor),
+    channel: row.channel as AttemptRecord["channel"],
+    reference: row.reference,
+    fundsConfirmed: row.funds_confirmed === null ? null : Number(row.funds_confirmed) === 1,
+    fingerprint: row.request_fingerprint,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    resolution: row.resolution,
+  };
 }
 
 export class LedgerRepository {
@@ -166,9 +232,90 @@ export class LedgerRepository {
       .prepare(
         `INSERT INTO settlements (${S_COLS})
          VALUES (@id, @obligationId, @currency, @idempotencyKey, @requestFingerprint, @amountMinor,
-                 @method, @settledBy, @settledAt, @businessDate)`,
+                 @method, @provider, @reference, @fundsConfirmed, @settledBy, @settledAt, @businessDate)`,
       )
-      .run(s);
+      .run({
+        ...s,
+        provider: s.provider ?? null,
+        reference: s.reference ?? null,
+        fundsConfirmed: s.fundsConfirmed ? 1 : null,
+      });
+  }
+
+  // ── Collection attempts (migration 17) ─────────────────────────────────────────────────────────
+  insertAttempt(a: AttemptRecord, now: Date): void {
+    this.db
+      .prepare(
+        `INSERT INTO collection_attempts (idempotency_key, customer_id, obligation_id, currency, amount_minor,
+                                          channel, reference, funds_confirmed, request_fingerprint, created_by, created_at)
+         VALUES (@key, @customerId, @obligationId, @currency, @amountMinor, @channel, @reference,
+                 @fundsConfirmed, @fingerprint, @createdBy, @now)`,
+      )
+      .run({ ...a, fundsConfirmed: a.fundsConfirmed ? 1 : null, now: now.toISOString() });
+  }
+
+  findAttempt(key: string): StoredAttemptRecord | null {
+    const row = this.db.prepare(`SELECT ${A_COLS} FROM collection_attempts WHERE idempotency_key = ?`).get(key) as
+      | AttemptRow
+      | undefined;
+    return row ? attempt(row) : null;
+  }
+
+  /** Attempts for one customer that have not been closed, oldest first. */
+  listOpenAttempts(customerId: string): AttemptRecord[] {
+    return (
+      this.db
+        .prepare(`SELECT ${A_COLS} FROM collection_attempts WHERE customer_id = ? AND resolved_at IS NULL ORDER BY created_at, idempotency_key`)
+        .all(customerId) as AttemptRow[]
+    ).map(attempt);
+  }
+
+  /** Closes an open attempt, once. A no-op for an attempt that is missing or already closed. */
+  resolveAttempt(key: string, resolution: "recorded" | "not_recorded", now: Date): void {
+    this.db
+      .prepare(`UPDATE collection_attempts SET resolved_at = ?, resolution = ? WHERE idempotency_key = ? AND resolved_at IS NULL`)
+      .run(now.toISOString(), resolution, key);
+  }
+
+  /** Migration 17. The settlement already carrying this provider transaction reference, if any. */
+  findSettlementByProviderReference(provider: string, reference: string): SettlementRecord | null {
+    const row = this.db
+      .prepare(`SELECT ${S_COLS} FROM settlements WHERE provider = ? AND reference = ?`)
+      .get(provider, reference) as SettlementRow | undefined;
+    return settlement(row);
+  }
+
+  /**
+   * Collected totals for ONE business day, per currency and per way of paying. Cash, card and each
+   * provider stay separate rows — a Whish receipt is never inside the cash total.
+   */
+  collectionTotals(businessDate: string): Array<{
+    readonly currency: string;
+    readonly method: SettlementMethod;
+    readonly provider: SettlementProvider | null;
+    readonly count: number;
+    readonly totalMinor: bigint;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT currency, method, provider, count(*) AS n, sum(amount_minor) AS total
+           FROM settlements WHERE business_date = ?
+          GROUP BY currency, method, provider ORDER BY currency, method, provider`,
+      )
+      .all(businessDate) as Array<{
+      currency: string;
+      method: string;
+      provider: string | null;
+      n: bigint | number;
+      total: bigint | number;
+    }>;
+    return rows.map((r) => ({
+      currency: r.currency,
+      method: r.method as SettlementMethod,
+      provider: (r.provider ?? null) as SettlementProvider | null,
+      count: Number(r.n),
+      totalMinor: minor(r.total),
+    }));
   }
 
   /**

@@ -72,6 +72,105 @@ export function isSettlementMethod(v: unknown): v is SettlementMethod {
   return typeof v === "string" && (SETTLEMENT_METHODS as readonly string[]).includes(v);
 }
 
+/**
+ * Migration 17. WHICH way a collection arrived. The stored `method` keeps migration 13's four values;
+ * a Whish or bank-transfer receipt is method 'external' with a `provider`, so it can never be read as
+ * till cash. 'external' with no provider is a historical or unspecified external payment.
+ */
+export const SETTLEMENT_PROVIDERS = ["whish", "bank_transfer"] as const;
+export type SettlementProvider = (typeof SETTLEMENT_PROVIDERS)[number];
+
+/** What the operator picks on the collection form. */
+export const COLLECTION_CHANNELS = ["cash", "card", "whish", "bank_transfer", "other"] as const;
+export type CollectionChannel = (typeof COLLECTION_CHANNELS)[number];
+
+export function isCollectionChannel(v: unknown): v is CollectionChannel {
+  return typeof v === "string" && (COLLECTION_CHANNELS as readonly string[]).includes(v);
+}
+
+/** The stored (method, provider) pair for a channel. */
+export function channelStorage(channel: CollectionChannel): {
+  readonly method: SettlementMethod;
+  readonly provider: SettlementProvider | null;
+} {
+  switch (channel) {
+    case "cash":
+      return { method: "cash", provider: null };
+    case "card":
+      return { method: "card", provider: null };
+    case "whish":
+      return { method: "external", provider: "whish" };
+    case "bank_transfer":
+      return { method: "external", provider: "bank_transfer" };
+    case "other":
+      return { method: "other", provider: null };
+  }
+}
+
+/** The channel a stored row represents; "external" is a historical row with no provider. */
+export function channelOfStored(method: SettlementMethod, provider: SettlementProvider | null): CollectionChannel | "external" {
+  if (provider) return provider;
+  return method === "external" ? "external" : method;
+}
+
+export const MAX_PAYMENT_REFERENCE = 64;
+/** Letters (any script), digits, and . _ / # - space; must start with a letter or digit. */
+const REFERENCE_SHAPE = /^[\p{L}\p{N}][\p{L}\p{N} ._/#-]*$/u;
+
+function luhnValid(digits: string): boolean {
+  let sum = 0;
+  let alt = false;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    let d = digits.charCodeAt(i) - 48;
+    if (alt) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    alt = !alt;
+  }
+  return sum % 10 === 0;
+}
+
+/**
+ * The operator-entered, NON-SENSITIVE payment reference, or null.
+ *
+ *   cash                         none allowed;
+ *   card                         optional (the terminal slip / approval number);
+ *   whish · bank_transfer · other  REQUIRED — a payment that cannot be traced is not "documented".
+ *
+ * 1–64 characters after trimming, one line, letters/digits/space and . _ / # - only. A value that
+ * reads as a payment-card number (13–19 digits, ignoring spaces and dashes, passing the Luhn check)
+ * is refused, so a card number typed into the wrong box is never stored. PINs and credentials have no
+ * field here at all.
+ */
+export function cleanPaymentReference(raw: unknown, channel: CollectionChannel): string | null {
+  const given = raw === undefined || raw === null ? "" : raw;
+  if (typeof given !== "string") throw new DomainError("INVALID_INPUT", "A payment reference must be text");
+  const text = given.trim();
+  if (channel === "cash") {
+    if (text !== "") throw new DomainError("INVALID_INPUT", "A cash payment carries no reference");
+    return null;
+  }
+  if (text === "") {
+    if (channel === "card") return null;
+    throw new DomainError("INVALID_INPUT", "This payment method needs a reference");
+  }
+  if (text.length > MAX_PAYMENT_REFERENCE || !REFERENCE_SHAPE.test(text)) {
+    throw new DomainError("INVALID_INPUT", "That payment reference is not valid");
+  }
+  // The same card number must be refused even when preceded by an approval-label/prefix.
+  // Checking only the WHOLE reference let "AUTH-4111111111111111" slip through the guard.
+  const possibleCardNumbers = text.match(/\d(?:[ -]?\d){12,18}(?!\d)/g) ?? [];
+  if (possibleCardNumbers.some((part) => {
+    const digits = part.replace(/[ -]/g, "");
+    return digits.length >= 13 && digits.length <= 19 && luhnValid(digits);
+  })) {
+    throw new DomainError("INVALID_INPUT", "That looks like a card number and must not be stored");
+  }
+  return text;
+}
+
 /** The longest external reference a manual obligation may carry. */
 export const MAX_SOURCE_REF = 120;
 
@@ -131,6 +230,12 @@ export interface SettlementRecord {
   readonly idempotencyKey: string;
   readonly amountMinor: bigint;
   readonly method: SettlementMethod;
+  /** Migration 17. NULL on every historical row, on cash and on card. */
+  readonly provider: SettlementProvider | null;
+  /** Migration 17. A non-sensitive operator-entered reference, or null. */
+  readonly reference: string | null;
+  /** Migration 17. True only when the operator explicitly confirmed the money was received. */
+  readonly fundsConfirmed: boolean | null;
   readonly settledBy: string;
   readonly settledAt: string;
   readonly businessDate: string;

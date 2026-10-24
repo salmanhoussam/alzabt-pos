@@ -42,7 +42,13 @@ import { useEffect, useState } from "react";
 import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../api";
 import { parseDecimal } from "../../domain/money";
 import { useT } from "../i18n";
-import type { CustomerStatementDto, StatementObligationDto } from "../../shared/ipcContract";
+import type {
+  CollectionMethodDto,
+  CustomerStatementDto,
+  PendingCollectionDto,
+  RecordPaymentRequest,
+  StatementObligationDto,
+} from "../../shared/ipcContract";
 
 /**
  * 🔴 THE TWO OUTCOMES AFTER WHICH A SECOND COLLECTION MUST NOT BE OFFERED.
@@ -56,17 +62,33 @@ import type { CustomerStatementDto, StatementObligationDto } from "../../shared/
  */
 const UNSAFE_TO_RETRY: ReadonlySet<string> = new Set(["PAYMENT_RECORDED", "PAYMENT_STATUS_UNKNOWN"]);
 
+const COLLECTION_METHODS: ReadonlyArray<CollectionMethodDto> = ["cash", "card", "whish", "bank_transfer", "other"];
+
 interface Props {
   readonly customerId: string;
 }
 
 export function CustomerStatement({ customerId }: Props) {
   const { t } = useT();
+  /** Own sentences for this slice's refusals (own codes, so the refusal-audit rules are untouched). */
+  const collectErrorText = (err: unknown): string => {
+    if (err instanceof ApiError && (err.code === "FUNDS_NOT_CONFIRMED" ||
+        err.code === "DUPLICATE_PAYMENT_REFERENCE" ||
+        err.code === "COLLECTION_UNRESOLVED")) {
+      return t(`collect.err.${err.code}`);
+    }
+    return errorText(err);
+  };
   const [statement, setStatement] = useState<CustomerStatementDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Which debt the owner is collecting against, or null when no form is open. */
   const [payingId, setPayingId] = useState<string | null>(null);
   const [amountText, setAmountText] = useState("");
+  /** Migration 17. HOW the money arrived; part of what an attempt IS, exactly like the amount. */
+  const [method, setMethod] = useState<CollectionMethodDto>("cash");
+  const [reference, setReference] = useState("");
+  /** Explicit, per attempt, never remembered: "the money really arrived". */
+  const [confirmed, setConfirmed] = useState(false);
   /**
    * 🔴 ONE KEY PER ATTEMPT, AND THE AMOUNT IS PART OF WHAT AN ATTEMPT IS. Exactly SellScreen's
    * convention, which replaces its key when the cart changes. Retained across a failed submit, so
@@ -80,8 +102,17 @@ export function CustomerStatement({ customerId }: Props) {
   const [blocked, setBlocked] = useState(false);
   const [notice, setNotice] = useState<"done" | "duplicate" | null>(null);
 
+  const resetPaymentDetails = () => {
+    setMethod("cash");
+    setReference("");
+    setConfirmed(false);
+  };
+
   const closeForm = () => {
+    // A recorded/unknown payment needs authoritative reconciliation, not a fresh attempt key.
+    if (blocked || busy) return;
     setPayingId(null);
+    resetPaymentDetails();
     setAmountText("");
     setPayError(null);
     setBlocked(false);
@@ -89,7 +120,10 @@ export function CustomerStatement({ customerId }: Props) {
   };
 
   const openForm = (obligationId: string) => {
+    // Do not clear an unresolved payment by switching to another obligation in this statement.
+    if (blocked || busy) return;
     setPayingId(obligationId);
+    resetPaymentDetails();
     setAmountText("");
     setPayError(null);
     setBlocked(false);
@@ -116,18 +150,40 @@ export function CustomerStatement({ customerId }: Props) {
       setPayError(t("collect.invalidAmount"));
       return;
     }
+    // 🔴 THE RULES ARE THE MAIN PROCESS'S; THESE ARE ONLY EARLY, HONEST REFUSALS in the owner's
+    // language. A non-cash payment is recorded only once the owner says the money arrived — this
+    // till never contacts Whish or a bank — and a traceable one needs its reference.
+    const needsReference = method === "whish" || method === "bank_transfer" || method === "other";
+    const needsConfirmation = needsReference;
+    if (needsReference && reference.trim() === "") {
+      setPayError(t("collect.referenceRequired"));
+      return;
+    }
+    if (needsConfirmation && !confirmed) {
+      setPayError(t("collect.confirmRequired"));
+      return;
+    }
+    await post({
+      customerId,
+      obligationId: o.id,
+      idempotencyKey: attemptKey,
+      amountMinor,
+      method,
+      reference: method === "cash" ? null : reference.trim() === "" ? null : reference.trim(),
+      fundsConfirmed: needsConfirmation ? confirmed : false,
+    });
+  };
+
+  /**
+   * The one place a collection is sent — a fresh one from the form, or the EXACT repeat of an
+   * attempt the ledger says was not recorded (same key, same payload, taken from the ledger's own
+   * record of the intent, never from this screen's memory).
+   */
+  const post = async (payload: RecordPaymentRequest) => {
     setBusy(true);
     setPayError(null);
     try {
-      const result = await call(
-        pos().recordCustomerPayment({
-          customerId,
-          obligationId: o.id,
-          idempotencyKey: attemptKey,
-          amountMinor,
-          method: "cash",
-        }),
-      );
+      const result = await call(pos().recordCustomerPayment(payload));
       // 🔴 THE STATEMENT IS REPLACED, NEVER PATCHED. Main recomputed it from the ledger after the
       // commit, so nothing here subtracts a payment from a balance.
       setStatement(result.statement);
@@ -136,12 +192,71 @@ export function CustomerStatement({ customerId }: Props) {
       setAmountText("");
       setAttemptKey(newIdempotencyKey());
     } catch (err) {
-      setPayError(errorText(err));
+      setPayError(collectErrorText(err));
       // 🔴 THE KEY IS NOT REGENERATED HERE. Retrying the same amount must replay the same key.
-      if (err instanceof ApiError && UNSAFE_TO_RETRY.has(err.code)) setBlocked(true);
+      if (err instanceof ApiError && UNSAFE_TO_RETRY.has(err.code)) {
+        setBlocked(true);
+        // 🔴 AND THE LEDGER IS ASKED, rather than the owner being left to guess. The statement carries
+        // every collection still open with what the ledger says about it; an attempt that has closed
+        // (its settlement committed) simply is not there any more.
+        await resolveFromLedger(payload.idempotencyKey, err.code === "PAYMENT_RECORDED" ? "recorded" : "unknown");
+      }
     } finally {
       setBusy(false);
     }
+  };
+
+  /** Leaves the form after the ledger has answered; the lock is released ONLY by an answer. */
+  const releaseAfterAnswer = () => {
+    setBlocked(false);
+    setPayError(null);
+    setPayingId(null);
+    resetPaymentDetails();
+    setAmountText("");
+    setAttemptKey(newIdempotencyKey());
+  };
+
+  const resolveFromLedger = async (key: string, priorOutcome: "recorded" | "unknown") => {
+    try {
+      const next = await call(pos().getCustomerStatement({ customerId }));
+      setStatement(next);
+      const open = next.pendingCollections.find((p) => p.idempotencyKey === key);
+      if (!open) {
+        // No OPEN attempt does not prove that a settlement exists: the intent may have failed
+        // before it was persisted, or it may have been closed as NOT recorded. Only the earlier
+        // authoritative PAYMENT_RECORDED response justifies an "already recorded" notice here.
+        // When the prior lookup failed, keep the lock and the UNKNOWN warning for manual review.
+        if (priorOutcome === "recorded") {
+          releaseAfterAnswer();
+          setNotice("duplicate");
+        }
+      } else if (open.status === "recorded") {
+        releaseAfterAnswer();
+        setNotice("duplicate");
+      } else if (open.status === "not_recorded") {
+        // The ledger WAS read and holds nothing: the banner offers the exact repeat, and a new
+        // payment is allowed because the earlier one is provably not recorded.
+        releaseAfterAnswer();
+      }
+      // unknown / conflict: stay blocked. The lookup failing is never read as "not recorded".
+    } catch {
+      /* the lookup failed: stay blocked */
+    }
+  };
+
+  /** The EXACT payment again: the ledger's own record of the intent, under the ORIGINAL key. */
+  const repeatPending = async (p: PendingCollectionDto) => {
+    if (busy) return;
+    const customer = customerId;
+    await post({
+      customerId: customer,
+      obligationId: p.obligationId,
+      idempotencyKey: p.idempotencyKey,
+      amountMinor: p.amount.minor,
+      method: p.method,
+      reference: p.reference,
+      fundsConfirmed: p.fundsConfirmed === true,
+    });
   };
 
   useEffect(() => {
@@ -185,12 +300,48 @@ export function CustomerStatement({ customerId }: Props) {
     );
   }
 
+  // 🔴 A collection the ledger could not answer keeps NEW collections closed for this customer — also
+  // after navigation or a restart, because this comes from the statement, not from screen state.
+  const lockedByPending = statement.pendingCollections.some((p) => p.status === "unknown" || p.status === "conflict");
+
   return (
     <section className="customer-statement" data-testid="customer-statement" data-customer={statement.customer.id}>
       <h3>{t("statement.title")}</h3>
       <p className="muted small" data-testid="statement-read-only">
         {t("statement.readOnly")}
       </p>
+
+      {statement.pendingCollections.length > 0 && (
+        /* 🔴 RECOVERED FROM THE LEDGER, NOT FROM THIS SCREEN'S MEMORY. A collection that was started and
+           never confirmed survives navigation, a closed window and a restart; each is reported with
+           what the ledger says, and an unanswered one keeps new collections closed. */
+        <div data-testid="collect-pending-list">
+          {statement.pendingCollections.map((p) => (
+            <div
+              key={p.idempotencyKey}
+              className={p.status === "unknown" || p.status === "conflict" ? "error" : "notice"}
+              data-testid="collect-pending"
+              data-status={p.status}
+            >
+              <p>
+                <bdi dir="ltr">{fmt(p.amount)}</bdi> · {t(`collect.method.${p.method}`)}
+                {p.reference !== null && (
+                  <>
+                    {" "}
+                    · <bdi dir="ltr">{p.reference}</bdi>
+                  </>
+                )}
+              </p>
+              <p>{t(`collect.pending.${p.status}`)}</p>
+              {p.status === "not_recorded" && (
+                <button className="btn" type="button" disabled={busy} onClick={() => void repeatPending(p)} data-testid="collect-pending-retry">
+                  {t("collect.pending.retry")}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {notice !== null && (
         /* 🔴 "ALREADY RECORDED" IS NOT "RECORDED AGAIN". A replayed key returns the committed
@@ -263,7 +414,14 @@ export function CustomerStatement({ customerId }: Props) {
                       {o.settlements.map((s) => (
                         <li key={s.id} data-testid="statement-settlement">
                           <bdi dir="ltr">{fmt(s.amount)}</bdi>{" "}
-                          <span className="muted small">{t(`statement.method.${s.method}`)}</span>{" "}
+                          <span className="muted small" data-testid="statement-settlement-method" data-method={s.method} data-provider={s.provider ?? ""}>
+                            {t(`statement.channel.${s.provider ?? s.method}`)}
+                          </span>{" "}
+                          {s.reference !== null && (
+                            <span className="muted small" data-testid="statement-settlement-reference">
+                              <bdi dir="ltr">{s.reference}</bdi>{" "}
+                            </span>
+                          )}
                           <span className="muted small">
                             <bdi dir="ltr">{s.settledAt.slice(0, 10)}</bdi>
                           </span>
@@ -314,6 +472,7 @@ export function CustomerStatement({ customerId }: Props) {
                           dir="ltr"
                           autoFocus
                           value={amountText}
+                          disabled={blocked || busy}
                           onChange={(e) => {
                             setAmountText(e.target.value);
                             setPayError(null);
@@ -323,11 +482,69 @@ export function CustomerStatement({ customerId }: Props) {
                           }}
                         />
                       </label>
-                      <div className="statement-row">
+                      <label>
                         <span className="muted">{t("collect.method")}</span>
-                        {/* Cash only in S3C, so it is stated rather than chosen. */}
-                        <span data-testid="collect-method">{t("collect.methodCash")}</span>
-                      </div>
+                        {/* Migration 17. A change of method is a different payment, so it takes a new
+                            key; while an outcome is UNKNOWN the choice is frozen so the same key and
+                            payload are the only thing that can be repeated. */}
+                        <select
+                          data-testid="collect-method"
+                          value={method}
+                          disabled={blocked || busy}
+                          onChange={(e) => {
+                            setMethod(e.target.value as CollectionMethodDto);
+                            setReference("");
+                            setConfirmed(false);
+                            setPayError(null);
+                            setAttemptKey(newIdempotencyKey());
+                          }}
+                        >
+                          {COLLECTION_METHODS.map((m) => (
+                            <option key={m} value={m}>
+                              {t(`collect.method.${m}`)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {method !== "cash" && (
+                        <label>
+                          <span className="muted">
+                            {t("collect.paymentReference")}
+                            {method === "card" ? ` (${t("collect.optional")})` : ""}
+                          </span>
+                          <input
+                            data-testid="collect-payment-reference"
+                            type="text"
+                            dir="ltr"
+                            maxLength={64}
+                            value={reference}
+                            disabled={blocked || busy}
+                            onChange={(e) => {
+                              setReference(e.target.value);
+                              setPayError(null);
+                              setAttemptKey(newIdempotencyKey());
+                            }}
+                          />
+                          <span className="muted small">{t("collect.referenceHint")}</span>
+                        </label>
+                      )}
+                      {(method === "whish" || method === "bank_transfer" || method === "other") && (
+                        <label className="collect-confirm-funds">
+                          <input
+                            data-testid="collect-funds-confirmed"
+                            type="checkbox"
+                            checked={confirmed}
+                            disabled={blocked || busy}
+                            onChange={(e) => {
+                              setConfirmed(e.target.checked);
+                              setPayError(null);
+                              setAttemptKey(newIdempotencyKey());
+                            }}
+                          />{" "}
+                          <span>{t("collect.fundsConfirmed")}</span>
+                          <span className="muted small"> {t("collect.fundsHint")}</span>
+                        </label>
+                      )}
                       {payError !== null && (
                         <p className="error" data-testid="collect-error">
                           {payError}
@@ -339,13 +556,19 @@ export function CustomerStatement({ customerId }: Props) {
                             {busy ? t("collect.posting") : t("collect.confirm")}
                           </button>
                         )}
-                        <button className="btn ghost" type="button" onClick={closeForm} data-testid="collect-cancel">
+                        <button className="btn ghost" type="button" onClick={closeForm} disabled={blocked || busy} data-testid="collect-cancel">
                           {t("collect.cancel")}
                         </button>
                       </div>
                     </form>
                   ) : (
-                    <button className="btn" type="button" onClick={() => openForm(o.id)} data-testid="collect-open">
+                    <button
+                      className="btn"
+                      type="button"
+                      disabled={blocked || busy || lockedByPending}
+                      onClick={() => openForm(o.id)}
+                      data-testid="collect-open"
+                    >
                       {t("collect.action")}
                     </button>
                   ))}

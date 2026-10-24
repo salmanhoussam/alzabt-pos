@@ -93,6 +93,9 @@ export const COUNTED_TABLES = [
   // restore the lines but forget which batches produced them, so a replayed request after a
   // restore would insert them a second time.
   "invoice_line_batches",
+  // Migration 17 — the durable intent of a collection. A snapshot without it would restore the
+  // settlements but forget an attempt that never committed, losing the operator's record of it.
+  "collection_attempts",
   "schema_migrations",
 ] as const;
 const DAILY_RE = /^daily-(\d{4}-\d{2}-\d{2})\.sqlite$/;

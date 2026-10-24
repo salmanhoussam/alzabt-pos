@@ -23,6 +23,7 @@
  */
 import { _electron as electron } from "playwright-core";
 import { signIn } from "./_signin.mjs";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -472,7 +473,8 @@ try {
     // 🔴 TRANSITION 13 -> 14 with migration 14 (credit_sale_identity_and_unpaid_state). The old value was 13.
     // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
     // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 16, "the installed app's ledger is at schema v16");
+    // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 17, "the installed app's ledger is at schema v17");
     assert(n("SELECT count(*) AS n FROM parties") === 5, "five party rows, and no more");
     assert(n("SELECT count(*) AS n FROM party_contact_history") === 0, "and zero contact-history rows — nothing was edited");
     assert(n("SELECT count(*) AS n FROM sales") === 0, "🔴 and still not one sale, obligation or payment anywhere");
@@ -672,7 +674,11 @@ try {
     (await testid(p5, "collect-outstanding").innerText()).includes("25.00"),
     "the form shows what is outstanding on THIS debt",
   );
-  assert((await testid(p5, "collect-method").innerText()).trim().length > 0, "and names the method it will record");
+  // 🔴 TRANSITION with migration 17 (M17A): the method used to be stated text (cash only); it is now a
+  // selector. What stays true is that cash is the DEFAULT and needs no reference or confirmation.
+  assert((await testid(p5, "collect-method").inputValue()) === "cash", "and cash is the default method it will record");
+  assert((await testid(p5, "collect-payment-reference").count()) === 0, "cash shows no reference field");
+  assert((await testid(p5, "collect-funds-confirmed").count()) === 0, "and no 'money received' confirmation");
   await p5.screenshot({ path: SHOTS + "S3C-A1-collect-form-arabic.png" });
 
   await testid(p5, "collect-amount").fill("10.00");
@@ -804,7 +810,157 @@ try {
     assert(o.posted_at === "2026-10-20T08:00:00.000Z", "and its posting time is untouched");
     // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
     // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
-    assert(n("SELECT count(*) AS n FROM schema_migrations") === 16, "the ledger is still at schema v16");
+    // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
+    assert(n("SELECT count(*) AS n FROM schema_migrations") === 17, "the ledger is still at schema v17");
+    db.close();
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // M17A · the OWNER records Whish, card and bank transfer against the SAME existing debt
+  //
+  // 🔴 Whish and bank transfer are RECORDED by the operator; this till never contacts a provider.
+  // So each needs a reference and an explicit "the money arrived", and none of them is cash.
+  // ═══════════════════════════════════════════════════════
+  {
+    const db0 = new Database(LEDGER, { readonly: true });
+    var cashBefore = Number(db0.prepare("SELECT coalesce(sum(amount_minor), 0) AS n FROM settlements WHERE method = 'cash'").get().n);
+    var settlementsBefore = Number(db0.prepare("SELECT count(*) AS n FROM settlements").get().n);
+    db0.close();
+  }
+  // 🔴 A COLLECTION STARTED BEFORE THE "RESTART": its durable intent exists, its settlement does not
+  // (the shape an internal fault leaves). The app must recover it from the LEDGER on launch.
+  {
+    const dbw = new Database(LEDGER);
+    const op = dbw.prepare("SELECT id FROM operators ORDER BY id LIMIT 1").get().id;
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify({
+          obligationId: "o-part",
+          partyId: statementCustomerId,
+          amountMinor: "200",
+          currency: "USD",
+          method: "external",
+          provider: "whish",
+          reference: "WH-E2E-REC",
+          fundsConfirmed: true,
+        }),
+      )
+      .digest("hex");
+    dbw
+      .prepare(
+        `INSERT INTO collection_attempts (idempotency_key, customer_id, obligation_id, currency, amount_minor, channel,
+                                          reference, funds_confirmed, request_fingerprint, created_by, created_at)
+         VALUES ('e2e-pending-key-01', ?, 'o-part', 'USD', 200, 'whish', 'WH-E2E-REC', 1, ?, ?, '2026-10-24T08:00:00.000Z')`,
+      )
+      .run(statementCustomerId, fingerprint, op);
+    dbw.close();
+  }
+  const owner4 = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+  const p6 = await owner4.firstWindow();
+  await signIn(p6, "Cashier One", "1111");
+  await p6.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+  await p6.locator('[data-testid="tab-customers"]').click();
+  await testid(p6, "customers-search").fill("0111111");
+  await p6.locator(`[data-customer="${statementCustomerId}"]`).first().click();
+  await testid(p6, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+  const card6 = (id) => p6.locator(`[data-obligation="${id}"]`);
+  const dbCount = () => {
+    const d = new Database(LEDGER, { readonly: true });
+    const c = Number(d.prepare("SELECT count(*) AS n FROM settlements").get().n);
+    d.close();
+    return c;
+  };
+
+  // ── RECOVERY · the unfinished collection is reported from the ledger, and repeated EXACTLY ──────
+  await testid(p6, "collect-pending").waitFor({ state: "visible", timeout: 30000 });
+  assert((await testid(p6, "collect-pending").getAttribute("data-status")) === "not_recorded", "🔴 the ledger says the earlier collection was NOT recorded");
+  assert((await testid(p6, "collect-pending").innerText()).includes("WH-E2E-REC"), "and the pending record carries its original reference");
+  assert(dbCount() === settlementsBefore, "nothing was collected just by opening the statement");
+  await p6.screenshot({ path: SHOTS + "M17A-A0-pending-recovered.png" });
+  await testid(p6, "collect-pending-retry").click();
+  await testid(p6, "collect-done").waitFor({ state: "visible", timeout: 30000 });
+  assert((await testid(p6, "collect-pending").count()) === 0, "🔴 once recorded, the attempt is closed and no longer shown");
+  assert(dbCount() === settlementsBefore + 1, "the exact repeat recorded exactly one settlement");
+
+  await card6("o-part").locator('[data-testid="collect-open"]').click();
+  await testid(p6, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+  await testid(p6, "collect-method").selectOption("whish");
+  await testid(p6, "collect-payment-reference").waitFor({ state: "visible", timeout: 30000 });
+  assert(!(await testid(p6, "collect-funds-confirmed").isChecked()), "🔴 the 'money received' confirmation starts UNCHECKED");
+
+  // 🔴 THE 1024×640 REACHABILITY GATE. The tallest form (Whish: amount + method + reference +
+  // confirmation) must keep Confirm and Cancel reachable in a 1024×640 viewport. The measured
+  // viewport is logged, because an unmeasured "it fits" is exactly what stayed open before.
+  try {
+    await p6.setViewportSize({ width: 1024, height: 640 });
+  } catch {
+    log("setViewportSize unsupported here; measuring the real window instead");
+  }
+  const vp = await p6.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }));
+  log(`collection-form viewport ${vp.w}x${vp.h}`);
+  for (const id of ["collect-confirm", "collect-cancel"]) {
+    const el = testid(p6, id);
+    await el.scrollIntoViewIfNeeded();
+    const box = await el.boundingBox();
+    assert(
+      box !== null && box.x >= 0 && box.y >= 0 && box.x + box.width <= vp.w && box.y + box.height <= vp.h,
+      `🔴 ${id} is fully inside the ${vp.w}x${vp.h} viewport once scrolled to (${JSON.stringify(box)})`,
+    );
+  }
+  await p6.screenshot({ path: SHOTS + `M17A-A1-collect-form-whish-${vp.w}x${vp.h}.png` });
+
+  // No reference → refused on screen, nothing written. Reference but no confirmation → refused too.
+  await testid(p6, "collect-amount").fill("5.00");
+  await testid(p6, "collect-confirm").click();
+  await testid(p6, "collect-error").waitFor({ state: "visible", timeout: 30000 });
+  await testid(p6, "collect-payment-reference").fill("WH-E2E-001");
+  await testid(p6, "collect-confirm").click();
+  await testid(p6, "collect-error").waitFor({ state: "visible", timeout: 30000 });
+  assert(dbCount() === settlementsBefore + 1, "🔴 neither refusal wrote a settlement (only the recovered one exists)");
+  await testid(p6, "collect-funds-confirmed").check();
+  await testid(p6, "collect-confirm").click();
+  await testid(p6, "collect-done").waitFor({ state: "visible", timeout: 30000 });
+  const whishRow = card6("o-part").locator('[data-testid="statement-settlement-method"][data-provider="whish"]');
+  assert((await whishRow.count()) === 2, "🔴 the history shows both Whish payments (the recovered one and the new one) as Whish, not as cash");
+  assert((await card6("o-part").innerText()).includes("WH-E2E-001"), "and carries its reference");
+  await p6.screenshot({ path: SHOTS + "M17A-A2-after-whish.png" });
+
+  // Card terminal (no reference) and bank transfer (reference + confirmation) on the same debt.
+  await card6("o-part").locator('[data-testid="collect-open"]').click();
+  await testid(p6, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+  await testid(p6, "collect-method").selectOption("card");
+  await testid(p6, "collect-amount").fill("3.00");
+  await testid(p6, "collect-confirm").click();
+  await testid(p6, "collect-done").waitFor({ state: "visible", timeout: 30000 });
+  await card6("o-part").locator('[data-testid="collect-open"]').click();
+  await testid(p6, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+  await testid(p6, "collect-method").selectOption("bank_transfer");
+  await testid(p6, "collect-amount").fill("4.00");
+  await testid(p6, "collect-payment-reference").fill("BT-E2E-001");
+  await testid(p6, "collect-funds-confirmed").check();
+  await testid(p6, "collect-confirm").click();
+  await testid(p6, "collect-done").waitFor({ state: "visible", timeout: 30000 });
+  await p6.screenshot({ path: SHOTS + "M17A-A3-after-three-methods.png" });
+  await owner4.close().catch(() => undefined);
+
+  {
+    const db = new Database(LEDGER, { readonly: true });
+    const n = (sql) => Number(db.prepare(sql).get().n);
+    assert(n("SELECT count(*) AS n FROM settlements") === settlementsBefore + 4, "exactly four settlements were added (one recovered, three new)");
+    const rec = db.prepare("SELECT s.idempotency_key AS k, s.method AS m, s.provider AS p, a.resolution AS r FROM settlements s JOIN collection_attempts a ON a.idempotency_key = s.idempotency_key WHERE s.reference = 'WH-E2E-REC'").get();
+    assert(rec.k === "e2e-pending-key-01" && rec.m === "external" && rec.p === "whish" && rec.r === "recorded", `🔴 the recovered payment kept its ORIGINAL key and closed its attempt (${JSON.stringify(rec)})`);
+    const w = db.prepare("SELECT method, provider, reference, funds_confirmed AS c, amount_minor AS a FROM settlements WHERE reference = 'WH-E2E-001'").get();
+    assert(w.method === "external" && w.provider === "whish" && Number(w.c) === 1 && Number(w.a) === 500, `🔴 Whish is stored as external/whish, confirmed, 5.00 (${JSON.stringify(w)})`);
+    const c = db.prepare("SELECT method, provider, reference FROM settlements WHERE method = 'card' AND obligation_id = 'o-part'").get();
+    assert(c.provider === null && c.reference === null, "card is stored as card with no reference");
+    const b = db.prepare("SELECT method, provider, reference, funds_confirmed AS c FROM settlements WHERE reference = 'BT-E2E-001'").get();
+    assert(b.method === "external" && b.provider === "bank_transfer" && Number(b.c) === 1, "bank transfer is stored as external/bank_transfer, confirmed");
+    assert(
+      n("SELECT coalesce(sum(amount_minor), 0) AS n FROM settlements WHERE method = 'cash'") === cashBefore,
+      "🔴 NONE of it is cash: the cash total is exactly what it was",
+    );
+    assert(n("SELECT count(*) AS n FROM obligations") === 3, "and still exactly three obligations — a collection never creates or rewrites a debt");
+    assert(n("SELECT amount_minor AS n FROM obligations WHERE id = 'o-part'") === 4000, "the original debt principal is untouched");
     db.close();
   }
 

@@ -19,6 +19,7 @@ import type { OnlineCatalogSnapshot } from "../application/posService";
 import { MAX_QUANTITY_MILLI } from "../domain/quantity";
 import { assertPaymentMethod } from "../domain/sale";
 import { formatDecimal, money } from "../domain/money";
+import { channelStorage, isCollectionChannel } from "../domain/ledger";
 import type { SaleRecord } from "../domain/sale";
 import { DEFAULT_TERMINAL_LANGUAGE, isLanguage } from "../shared/i18n";
 import { MAX_PARTY_ADDRESS, MAX_PARTY_NAME, MAX_PARTY_NOTE, MAX_PARTY_PHONE } from "../domain/party";
@@ -969,14 +970,25 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     recordCustomerPayment: wrap(
       "recordCustomerPayment",
       (p) => {
-        const o = exactObject(p, ["customerId", "obligationId", "idempotencyKey", "amountMinor", "method"]);
+        // `reference` and `fundsConfirmed` may be absent (every caller that predates migration 17).
+        const o = objectWithOptional(
+          p,
+          ["customerId", "obligationId", "idempotencyKey", "amountMinor", "method"],
+          ["reference", "fundsConfirmed"],
+        );
         const customerId = str(o.customerId, "customerId", 100);
         const obligationId = str(o.obligationId, "obligationId", 100);
         const idempotencyKey = str(o.idempotencyKey, "idempotencyKey", 100);
-        // 🔴 S3C RECORDS CASH AND NOTHING ELSE. The ledger column accepts more, but a method this
-        // screen cannot truthfully take must not be reachable through it — Whish and Credit are a
-        // separate, still-unauthorized decision.
-        if (o.method !== "cash") invalid("'method' must be 'cash'");
+        // 🔴 FIVE CHANNELS AND NO MORE: cash · card · whish · bank_transfer · other. "Credit" is a
+        // STATE, never a way of paying, so it is not here; an unknown value is refused outright.
+        if (!isCollectionChannel(o.method)) invalid("'method' must be cash, card, whish, bank_transfer or other");
+        const channel = o.method;
+        if ("reference" in o && o.reference !== null && typeof o.reference !== "string") {
+          invalid("'reference' must be text or null");
+        }
+        if ("fundsConfirmed" in o && typeof o.fundsConfirmed !== "boolean") {
+          invalid("'fundsConfirmed' must be true or false");
+        }
         const amountMinor = parseMinor(o.amountMinor);
 
         // 🔴 THE CUSTOMER IS RESOLVED **BEFORE** THE SETTLE, AND THAT ORDER IS THE WHOLE POINT.
@@ -988,12 +1000,18 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         // before any write.
         const party = customers().get("customer", customerId);
 
-        const result = ledger().settle({
+        const result = ledger().collect({
+          customerId,
           obligationId,
           partyId: customerId,
           idempotencyKey,
           amountMinor,
-          method: "cash",
+          // The ledger derives the stored method/provider from the channel and applies the
+          // reference and confirmation rules; nothing about them is decided here.
+          method: channelStorage(channel).method,
+          channel,
+          reference: "reference" in o ? o.reference : undefined,
+          fundsConfirmed: "fundsConfirmed" in o ? o.fundsConfirmed : undefined,
         });
 
         const statement = ledger().statementFor(customerId);
@@ -1002,6 +1020,9 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           id: result.record.id,
           amount: { minor: result.record.amountMinor.toString(), currency: result.record.currency },
           method: result.record.method,
+          provider: result.record.provider,
+          reference: result.record.reference,
+          fundsConfirmed: result.record.fundsConfirmed,
           settledAt: result.record.settledAt,
         } as const;
         log.info("customer-payment-recorded", { id: result.record.id, duplicate: result.duplicate });
@@ -1519,6 +1540,9 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           id: st.id,
           amount: { minor: st.amountMinor.toString(), currency: st.currency },
           method: st.method,
+          provider: st.provider,
+          reference: st.reference,
+          fundsConfirmed: st.fundsConfirmed,
           settledAt: st.settledAt,
         })),
       })),
@@ -1526,6 +1550,20 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       balances: [...s.balances.entries()]
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([currency, minor]) => ({ minor: minor.toString(), currency })),
+      // 🔴 READ FROM THE LEDGER EVERY TIME, never remembered by the screen: this is what survives a
+      // navigation, a closed window and a restart.
+      pendingCollections: ledger()
+        .openCollections(customer.id)
+        .map(({ attempt, status }) => ({
+          idempotencyKey: attempt.key,
+          obligationId: attempt.obligationId,
+          amount: { minor: attempt.amountMinor.toString(), currency: attempt.currency },
+          method: attempt.channel,
+          reference: attempt.reference,
+          fundsConfirmed: attempt.fundsConfirmed,
+          createdAt: attempt.createdAt,
+          status,
+        })),
     };
   }
 

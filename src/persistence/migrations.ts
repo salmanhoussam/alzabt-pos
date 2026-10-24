@@ -1961,4 +1961,99 @@ WHEN NEW.source_kind = 'sale'
 BEGIN SELECT RAISE(ABORT, 'ledger: an invoice receivable must match its invoice customer, currency and unpaid balance'); END;
 `,
   },
+  {
+    version: 17,
+    name: "settlement_collection_details",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 17 — a collection records WHICH way the money arrived, not just that it did.
+    //
+    // `settlements.method` keeps migration 13's four values and its meaning: no row is rewritten and
+    // no CHECK is widened (a rebuild of an append-only financial table would be the largest possible
+    // change for a three-column need). Three nullable columns say the rest:
+    //   provider         'whish' | 'bank_transfer' — only on method 'external'. So a Whish receipt is
+    //                    method 'external', never 'cash', and a till-cash total (method = 'cash')
+    //                    cannot include it.
+    //   reference        a non-sensitive operator-entered reference (a Whish/bank transaction number,
+    //                    a card slip number). Free of PIN/card data is enforced by the service; the
+    //                    column is length-bounded here.
+    //   funds_confirmed  1 when the operator explicitly confirmed the money was actually received.
+    //                    Never inferred. NULL on every historical row and on cash.
+    //
+    // Every historical settlement keeps NULL in all three: it stays exactly what it was. The
+    // existing immutability triggers cover the new columns (they fire on any UPDATE/DELETE).
+    //
+    // Database-level guards (the service enforces the full rules; these are the backstop):
+    //   · a provider only on 'external', and only with a reference AND a confirmation;
+    //   · cash carries no reference and no confirmation;
+    //   · one (provider, reference) can be recorded ONCE — the same Whish or bank transaction cannot
+    //     be counted as money received twice under two different payment keys.
+    //
+    // It also adds `collection_attempts`: the durable, secret-free INTENT of a collection, committed
+    // before its settlement can exist, so an unknown outcome can be recovered across navigation and
+    // restart by reading the ledger under the ORIGINAL key. See the table's own note below.
+    sql: `
+ALTER TABLE settlements ADD COLUMN provider TEXT
+  CHECK (provider IS NULL OR provider IN ('whish', 'bank_transfer'));
+ALTER TABLE settlements ADD COLUMN reference TEXT
+  CHECK (reference IS NULL OR (length(reference) BETWEEN 1 AND 64 AND reference = trim(reference)));
+ALTER TABLE settlements ADD COLUMN funds_confirmed INTEGER
+  CHECK (funds_confirmed IS NULL OR funds_confirmed = 1);
+
+CREATE UNIQUE INDEX settlements_provider_reference ON settlements (provider, reference)
+  WHERE provider IS NOT NULL;
+
+CREATE TRIGGER settlements_collection_shape BEFORE INSERT ON settlements
+WHEN (NEW.provider IS NOT NULL AND NEW.method <> 'external')
+  OR (NEW.provider IS NOT NULL AND (NEW.reference IS NULL OR NEW.funds_confirmed IS NOT 1))
+  OR (NEW.method = 'cash' AND (NEW.reference IS NOT NULL OR NEW.funds_confirmed IS NOT NULL))
+BEGIN SELECT RAISE(ABORT, 'ledger: payment method details are inconsistent'); END;
+
+-- 🔴 THE DURABLE INTENT OF A COLLECTION, written (and committed) BEFORE the settlement can exist.
+-- If the renderer loses its state — navigation, a closed window, a restart — the original key and the
+-- exact intent are still here, so the outcome can be settled by reading the ledger under that key and
+-- never by guessing or by minting a different key. It holds only what the settlement itself would
+-- hold (ids, amount, channel, a non-sensitive reference): no PIN, credential or card data.
+-- It is bookkeeping, not money: it never changes a settlement, obligation, sale or invoice. The
+-- settlement transaction closes its own attempt atomically ('recorded'), so an attempt that is still
+-- open after a fault is one whose settlement did NOT commit — and the ledger is asked anyway.
+CREATE TABLE collection_attempts (
+  idempotency_key     TEXT    PRIMARY KEY CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  customer_id         TEXT    NOT NULL REFERENCES parties (id),
+  obligation_id       TEXT    NOT NULL REFERENCES obligations (id),
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  amount_minor        INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  channel             TEXT    NOT NULL CHECK (channel IN ('cash', 'card', 'whish', 'bank_transfer', 'other')),
+  reference           TEXT    CHECK (reference IS NULL OR (length(reference) BETWEEN 1 AND 64 AND reference = trim(reference))),
+  funds_confirmed     INTEGER CHECK (funds_confirmed IS NULL OR funds_confirmed = 1),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  created_by          TEXT    NOT NULL REFERENCES operators (id),
+  created_at          TEXT    NOT NULL,
+  resolved_at         TEXT,
+  resolution          TEXT    CHECK (resolution IS NULL OR resolution IN ('recorded', 'not_recorded')),
+  CHECK ((resolved_at IS NULL) = (resolution IS NULL))
+) STRICT;
+
+CREATE INDEX collection_attempts_open ON collection_attempts (customer_id) WHERE resolved_at IS NULL;
+
+-- Only the resolution may be written, and only once. Everything else about an attempt is frozen.
+CREATE TRIGGER collection_attempts_resolve_once BEFORE UPDATE ON collection_attempts
+WHEN OLD.resolved_at IS NOT NULL
+  OR NEW.idempotency_key IS NOT OLD.idempotency_key OR NEW.customer_id IS NOT OLD.customer_id
+  OR NEW.obligation_id IS NOT OLD.obligation_id OR NEW.currency IS NOT OLD.currency
+  OR NEW.amount_minor IS NOT OLD.amount_minor OR NEW.channel IS NOT OLD.channel
+  OR NEW.reference IS NOT OLD.reference OR NEW.funds_confirmed IS NOT OLD.funds_confirmed
+  OR NEW.request_fingerprint IS NOT OLD.request_fingerprint OR NEW.created_by IS NOT OLD.created_by
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'ledger: a collection attempt can only be resolved, once'); END;
+CREATE TRIGGER collection_attempts_no_delete BEFORE DELETE ON collection_attempts
+BEGIN SELECT RAISE(ABORT, 'ledger: a collection attempt cannot be deleted'); END;
+
+-- Even a direct SQL insert cannot resurrect a payment key whose attempt was permanently closed
+-- as NOT recorded. A late IPC retry is blocked in the service; this is its database backstop.
+CREATE TRIGGER settlements_closed_collection_attempt BEFORE INSERT ON settlements
+WHEN EXISTS (SELECT 1 FROM collection_attempts
+             WHERE idempotency_key = NEW.idempotency_key AND resolution = 'not_recorded')
+BEGIN SELECT RAISE(ABORT, 'ledger: a closed collection attempt cannot be settled'); END;
+`,
+  },
 ];

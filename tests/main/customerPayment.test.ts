@@ -558,10 +558,14 @@ describe("authorization", () => {
 // ══════════════════════════════════════════════════════════════════════════════════════════════
 
 describe("the payload", () => {
-  it("🔴 accepts CASH only — no other method is reachable through this channel", () => {
+  // 🔴 TRANSITION with migration 17 (M17A). This asserted CASH ONLY; the channel now takes exactly five
+  // named ways of paying (cash · card · whish · bank_transfer · other). What stays an INVARIANT is
+  // that nothing outside that list is reachable — 'external' (a stored value, not a channel) and
+  // 'credit' (a STATE, never a way of paying) in particular.
+  it("🔴 accepts exactly the five named channels — nothing else is reachable through this channel", () => {
     const c = customer("زبون");
     const o = owe(c.id, "bill-1", 1000n);
-    for (const m of ["card", "external", "other", "whish", "credit", ""]) {
+    for (const m of ["external", "credit", "CASH", "Whish", "wire", "bank", ""]) {
       const r = ipc.recordCustomerPayment({ ...payReq(c.id, o.id, `key-m-${m || "empty"}-1`, "100"), method: m });
       expect(errCode(r), m).toBe("INVALID_INPUT");
     }

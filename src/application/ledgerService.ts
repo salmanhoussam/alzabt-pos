@@ -34,12 +34,17 @@ import { businessDateOf } from "../domain/businessDay";
 import { DomainError } from "../domain/errors";
 import { formatDecimal, money } from "../domain/money";
 import {
+  type CollectionChannel,
   type ObligationDirection,
   type ObligationRecord,
   type ObligationSource,
   type SettlementMethod,
+  type SettlementProvider,
   type SettlementRecord,
   balancesByCurrency,
+  channelStorage,
+  cleanPaymentReference,
+  isCollectionChannel,
   isObligationDirection,
   isObligationSource,
   isSettlementMethod,
@@ -48,8 +53,24 @@ import {
   partyKindFor,
   sourceRef as cleanSourceRef,
 } from "../domain/ledger";
-import type { LedgerRepository } from "../persistence/ledgerRepository";
+import type { AttemptRecord, LedgerRepository } from "../persistence/ledgerRepository";
 import type { PartyRepository } from "../persistence/partyRepository";
+
+interface PreparedCollection {
+  readonly key: string;
+  readonly obligation: ObligationRecord;
+  readonly partyId: string;
+  readonly obligationId: string;
+  readonly currency: string;
+  readonly amountMinor: bigint;
+  readonly method: SettlementMethod;
+  readonly provider: SettlementProvider | null;
+  readonly reference: string | null;
+  readonly fundsConfirmed: boolean | null;
+  /** The named channel, or null for the legacy migration-13 call (which keeps no attempt). */
+  readonly channel: CollectionChannel | null;
+  readonly fingerprint: string;
+}
 
 /** Who is acting. Supplied by the POS service, which owns the session and the live role. */
 export interface LedgerActor {
@@ -87,6 +108,14 @@ export interface SettlementDraft {
   readonly idempotencyKey: unknown;
   readonly amountMinor: unknown;
   readonly method: unknown;
+  /**
+   * Migration 17. When present the payment is a COLLECTION through a named channel (cash · card ·
+   * whish · bank_transfer · other) and the stored method/provider are derived from it, with the
+   * reference and confirmation rules applied. Absent = the migration-13 behaviour, unchanged.
+   */
+  readonly channel?: unknown;
+  readonly reference?: unknown;
+  readonly fundsConfirmed?: unknown;
 }
 
 /** What a caller gets back. `duplicate` distinguishes a retry from a fresh posting. */
@@ -198,6 +227,19 @@ export class LedgerService {
    *
    * It is a READ. It posts nothing, and it is owner-gated like every other read here.
    */
+  /**
+   * What was collected on ONE business day, per currency and per way of paying (owner-only read).
+   * Cash is its own row: a Whish, bank or card receipt is never inside the till-cash figure, and no
+   * currency is ever added to another.
+   */
+  collectionTotals(businessDate: string): ReturnType<LedgerRepository["collectionTotals"]> {
+    this.requireOwner();
+    if (typeof businessDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) {
+      throw new DomainError("INVALID_INPUT", "A business date must be written as YYYY-MM-DD");
+    }
+    return this.deps.ledger.collectionTotals(businessDate);
+  }
+
   settlementForIdempotencyKey(key: string): SettlementRecord | null {
     this.requireOwner();
     if (typeof key !== "string" || key.length === 0) return null;
@@ -352,18 +394,185 @@ export class LedgerService {
    */
   settle(draft: SettlementDraft): PostResult<SettlementRecord> {
     const actor = this.requireOwner();
+    return this.commitCollection(this.prepareCollection(draft), actor);
+  }
 
+  /**
+   * A COLLECTION: the durable intent first, then the settlement.
+   *
+   * 1. Everything is validated BEFORE anything is written, so a refused payment leaves no trace.
+   * 2. The intent (customer, obligation, amount, channel, reference, confirmation and the ORIGINAL
+   *    idempotency key) is committed in its own transaction. From here on, whatever the renderer
+   *    loses — navigation, a closed window, a restart — the exact attempt is recoverable.
+   * 3. The settlement commits in a second transaction and closes its own attempt atomically.
+   *
+   * 🔴 A new key for this customer is refused while an earlier attempt cannot be resolved by reading
+   * the ledger (COLLECTION_UNRESOLVED), so an unknown outcome is never papered over with a second
+   * payment. An earlier attempt the ledger CAN answer — recorded, or provably not — is closed
+   * here and then no longer blocks.
+   */
+  collect(draft: SettlementDraft & { readonly customerId: unknown }): PostResult<SettlementRecord> {
+    const actor = this.requireOwner();
+    const prepared = this.prepareCollection(draft);
+    if (prepared.channel === null || typeof draft.customerId !== "string" || draft.customerId !== prepared.partyId) {
+      throw new DomainError("INVALID_INPUT", "A collection needs a payment channel and its customer");
+    }
+    const instant = this.now();
+    this.deps.transact(() => {
+      const live = this.requireOwner();
+      if (live.id !== actor.id) {
+        throw new DomainError("NOT_AUTHORIZED", "The signed-in operator changed during the payment");
+      }
+      this.beginAttempt(prepared, actor, instant);
+    });
+    try {
+      return this.commitCollection(prepared, actor);
+    } catch (error) {
+      // A DomainError was thrown INSIDE the settlement transaction, which rolled back: nothing was
+      // written under this key, so the attempt is provably "not recorded" and is closed. Anything
+      // else (an internal fault, a lost handle) proves nothing — the attempt stays OPEN and the
+      // ledger is asked later.
+      // An authorization failure writes nothing more — the attempt is left exactly as it was.
+      if (error instanceof DomainError && error.code !== "NOT_LOGGED_IN" && error.code !== "NOT_AUTHORIZED") {
+        try {
+          this.deps.transact(() => {
+            if (!this.deps.ledger.findSettlementByIdempotencyKey(prepared.key)) {
+              this.deps.ledger.resolveAttempt(prepared.key, "not_recorded", this.now());
+            }
+          });
+        } catch {
+          /* leave it open; the read side will resolve it */
+        }
+      }
+      throw error;
+    }
+  }
+
+  private beginAttempt(p: PreparedCollection, actor: LedgerActor, instant: Date): void {
+    const ledger = this.deps.ledger;
+    // A settlement under this key (including every pre-migration-17 one) needs no attempt: the
+    // settlement itself is the record, and commitCollection answers the replay.
+    if (ledger.findSettlementByIdempotencyKey(p.key)) return;
+    const existing = ledger.findAttempt(p.key);
+    if (existing) {
+      if (existing.fingerprint !== p.fingerprint) {
+        throw new DomainError("IDEMPOTENCY_CONFLICT", "That payment key was already used for a different payment");
+      }
+      // Closing an attempt is FINAL. If 'not_recorded' is later replayed, allowing settlement
+      // under that key would leave a recorded payment paired with a permanently 'not_recorded'
+      // attempt. A delayed IPC retry after a replacement collection is especially dangerous.
+      if (existing.resolution === "not_recorded") {
+        throw new DomainError("IDEMPOTENCY_CONFLICT", "That collection attempt is closed as not recorded");
+      }
+      if (existing.resolution === "recorded") {
+        throw new DomainError("LEDGER_INTEGRITY", "A recorded collection attempt has no matching settlement");
+      }
+      return; // only an OPEN same-intent attempt may continue under its original key
+    }
+    // Any OTHER open attempt of this customer must be answerable from the ledger before a new one starts.
+    for (const open of ledger.listOpenAttempts(p.partyId)) {
+      let settled: ReturnType<LedgerRepository["findSettlementByIdempotencyKey"]>;
+      try {
+        settled = ledger.findSettlementByIdempotencyKey(open.key);
+      } catch {
+        throw new DomainError("COLLECTION_UNRESOLVED", "An earlier payment could not be confirmed yet");
+      }
+      if (settled && settled.fingerprint !== open.fingerprint) {
+        throw new DomainError("COLLECTION_UNRESOLVED", "An earlier payment could not be confirmed yet");
+      }
+      ledger.resolveAttempt(open.key, settled ? "recorded" : "not_recorded", instant);
+    }
+    ledger.insertAttempt(
+      {
+        key: p.key,
+        customerId: p.partyId,
+        obligationId: p.obligationId,
+        currency: p.currency,
+        amountMinor: p.amountMinor,
+        channel: p.channel as NonNullable<PreparedCollection["channel"]>,
+        reference: p.reference,
+        fundsConfirmed: p.fundsConfirmed,
+        fingerprint: p.fingerprint,
+        createdBy: actor.id,
+        createdAt: instant.toISOString(),
+      },
+      instant,
+    );
+  }
+
+  /**
+   * One customer's collections that are still open, each with what the ledger says about it
+   * (owner-only, READ-ONLY — it writes nothing).
+   *
+   *   recorded      the ledger has a settlement under the original key and it matches the intent;
+   *   not_recorded  the ledger was read successfully and has none — nothing was taken;
+   *   conflict      a settlement exists under the key but is a DIFFERENT payment — fail closed;
+   *   unknown       the lookup itself failed — never reported as "not recorded".
+   */
+  openCollections(customerId: string): Array<{
+    readonly attempt: AttemptRecord;
+    readonly status: "recorded" | "not_recorded" | "conflict" | "unknown";
+  }> {
+    this.requireOwner();
+    if (typeof customerId !== "string" || customerId.length === 0) return [];
+    const open = this.deps.ledger.listOpenAttempts(customerId);
+    return open.map((attempt) => {
+      try {
+        const settled = this.deps.ledger.findSettlementByIdempotencyKey(attempt.key);
+        if (!settled) return { attempt, status: "not_recorded" as const };
+        return { attempt, status: settled.fingerprint === attempt.fingerprint ? ("recorded" as const) : ("conflict" as const) };
+      } catch {
+        return { attempt, status: "unknown" as const };
+      }
+    });
+  }
+
+  /** Validates a draft completely and normalises it. Writes nothing. */
+  private prepareCollection(draft: SettlementDraft): PreparedCollection {
     if (typeof draft.obligationId !== "string" || draft.obligationId.length === 0) {
       throw new DomainError("INVALID_INPUT", "A payment needs an obligation");
     }
     if (typeof draft.idempotencyKey !== "string" || !KEY_PATTERN.test(draft.idempotencyKey)) {
       throw new DomainError("INVALID_INPUT", "A valid idempotency key is required");
     }
-    if (!isSettlementMethod(draft.method)) {
-      throw new DomainError("INVALID_PAYMENT_METHOD", "That payment method is not one this till records");
-    }
     const key = draft.idempotencyKey;
-    const method: SettlementMethod = draft.method;
+    let channelName: CollectionChannel | null = null;
+    let method: SettlementMethod;
+    let provider: SettlementProvider | null = null;
+    let reference: string | null = null;
+    let fundsConfirmed: boolean | null = null;
+    if (draft.channel !== undefined) {
+      if (!isCollectionChannel(draft.channel)) {
+        throw new DomainError("INVALID_PAYMENT_METHOD", "That payment method is not one this till records");
+      }
+      const channel: CollectionChannel = draft.channel;
+      channelName = channel;
+      ({ method, provider } = channelStorage(channel));
+      reference = cleanPaymentReference(draft.reference, channel);
+      if (draft.fundsConfirmed !== undefined && draft.fundsConfirmed !== null && typeof draft.fundsConfirmed !== "boolean") {
+        throw new DomainError("INVALID_INPUT", "The confirmation must be true or false");
+      }
+      if (channel === "whish" || channel === "bank_transfer" || channel === "other") {
+        // 🔴 NEVER INFERRED. An operator-recorded external payment is only a payment once the operator
+        // says the money really arrived; this till does not contact Whish or a bank.
+        if (draft.fundsConfirmed !== true) {
+          throw new DomainError("FUNDS_NOT_CONFIRMED", "Confirm that the money was actually received");
+        }
+        fundsConfirmed = true;
+      } else if (channel === "card") {
+        fundsConfirmed = draft.fundsConfirmed === true ? true : null;
+      } else if (draft.fundsConfirmed === true) {
+        throw new DomainError("INVALID_INPUT", "A cash payment carries no confirmation");
+      }
+    } else {
+      if (!isSettlementMethod(draft.method)) {
+        throw new DomainError("INVALID_PAYMENT_METHOD", "That payment method is not one this till records");
+      }
+      if (draft.reference !== undefined || draft.fundsConfirmed !== undefined) {
+        throw new DomainError("INVALID_INPUT", "A payment reference needs a payment channel");
+      }
+      method = draft.method;
+    }
 
     const obligation = this.deps.ledger.findObligationById(draft.obligationId);
     if (!obligation) throw new DomainError("INVALID_INPUT", "That obligation no longer exists");
@@ -385,18 +594,57 @@ export class LedgerService {
           amountMinor: amount.minor.toString(),
           currency: amount.currency,
           method,
+          // Only when present, so a cash collection hashes EXACTLY as it did before migration 17 and
+          // an older key still replays. A different provider, reference or confirmation is a
+          // different payment and conflicts.
+          ...(provider !== null ? { provider } : {}),
+          ...(reference !== null ? { reference } : {}),
+          ...(fundsConfirmed !== null ? { fundsConfirmed } : {}),
         }),
       )
       .digest("hex");
 
+    return {
+      key,
+      obligation,
+      partyId: obligation.partyId,
+      obligationId: obligation.id,
+      currency: obligation.currency,
+      amountMinor: amount.minor,
+      method,
+      provider,
+      reference,
+      fundsConfirmed,
+      channel: channelName,
+      fingerprint,
+    };
+  }
+
+  /** The settlement transaction. Re-reads the durable owner role INSIDE it, then writes or replays. */
+  private commitCollection(p: PreparedCollection, actor: LedgerActor): PostResult<SettlementRecord> {
+    const { key, obligation, provider, reference, fundsConfirmed, method, fingerprint } = p;
+    const amount = { minor: p.amountMinor };
     const instant = this.now();
     return this.deps.transact(() => {
+      // The owner may be demoted between request validation and acquiring the write transaction.
+      // Re-read the durable role under BEGIN IMMEDIATE, before a replay or any financial write.
+      const liveActor = this.requireOwner();
+      if (liveActor.id !== actor.id) {
+        throw new DomainError("NOT_AUTHORIZED", "The signed-in operator changed during the payment");
+      }
       const prior = this.deps.ledger.findSettlementByIdempotencyKey(key);
       if (prior) {
         if (prior.fingerprint !== fingerprint) {
           throw new DomainError("IDEMPOTENCY_CONFLICT", "That payment key was already used for a different payment");
         }
+        this.deps.ledger.resolveAttempt(key, "recorded", instant);
         return { record: prior.settlement, duplicate: true };
+      }
+
+      // 🔴 ONE PROVIDER TRANSACTION, ONE COLLECTION. The same Whish or bank reference under a new key
+      // would count the same money twice. (The unique index is the backstop for a race.)
+      if (provider !== null && reference !== null && this.deps.ledger.findSettlementByProviderReference(provider, reference)) {
+        throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
       }
 
       const paid = this.deps.ledger.settledTotal(obligation.id);
@@ -417,11 +665,17 @@ export class LedgerService {
         idempotencyKey: key,
         amountMinor: amount.minor,
         method,
+        provider,
+        reference,
+        fundsConfirmed,
         settledBy: actor.id,
         settledAt: instant.toISOString(),
         businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
       };
       this.deps.ledger.insertSettlement({ ...record, requestFingerprint: fingerprint });
+      // The settlement and the closing of its attempt are ONE transaction: an attempt is never open
+      // for a payment that committed.
+      this.deps.ledger.resolveAttempt(key, "recorded", instant);
       return { record, duplicate: false };
     });
   }

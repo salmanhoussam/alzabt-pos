@@ -633,6 +633,12 @@ export interface StatementSettlementDto {
   readonly id: string;
   readonly amount: MoneyDto;
   readonly method: "cash" | "card" | "external" | "other";
+  /** Migration 17. Which provider an 'external' payment came through; null otherwise and on history. */
+  readonly provider: "whish" | "bank_transfer" | null;
+  /** Migration 17. The operator-entered, non-sensitive reference; null when none. */
+  readonly reference: string | null;
+  /** Migration 17. True when the operator confirmed the money was received; null on cash and history. */
+  readonly fundsConfirmed: boolean | null;
   readonly settledAt: string;
 }
 
@@ -672,6 +678,8 @@ export interface CustomerStatementDto {
   readonly customer: CustomerDto;
   readonly obligations: readonly StatementObligationDto[];
   readonly balances: readonly MoneyDto[];
+  /** Collections started and not yet closed, each with the ledger's answer. Usually empty. */
+  readonly pendingCollections: readonly PendingCollectionDto[];
 }
 
 /**
@@ -707,7 +715,43 @@ export interface RecordPaymentRequest {
    */
   readonly idempotencyKey: string;
   readonly amountMinor: string;
-  readonly method: "cash";
+  /**
+   * HOW the money arrived (migration 17). Whish and bank transfer are operator-RECORDED payments:
+   * this till never contacts a provider, so the operator must confirm the funds were received.
+   */
+  readonly method: CollectionMethodDto;
+  /**
+   * A non-sensitive reference (a Whish/bank transaction number, a card slip number): never a PIN,
+   * credential or card number. Required for whish, bank_transfer and other; optional for card;
+   * refused for cash. Omit or null when not applicable.
+   */
+  readonly reference?: string | null;
+  /** True only when the operator explicitly confirmed the money was actually received. */
+  readonly fundsConfirmed?: boolean;
+}
+
+export type CollectionMethodDto = "cash" | "card" | "whish" | "bank_transfer" | "other";
+
+/**
+ * A collection that was STARTED and is not yet closed — recovered from the ledger, not from the
+ * screen's memory, so it survives navigation, a closed window and a restart.
+ *
+ *   recorded      the ledger holds a settlement under the original key that matches this intent;
+ *   not_recorded  the ledger was read and holds none — nothing was taken. It may be repeated EXACTLY
+ *                 (same key, same payload) or a new payment may be started;
+ *   conflict      a settlement under the key is a DIFFERENT payment — fail closed;
+ *   unknown       the lookup failed — never to be read as "not recorded", and a new collection for
+ *                 this customer is refused until it can be answered.
+ */
+export interface PendingCollectionDto {
+  readonly idempotencyKey: string;
+  readonly obligationId: string;
+  readonly amount: MoneyDto;
+  readonly method: CollectionMethodDto;
+  readonly reference: string | null;
+  readonly fundsConfirmed: boolean | null;
+  readonly createdAt: string;
+  readonly status: "recorded" | "not_recorded" | "conflict" | "unknown";
 }
 
 /**

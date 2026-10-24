@@ -84,6 +84,8 @@ describe("schema is unchanged by this feature", () => {
       [15, "invoice_line_batch_identity"],
       // Migration 16 adds only an invoice's optional customer-account link and two guard triggers.
       [16, "invoice_customer_account_link"],
+      // Migration 17 adds only three nullable collection-detail columns, one index and one trigger.
+      [17, "settlement_collection_details"],
     ]);
   });
 

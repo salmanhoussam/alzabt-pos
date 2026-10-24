@@ -430,7 +430,7 @@ describe("the migration is fingerprinted and immutable", () => {
     // Their checksums are what an existing installation already has on disk; editing any of them
     // would make every real ledger refuse to open with MigrationMismatchError.
     expect(MIGRATIONS.filter((m) => m.version <= 7)).toHaveLength(7);
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]); // 8 -> 9 product master -> 10 its audit -> 11 the create capability
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]); // 8 -> 9 product master -> 10 its audit -> 11 the create capability
     expect(MIGRATIONS[7]!.name).toBe("operator_accounts");
   });
 });

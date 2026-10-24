@@ -38,9 +38,11 @@ describe("the collection form cannot post twice", () => {
     expect(trySide).toMatch(/setAttemptKey\(newIdempotencyKey\(\)\)/);
   });
 
-  it("🔴 a changed amount is a new attempt and gets a new key", () => {
+  it("🔴 a changed amount is a new attempt and gets a new key, only while editing is permitted", () => {
     const onChange = STATEMENT.slice(STATEMENT.indexOf("onChange={(e) => {\n                            setAmountText"));
     expect(onChange.slice(0, 400)).toMatch(/setAttemptKey\(newIdempotencyKey\(\)\)/);
+    // The field is disabled after an unknown outcome, so the handler cannot mint another key then.
+    expect(STATEMENT).toMatch(/data-testid="collect-amount"[\s\S]*?disabled=\{blocked \|\| busy\}/);
   });
 
   it("🔴 the key comes from the shared 128-bit generator, not an ad-hoc one", () => {
@@ -53,6 +55,21 @@ describe("the collection form cannot post twice", () => {
     expect(STATEMENT).toMatch(/PAYMENT_STATUS_UNKNOWN/);
     expect(STATEMENT).toMatch(/UNSAFE_TO_RETRY\.has\(err\.code\)/);
     expect(STATEMENT).toMatch(/\{!blocked && \(/);
+  });
+
+  it("🔴 an UNKNOWN outcome cannot be dismissed or switched to another debt inside this form", () => {
+    expect(STATEMENT).toMatch(/const closeForm = \(\) => \{[\s\S]*?if \(blocked \|\| busy\) return;/);
+    expect(STATEMENT).toMatch(/const openForm = \(obligationId: string\) => \{[\s\S]*?if \(blocked \|\| busy\) return;/);
+    expect(STATEMENT).toMatch(/onClick=\{closeForm\} disabled=\{blocked \|\| busy\} data-testid="collect-cancel"/);
+    // TRANSITION with the M17A recovery work: the open button is ALSO closed while the ledger cannot
+    // answer an earlier collection (lockedByPending), which comes from the statement, not screen state.
+    expect(STATEMENT).toMatch(/disabled=\{blocked \|\| busy \|\| lockedByPending\}\s+onClick=\{\(\) => openForm\(o.id\)\}\s+data-testid="collect-open"/);
+  });
+
+  it("🔴 a vanished open attempt is NOT mistaken for a recorded payment after an UNKNOWN lookup", () => {
+    expect(STATEMENT).toMatch(/resolveFromLedger\(payload\.idempotencyKey, err\.code === "PAYMENT_RECORDED" \? "recorded" : "unknown"\)/);
+    expect(STATEMENT).toMatch(/if \(!open\) \{\s*if \(priorOutcome === "recorded"\)/);
+    expect(STATEMENT).not.toMatch(/if \(!open\) \{\s*releaseAfterAnswer\(\)/);
   });
 
   it("🔴 PAYMENT_NOT_RECORDED is NOT in the unsafe set — the safe retry stays offered", () => {
@@ -81,11 +98,15 @@ describe("the form does no money arithmetic", () => {
 });
 
 describe("what the form offers", () => {
-  it("🔴 cash only — no other method is selectable", () => {
-    expect(STATEMENT).toMatch(/method: "cash"/);
-    for (const m of ["whish", "credit", '"card"', '"external"']) {
-      expect(STATEMENT.toLowerCase(), m).not.toContain(m.toLowerCase().replace(/"/g, ""));
-    }
+  // 🔴 TRANSITION with migration 17 (M17A): this pinned CASH ONLY. The form now offers exactly five
+  // channels; 'credit' (a state) and 'external' (a stored value, not a channel) are still never a
+  // choice, and the method sent is the owner's selection, never a literal.
+  it("🔴 offers exactly the five channels — never credit, never a bare 'external'", () => {
+    expect(STATEMENT).toContain('["cash", "card", "whish", "bank_transfer", "other"]');
+    expect(STATEMENT).not.toMatch(/method: "cash"/);
+    expect(STATEMENT).toMatch(/\n\s+method,\n/);
+    expect(STATEMENT.toLowerCase()).not.toContain("credit");
+    expect(STATEMENT).not.toMatch(/<option[^>]*value="external"/);
   });
 
   it("🔴 collection is offered only on a debt that is still owed", () => {
@@ -134,5 +155,83 @@ describe("the words and the contract", () => {
   it("🔴 the renderer reaches exactly one money-writing channel", () => {
     const used = Object.keys(CHANNELS).filter((c) => STATEMENT.includes(`pos().${c}(`));
     expect(used.sort()).toEqual(["getCustomerStatement", "recordCustomerPayment"]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// M17A — the collection form's payment methods. SOURCE-LEVEL assertions (no DOM environment).
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+describe("payment methods on the collection form (source-level)", () => {
+  it("🔴 non-cash rules are the owner's explicit acts: reference and 'money received' start empty and unchecked", () => {
+    expect(STATEMENT).toContain('useState("")'); // reference
+    expect(STATEMENT).toMatch(/const \[confirmed, setConfirmed\] = useState\(false\)/);
+    expect(STATEMENT).not.toMatch(/setConfirmed\(true\)/);
+  });
+  it("🔴 the confirmation is sent as the owner's choice, and is required for whish, bank transfer and other", () => {
+    expect(STATEMENT).toMatch(/method === "whish" \|\| method === "bank_transfer" \|\| method === "other"/);
+    expect(STATEMENT).toContain("fundsConfirmed: needsConfirmation ? confirmed : false");
+    expect(STATEMENT).toContain('t("collect.confirmRequired")');
+    expect(STATEMENT).toContain('t("collect.referenceRequired")');
+  });
+  it("🔴 a different method, reference or confirmation is a different payment and takes a new key — except while an outcome is UNKNOWN, when the fields are frozen", () => {
+    const changes = STATEMENT.match(/setAttemptKey\(newIdempotencyKey\(\)\)/g) ?? [];
+    expect(changes.length).toBeGreaterThanOrEqual(5);
+    // 5 here + the open button's own `blocked || busy || lockedByPending` (asserted above) = the same six.
+    expect((STATEMENT.match(/disabled=\{blocked \|\| busy\}/g) ?? []).length).toBeGreaterThanOrEqual(5);
+  });
+  it("🔴 history labels Whish and bank transfer as themselves, never as cash, in both languages", () => {
+    expect(STATEMENT).toContain("statement.channel.${s.provider ?? s.method}");
+    for (const lang of ["ar", "en"] as const) {
+      for (const k of ["cash", "card", "whish", "bank_transfer", "other"]) {
+        expect(translate(lang, `statement.channel.${k}`), `${lang} ${k}`).not.toBe(`statement.channel.${k}`);
+        expect(translate(lang, `collect.method.${k}`), `${lang} ${k}`).not.toBe(`collect.method.${k}`);
+      }
+    }
+    expect(translate("en", "statement.channel.whish")).not.toBe(translate("en", "statement.channel.cash"));
+  });
+  it("🔴 the operator is told the till does not contact Whish or the bank, and never to type a card number", () => {
+    expect(translate("en", "collect.fundsHint")).toMatch(/does not contact Whish or the bank/i);
+    expect(translate("en", "collect.referenceHint")).toMatch(/never type a card number/i);
+    expect(translate("ar", "collect.fundsHint")).toContain("لا يتّصل");
+    expect(translate("ar", "collect.referenceHint")).toContain("لا تكتب رقم بطاقة");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// M17A final gate — recovery of an unknown outcome (SOURCE-LEVEL; the behaviour is in
+// tests/main/collectionRecovery.test.ts against the real ledger).
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+describe("recovering an unfinished collection (source-level)", () => {
+  it("🔴 pending collections come from the statement (the ledger), not from screen state", () => {
+    expect(STATEMENT).toContain("statement.pendingCollections");
+    expect(STATEMENT).not.toMatch(/localStorage|sessionStorage|indexedDB/);
+  });
+  it("🔴 the exact repeat re-sends the ORIGINAL key and payload from the ledger's record — no new key", () => {
+    const repeat = STATEMENT.slice(STATEMENT.indexOf("const repeatPending"), STATEMENT.indexOf("useEffect(() => {"));
+    expect(repeat).toContain("idempotencyKey: p.idempotencyKey");
+    expect(repeat).toContain("amountMinor: p.amount.minor");
+    expect(repeat).not.toContain("newIdempotencyKey");
+  });
+  it("🔴 only a not-recorded attempt offers a repeat; unknown and conflict keep new collections closed", () => {
+    expect(STATEMENT).toMatch(/p\.status === "not_recorded" &&/);
+    expect(STATEMENT).toMatch(/lockedByPending = statement\.pendingCollections\.some\(\(p\) => p\.status === "unknown" \|\| p\.status === "conflict"\)/);
+    expect(STATEMENT).toMatch(/disabled=\{blocked \|\| busy \|\| lockedByPending\}/);
+  });
+  it("🔴 the lock is released only by an answer from the ledger, and a failed lookup stays locked", () => {
+    const resolve = STATEMENT.slice(STATEMENT.indexOf("const resolveFromLedger"), STATEMENT.indexOf("const repeatPending"));
+    expect(resolve).toContain('open.status === "not_recorded"');
+    // The catch block is EMPTY: a failed lookup changes nothing, so the lock stays.
+    expect(resolve).toMatch(/catch \{\s*\}/);
+  });
+  it("all four ledger answers are explained in both languages, and none says 'collect again'", () => {
+    for (const s of ["recorded", "not_recorded", "unknown", "conflict"]) {
+      for (const lang of ["ar", "en"] as const) {
+        expect(translate(lang, `collect.pending.${s}`), `${lang} ${s}`).not.toBe(`collect.pending.${s}`);
+      }
+    }
+    expect(translate("en", "collect.pending.unknown")).toMatch(/do not collect the money again/i);
+    expect(translate("en", "collect.pending.conflict")).toMatch(/do not collect again/i);
+    expect(translate("ar", "collect.pending.unknown")).toContain("لا تحصِّل");
+    expect(translate("ar", "collect.err.COLLECTION_UNRESOLVED")).not.toBe("collect.err.COLLECTION_UNRESOLVED");
   });
 });
