@@ -82,6 +82,8 @@ describe("schema is unchanged by this feature", () => {
       [14, "credit_sale_identity_and_unpaid_state"],
       // Migration 15 adds only the durable identity of an invoice-line batch; no product table.
       [15, "invoice_line_batch_identity"],
+      // Migration 16 adds only an invoice's optional customer-account link and two guard triggers.
+      [16, "invoice_customer_account_link"],
     ]);
   });
 

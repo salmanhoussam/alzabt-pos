@@ -1910,4 +1910,55 @@ WHEN (SELECT status FROM invoices WHERE id = NEW.invoice_id) IS NOT 'draft'
 BEGIN SELECT RAISE(ABORT, 'invoice: a line batch can only be recorded on a draft'); END;
 `,
   },
+  {
+    version: 16,
+    name: "invoice_customer_account_link",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 16 — an invoice DRAFT can name the exact customer account it is for.
+    //
+    // `invoices.customer_party_id` is nullable and independent of `customer_name`, which stays the
+    // free-text name PRINTED on the document. Linking is explicit (the operator picks an account);
+    // nothing here matches by name, and two customers called the same thing stay two accounts.
+    //
+    // Additive: one ALTER ADD COLUMN, no table rebuilt, no row rewritten. Every existing invoice —
+    // finalized or draft — keeps NULL, so no historical invoice is linked and none gains a debt.
+    // The finalized-invoice triggers already abort any UPDATE once status = 'final', so the link is
+    // frozen with the document.
+    //
+    // `sales` is deliberately NOT touched. M14 requires customer_id IS NULL on invoice-origin sales;
+    // the invoice → customer relationship lives on the invoice, and the receivable points at the
+    // invoice's sale. Two triggers keep that relationship honest at the database level:
+    //   · a link may only name an ACTIVE CUSTOMER party (never a supplier, never an inactive one);
+    //   · a receivable posted against an invoice-origin sale must belong to THAT invoice's linked
+    //     customer, be a receivable, be in the sale's currency and equal its unpaid balance, and the
+    //     sale must be wholly unpaid. A forged or mismatched debt is refused whoever posts it.
+    sql: `
+ALTER TABLE invoices ADD COLUMN customer_party_id TEXT REFERENCES parties (id);
+
+CREATE INDEX invoices_customer_party_id ON invoices (customer_party_id) WHERE customer_party_id IS NOT NULL;
+
+CREATE TRIGGER invoices_customer_link_insert BEFORE INSERT ON invoices
+WHEN NEW.customer_party_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM parties WHERE id = NEW.customer_party_id AND kind = 'customer' AND is_active = 1)
+BEGIN SELECT RAISE(ABORT, 'invoice: the linked account must be an active customer'); END;
+
+CREATE TRIGGER invoices_customer_link_update BEFORE UPDATE OF customer_party_id ON invoices
+WHEN NEW.customer_party_id IS NOT NULL
+ AND NEW.customer_party_id IS NOT OLD.customer_party_id
+ AND NOT EXISTS (SELECT 1 FROM parties WHERE id = NEW.customer_party_id AND kind = 'customer' AND is_active = 1)
+BEGIN SELECT RAISE(ABORT, 'invoice: the linked account must be an active customer'); END;
+
+CREATE TRIGGER obligations_invoice_sale_match BEFORE INSERT ON obligations
+WHEN NEW.source_kind = 'sale'
+ AND EXISTS (SELECT 1 FROM sales WHERE id = NEW.sale_id AND source_type = 'invoice')
+ AND NOT EXISTS (
+   SELECT 1 FROM sales AS s JOIN invoices AS i ON i.id = s.invoice_id
+   WHERE s.id = NEW.sale_id AND i.customer_party_id = NEW.party_id
+     AND NEW.direction = 'receivable' AND NEW.party_kind = 'customer'
+     AND s.currency = NEW.currency AND s.paid_minor = 0
+     AND s.payment_status = 'unpaid' AND s.balance_due_minor = NEW.amount_minor
+ )
+BEGIN SELECT RAISE(ABORT, 'ledger: an invoice receivable must match its invoice customer, currency and unpaid balance'); END;
+`,
+  },
 ];

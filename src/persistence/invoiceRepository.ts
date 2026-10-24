@@ -35,6 +35,8 @@ export interface InvoiceRow {
   readonly customer_name: string | null;
   readonly customer_address: string | null;
   readonly customer_phone: string | null;
+  /** Migration 16. The exact customer account this document is for; NULL = not linked. */
+  readonly customer_party_id: string | null;
   readonly notes: string | null;
   readonly subtotal_minor: bigint;
   readonly tax_minor: bigint;
@@ -72,6 +74,7 @@ export interface InvoiceHeaderEdit {
   readonly customerAddress: string | null;
   readonly customerPhone: string | null;
   readonly notes: string | null;
+  readonly customerPartyId: string | null;
   readonly paidMinor: bigint;
 }
 
@@ -102,7 +105,7 @@ export interface InvoiceFinalization {
 }
 
 const INVOICE_COLUMNS = `id, status, invoice_number, invoice_date, currency, customer_name,
-  customer_address, customer_phone, notes, subtotal_minor, tax_minor, total_minor, paid_minor,
+  customer_address, customer_phone, customer_party_id, notes, subtotal_minor, tax_minor, total_minor, paid_minor,
   balance_due_minor, amount_in_words, issuer_snapshot_json, tax_snapshot_json, created_by_id,
   created_by_name, created_at, updated_at, finalized_at`;
 
@@ -129,7 +132,7 @@ export class InvoiceRepository {
     this.db
       .prepare(
         `INSERT INTO invoices (${INVOICE_COLUMNS})
-         VALUES (@id, 'draft', NULL, NULL, @currency, NULL, NULL, NULL, NULL,
+         VALUES (@id, 'draft', NULL, NULL, @currency, NULL, NULL, NULL, NULL, NULL,
                  0, 0, 0, 0, 0, NULL, NULL, NULL, @byId, @byName, @now, @now, NULL)`,
       )
       .run({ id, currency, byId: createdBy.id, byName: createdBy.name, now: stamp });
@@ -198,6 +201,7 @@ export class InvoiceRepository {
         `UPDATE invoices
             SET invoice_date = @invoiceDate, customer_name = @customerName,
                 customer_address = @customerAddress, customer_phone = @customerPhone,
+                customer_party_id = @customerPartyId,
                 notes = @notes, subtotal_minor = @subtotal, tax_minor = @tax,
                 total_minor = @total, paid_minor = @paid, balance_due_minor = @balance,
                 updated_at = @now
@@ -209,6 +213,7 @@ export class InvoiceRepository {
         customerName: header.customerName,
         customerAddress: header.customerAddress,
         customerPhone: header.customerPhone,
+        customerPartyId: header.customerPartyId,
         notes: header.notes,
         subtotal: totals.subtotalMinor,
         tax: totals.taxMinor,

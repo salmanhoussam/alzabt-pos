@@ -503,4 +503,88 @@ assert(
   `both distinct rows reached the final invoice exactly once (${JSON.stringify(finalDescriptions)})`,
 );
 
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// M · Migration 16 — link a draft to an exact customer account, then issue it ON that account
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const ACCOUNT_NAME = "عميل الحساب الاختباري";
+const invoiceSalesBefore = num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice'");
+({ app, page } = await launch());
+await openDrafts(page);
+await testid(page, "new-invoice").click();
+await page.waitForSelector('[data-testid="invoice-mode-chooser"]');
+await testid(page, "mode-outgoing").click();
+await page.waitForSelector('[data-testid="add-row"]');
+
+// Arabic labels, and the promise that choosing an account is not a debt.
+const accountArabic = await textOf(page, "sheet-account");
+assert(accountArabic.includes("حساب العميل"), "the Arabic customer-account label is shown");
+assert(accountArabic.includes("اختيار حساب العميل"), "the Arabic «choose account» action is shown");
+assert(accountArabic.includes("لا يُنشئ ديناً"), "the Arabic hint says choosing an account creates no debt");
+assert((await testid(page, "account-issue").count()) === 0, "issue-on-account is not offered before an account is chosen");
+
+// Choose an account by creating one in the directory (the picker is the ordinary customer finder).
+await testid(page, "account-choose").click();
+await testid(page, "customer-finder").waitFor({ timeout: 30000 });
+await testid(page, "customer-new").click();
+await testid(page, "customer-field-name").fill(ACCOUNT_NAME);
+await testid(page, "customer-save").click();
+await testid(page, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
+await testid(page, "sheet-account-name").waitFor({ timeout: 30000 });
+assert((await textOf(page, "sheet-account-name")) === ACCOUNT_NAME, "the chosen account is shown by name");
+assert((await testid(page, "account-issue").count()) === 1, "the owner is offered «Issue on Customer Account»");
+assert(!(await testid(page, "account-issue").isChecked()), "…unchecked by default: issuing on account is never implicit");
+
+await testid(page, "add-row").click();
+await testid(page, "new-line-description").fill("صنف على الحساب");
+await testid(page, "new-line-quantity").fill("1");
+await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), "حبة");
+await testid(page, "new-line-price").fill("20.00");
+await testid(page, "save-draft").click();
+await until("the account draft to save", async () => (await testid(page, "draft-saved").count()) === 1);
+
+// English labels on the same sheet.
+await testid(page, "lang-toggle").click();
+await page.waitForFunction(() => document.documentElement.lang === "en", undefined, { timeout: 20000 });
+const accountEnglish = await textOf(page, "sheet-account");
+assert(accountEnglish.includes("Customer account"), "the English customer-account label is shown");
+assert(accountEnglish.includes("Issue on Customer Account"), "the English owner-only option is shown");
+assert(accountEnglish.includes("does not create a debt"), "the English hint says choosing an account creates no debt");
+await testid(page, "lang-toggle").click();
+await page.waitForFunction(() => document.documentElement.lang === "ar", undefined, { timeout: 20000 });
+
+await testid(page, "leave-draft").click();
+await page.waitForSelector('[data-testid="add-row"]', { state: "detached" });
+await app.close();
+assert(num("SELECT count(*) AS n FROM invoices WHERE status = 'draft' AND customer_party_id IS NOT NULL") === 1, "🔴 the draft is linked to the exact account id");
+assert(num("SELECT count(*) AS n FROM obligations") === 0, "🔴 choosing and saving an account created NO debt");
+assert(num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice'") === invoiceSalesBefore, "and no sale");
+
+// Reopen: the link survives, then issue it on the account.
+({ app, page } = await launch());
+await openDrafts(page);
+await testid(page, "draft-open").first().click();
+await page.waitForSelector('[data-testid="add-row"]');
+await testid(page, "sheet-account-name").waitFor({ timeout: 30000 });
+assert((await textOf(page, "sheet-account-name")) === ACCOUNT_NAME, "the account link survived reopening");
+await testid(page, "account-issue").check();
+await testid(page, "finalize").click();
+await testid(page, "finalize-confirm").waitFor({ state: "visible" });
+const confirmAccount = await textOf(page, "confirm-account");
+assert(confirmAccount.includes(ACCOUNT_NAME) && confirmAccount.includes("20.00"), "the confirmation names the account and the whole total");
+await testid(page, "finalize-confirm-yes").click();
+await testid(page, "finalized-notice").waitFor({ state: "visible", timeout: 60000 });
+assert((await textOf(page, "finalized-on-account")).includes(ACCOUNT_NAME), "the issued notice says whose account carries the debt");
+await page.screenshot({ path: SHOTS + "M16-issued-on-account.png" });
+await app.close();
+
+assert(num("SELECT count(*) AS n FROM obligations") === 1, "🔴 exactly one receivable was posted");
+const ob = one("SELECT o.amount_minor AS a, o.direction AS d, o.party_id AS p, p.display_name AS name FROM obligations o JOIN parties p ON p.id = o.party_id");
+assert(Number(ob.a) === 2000 && ob.d === "receivable" && ob.name === ACCOUNT_NAME, `the receivable is the whole total on the chosen account (${JSON.stringify(ob)})`);
+assert(
+  num("SELECT count(*) AS n FROM obligations o JOIN sales s ON s.id = o.sale_id JOIN invoices i ON i.id = s.invoice_id WHERE i.status = 'final' AND i.customer_party_id = o.party_id") === 1,
+  "🔴 receivable → invoice sale → final invoice → same account, all consistent",
+);
+assert(num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice'") === invoiceSalesBefore + 1, "exactly one invoice sale was added");
+assert(num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice' AND customer_id IS NOT NULL") === 0, "invoice sales still carry no customer_id (M14)");
+
 log(`\nOK — ${passed} assertions passed against the installed app`);

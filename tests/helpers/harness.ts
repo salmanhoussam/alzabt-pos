@@ -17,6 +17,7 @@ import { OperatorRepository } from "../../src/persistence/operatorRepository";
 import { OperatorService } from "../../src/application/operatorService";
 import { PinStateRepository } from "../../src/persistence/pinStateRepository";
 import { SaleRepository } from "../../src/persistence/saleRepository";
+import { makeInvoiceCreditPort } from "../../src/application/invoiceCreditPort";
 import { InvoiceService } from "../../src/application/invoiceService";
 import { CompanyProfileRepository } from "../../src/persistence/companyProfileRepository";
 import { InvoiceRepository } from "../../src/persistence/invoiceRepository";
@@ -210,6 +211,7 @@ export function makeHarness(
     let idSeq = 0;
     const invoices = new InvoiceService({
       invoices: invoiceStore,
+      credit: makeInvoiceCreditPort({ session: service, parties: () => parties, ledger: () => ledger }),
       reconciliation: reconciliationStore,
       company: companyStore,
       catalogStore: new CatalogRepository(db),

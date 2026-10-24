@@ -99,6 +99,8 @@ const headerPatch = (patch: InvoiceHeaderPatch): InvoiceHeaderPatch => {
   for (const key of HEADER_PATCH_KEYS) {
     if (key in patch) out[key] = patch[key] ?? null;
   }
+  // Migration 16: a CHOSEN account id, not a typed field (see INVOICE_HEADER_LINK_KEYS).
+  if ("customerPartyId" in patch) out.customerPartyId = patch.customerPartyId ?? null;
   return out as InvoiceHeaderPatch;
 };
 
@@ -356,7 +358,8 @@ const api: PosApi = {
     ipcRenderer.invoke(CH.removeInvoiceLine, { invoiceId: req.invoiceId, lineId: req.lineId }),
   discardInvoiceDraft: (req) => ipcRenderer.invoke(CH.discardInvoiceDraft, { invoiceId: req.invoiceId }),
 
-  finalizeInvoice: (req) => ipcRenderer.invoke(CH.finalizeInvoice, { invoiceId: req.invoiceId }),
+  finalizeInvoice: (req) =>
+    ipcRenderer.invoke(CH.finalizeInvoice, { invoiceId: req.invoiceId, issueOnAccount: req.issueOnAccount === true }),
 
   listInvoices: (req) => ipcRenderer.invoke(CH.listInvoices, { term: req.term, limit: req.limit }),
   listInvoiceDrafts: (req) => ipcRenderer.invoke(CH.listInvoiceDrafts, { term: req.term, limit: req.limit }),

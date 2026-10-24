@@ -13,6 +13,8 @@ import { type TempDir, tempDir } from "../helpers/harness";
 const V14 = 14;
 const V15 = 15;
 const MIGRATIONS_V14 = MIGRATIONS.slice(0, V14);
+// Migration 16 landed later; this file pins v15 as a historical target, so it runs the v15 registry.
+const MIGRATIONS_V15 = MIGRATIONS.slice(0, V15);
 let t: TempDir;
 beforeEach(() => {
   t = tempDir();
@@ -67,7 +69,7 @@ describe("migration 15 on a populated v14 ledger", () => {
     pre.close();
 
     const backup = `${t.dir}/pre-m15.sqlite`;
-    const db = openDatabase(t.dbPath, MIGRATIONS, {
+    const db = openDatabase(t.dbPath, MIGRATIONS_V15, {
       beforeMigrations: (conn, pending) => {
         expect(pending).toEqual({ fromVersion: V14, toVersion: V15 });
         snapshotDatabase(conn, backup);
@@ -116,7 +118,7 @@ describe("migration 15 on a populated v14 ledger", () => {
   });
 
   it("a fresh install reaches v15 and reopening does not migrate again", () => {
-    const fresh = openDatabase(`${t.dir}/fresh.sqlite`);
+    const fresh = openDatabase(`${t.dir}/fresh.sqlite`, MIGRATIONS_V15);
     try {
       expect(schemaVersion(fresh)).toBe(V15);
       expect(fresh.pragma("foreign_key_check")).toEqual([]);
@@ -124,7 +126,7 @@ describe("migration 15 on a populated v14 ledger", () => {
       fresh.close();
     }
     let calls = 0;
-    const again = openDatabase(`${t.dir}/fresh.sqlite`, MIGRATIONS, { beforeMigrations: () => void (calls += 1) });
+    const again = openDatabase(`${t.dir}/fresh.sqlite`, MIGRATIONS_V15, { beforeMigrations: () => void (calls += 1) });
     expect(calls).toBe(0);
     again.close();
   });

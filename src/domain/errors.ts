@@ -71,6 +71,12 @@ export type DomainErrorCode =
   // The authorization refusal. Deliberately ONE code for every restricted channel: the operator
   // learns that this action needs an owner, and not which channels exist to probe.
   | "NOT_AUTHORIZED"
+  // Migration 16 — issuing an invoice on a customer account. Each is its own code because each is a
+  // different sentence the operator can act on (text-context rule): none may borrow a generic one.
+  | "CREDIT_OWNER_ONLY"
+  | "CREDIT_NEEDS_CUSTOMER"
+  | "CREDIT_NEEDS_UNPAID"
+  | "CREDIT_NOT_ISSUED"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

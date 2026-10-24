@@ -19,6 +19,7 @@ import { decodeBarcodePhoto } from "./phoneBarcode";
 import { assertStorable, normalizeProductPhoto } from "./photoNormalize";
 import type { OnlineCatalogSnapshot } from "../application/posService";
 import type { OnlineCatalogExportDto } from "../shared/ipcContract";
+import { makeInvoiceCreditPort } from "../application/invoiceCreditPort";
 import { InvoiceService } from "../application/invoiceService";
 import { PartyService } from "../application/partyService";
 import { LedgerService } from "../application/ledgerService";
@@ -778,6 +779,9 @@ function startTill(): void {
   // through PosService and its migration-5 audit row.
   invoices = new InvoiceService({
     invoices: new InvoiceRepository(db),
+    // Migration 16: explicit customer linking and issue-on-account, through the live party and
+    // ledger services (constructed just below, hence lazy).
+    credit: makeInvoiceCreditPort({ session: service, parties: () => parties, ledger: () => ledgerService }),
     reconciliation: new ReconciliationRepository(db),
     company: new CompanyProfileRepository(db),
     catalogStore,

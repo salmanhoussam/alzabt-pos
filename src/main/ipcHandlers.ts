@@ -64,6 +64,7 @@ import {
   CHANNELS,
   type ChannelName,
   type CustomerPaymentOverpaymentErrorContext,
+  INVOICE_HEADER_LINK_KEYS,
   INVOICE_HEADER_PATCH_KEYS,
   type InvoiceHeaderPatchKey,
   type IpcError,
@@ -1239,17 +1240,20 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       // was always written correctly and was unreachable, because the old payload demanded every
       // field and `optionalStr` turned a missing one into an explicit null.
       const draft: Record<string, string | null> = {};
-      const limits: Record<InvoiceHeaderPatchKey, number> = {
+      const limits: Record<InvoiceHeaderPatchKey | (typeof INVOICE_HEADER_LINK_KEYS)[number], number> = {
         invoiceDate: 10,
         customerName: MAX_CUSTOMER_FIELD,
         customerAddress: MAX_NOTES,
         customerPhone: MAX_CUSTOMER_FIELD,
         notes: MAX_NOTES,
+        // An account id. The service resolves it to an ACTIVE customer; this layer never matches names.
+        customerPartyId: 100,
         // A typed decimal, parsed by the domain. Never a balance the renderer worked out.
         paid: 32,
       };
-      const patch = patchObject(o.patch, INVOICE_HEADER_PATCH_KEYS);
-      for (const key of INVOICE_HEADER_PATCH_KEYS) {
+      const allKeys = [...INVOICE_HEADER_PATCH_KEYS, ...INVOICE_HEADER_LINK_KEYS] as const;
+      const patch = patchObject(o.patch, allKeys);
+      for (const key of allKeys) {
         if (!(key in patch)) continue;
         draft[key] = optionalStr(patch[key], key, limits[key]);
       }
@@ -1303,7 +1307,13 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
 
     finalizeInvoice: wrap("finalizeInvoice", (p) => {
       // The payload is an id and nothing else: every frozen value is computed in the service.
-      const view = invoices().finalizeInvoice(invoiceId(p));
+      // `issueOnAccount` may be absent (every caller that predates migration 16); present, it must
+      // be a real boolean — never a truthy string that would put a debt on an account by accident.
+      const o = objectWithOptional(p, ["invoiceId"], ["issueOnAccount"]);
+      if ("issueOnAccount" in o && typeof o.issueOnAccount !== "boolean") invalid("'issueOnAccount' must be true or false");
+      const view = invoices().finalizeInvoice(str(o.invoiceId, "invoiceId", 100), {
+        issueOnAccount: o.issueOnAccount === true,
+      });
       log.info("invoice-finalized", {
         id: view.invoice.id,
         number: Number(view.invoice.invoice_number),

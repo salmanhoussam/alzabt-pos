@@ -22,7 +22,8 @@ import type {
   ReconciliationDto,
 } from "../../../shared/ipcContract";
 import { INVOICE_HEADER_PATCH_KEYS } from "../../../shared/ipcContract";
-import { call, errorText, fmt, newIdempotencyKey, pos } from "../../api";
+import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../../api";
+import { CustomerFinder } from "../CustomerFinder";
 import { useT } from "../../i18n";
 import { DEFAULT_UNIT, UnitCell } from "../../components/UnitCell";
 import { DraftRowStore } from "./draftRowStore";
@@ -88,6 +89,8 @@ function rowUnfinished(r: DraftRow): boolean {
 }
 
 type FinalizedNotice = {
+  /** The customer whose account the whole total was put on, when it was issued on account. */
+  readonly onAccountOf?: string;
   readonly number: number;
   readonly items: ReadonlyArray<ReconciliationDto>;
 };
@@ -184,6 +187,13 @@ export function InvoiceSheet({
   const [exiting, setExiting] = useState(false);
   const [saved, setSaved] = useState(false);
   const [finalized, setFinalized] = useState<FinalizedNotice | null>(null);
+  /** Migration 16. The linked account's name for DISPLAY only — the link itself is the id on the invoice. */
+  const [linkedName, setLinkedName] = useState<string | null>(null);
+  const [findingCustomer, setFindingCustomer] = useState(false);
+  /** Convenience only: the owner-only option is drawn for owners; the service re-reads the live role. */
+  const [isOwner, setIsOwner] = useState(false);
+  /** Explicit, per attempt, never remembered: issuing on account is a deliberate act every time. */
+  const [issueOnAccount, setIssueOnAccount] = useState(false);
   const [busy, setBusy] = useState(false);
   /** The tax-rate input, so Finalize can read what is typed instead of trusting that a blur happened. */
   const taxInput = useRef<HTMLInputElement | null>(null);
@@ -196,6 +206,28 @@ export function InvoiceSheet({
       .then(setProducts)
       .catch(() => setProducts([]));
   }, [invoiceId]);
+
+  useEffect(() => {
+    call(pos().currentCashier())
+      .then((c) => setIsOwner(c?.role === "owner"))
+      .catch(() => setIsOwner(false));
+  }, []);
+
+  const linkedId = view?.invoice.customerPartyId ?? null;
+  useEffect(() => {
+    if (!linkedId) {
+      setLinkedName(null);
+      setIssueOnAccount(false);
+      return;
+    }
+    let live = true;
+    call(pos().getCustomer({ customerId: linkedId }))
+      .then((c) => live && setLinkedName(c.displayName))
+      .catch(() => live && setLinkedName(null));
+    return () => {
+      live = false;
+    };
+  }, [linkedId]);
 
   const readOnly = view?.invoice.status === "final";
 
@@ -484,6 +516,39 @@ export function InvoiceSheet({
     }
   };
 
+  /** The operator's own language for the account refusals; every other error keeps its normal text. */
+  const accountErrorText = (e: unknown): string => {
+    if (e instanceof ApiError && e.code.startsWith("CREDIT_")) {
+      const key = `inv.account.err.${e.code}`;
+      const text = t(key);
+      if (text !== key) return text;
+    }
+    return errorText(e);
+  };
+
+  /** Links (or unlinks) an exact account through the ordinary header write, then adopts the answer. */
+  const chooseAccount = async (customerId: string | null, displayName: string | null) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const previousCustomerId = viewRef.current?.invoice.customerPartyId ?? null;
+      const next = await call(pos().updateInvoiceHeader({ invoiceId, patch: { customerPartyId: customerId } }));
+      setView(next);
+      setLinkedName(displayName);
+      // A checked credit instruction belongs to the PREVIOUS customer's identity. Changing the
+      // account (including unlinking) must require an explicit fresh tick for the new customer.
+      if (next.invoice.customerPartyId !== previousCustomerId) setIssueOnAccount(false);
+      // Convenience: an EMPTY printed name is prefilled with the account's name. The printed name
+      // stays its own field — it is a snapshot the operator may edit, and never drives the link.
+      const nameInput = fieldRefs.current.customerName;
+      if (displayName && nameInput && nameInput.value.trim() === "") nameInput.value = displayName;
+    } catch (e) {
+      setError(accountErrorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** Stores a tax rate that is typed but not yet blurred, so the total is the stored one. */
   const flushTax = async () => {
     const el = taxInput.current;
@@ -518,6 +583,12 @@ export function InvoiceSheet({
         await flushTax();
         await flushHeader();
       });
+      // On account means the WHOLE total is owed: refuse here, on the stored values, rather than
+      // after the operator has confirmed.
+      if (issueOnAccount && viewRef.current && viewRef.current.invoice.paid.minor !== "0") {
+        setError(t("inv.account.err.CREDIT_NEEDS_UNPAID"));
+        return;
+      }
       setConfirming(true);
     } catch (e) {
       setError(errorText(e));
@@ -547,12 +618,35 @@ export function InvoiceSheet({
         return;
       }
       await flushHeader();
-      const next = await call(pos().finalizeInvoice({ invoiceId }));
+      // Never silently downgrade a checked on-account instruction to an ordinary unpaid invoice.
+      // The service remains the authority and will refuse a missing/inactive account.
+      const account = issueOnAccount;
+      let next: InvoiceViewDto;
+      try {
+        next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: account }));
+      } catch (e) {
+        // 🔴 ON ACCOUNT, an unclear outcome is resolved by ASKING the ledger, never by guessing: the
+        // same request again verifies the invoice, its sale and its receivable and writes nothing
+        // if they already exist (and refuses plainly if they do not).
+        const unclear =
+          !(e instanceof ApiError) || e.code === "INVOICE_FINALIZED" || e.code === "INVOICE_STATUS_UNKNOWN" || e.code === "INTERNAL";
+        if (!account || !unclear) throw e;
+        try {
+          next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: true }));
+        } catch (again) {
+          if (again instanceof ApiError && again.code.startsWith("CREDIT_")) throw again;
+          throw new Error(t("inv.account.unknown"));
+        }
+      }
       setView(next);
       const items = await call(pos().listReconciliation({ invoiceId }));
-      setFinalized({ number: next.invoice.invoiceNumber!, items });
+      setFinalized({
+        number: next.invoice.invoiceNumber!,
+        items,
+        onAccountOf: account ? (linkedName ?? undefined) : undefined,
+      });
     } catch (e) {
-      setError(errorText(e));
+      setError(accountErrorText(e));
     } finally {
       setBusy(false);
     }
@@ -691,6 +785,50 @@ export function InvoiceSheet({
             onBlur={(e) => void header({ notes: e.target.value.trim() === "" ? null : e.target.value })}
           />
         </label>
+        {/* 🔴 MIGRATION 16 · THE CUSTOMER ACCOUNT. Chosen from the directory by identity, never typed
+            and never matched by name — two customers called the same thing are two accounts.
+            Choosing one only LINKS the invoice; it creates no debt. Issuing on account is a
+            separate, explicit, owner-only act below. */}
+        <div className="field wide inv-account" data-testid="sheet-account">
+          <span>{t("inv.account.title")}</span>
+          {linkedId ? (
+            <div className="inv-account-row">
+              <strong dir="auto" data-testid="sheet-account-name">{linkedName ?? "…"}</strong>
+              {!readOnly && (
+                <>
+                  <button className="btn ghost small" disabled={busy} onClick={() => setFindingCustomer(true)} data-testid="account-change">
+                    {t("inv.account.change")}
+                  </button>
+                  <button className="btn ghost small" disabled={busy} onClick={() => void chooseAccount(null, null)} data-testid="account-unlink">
+                    {t("inv.account.unlink")}
+                  </button>
+                </>
+              )}
+            </div>
+          ) : (
+            !readOnly && (
+              <button className="btn ghost small" disabled={busy} onClick={() => setFindingCustomer(true)} data-testid="account-choose">
+                {t("inv.account.choose")}
+              </button>
+            )
+          )}
+          {!readOnly && <span className="muted small">{t("inv.account.hint")}</span>}
+          {!readOnly && linkedId && isOwner && (
+            <label className="field inline" data-testid="account-issue-row">
+              <input
+                type="checkbox"
+                checked={issueOnAccount}
+                disabled={busy}
+                onChange={(e) => setIssueOnAccount(e.target.checked)}
+                data-testid="account-issue"
+              />
+              <span>{t("inv.account.issue")}</span>
+            </label>
+          )}
+          {!readOnly && linkedId && isOwner && issueOnAccount && (
+            <span className="muted small" data-testid="account-issue-hint">{t("inv.account.issueHint")}</span>
+          )}
+        </div>
       </section>
 
       {/* 🔴 PER-INVOICE TAX, not a global switch. Issuing one taxed invoice used to mean toggling
@@ -1104,6 +1242,14 @@ export function InvoiceSheet({
             <dl className="inv-confirm">
               <dt>{t("inv.sheet.customer")}</dt>
               <dd>{inv.customerName ?? "—"}</dd>
+              {issueOnAccount && linkedId && (
+                <>
+                  <dt>{t("inv.account.confirmRow")}</dt>
+                  <dd data-testid="confirm-account">
+                    <bdi dir="auto">{linkedName ?? "—"}</bdi> — <bdi dir="ltr">{fmt(inv.total)}</bdi>
+                  </dd>
+                </>
+              )}
               <dt>{t("inv.sheet.lineCount")}</dt>
               <dd dir="ltr">{view.lines.length}</dd>
               <dt>{t("inv.sheet.subtotal")}</dt>
@@ -1181,12 +1327,27 @@ export function InvoiceSheet({
         </div>
       )}
 
+      {findingCustomer && (
+        <CustomerFinder
+          onClose={() => setFindingCustomer(false)}
+          onPick={(c) => {
+            setFindingCustomer(false);
+            void chooseAccount(c.id, c.displayName);
+          }}
+        />
+      )}
+
       {finalized && (
         <div className="overlay">
           <div className="card dialog" data-testid="finalized-notice">
             <h2>
               {t("inv.sheet.finalized")} <bdi dir="ltr">#{finalized.number}</bdi>
             </h2>
+            {finalized.onAccountOf !== undefined && (
+              <p data-testid="finalized-on-account">
+                {t("inv.account.issued")} <bdi dir="auto">{finalized.onAccountOf}</bdi>
+              </p>
+            )}
             {summarize(finalized.items, t).length > 0 ? (
               <>
                 <p>

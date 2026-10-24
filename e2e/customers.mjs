@@ -471,7 +471,8 @@ try {
     const n = (sql) => Number(db.prepare(sql).get().n);
     // 🔴 TRANSITION 13 -> 14 with migration 14 (credit_sale_identity_and_unpaid_state). The old value was 13.
     // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 15, "the installed app's ledger is at schema v15");
+    // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 16, "the installed app's ledger is at schema v16");
     assert(n("SELECT count(*) AS n FROM parties") === 5, "five party rows, and no more");
     assert(n("SELECT count(*) AS n FROM party_contact_history") === 0, "and zero contact-history rows — nothing was edited");
     assert(n("SELECT count(*) AS n FROM sales") === 0, "🔴 and still not one sale, obligation or payment anywhere");
@@ -802,7 +803,8 @@ try {
     assert(Number(o.amount_minor) === 2500, `the original amount is still 2500 (${o.amount_minor})`);
     assert(o.posted_at === "2026-10-20T08:00:00.000Z", "and its posting time is untouched");
     // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
-    assert(n("SELECT count(*) AS n FROM schema_migrations") === 15, "the ledger is still at schema v15");
+    // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
+    assert(n("SELECT count(*) AS n FROM schema_migrations") === 16, "the ledger is still at schema v16");
     db.close();
   }
 

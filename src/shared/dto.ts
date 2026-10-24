@@ -309,6 +309,7 @@ export function toInvoiceDto(row: InvoiceRow): InvoiceDto {
     customerName: row.customer_name,
     customerAddress: row.customer_address,
     customerPhone: row.customer_phone,
+    customerPartyId: row.customer_party_id,
     notes: row.notes,
     subtotal: toMoneyDto(money(row.subtotal_minor, c)),
     tax: toMoneyDto(money(row.tax_minor, c)),

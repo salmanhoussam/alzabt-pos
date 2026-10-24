@@ -889,6 +889,8 @@ export interface InvoiceDto {
   readonly customerName: string | null;
   readonly customerAddress: string | null;
   readonly customerPhone: string | null;
+  /** Migration 16. The linked customer account, if the operator chose one. */
+  readonly customerPartyId: string | null;
   readonly notes: string | null;
   readonly subtotal: MoneyDto;
   readonly tax: MoneyDto;
@@ -929,6 +931,8 @@ export interface InvoiceHeaderPatch {
   readonly customerAddress?: string | null;
   readonly customerPhone?: string | null;
   readonly notes?: string | null;
+  /** Migration 16. The exact customer ACCOUNT id, or null to unlink. Never matched by name. */
+  readonly customerPartyId?: string | null;
   /** A typed decimal ("100.00"), or null for nothing paid. NOT a computed balance. */
   readonly paid?: string | null;
 }
@@ -942,6 +946,13 @@ export const INVOICE_HEADER_PATCH_KEYS = [
   "notes",
   "paid",
 ] as const;
+
+/**
+ * Header keys that are CHOSEN, not typed (migration 16). They are deliberately not in
+ * INVOICE_HEADER_PATCH_KEYS: every key there is a text input the sheet must flush on demand, and an
+ * account is picked through the customer directory, never typed into a field.
+ */
+export const INVOICE_HEADER_LINK_KEYS = ["customerPartyId"] as const;
 
 export type InvoiceHeaderPatchKey = (typeof INVOICE_HEADER_PATCH_KEYS)[number];
 
@@ -1012,6 +1023,16 @@ export interface InvoiceLineRefRequest {
 
 export interface InvoiceIdRequest {
   readonly invoiceId: string;
+}
+
+/**
+ * Issuing a draft. `issueOnAccount` is an EXPLICIT, owner-only act: it puts the whole unpaid total
+ * on the linked customer's account, atomically with the invoice and its sale. Omitting it (or false)
+ * is the ordinary finalization, unchanged.
+ */
+export interface FinalizeInvoiceRequest {
+  readonly invoiceId: string;
+  readonly issueOnAccount?: boolean;
 }
 
 export interface InvoiceNumberRequest {
@@ -1276,7 +1297,7 @@ export interface PosApi {
   removeInvoiceLine(req: InvoiceLineRefRequest): Promise<IpcResult<InvoiceViewDto>>;
   discardInvoiceDraft(req: InvoiceIdRequest): Promise<IpcResult<null>>;
 
-  finalizeInvoice(req: InvoiceIdRequest): Promise<IpcResult<InvoiceViewDto>>;
+  finalizeInvoice(req: FinalizeInvoiceRequest): Promise<IpcResult<InvoiceViewDto>>;
 
   listInvoices(req: InvoiceSearchRequest): Promise<IpcResult<InvoiceDto[]>>;
   listInvoiceDrafts(req: InvoiceSearchRequest): Promise<IpcResult<InvoiceDto[]>>;

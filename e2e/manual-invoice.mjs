@@ -296,7 +296,8 @@ await app.close();
   // 🔴 TRANSITION 11 -> 12 with migration 12 (party identity). The old value was 11.
   // 🔴 TRANSITION 13 -> 14 with migration 14 (credit_sale_identity_and_unpaid_state). The old value was 13.
   // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
-  assert(f.schema === 15, `the ledger is at schema v15 (got ${f.schema})`);
+  // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
+  assert(f.schema === 16, `the ledger is at schema v16 (got ${f.schema})`);
   assert(f.invoices === 0 && f.invoiceLines === 0 && f.reconciliation === 0, "no invoice exists yet");
   assert(count("company_profile") === 1, "exactly one company_profile row, however many saves happened");
   assert(Number(one("SELECT next_invoice_number AS n FROM company_profile").n) === 61, "the sequence starts at 61 as configured");
@@ -711,7 +712,8 @@ await app.close();
   // 🔴 TRANSITION 11 -> 12. The old value was 11.
   // 🔴 TRANSITION 13 -> 14 with migration 14. The integrity and foreign-key checks are unchanged.
   // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
-  assert(f.schema === 15 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v15");
+  // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
+  assert(f.schema === 16 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v16");
   assert(f.invoices === 1 && f.invoiceLines === 4, "the invoice and its lines survived the restart");
   assert(f.highestNumber === 61, "the invoice number is unchanged");
   assert(f.reconciliation === 4, "every reconciliation row survived");

@@ -286,7 +286,8 @@ await app.close();
     // value was 13 (obligations_and_settlements). A literal on purpose: deriving it from the build
     // under test would make the check circular, and this asserts what the INSTALLED app actually wrote.
     // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 15, "the installed app's ledger is at schema v15");
+    // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 16, "the installed app's ledger is at schema v16");
 
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
     const types = rows.map((r) => r.event_type);
