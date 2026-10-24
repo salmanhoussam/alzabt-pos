@@ -264,7 +264,7 @@ export class LedgerService {
     const ref = cleanSourceRef(draft.sourceRef);
     // Validates the amount is a positive bigint within range AND the currency is one this product
     // knows. Throws before anything is written.
-    const amount = ledgerAmount(draft.amountMinor, draft.currency);
+    const amount = this.validateObligationAmount(draft.amountMinor, draft.currency);
 
     const party = this.deps.parties.findById(draft.partyId);
     if (!party) throw new DomainError("PARTY_NOT_FOUND", "That account no longer exists");
@@ -327,6 +327,20 @@ export class LedgerService {
       this.deps.ledger.insertObligation(record);
       return { record, duplicate: false };
     });
+  }
+
+  /** Shared amount/currency validation for internal atomic sale-to-obligation posting. */
+  validateObligationAmount(amountMinor: unknown, currency: unknown): ReturnType<typeof ledgerAmount> {
+    if (typeof currency !== "string") {
+      throw new DomainError("INVALID_INPUT", "An obligation needs a currency");
+    }
+    return ledgerAmount(amountMinor, currency);
+  }
+
+  /** Owner-authorized read used to reconcile an atomic POS credit-sale pair. */
+  findSaleObligation(saleId: string): ObligationRecord | null {
+    this.requireOwner();
+    return this.deps.ledger.findObligationBySource("sale", saleId);
   }
 
   /**

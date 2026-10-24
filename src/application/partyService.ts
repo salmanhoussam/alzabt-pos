@@ -152,6 +152,22 @@ export class PartyService {
     return row;
   }
 
+  /**
+   * Revalidates the durable customer identity used by an internal POS credit sale.
+   * The caller owns credit authorization; this method guarantees a live customer row and snapshot.
+   */
+  activeCustomerForSale(id: unknown): PartyRow {
+    this.requireOperator();
+    if (typeof id !== "string" || id.length === 0) {
+      throw new DomainError("INVALID_INPUT", "A customer account is required");
+    }
+    const row = this.deps.parties.findById(id);
+    if (!row || row.kind !== "customer" || row.is_active !== 1) {
+      throw new DomainError("PARTY_NOT_FOUND", "That active customer account no longer exists");
+    }
+    return row;
+  }
+
   /** Accounts that READ as the same name. Information for the operator; never acted on here. */
   findDuplicateNames(kind: PartyKind, displayName: unknown): PartyRow[] {
     this.requireFor(kind);

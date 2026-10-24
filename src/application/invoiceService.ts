@@ -891,6 +891,8 @@ export class InvoiceService {
         .digest("hex"),
       sourceType: "invoice",
       invoiceId: invoice.id,
+      customerId: null,
+      customerNameSnapshot: null,
       cashierId: cashier.id,
       cashierName: cashier.name,
       currency,

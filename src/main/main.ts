@@ -739,6 +739,7 @@ function startTill(): void {
     schemaVersion: MIGRATIONS.length,
   });
   const ledger = db;
+  let creditSaleServices: { readonly parties: PartyService; readonly ledger: LedgerService } | null = null;
   const service = new PosService({
     repository: saleStore,
     pinStates: new PinStateRepository(db),
@@ -763,6 +764,7 @@ function startTill(): void {
     // mutation. Both use THIS connection — there is no second database handle anywhere, because
     // atomicity across two connections would not be atomicity.
     auditStore,
+    creditSaleServices: () => creditSaleServices,
     transact: (fn) => {
       if (!db) throw new Error("ledger is not open");
       return db.transaction(fn).immediate();
@@ -833,6 +835,7 @@ function startTill(): void {
       return row?.currency ?? null;
     },
   });
+  creditSaleServices = { parties, ledger: ledgerService };
 
   // The phone bridge reads this through its getter when a session starts.
   posService = service;

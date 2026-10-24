@@ -8,13 +8,14 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { businessDateOf } from "../domain/businessDay";
-import { type CartLine, priceCart } from "../domain/cart";
+import { MAX_CART_LINES, type CartLine, priceCart } from "../domain/cart";
 import { BASE_UNITS, type Catalog, loadCatalog } from "../domain/catalog";
 import { decodeUtf8Strict, toImportCsv, validateImport, type ImportRejection } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
 import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
 import { categoryNameAr, categoryNameEn } from "../domain/category";
+import { MAX_QUANTITY_MILLI } from "../domain/quantity";
 import { imageBytes, imageEdge, imageMime, imageOrigin } from "../domain/productImage";
 import type { PhoneSessionAction, PhoneSessionSpec } from "../domain/phoneSession";
 import type { PhoneSubmission } from "../domain/phoneSubmission";
@@ -79,10 +80,13 @@ import {
 } from "../persistence/catalogRepository";
 import type { AuditRepository } from "../persistence/auditRepository";
 import type { PinStateRepository } from "../persistence/pinStateRepository";
-import type { SaleRepository } from "../persistence/saleRepository";
+import type { NewSaleHeader, NewSaleLine, SaleRepository } from "../persistence/saleRepository";
 import { type Cashier, pinMatches } from "./cashierAuth";
 import type { LoginOutcome as OperatorLoginOutcome, OperatorService } from "./operatorService";
 import type { OperatorRole } from "../persistence/operatorRepository";
+import type { ObligationRecord } from "../domain/ledger";
+import type { LedgerService } from "./ledgerService";
+import type { PartyService } from "./partyService";
 
 /**
  * A category's audited state — its two names and whether it is offered, and nothing else.
@@ -207,6 +211,11 @@ export interface PosServiceDeps {
    * the same thing.
    */
   readonly transact?: <T>(fn: () => T) => T;
+  /** Internal-only coordinator dependencies; not registered as an IPC capability. */
+  readonly creditSaleServices?: () => {
+    readonly parties: PartyService;
+    readonly ledger: LedgerService;
+  } | null;
   /**
    * A DIAGNOSTIC mirror of each committed audit row, called AFTER the transaction commits. Wired
    * in main.ts to the rotating logfile, which is useful for field support and is NOT the record of
@@ -241,6 +250,19 @@ export interface CreateSaleInput {
 export interface CreateSaleResult {
   readonly sale: SaleRecord;
   /** True when this idempotency key had already completed a sale; no new sale was written. */
+  readonly duplicate: boolean;
+}
+
+export interface CreateCreditSaleInput {
+  readonly idempotencyKey: string;
+  readonly lines: ReadonlyArray<CartLine>;
+  readonly expectedTotalMinor: bigint;
+  readonly customerId: string;
+}
+
+export interface CreateCreditSaleResult {
+  readonly sale: SaleRecord;
+  readonly obligation: ObligationRecord;
   readonly duplicate: boolean;
 }
 
@@ -2086,6 +2108,8 @@ export class PosService {
         // full at completion by one real method — unchanged behaviour, now written down.
         sourceType: "pos",
         invoiceId: null,
+        customerId: null,
+        customerNameSnapshot: null,
         cashierId: cashier.id,
         cashierName: cashier.name,
         currency: priced.currency,
@@ -2117,6 +2141,360 @@ export class PosService {
     const sale = this.repository.getSale(saleId);
     if (!sale) throw new DomainError("LEDGER_INTEGRITY", "Committed sale could not be read back");
     return { sale, duplicate: false };
+  }
+
+  /**
+   * Internal-only, owner-authorized, fully unpaid POS sale. Its outer transaction is the sole
+   * commit boundary for the sale header, every line and the LedgerService-posted receivable.
+   * This method is deliberately not registered on the renderer bridge.
+   */
+  createCustomerCreditSale(input: CreateCreditSaleInput): CreateCreditSaleResult {
+    const cashier = this.requireCashier();
+    this.requireCreditSaleOwner();
+    const services = this.deps.creditSaleServices?.();
+    const transact = this.deps.transact;
+    if (!services || !transact) {
+      throw new DomainError("NOT_AVAILABLE", "Atomic customer credit sales are not wired on this terminal");
+    }
+    if (typeof input.idempotencyKey !== "string" || !/^[A-Za-z0-9-]{8,100}$/.test(input.idempotencyKey)) {
+      throw new DomainError("INVALID_INPUT", "A valid idempotency key is required");
+    }
+    if (typeof input.customerId !== "string" || input.customerId.length === 0) {
+      throw new DomainError("INVALID_INPUT", "A customer account is required");
+    }
+    if (typeof input.expectedTotalMinor !== "bigint") {
+      throw new DomainError("INVALID_INPUT", "A valid displayed total is required");
+    }
+
+    this.validateCreditSaleRequestLines(input.lines);
+
+    // The owner is authorized before this transaction reads any persisted sale or receivable.
+    // Existing keys are resolved only from immutable original transaction facts, never today's
+    // catalog, which may have changed or no longer contain the products.
+    let existingPair: Omit<CreateCreditSaleResult, "duplicate"> | null;
+    try {
+      existingPair = transact(() => {
+        this.requireCreditSaleOwner();
+        const keyed = this.repository.findByIdempotencyKey(input.idempotencyKey);
+        return keyed ? this.recoverExistingCreditPair(keyed, input, services.ledger, cashier.id) : null;
+      });
+    } catch (error) {
+      if (error instanceof DomainError) throw error;
+      throw new DomainError("LEDGER_INTEGRITY", "Credit-sale outcome is unknown; do not retry with a new key");
+    }
+    if (existingPair) return { ...existingPair, duplicate: true };
+
+    // Only an authoritative successful key lookup that found no sale reaches current pricing.
+    let writeAttempted = false;
+    let saleId: string | null = null;
+    try {
+      let committedPair: CreateCreditSaleResult | null = null;
+      transact(() => {
+        // Recheck the key before current pricing so a concurrent commit is still recoverable.
+        this.requireCreditSaleOwner();
+        const racedKey = this.repository.findByIdempotencyKey(input.idempotencyKey);
+        if (racedKey) {
+          committedPair = {
+            ...this.recoverExistingCreditPair(racedKey, input, services.ledger, cashier.id),
+            duplicate: true,
+          };
+          return;
+        }
+
+        const priced = priceCart(this.catalog, input.lines);
+        const amount = services.ledger.validateObligationAmount(priced.total.minor, priced.currency);
+
+        // Renderer totals are only a stale-screen check; all sale terms come from the trusted catalog.
+        if (priced.total.minor !== input.expectedTotalMinor) {
+          throw new DomainError(
+            "TOTAL_MISMATCH",
+            "The displayed total no longer matches the catalog; please review the cart",
+          );
+        }
+        const fingerprint = this.creditSaleFingerprint({
+          cashierId: cashier.id,
+          customerId: input.customerId,
+          lines: input.lines,
+          expectedTotalMinor: input.expectedTotalMinor,
+          totalMinor: amount.minor,
+          currency: priced.currency,
+          paidMinor: 0n,
+          paymentStatus: "unpaid",
+          balanceDueMinor: amount.minor,
+          paymentMethod: null,
+          taxMinor: 0n,
+        });
+        const customer = services.parties.activeCustomerForSale(input.customerId);
+        const instant = this.now();
+        const timestamp = instant.toISOString();
+        const newSaleId = this.newId();
+        saleId = newSaleId;
+        const lines: NewSaleLine[] = priced.lines.map((line) => ({
+          id: this.newId(),
+          lineNo: line.lineNo,
+          invoiceLineId: null,
+          productId: line.productId,
+          sku: line.sku,
+          productName: line.productName,
+          saleUnit: line.saleUnit,
+          unitLabel: null,
+          quantityMilli: line.quantityMilli,
+          unitPriceMinor: line.unitPrice.minor,
+          lineTotalMinor: line.lineTotal.minor,
+        }));
+        writeAttempted = true;
+        const header: NewSaleHeader = {
+          id: newSaleId,
+          idempotencyKey: input.idempotencyKey,
+          requestFingerprint: fingerprint,
+          sourceType: "pos",
+          invoiceId: null,
+          customerId: customer.id,
+          customerNameSnapshot: customer.display_name,
+          cashierId: cashier.id,
+          cashierName: cashier.name,
+          currency: priced.currency,
+          subtotalMinor: priced.subtotal.minor,
+          taxMinor: 0n,
+          totalMinor: amount.minor,
+          paidMinor: 0n,
+          balanceDueMinor: amount.minor,
+          paymentStatus: "unpaid",
+          paymentMethod: null,
+          businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
+          completedAt: timestamp,
+          createdAt: timestamp,
+        };
+        this.repository.commitSaleWithinTransaction(header, lines);
+        const posted = services.ledger.postObligation({
+          partyId: customer.id,
+          direction: "receivable",
+          sourceKind: "sale",
+          sourceRef: newSaleId,
+          currency: priced.currency,
+          amountMinor: amount.minor,
+        });
+        const keyed = this.repository.findByIdempotencyKey(input.idempotencyKey);
+        if (!keyed) throw new DomainError("LEDGER_INTEGRITY", "Credit sale disappeared before verification");
+        const pair = this.recoverExistingCreditPair(keyed, input, services.ledger, cashier.id);
+        if (pair.obligation.id !== posted.record.id) {
+          throw new DomainError("LEDGER_INTEGRITY", "The posted receivable does not match its sale");
+        }
+        this.repository.verifySaleWithinTransaction(newSaleId);
+        committedPair = { ...pair, duplicate: false };
+      });
+      if (!committedPair) {
+        throw new DomainError("LEDGER_INTEGRITY", "Atomic credit-sale transaction returned no pair");
+      }
+      return committedPair;
+    } catch (error) {
+      // The expected owner/customer refusals happen before the first write and are not ambiguous.
+      if (error instanceof DomainError && !writeAttempted) throw error;
+      // A commit may have succeeded before the caller lost its response. Resolve BOTH durable rows.
+      const outcome = this.resolveCreditPairAfterFailure(
+        saleId ?? "",
+        input.idempotencyKey,
+        input,
+        services.ledger,
+        cashier.id,
+      );
+      if (outcome) return { ...outcome, duplicate: true };
+      if (error instanceof DomainError) throw error;
+      throw new DomainError(
+        "NOT_AVAILABLE",
+        "Credit sale was not recorded; both the sale and receivable were confirmed absent",
+      );
+    }
+  }
+
+  private requireCreditSaleOwner(): void {
+    if (this.requireLiveRole() !== "owner") {
+      throw new DomainError("NOT_AUTHORIZED", "Only the shop owner can create a customer credit sale");
+    }
+  }
+
+  private validateCreditSaleRequestLines(lines: ReadonlyArray<CartLine>): void {
+    if (!Array.isArray(lines) || lines.length === 0 || lines.length > MAX_CART_LINES) {
+      throw new DomainError("INVALID_INPUT", "A credit sale needs a valid list of sale lines");
+    }
+    const seen = new Set<string>();
+    for (const line of lines) {
+      if (
+        !line ||
+        typeof line.productId !== "string" ||
+        line.productId.length === 0 ||
+        !Number.isSafeInteger(line.quantityMilli) ||
+        line.quantityMilli < 1 ||
+        line.quantityMilli > MAX_QUANTITY_MILLI ||
+        seen.has(line.productId)
+      ) {
+        throw new DomainError("INVALID_INPUT", "A credit sale contains an invalid or duplicate sale line");
+      }
+      seen.add(line.productId);
+    }
+  }
+
+  private creditSaleFingerprint(input: {
+    readonly cashierId: string;
+    readonly customerId: string;
+    readonly lines: ReadonlyArray<CartLine>;
+    readonly expectedTotalMinor: bigint;
+    readonly totalMinor: bigint;
+    readonly currency: string;
+    readonly paidMinor: bigint;
+    readonly paymentStatus: string;
+    readonly balanceDueMinor: bigint;
+    readonly paymentMethod: PaymentMethod | null;
+    readonly taxMinor: bigint;
+  }): string {
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          cashierId: input.cashierId,
+          sourceType: "pos",
+          paymentIntent: "customer_credit",
+          customerId: input.customerId,
+          lines: input.lines.map((line) => [line.productId, line.quantityMilli]),
+          expectedTotalMinor: input.expectedTotalMinor.toString(),
+          totalMinor: input.totalMinor.toString(),
+          currency: input.currency,
+          paymentMethod: input.paymentMethod,
+          paidMinor: input.paidMinor.toString(),
+          paymentStatus: input.paymentStatus,
+          balanceDueMinor: input.balanceDueMinor.toString(),
+          taxMinor: input.taxMinor.toString(),
+        }),
+      )
+      .digest("hex");
+  }
+
+  /**
+   * Reconstructs the original request fingerprint from immutable sale facts and request identity.
+   * No current catalog data participates, so a price/currency/catalog change cannot hide a commit.
+   */
+  private recoverExistingCreditPair(
+    keyed: NonNullable<ReturnType<SaleRepository["findByIdempotencyKey"]>>,
+    input: CreateCreditSaleInput,
+    ledger: LedgerService,
+    cashierId: string,
+  ): Omit<CreateCreditSaleResult, "duplicate"> {
+    const sale = keyed.sale;
+    if (
+      sale.sourceType !== "pos" ||
+      sale.invoiceId !== null ||
+      (sale.paymentStatus === "paid" && sale.paymentMethod !== null)
+    ) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key belongs to a different transaction");
+    }
+    if (
+      sale.customerId === null ||
+      sale.customerNameSnapshot === null ||
+      sale.customerNameSnapshot.trim().length === 0 ||
+      sale.paymentStatus !== "unpaid" ||
+      sale.paymentMethod !== null ||
+      sale.paid.minor !== 0n ||
+      sale.total.minor <= 0n ||
+      sale.balanceDue.minor !== sale.total.minor ||
+      sale.tax.minor !== 0n
+    ) {
+      throw new DomainError("LEDGER_INTEGRITY", "The keyed sale is not a valid fully unpaid customer-credit sale");
+    }
+
+    const lineSum = sale.lines.reduce((sum, line) => sum + line.lineTotal.minor, 0n);
+    if (
+      sale.lines.length === 0 ||
+      lineSum !== sale.subtotal.minor ||
+      sale.total.minor !== sale.subtotal.minor + sale.tax.minor ||
+      sale.lines.some(
+        (line, index) =>
+          line.lineNo !== index + 1 ||
+          line.saleId !== sale.id ||
+          line.productId === null ||
+          line.sku === null ||
+          line.saleUnit === null ||
+          line.invoiceLineId !== null ||
+          line.unitLabel !== null,
+      )
+    ) {
+      throw new DomainError("LEDGER_INTEGRITY", "The keyed credit sale has inconsistent immutable lines");
+    }
+
+    let obligation: ObligationRecord | null;
+    try {
+      obligation = ledger.findSaleObligation(sale.id);
+    } catch {
+      throw new DomainError("LEDGER_INTEGRITY", "Credit-sale outcome is unknown because its receivable could not be read");
+    }
+    if (
+      !obligation ||
+      obligation.sourceKind !== "sale" ||
+      obligation.sourceRef !== sale.id ||
+      obligation.saleId !== sale.id ||
+      obligation.partyId !== sale.customerId ||
+      obligation.partyKind !== "customer" ||
+      obligation.direction !== "receivable" ||
+      obligation.currency !== sale.currency ||
+      obligation.amountMinor !== sale.balanceDue.minor
+    ) {
+      throw new DomainError("LEDGER_INTEGRITY", "Credit sale and receivable are missing or inconsistent");
+    }
+
+    const sameRequestLines =
+      input.lines.length === sale.lines.length &&
+      input.lines.every(
+        (line, index) =>
+          line.productId === sale.lines[index]!.productId &&
+          line.quantityMilli === sale.lines[index]!.quantityMilli,
+      );
+    if (
+      cashierId !== sale.cashierId ||
+      input.customerId !== sale.customerId ||
+      !sameRequestLines ||
+      input.expectedTotalMinor !== sale.total.minor
+    ) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
+    }
+
+    const originalFingerprint = this.creditSaleFingerprint({
+      cashierId: sale.cashierId,
+      customerId: sale.customerId,
+      lines: input.lines,
+      expectedTotalMinor: input.expectedTotalMinor,
+      totalMinor: sale.total.minor,
+      currency: sale.currency,
+      paidMinor: sale.paid.minor,
+      paymentStatus: sale.paymentStatus,
+      balanceDueMinor: sale.balanceDue.minor,
+      paymentMethod: sale.paymentMethod,
+      taxMinor: sale.tax.minor,
+    });
+    if (keyed.fingerprint !== originalFingerprint) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
+    }
+
+    return { sale, obligation };
+  }
+
+  private resolveCreditPairAfterFailure(
+    saleId: string,
+    key: string,
+    input: CreateCreditSaleInput,
+    ledger: LedgerService,
+    cashierId: string,
+  ): Omit<CreateCreditSaleResult, "duplicate"> | null {
+    let keyed: ReturnType<SaleRepository["findByIdempotencyKey"]>;
+    let obligation: ObligationRecord | null;
+    try {
+      keyed = this.repository.findByIdempotencyKey(key);
+      obligation = ledger.findSaleObligation(keyed?.sale.id ?? saleId);
+    } catch {
+      throw new DomainError("LEDGER_INTEGRITY", "Credit-sale outcome is unknown; do not retry with a new key");
+    }
+    if (!keyed && !obligation) return null;
+    if (!keyed && obligation) {
+      throw new DomainError("LEDGER_INTEGRITY", "Receivable exists without its keyed sale; do not retry");
+    }
+    return keyed ? this.recoverExistingCreditPair(keyed, input, ledger, cashierId) : null;
   }
 
   /**
