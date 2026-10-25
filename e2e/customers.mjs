@@ -1448,7 +1448,18 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       await testid(pe, "receipt-open").click();
       await testid(pe, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
       assert((await testid(pe, "receipt-hint").innerText()).includes("its reference is never split"), "the English hint says the reference is never split");
-      await testid(pe, "receipt-currency").selectOption("LBP");
+      // M17B-S1: only LBP has two open debts now.
+      // The currency selector is intentionally disabled for one eligible currency.
+      const lbpCurrency = testid(pe, "receipt-currency");
+      const availableCurrencies = await lbpCurrency.locator("option").evaluateAll(
+        (options) => options.map((option) => option.value),
+      );
+      assert(
+        JSON.stringify(availableCurrencies) === JSON.stringify(["LBP"]),
+        `only LBP is sharable now (${availableCurrencies})`,
+      );
+      assert(await lbpCurrency.isDisabled(), "the single-currency selector is intentionally disabled");
+      assert((await lbpCurrency.inputValue()) === "LBP", "LBP is selected automatically");
       await testid(pe, "receipt-method").selectOption("bank_transfer");
       await testid(pe, "receipt-reference").fill("BT-S1-77");
       await testid(pe, "receipt-total").fill("5000000.00");
