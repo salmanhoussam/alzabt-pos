@@ -286,8 +286,16 @@ export class LedgerRepository {
   }
 
   /**
-   * Collected totals for ONE business day, per currency and per way of paying. Cash, card and each
-   * provider stay separate rows — a Whish receipt is never inside the cash total.
+   * COLLECTIONS on ONE business day, per currency and per way of paying. Cash, card and each provider
+   * stay separate rows — a Whish receipt is never inside the cash total.
+   *
+   * 🔴 THE ONE DEFINITION OF "COLLECTED AGAINST CUSTOMER DEBTS" (migration 18): every `receipts` row
+   * (one real external receipt) PLUS every DIRECT settlement (`receipt_id IS NULL`). An allocation
+   * settlement (`receipt_id IS NOT NULL`) is what a receipt PAID, not an additional collection, so it is
+   * never summed here — counting it beside its receipt would report 200.00 for a 100.00 transfer.
+   *
+   * 🔴 IT IS NOT THE SHOP'S TOTAL TAKINGS. A POS checkout's own tender (`sales.payment_method`/`paid_minor`)
+   * and the typed `paid` figure on an invoice are not read at all: S1 does not integrate them.
    */
   collectionTotals(businessDate: string): Array<{
     readonly currency: string;
@@ -298,11 +306,15 @@ export class LedgerRepository {
   }> {
     const rows = this.db
       .prepare(
-        `SELECT currency, method, provider, count(*) AS n, sum(amount_minor) AS total
-           FROM settlements WHERE business_date = ?
+        `SELECT currency, method, provider, count(*) AS n, sum(amount_minor) AS total FROM (
+           SELECT currency, 'external' AS method, provider, amount_minor FROM receipts WHERE business_date = ?
+           UNION ALL
+           SELECT currency, method, provider, amount_minor FROM settlements
+            WHERE business_date = ? AND receipt_id IS NULL
+         )
           GROUP BY currency, method, provider ORDER BY currency, method, provider`,
       )
-      .all(businessDate) as Array<{
+      .all(businessDate, businessDate) as Array<{
       currency: string;
       method: string;
       provider: string | null;

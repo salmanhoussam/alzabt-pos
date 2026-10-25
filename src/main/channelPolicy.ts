@@ -211,6 +211,8 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // someone later reclassifies by accident is not a boundary worth having on money.
   getCustomerStatement: "owner",
   recordCustomerPayment: "owner",
+  // M17B-S1. Owner, and refused again by `LedgerService.requireOwner` inside BOTH transactions.
+  recordAllocatedReceipt: "owner",
   renameCategory: "owner",
   setCategoryActive: "owner",
   deleteCategory: "owner",

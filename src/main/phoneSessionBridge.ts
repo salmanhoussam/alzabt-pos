@@ -53,7 +53,7 @@ const PAIRED_WITHOUT_FORM_HTML = `<!doctype html>
 <html lang="ar" dir="rtl">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>الزبط</title>
+<title>عالضبط</title>
 <style>body{margin:0;padding:24px;font-family:system-ui,sans-serif;line-height:1.6}</style>
 <p>تم ربط الهاتف بالصندوق، لكن إدخال الأصناف غير متاح على هذا الصندوق.</p>
 </html>

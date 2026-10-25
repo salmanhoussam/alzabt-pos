@@ -86,6 +86,8 @@ describe("schema is unchanged by this feature", () => {
       [16, "invoice_customer_account_link"],
       // Migration 17 adds only three nullable collection-detail columns, one index and one trigger.
       [17, "settlement_collection_details"],
+      // Migration 18 adds only external-receipt tables and one nullable settlement link.
+      [18, "external_receipt_allocation"],
     ]);
   });
 

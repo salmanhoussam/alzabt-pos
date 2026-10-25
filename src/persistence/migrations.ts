@@ -2056,4 +2056,190 @@ WHEN EXISTS (SELECT 1 FROM collection_attempts
 BEGIN SELECT RAISE(ABORT, 'ledger: a closed collection attempt cannot be settled'); END;
 `,
   },
+  {
+    version: 18,
+    name: "external_receipt_allocation",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 18 — ONE real external receipt (a Whish or bank transfer) shared across SEVERAL debts
+    // of ONE customer.
+    //
+    // Additive only: three new tables, one new nullable column, new indexes and triggers. Migration
+    // 17 and every earlier statement are untouched, and no existing row is rewritten.
+    //
+    // 🔴 THE MODEL. A `receipts` row IS the money that arrived — one real provider transaction, one
+    // row, its reference stored once and never split into invented suffixes. What it PAID is a set of
+    // ordinary `settlements` rows (the allocations), each pointing at its receipt through
+    // `settlements.receipt_id`. An allocation reduces a debt; it is NOT additional money. What was
+    // COLLECTED against customer debts is therefore receipts + direct settlements (receipt_id IS
+    // NULL), never the allocation rows (see LedgerRepository.collectionTotals). That is collections
+    // only: it does not include a POS checkout's own tender or an invoice's typed `paid` figure.
+    //
+    // 🔴 EXACT ALLOCATION WITHOUT DEFERRED CHECKS (SQLite has none). The allocation settlements are
+    // inserted FIRST and the receipt row LAST, in one transaction. The foreign key
+    // settlements.receipt_id is DEFERRABLE INITIALLY DEFERRED, so the children may precede their
+    // parent and a transaction that never seals fails at COMMIT. The receipt row is the SEAL: its
+    // BEFORE INSERT trigger refuses unless the finished set is exactly right (count, distinct debts,
+    // sum, customer, receivable direction, currency, shape). A child inserted after the seal is
+    // refused, and settlements are already immutable, so a sealed receipt can never change.
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    sql: `
+-- The durable INTENT of a receipt, written before the receipt can exist (the same discipline as
+-- collection_attempts): after a lost response, a closed window or a restart, the original key and
+-- the exact intent are still here. Secret-free: ids, amounts, a non-sensitive reference.
+CREATE TABLE receipt_attempts (
+  idempotency_key     TEXT    PRIMARY KEY CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  customer_id         TEXT    NOT NULL REFERENCES parties (id),
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  amount_minor        INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  provider            TEXT    NOT NULL CHECK (provider IN ('whish', 'bank_transfer')),
+  reference           TEXT    NOT NULL CHECK (length(reference) BETWEEN 1 AND 64 AND reference = trim(reference)),
+  funds_confirmed     INTEGER NOT NULL CHECK (funds_confirmed = 1),
+  allocation_count    INTEGER NOT NULL CHECK (allocation_count BETWEEN 2 AND 50),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  created_by          TEXT    NOT NULL REFERENCES operators (id),
+  created_at          TEXT    NOT NULL,
+  resolved_at         TEXT,
+  resolution          TEXT    CHECK (resolution IS NULL OR resolution IN ('recorded', 'not_recorded')),
+  CHECK ((resolved_at IS NULL) = (resolution IS NULL))
+) STRICT;
+
+CREATE INDEX receipt_attempts_open ON receipt_attempts (customer_id) WHERE resolved_at IS NULL;
+
+CREATE TABLE receipt_attempt_lines (
+  idempotency_key TEXT    NOT NULL REFERENCES receipt_attempts (idempotency_key),
+  obligation_id   TEXT    NOT NULL REFERENCES obligations (id),
+  amount_minor    INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  PRIMARY KEY (idempotency_key, obligation_id)
+) STRICT;
+
+CREATE TABLE receipts (
+  id                  TEXT    PRIMARY KEY,
+  customer_id         TEXT    NOT NULL,
+  customer_kind       TEXT    GENERATED ALWAYS AS ('customer') STORED,
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  amount_minor        INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  -- The real external channel this slice supports; stored as method 'external' + provider, exactly
+  -- like a direct M17 collection, so it can never be counted as till cash.
+  provider            TEXT    NOT NULL CHECK (provider IN ('whish', 'bank_transfer')),
+  reference           TEXT    NOT NULL CHECK (length(reference) BETWEEN 1 AND 64 AND reference = trim(reference)),
+  funds_confirmed     INTEGER NOT NULL CHECK (funds_confirmed = 1),
+  allocation_count    INTEGER NOT NULL CHECK (allocation_count BETWEEN 2 AND 50),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  received_by         TEXT    NOT NULL REFERENCES operators (id),
+  received_at         TEXT    NOT NULL CHECK (received_at GLOB
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  FOREIGN KEY (customer_id, customer_kind) REFERENCES parties (id, kind)
+) STRICT;
+
+-- 🔴 ONE REAL PROVIDER TRANSACTION, ONE RECEIPT.
+CREATE UNIQUE INDEX receipts_provider_reference ON receipts (provider, reference);
+
+-- The allocation link. Nullable (every historical settlement stays NULL = a direct collection) and
+-- DEFERRED so the children can be written before the sealing receipt row inside one transaction.
+ALTER TABLE settlements ADD COLUMN receipt_id TEXT REFERENCES receipts (id) DEFERRABLE INITIALLY DEFERRED;
+CREATE INDEX settlements_receipt ON settlements (receipt_id) WHERE receipt_id IS NOT NULL;
+
+-- 🔴 THE SEAL. Refuses a receipt unless the allocations already written in this transaction are
+-- exactly right. (No allocation can be missing, duplicated, mixed, foreign or overpaying; the
+-- overpayment of a single debt is refused per child by settlements_no_overpayment.)
+CREATE TRIGGER receipts_seal BEFORE INSERT ON receipts
+WHEN (SELECT count(*) FROM settlements WHERE receipt_id = NEW.id) <> NEW.allocation_count
+  OR (SELECT count(DISTINCT obligation_id) FROM settlements WHERE receipt_id = NEW.id) <> NEW.allocation_count
+  OR coalesce((SELECT sum(amount_minor) FROM settlements WHERE receipt_id = NEW.id), 0) <> NEW.amount_minor
+  OR EXISTS (
+       SELECT 1 FROM settlements AS s JOIN obligations AS o ON o.id = s.obligation_id
+       WHERE s.receipt_id = NEW.id
+         AND (o.party_id <> NEW.customer_id OR o.party_kind <> 'customer' OR o.direction <> 'receivable'
+              OR s.currency <> NEW.currency
+              OR s.method <> 'external' OR s.provider IS NOT NULL OR s.reference IS NOT NULL
+              OR s.funds_confirmed IS NOT NULL))
+  OR NOT EXISTS (SELECT 1 FROM parties WHERE id = NEW.customer_id AND kind = 'customer' AND is_active = 1)
+BEGIN SELECT RAISE(ABORT, 'ledger: a receipt must be allocated exactly across its debts'); END;
+
+-- 🔴 THE SAME REFERENCE CAN NEVER BE BOTH A RECEIPT AND A DIRECT COLLECTION, in either direction.
+-- (settlements_provider_reference from migration 17 is untouched; allocation rows carry no reference.)
+CREATE TRIGGER receipts_reference_vs_settlements BEFORE INSERT ON receipts
+WHEN EXISTS (SELECT 1 FROM settlements WHERE provider = NEW.provider AND reference = NEW.reference)
+BEGIN SELECT RAISE(ABORT, 'ledger: that payment reference is already recorded as a collection'); END;
+
+CREATE TRIGGER settlements_reference_vs_receipts BEFORE INSERT ON settlements
+WHEN NEW.provider IS NOT NULL
+ AND EXISTS (SELECT 1 FROM receipts WHERE provider = NEW.provider AND reference = NEW.reference)
+BEGIN SELECT RAISE(ABORT, 'ledger: that payment reference is already recorded as a receipt'); END;
+
+-- An allocation may only be written BEFORE its receipt exists: after the seal, the set is closed.
+CREATE TRIGGER settlements_receipt_sealed BEFORE INSERT ON settlements
+WHEN NEW.receipt_id IS NOT NULL AND EXISTS (SELECT 1 FROM receipts WHERE id = NEW.receipt_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a sealed receipt cannot take another allocation'); END;
+
+-- 🔴 A RECEIPT MUST BE THE INTENT RECORDED UNDER ITS KEY. When an attempt exists for the key, the receipt
+-- must carry the same customer, currency, total, provider, reference, count and fingerprint, and EVERY
+-- allocation must be one of the attempt's lines (same debt, same amount); with the count and the seal's
+-- distinctness check that makes the two sets identical. A receipt with other shares can no longer be
+-- sealed under an existing intent, whatever fingerprint it carries. (A receipt inserted with NO attempt
+-- is still allowed — the service always writes the attempt first, and raw-SQL fixtures rely on this.)
+CREATE TRIGGER receipts_match_intent BEFORE INSERT ON receipts
+WHEN EXISTS (
+  SELECT 1 FROM receipt_attempts AS a
+  WHERE a.idempotency_key = NEW.idempotency_key
+    AND (a.customer_id <> NEW.customer_id OR a.currency <> NEW.currency OR a.amount_minor <> NEW.amount_minor
+         OR a.provider <> NEW.provider OR a.reference <> NEW.reference
+         OR a.allocation_count <> NEW.allocation_count OR a.request_fingerprint <> NEW.request_fingerprint
+         OR EXISTS (SELECT 1 FROM settlements AS s
+                    WHERE s.receipt_id = NEW.id
+                      AND NOT EXISTS (SELECT 1 FROM receipt_attempt_lines AS l
+                                      WHERE l.idempotency_key = a.idempotency_key
+                                        AND l.obligation_id = s.obligation_id AND l.amount_minor = s.amount_minor))))
+BEGIN SELECT RAISE(ABORT, 'ledger: a receipt must match the intent recorded under its key'); END;
+
+-- A key permanently closed as NOT recorded can never post money later.
+CREATE TRIGGER receipts_closed_attempt BEFORE INSERT ON receipts
+WHEN EXISTS (SELECT 1 FROM receipt_attempts WHERE idempotency_key = NEW.idempotency_key AND resolution = 'not_recorded')
+BEGIN SELECT RAISE(ABORT, 'ledger: a closed receipt attempt cannot be recorded'); END;
+
+CREATE TRIGGER receipts_immutable_update BEFORE UPDATE ON receipts
+BEGIN SELECT RAISE(ABORT, 'ledger: a sealed receipt is immutable'); END;
+CREATE TRIGGER receipts_immutable_delete BEFORE DELETE ON receipts
+BEGIN SELECT RAISE(ABORT, 'ledger: a sealed receipt cannot be deleted'); END;
+
+-- Attempts: only the one-time resolution may be written; no deletes; lines are frozen.
+CREATE TRIGGER receipt_attempts_resolve_once BEFORE UPDATE ON receipt_attempts
+WHEN OLD.resolved_at IS NOT NULL
+  OR NEW.idempotency_key IS NOT OLD.idempotency_key OR NEW.customer_id IS NOT OLD.customer_id
+  OR NEW.currency IS NOT OLD.currency OR NEW.amount_minor IS NOT OLD.amount_minor
+  OR NEW.provider IS NOT OLD.provider OR NEW.reference IS NOT OLD.reference
+  OR NEW.funds_confirmed IS NOT OLD.funds_confirmed OR NEW.allocation_count IS NOT OLD.allocation_count
+  OR NEW.request_fingerprint IS NOT OLD.request_fingerprint OR NEW.created_by IS NOT OLD.created_by
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'ledger: a receipt attempt can only be resolved, once'); END;
+-- The resolution cannot lie about the receipt: 'recorded' needs a receipt that IS the intent, 'not_recorded' forbids any.
+CREATE TRIGGER receipt_attempts_resolution_truth BEFORE UPDATE ON receipt_attempts
+WHEN (NEW.resolution = 'recorded' AND NOT EXISTS (
+        SELECT 1 FROM receipts AS r
+        WHERE r.idempotency_key = NEW.idempotency_key
+          AND r.customer_id = NEW.customer_id AND r.currency = NEW.currency AND r.amount_minor = NEW.amount_minor
+          AND r.provider = NEW.provider AND r.reference = NEW.reference
+          AND r.allocation_count = NEW.allocation_count AND r.request_fingerprint = NEW.request_fingerprint
+          AND NOT EXISTS (SELECT 1 FROM settlements AS s
+                          WHERE s.receipt_id = r.id
+                            AND NOT EXISTS (SELECT 1 FROM receipt_attempt_lines AS l
+                                            WHERE l.idempotency_key = NEW.idempotency_key
+                                              AND l.obligation_id = s.obligation_id AND l.amount_minor = s.amount_minor))))
+  OR (NEW.resolution = 'not_recorded' AND EXISTS (SELECT 1 FROM receipts WHERE idempotency_key = NEW.idempotency_key))
+BEGIN SELECT RAISE(ABORT, 'ledger: a receipt attempt resolution must match the ledger'); END;
+CREATE TRIGGER receipt_attempts_no_delete BEFORE DELETE ON receipt_attempts
+BEGIN SELECT RAISE(ABORT, 'ledger: a receipt attempt cannot be deleted'); END;
+CREATE TRIGGER receipt_attempt_lines_open_only BEFORE INSERT ON receipt_attempt_lines
+WHEN (SELECT resolved_at FROM receipt_attempts WHERE idempotency_key = NEW.idempotency_key) IS NOT NULL
+  OR (SELECT count(*) FROM receipt_attempt_lines WHERE idempotency_key = NEW.idempotency_key)
+     >= (SELECT allocation_count FROM receipt_attempts WHERE idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'ledger: a receipt attempt already holds all of its lines'); END;
+CREATE TRIGGER receipt_attempt_lines_immutable_update BEFORE UPDATE ON receipt_attempt_lines
+BEGIN SELECT RAISE(ABORT, 'ledger: a receipt attempt line is immutable'); END;
+CREATE TRIGGER receipt_attempt_lines_immutable_delete BEFORE DELETE ON receipt_attempt_lines
+BEGIN SELECT RAISE(ABORT, 'ledger: a receipt attempt line cannot be deleted'); END;
+`,
+  },
 ];

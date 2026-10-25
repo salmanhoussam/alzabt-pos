@@ -475,7 +475,8 @@ try {
     // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
     // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
     // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 17, "the installed app's ledger is at schema v17");
+    // 🔴 TRANSITION 17 -> 18 with migration 18 (external_receipt_allocation). The old value was 17.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 18, "the installed app's ledger is at schema v18");
     assert(n("SELECT count(*) AS n FROM parties") === 5, "five party rows, and no more");
     assert(n("SELECT count(*) AS n FROM party_contact_history") === 0, "and zero contact-history rows — nothing was edited");
     assert(n("SELECT count(*) AS n FROM sales") === 0, "🔴 and still not one sale, obligation or payment anywhere");
@@ -812,7 +813,8 @@ try {
     // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
     // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
     // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
-    assert(n("SELECT count(*) AS n FROM schema_migrations") === 17, "the ledger is still at schema v17");
+    // 🔴 TRANSITION 17 -> 18 with migration 18 (external_receipt_allocation). The old value was 17.
+    assert(n("SELECT count(*) AS n FROM schema_migrations") === 18, "the ledger is still at schema v18");
     db.close();
   }
 
@@ -1182,7 +1184,7 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
   await testid(pb, "collect-pending").waitFor({ state: "visible", timeout: 30000 });
   assert((await testid(pb, "collect-pending").getAttribute("data-status")) === "not_recorded", "🔴 the ledger reports the Arabic-test attempt as NOT recorded");
   const banner = await testid(pb, "collect-pending").innerText();
-  const WARN = "ما في عملية قبض مسجّلة في الضبط لهالمحاولة. هيدا ما بيعني بالضرورة إن المبلغ ما وصل. تأكّد من استلام المبلغ فعلياً قبل إعادة محاولة تسجيل القبض.";
+  const WARN = "ما في عملية قبض مسجّلة في برنامج «عالضبط» لهالمحاولة. هيدا ما بيعني بالضرورة إن المبلغ ما وصل. تأكّد من استلام المبلغ فعلياً قبل إعادة محاولة تسجيل القبض.";
   assert(banner.includes(WARN), "🔴 the Arabic recovery warning is the corrected text");
   assert(!banner.includes("لم يُؤخَذ"), "🔴 it no longer says nothing was taken");
   assert(banner.includes("WH-E2E-AR"), "and carries the attempt's own reference");
@@ -1209,6 +1211,285 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
   } finally {
     await ar2.close().catch(() => undefined);
   }
+
+  // ═══════════════════════════════════════════════════════
+  // M17B-S1 · ONE real Whish/bank receipt shared across SEVERAL debts of ONE customer (migration 18).
+  //
+  // Installed app, real window resized to 1024×640 (native + OS bounds recorded, as for finding B),
+  // Arabic first and then English, synthetic fixtures only — nothing here contacts a provider.
+  // Proves: exact allocation; one receipt, never two; the reference stored once; refusals write
+  // nothing; an unfinished receipt is recovered from the LEDGER under its ORIGINAL key and recorded
+  // once; USD and LBP stay apart; nothing is counted as cash; no debt is created or rewritten.
+  // ═══════════════════════════════════════════════════════
+  const s1 = { generatedBy: "e2e/customers.mjs (M17B-S1)", platform: process.platform, requestedDip: { width: 1024, height: 640 } };
+  const persistS1 = () => writeFileSync(SHOTS + "M18-S1-window-evidence.json", JSON.stringify(s1, null, 2));
+  const readDb = (fn) => {
+    const d = new Database(LEDGER, { readonly: true });
+    try {
+      return fn(d);
+    } finally {
+      d.close();
+    }
+  };
+  const num = (sql, ...args) => readDb((d) => Number(d.prepare(sql).get(...args).n));
+  const OPEN = "2026-10-25T08:00:00.000Z";
+  {
+    const dbw = new Database(LEDGER);
+    const op = dbw.prepare("SELECT id FROM operators ORDER BY id LIMIT 1").get().id;
+    const ins = dbw.prepare(
+      `INSERT INTO obligations (id, party_id, party_kind, direction, source_kind, source_ref, sale_id, currency, amount_minor, posted_by, posted_at, business_date)
+       VALUES (?, ?, 'customer', 'receivable', 'manual', ?, NULL, ?, ?, ?, ?, '2026-10-25')`,
+    );
+    for (const [id, ref, cur, minor] of [
+      ["s1-A", "S1-A", "USD", 6000],
+      ["s1-B", "S1-B", "USD", 4000],
+      ["s1-C", "S1-C", "USD", 2500],
+      ["s1-D", "S1-D", "USD", 2500],
+      ["s1-L1", "S1-L1", "LBP", 300000000],
+      ["s1-L2", "S1-L2", "LBP", 200000000],
+    ])
+      ins.run(id, statementCustomerId, ref, cur, minor, op, OPEN);
+    // A DIRECT M17A collection already holds this reference: a receipt must not be able to reuse it.
+    dbw
+      .prepare(
+        `INSERT INTO settlements (id, obligation_id, currency, idempotency_key, request_fingerprint, amount_minor, method, provider, reference, funds_confirmed, settled_by, settled_at, business_date)
+         VALUES ('s1-direct', 's1-C', 'USD', 'e2e-s1-direct-key', 'fp', 100, 'external', 'whish', 'WH-S1-DUP', 1, ?, ?, '2026-10-25')`,
+      )
+      .run(op, OPEN);
+    dbw.close();
+  }
+  const base = {
+    obligations: num("SELECT count(*) AS n FROM obligations"),
+    sales: num("SELECT count(*) AS n FROM sales"),
+    invoices: num("SELECT count(*) AS n FROM invoices"),
+    cash: num("SELECT coalesce(sum(amount_minor),0) AS n FROM settlements WHERE method = 'cash'"),
+    settlements: num("SELECT count(*) AS n FROM settlements"),
+  };
+  const outstandingOf = (id) =>
+    readDb((d) => {
+      const o = d.prepare("SELECT amount_minor AS a FROM obligations WHERE id = ?").get(id);
+      const s = d.prepare("SELECT coalesce(sum(amount_minor),0) AS p FROM settlements WHERE obligation_id = ?").get(id);
+      return Number(o.a) - Number(s.p);
+    });
+
+  // ── S1-1 · Arabic, real 1024×640 window: refusals first, then the exact receipt ────────────────
+  const { a: s1a, p: pq } = await launchArabic();
+  try {
+    s1.bStatus = "failed";
+    const s1Win = await resizeReal(s1a, pq);
+    const nat = await readNative(s1a, s1Win);
+    const os = readOs(nat.hwnd);
+    s1.native = nat;
+    s1.os = os;
+    if (os.status === "ok") s1.osDipSize = { width: os.windowRect.width / (os.dpi / 96), height: os.windowRect.height / (os.dpi / 96), dpiScale: os.dpi / 96 };
+    persistS1();
+    assert(nat.size[0] === 1024 && nat.size[1] === 640, `🔴 M18-S1 BrowserWindow outer size is 1024x640 DIP (${nat.size})`);
+    if (os.status === "ok") {
+      assert(os.ownerPid === nat.electronPid, "🔴 M18-S1 the OS window belongs to the app process");
+      assert(Math.abs(s1.osDipSize.width - 1024) <= 2 && Math.abs(s1.osDipSize.height - 640) <= 2, `🔴 M18-S1 the OS window rect is 1024x640 DIP (${JSON.stringify(s1.osDipSize)})`);
+      s1.bStatus = "measured";
+    } else {
+      s1.bStatus = "blocked";
+      log(`M18-S1 OS-level bounds NOT measured: ${os.status} ${os.reason ?? ""}`);
+    }
+
+    await testid(pq, "receipt-open").waitFor({ state: "visible", timeout: 30000 });
+    await testid(pq, "receipt-open").click();
+    await testid(pq, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
+    assert((await testid(pq, "receipt-confirm").isDisabled()), "🔴 Confirm starts DISABLED (nothing is allocated yet)");
+    assert(!(await testid(pq, "receipt-funds-confirmed").isChecked()), "🔴 the funds-received confirmation starts UNCHECKED");
+    // Only Whish and bank transfer are offered.
+    const methods = await testid(pq, "receipt-method").evaluate((s) => [...s.options].map((o) => o.value));
+    assert(JSON.stringify(methods) === JSON.stringify(["whish", "bank_transfer"]), `only Whish and bank transfer are offered (${methods})`);
+    const shareFor = (id) => pq.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
+    await testid(pq, "receipt-currency").selectOption("USD");
+    await testid(pq, "receipt-reference").fill("WH-S1-DUP");
+    await testid(pq, "receipt-total").fill("100.00");
+    await shareFor("s1-A").fill("60.00");
+    await shareFor("s1-B").fill("39.00");
+    assert((await testid(pq, "receipt-left").getAttribute("data-complete")) === "no", "🔴 99.00 of 100.00 is NOT complete");
+    assert((await testid(pq, "receipt-left").innerText()).includes("1.00 USD"), "and 'left to allocate' shows exactly 1.00 USD");
+    assert(await testid(pq, "receipt-confirm").isDisabled(), "🔴 Confirm stays disabled while shares do not add up");
+    await shareFor("s1-B").fill("40.00");
+    assert((await testid(pq, "receipt-left").getAttribute("data-complete")) === "yes", "60.00 + 40.00 completes 100.00");
+    assert(!(await testid(pq, "receipt-confirm").isDisabled()), "Confirm enables only now");
+
+    // 🔴 real-window reachability of the tallest state, before anything is submitted
+    s1.controls = {};
+    for (const id of ["receipt-confirm", "receipt-cancel"]) {
+      const el = testid(pq, id);
+      await el.scrollIntoViewIfNeeded();
+      const box = await el.boundingBox();
+      const r = await readable(el);
+      let actionable = true;
+      try {
+        await el.click({ trial: true, timeout: 10000 });
+      } catch (e) {
+        actionable = String(e.message).slice(0, 300);
+      }
+      s1.controls[id] = { box, actionable, ...r };
+    }
+    s1.document = await pq.evaluate(() => ({ innerWidth: window.innerWidth, innerHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio, scrollOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth }));
+    persistS1();
+    for (const id of ["receipt-confirm", "receipt-cancel"]) {
+      const c = s1.controls[id];
+      assert(c.actionable === true, `🔴 ${id} is actionable (${c.actionable})`);
+      assert(c.box !== null && c.box.x >= 0 && c.box.y >= 0 && c.box.x + c.box.width <= s1.document.innerWidth && c.box.y + c.box.height <= s1.document.innerHeight, `🔴 ${id} is fully inside the real ${s1.document.innerWidth}x${s1.document.innerHeight} document (${JSON.stringify(c.box)})`);
+      assert(c.fontPx >= 12 && !c.clippedX && c.text.length > 0, `🔴 ${id} is readable and not clipped («${c.text}»)`);
+    }
+    assert(s1.document.scrollOverflowX <= 0, `🔴 no horizontal overflow in the Arabic shared-receipt form (${s1.document.scrollOverflowX}px)`);
+    await pq.screenshot({ path: SHOTS + "M18-S1-A1-form-arabic.png" });
+
+    // refusal 1: the confirmation was not given → refused on screen, nothing written
+    await testid(pq, "receipt-confirm").click();
+    await testid(pq, "receipt-error").waitFor({ state: "visible", timeout: 30000 });
+    assert(num("SELECT count(*) AS n FROM receipts") === 0 && num("SELECT count(*) AS n FROM receipt_attempts") === 0, "🔴 an unconfirmed receipt wrote NOTHING");
+    // refusal 2: the reference already belongs to a direct collection → the ledger refuses, nothing is shared
+    await testid(pq, "receipt-funds-confirmed").check();
+    await testid(pq, "receipt-confirm").click();
+    await testid(pq, "receipt-error").waitFor({ state: "visible", timeout: 30000 });
+    const dupText = (await testid(pq, "receipt-error").innerText()).trim();
+    assert(dupText === "هذا المرجع مسجَّل مسبقاً لدفعة أخرى. لا تسجِّل المبلغ نفسه مرّتين.", `🔴 the duplicate reference is refused in Arabic («${dupText}»)`);
+    assert(num("SELECT count(*) AS n FROM receipts") === 0, "🔴 the duplicate-reference refusal created no receipt");
+    assert(num("SELECT count(*) AS n FROM settlements WHERE receipt_id IS NOT NULL") === 0, "and no allocation");
+    assert(num("SELECT count(*) AS n FROM receipt_attempts WHERE resolution = 'not_recorded'") === 1, "and its attempt was closed as not recorded");
+
+    // the happy path: a fresh, real reference
+    await testid(pq, "receipt-reference").fill("WH-S1-001");
+    await testid(pq, "receipt-confirm").click();
+    await testid(pq, "receipt-done").waitFor({ state: "visible", timeout: 30000 });
+    assert(num("SELECT count(*) AS n FROM receipts") === 1, "🔴 exactly ONE receipt");
+    assert(num("SELECT count(*) AS n FROM settlements WHERE receipt_id IS NOT NULL") === 2, "🔴 exactly TWO allocations");
+    assert(outstandingOf("s1-A") === 0 && outstandingOf("s1-B") === 0, "🔴 both debts are settled to exactly 0");
+    assert(num("SELECT count(*) AS n FROM obligations") === base.obligations, "🔴 no debt was created");
+    assert(num("SELECT count(*) AS n FROM sales") === base.sales && num("SELECT count(*) AS n FROM invoices") === base.invoices, "no sale or invoice was touched");
+    assert(num("SELECT coalesce(sum(amount_minor),0) AS n FROM settlements WHERE method = 'cash'") === base.cash, "🔴 NONE of it is cash");
+    const rec = readDb((d) => d.prepare("SELECT provider, reference, amount_minor AS a, currency, allocation_count AS c FROM receipts").get());
+    assert(rec.provider === "whish" && rec.reference === "WH-S1-001" && Number(rec.a) === 10000 && rec.currency === "USD" && Number(rec.c) === 2, `the receipt is Whish WH-S1-001 100.00 USD over 2 debts (${JSON.stringify(rec)})`);
+    const shareRows = readDb((d) => d.prepare("SELECT provider, reference, method FROM settlements WHERE receipt_id IS NOT NULL").all());
+    assert(shareRows.every((r) => r.provider === null && r.reference === null && r.method === "external"), "🔴 the shares carry NO reference of their own — the reference is stored once");
+    assert((await pq.locator('[data-testid="statement-settlement-share"]').count()) === 2, "the history shows two shares of the receipt");
+    const shareText = await pq.locator('[data-testid="statement-settlement-share"]').first().innerText();
+    assert(shareText.includes("WH-S1-001") && shareText.includes("100.00 USD"), `each share names its receipt and the WHOLE amount (${shareText})`);
+    await pq.screenshot({ path: SHOTS + "M18-S1-A2-after-receipt-arabic.png" });
+    s1.recoveryAfterHappy = "recorded";
+    persistS1();
+  } catch (e) {
+    s1.bStatus = "failed";
+    s1.failure = String(e && e.message ? e.message : e).slice(0, 600);
+    persistS1();
+    throw e;
+  } finally {
+    await s1a.close().catch(() => undefined);
+  }
+
+  // ── S1-2 · an UNFINISHED receipt recovered from the ledger under its ORIGINAL key (Arabic) ─────
+  {
+    const dbw = new Database(LEDGER);
+    const op = dbw.prepare("SELECT id FROM operators ORDER BY id LIMIT 1").get().id;
+    const lines = [["s1-C", "2400"], ["s1-D", "2500"]].sort((x, y) => (x[0] < y[0] ? -1 : 1));
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify({ kind: "receipt", customerId: statementCustomerId, currency: "USD", provider: "whish", reference: "WH-S1-REC", fundsConfirmed: true, totalMinor: "4900", allocations: lines }))
+      .digest("hex");
+    dbw
+      .prepare(
+        `INSERT INTO receipt_attempts (idempotency_key, customer_id, currency, amount_minor, provider, reference, funds_confirmed, allocation_count, request_fingerprint, created_by, created_at)
+         VALUES ('e2e-receipt-pend-01', ?, 'USD', 4900, 'whish', 'WH-S1-REC', 1, 2, ?, ?, ?)`,
+      )
+      .run(statementCustomerId, fingerprint, op, OPEN);
+    const ln = dbw.prepare("INSERT INTO receipt_attempt_lines (idempotency_key, obligation_id, amount_minor) VALUES ('e2e-receipt-pend-01', ?, ?)");
+    for (const [id, amt] of lines) ln.run(id, Number(amt));
+    dbw.close();
+  }
+  const receiptsBefore = num("SELECT count(*) AS n FROM receipts");
+  const settlementsBeforeRec = num("SELECT count(*) AS n FROM settlements");
+  const { a: s1b, p: pr } = await launchArabic();
+  try {
+    await resizeReal(s1b, pr);
+    await testid(pr, "receipt-pending").waitFor({ state: "visible", timeout: 30000 });
+    assert((await testid(pr, "receipt-pending").getAttribute("data-status")) === "not_recorded", "🔴 the ledger reports the unfinished receipt as NOT recorded");
+    const text = await testid(pr, "receipt-pending").innerText();
+    assert(text.includes("ما في دفعة مسجّلة في برنامج «عالضبط» لهالمحاولة. هيدا ما بيعني بالضرورة إن المبلغ ما وصل. تأكّد من استلام المبلغ فعلياً قبل إعادة محاولة تسجيل الدفعة."), "🔴 the Arabic recovery warning is the approved wording");
+    assert(!text.includes("لم يُؤخَذ"), "🔴 it never says nothing was taken");
+    assert(text.includes("WH-S1-REC"), "and carries the attempt's own reference");
+    const retry = testid(pr, "receipt-pending-retry");
+    await retry.scrollIntoViewIfNeeded();
+    const rr = await readable(retry);
+    assert(rr.text === "إعادة محاولة تسجيل الدفعة", `🔴 the Arabic retry label is about retrying the RECORDING («${rr.text}»)`);
+    assert(rr.fontPx >= 12 && !rr.clippedX, "the retry button is readable and not clipped");
+    await retry.click({ trial: true, timeout: 10000 });
+    assert(num("SELECT count(*) AS n FROM receipts") === receiptsBefore && num("SELECT count(*) AS n FROM settlements") === settlementsBeforeRec, "🔴 viewing the recovery screen recorded NOTHING");
+    await pr.screenshot({ path: SHOTS + "M18-S1-A3-recovery-arabic.png" });
+    await retry.click();
+    await testid(pr, "receipt-done").waitFor({ state: "visible", timeout: 30000 });
+    assert(num("SELECT count(*) AS n FROM receipts") === receiptsBefore + 1, "🔴 the exact repeat recorded exactly ONE receipt");
+    const kept = readDb((d) => d.prepare("SELECT r.idempotency_key AS k, a.resolution AS res FROM receipts r JOIN receipt_attempts a ON a.idempotency_key = r.idempotency_key WHERE r.reference = 'WH-S1-REC'").get());
+    assert(kept.k === "e2e-receipt-pend-01" && kept.res === "recorded", `🔴 it kept its ORIGINAL key and closed its attempt (${JSON.stringify(kept)})`);
+    assert(outstandingOf("s1-C") === 2500 - 100 - 2400 && outstandingOf("s1-D") === 0, "the two debts were reduced by exactly their shares");
+    assert((await testid(pr, "receipt-pending").count()) === 0, "once recorded, the attempt is no longer shown");
+  } finally {
+    await s1b.close().catch(() => undefined);
+  }
+
+  // ── S1-3 · English, LBP bank transfer: currencies stay apart ──────────────────────────────────
+  {
+    const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    try {
+      const pe = await app.firstWindow();
+      await signIn(pe, "Cashier One", "1111");
+      await pe.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      if ((await pe.evaluate(() => document.documentElement.lang)) !== "en") await testid(pe, "lang-toggle").click();
+      await pe.waitForFunction(() => document.documentElement.lang === "en" && document.documentElement.dir === "ltr", undefined, { timeout: 10000 });
+      await resizeReal(app, pe);
+      await pe.locator('[data-testid="tab-customers"]').click();
+      await testid(pe, "customers-search").fill("0111111");
+      await pe.locator(`[data-customer="${statementCustomerId}"]`).first().click();
+      await testid(pe, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+      await testid(pe, "receipt-open").click();
+      await testid(pe, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
+      assert((await testid(pe, "receipt-hint").innerText()).includes("its reference is never split"), "the English hint says the reference is never split");
+      await testid(pe, "receipt-currency").selectOption("LBP");
+      await testid(pe, "receipt-method").selectOption("bank_transfer");
+      await testid(pe, "receipt-reference").fill("BT-S1-77");
+      await testid(pe, "receipt-total").fill("5000000.00");
+      const share = (id) => pe.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
+      assert((await pe.locator('[data-testid="receipt-debt"]').count()) === 2, "only the two LBP debts are listed for an LBP receipt (USD debts are never mixed in)");
+      await share("s1-L1").fill("3000000.00");
+      await share("s1-L2").fill("2000000.00");
+      assert((await testid(pe, "receipt-left").getAttribute("data-complete")) === "yes", "3,000,000.00 + 2,000,000.00 completes 5,000,000.00 LBP");
+      await testid(pe, "receipt-funds-confirmed").check();
+      await pe.screenshot({ path: SHOTS + "M18-S1-A4-lbp-english.png" });
+      await testid(pe, "receipt-confirm").click();
+      await testid(pe, "receipt-done").waitFor({ state: "visible", timeout: 30000 });
+      assert(outstandingOf("s1-L1") === 0 && outstandingOf("s1-L2") === 0, "both LBP debts are settled to exactly 0");
+      const lbp = readDb((d) => d.prepare("SELECT provider, currency, amount_minor AS a FROM receipts WHERE reference = 'BT-S1-77'").get());
+      assert(lbp.provider === "bank_transfer" && lbp.currency === "LBP" && Number(lbp.a) === 500000000, `the LBP receipt is a bank transfer of 5,000,000.00 (${JSON.stringify(lbp)})`);
+      await pe.screenshot({ path: SHOTS + "M18-S1-A5-after-lbp-english.png" });
+    } finally {
+      await app.close().catch(() => undefined);
+    }
+  }
+
+  // ── S1-4 · what the whole installed ledger now says ───────────────────────────────────────────
+  readDb((d) => {
+    const n = (sql) => Number(d.prepare(sql).get().n);
+    assert(n("SELECT count(*) AS n FROM receipts") === 3, "three receipts: USD Whish, recovered USD Whish, LBP bank transfer");
+    assert(n("SELECT count(*) AS n FROM settlements WHERE receipt_id IS NOT NULL") === 6, "six allocation shares in all");
+    assert(n("SELECT count(*) AS n FROM obligations") === base.obligations, "🔴 no debt was ever created or rewritten");
+    assert(n("SELECT coalesce(sum(amount_minor),0) AS n FROM settlements WHERE method = 'cash'") === base.cash, "🔴 the cash total is exactly what it was");
+    // every receipt is EXACTLY allocated, from the stored rows alone
+    for (const r of d.prepare("SELECT id, amount_minor AS a, allocation_count AS c, customer_id AS cu, currency FROM receipts").all()) {
+      const k = d.prepare("SELECT count(*) AS c, coalesce(sum(s.amount_minor),0) AS s, count(DISTINCT s.obligation_id) AS dd FROM settlements s JOIN obligations o ON o.id = s.obligation_id WHERE s.receipt_id = ? AND o.party_id = ? AND s.currency = ?").get(r.id, r.cu, r.currency);
+      assert(Number(k.c) === Number(r.c) && Number(k.dd) === Number(r.c) && Number(k.s) === Number(r.a), `receipt ${r.id} is exactly allocated to one customer and one currency`);
+    }
+    // collected per currency = receipts + DIRECT settlements, and never the shares (collections only, not takings)
+    const received = (cur) => Number(d.prepare("SELECT (SELECT coalesce(sum(amount_minor),0) FROM receipts WHERE currency = ?) + (SELECT coalesce(sum(amount_minor),0) FROM settlements WHERE currency = ? AND receipt_id IS NULL) AS n").get(cur, cur).n);
+    const sharesUsd = Number(d.prepare("SELECT coalesce(sum(amount_minor),0) AS n FROM settlements WHERE receipt_id IS NOT NULL AND currency = 'USD'").get().n);
+    assert(sharesUsd === 10000 + 4900, `the USD shares total 149.00 (${sharesUsd})`);
+    assert(received("LBP") === 500000000 + Number(d.prepare("SELECT coalesce(sum(amount_minor),0) AS n FROM settlements WHERE currency = 'LBP' AND receipt_id IS NULL").get().n), "LBP money received = the receipt + direct LBP settlements");
+    assert(d.pragma("foreign_key_check").length === 0 && d.pragma("integrity_check", { simple: true }) === "ok", "the installed ledger is sound");
+  });
+  log("M17B-S1 shared-receipt E2E complete");
 
   log("customer collection E2E complete");
   log("customer statement E2E complete");

@@ -432,6 +432,28 @@ export function paymentFailureTruth(ledger: LedgerService, payload: unknown, lan
 }
 
 /**
+ * What the OWNER is told after an unexpected error in `recordAllocatedReceipt`, decided by READING the
+ * ledger under the key the caller sent — never by guessing from the exception. Same discipline and
+ * same sentences as `paymentFailureTruth`: no key means no lookup and no retry is offered; a lookup
+ * that fails is "unknown" and says "do not collect again".
+ */
+export function receiptFailureTruth(ledger: LedgerService, payload: unknown, lang: Language): IpcError {
+  const key =
+    payload && typeof payload === "object" && typeof (payload as { idempotencyKey?: unknown }).idempotencyKey === "string"
+      ? (payload as { idempotencyKey: string }).idempotencyKey
+      : null;
+  if (key === null) return paymentOutcomeError(lang, "not_recorded");
+  try {
+    const found = ledger.receiptForIdempotencyKey(key);
+    return found
+      ? paymentOutcomeError(lang, "recorded", `${formatDecimal(money(found.amountMinor, found.currency))} ${found.currency}`)
+      : paymentOutcomeError(lang, "not_recorded_retry");
+  } catch {
+    return paymentOutcomeError(lang, "unknown");
+  }
+}
+
+/**
  * What the cashier is told after an unexpected error in `finalizeInvoice`, decided by READING the
  * ledger rather than by guessing from the exception.
  *
@@ -1031,6 +1053,70 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       (p) => paymentFailureTruth(ledger(), p, operatorLanguage()),
     ),
 
+    /**
+     * M17B-S1 · An OWNER records ONE real Whish/bank receipt and shares it across two or more debts of
+     * ONE customer.
+     *
+     * 🔴 THE CUSTOMER IS RESOLVED BEFORE ANY WRITE (the same ordering lesson as `recordCustomerPayment`),
+     * every share and the total are parsed to exact minor units here, and ALL the rules (one customer,
+     * one currency, exact sum, distinct debts, live outstanding, one reference once, owner role) are
+     * the ledger's and the database's — nothing is decided in this handler.
+     */
+    recordAllocatedReceipt: wrap(
+      "recordAllocatedReceipt",
+      (p) => {
+        const o = exactObject(p, [
+          "customerId",
+          "idempotencyKey",
+          "channel",
+          "reference",
+          "fundsConfirmed",
+          "currency",
+          "totalMinor",
+          "allocations",
+        ]);
+        const customerId = str(o.customerId, "customerId", 100);
+        const idempotencyKey = str(o.idempotencyKey, "idempotencyKey", 100);
+        if (o.channel !== "whish" && o.channel !== "bank_transfer") invalid("'channel' must be whish or bank_transfer");
+        const channel = o.channel;
+        const reference = str(o.reference, "reference", 64);
+        if (typeof o.fundsConfirmed !== "boolean") invalid("'fundsConfirmed' must be true or false");
+        const currency = str(o.currency, "currency", 3);
+        const totalMinor = parseMinor(o.totalMinor);
+        if (!Array.isArray(o.allocations) || o.allocations.length > 50) invalid("'allocations' must be a short list");
+        const allocations = (o.allocations as unknown[]).map((raw) => {
+          const a = exactObject(raw, ["obligationId", "amountMinor"]);
+          return { obligationId: str(a.obligationId, "obligationId", 100), amountMinor: parseMinor(a.amountMinor) };
+        });
+        const party = customers().get("customer", customerId);
+        const result = ledger().recordAllocatedReceipt({
+          customerId,
+          idempotencyKey,
+          channel,
+          reference,
+          fundsConfirmed: o.fundsConfirmed,
+          currency,
+          totalMinor,
+          allocations,
+        });
+        const dto = toStatementDto(party, ledger().statementFor(customerId));
+        log.info("allocated-receipt-recorded", { id: result.receipt.id, duplicate: result.duplicate });
+        return {
+          receipt: {
+            id: result.receipt.id,
+            total: { minor: result.receipt.amountMinor.toString(), currency: result.receipt.currency },
+            provider: result.receipt.provider,
+            reference: result.receipt.reference,
+            allocationCount: result.receipt.allocationCount,
+            receivedAt: result.receipt.receivedAt,
+          },
+          duplicate: result.duplicate,
+          statement: dto,
+        };
+      },
+      (p) => receiptFailureTruth(ledger(), p, operatorLanguage()),
+    ),
+
     setCustomerActive: wrap("setCustomerActive", (p) => {
       const o = exactObject(p, ["customerId", "isActive"]);
       if (typeof o.isActive !== "boolean") invalid("'isActive' must be true or false");
@@ -1525,6 +1611,8 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
    * arithmetic would be a second place where what a customer owes is computed.
    */
   function toStatementDto(customer: PartyRow, s: ReturnType<LedgerService["statementFor"]>): CustomerStatementDto {
+    // Migration 18: which settlements are SHARES of a receipt (display only; a share is not money).
+    const shares = ledger().receiptsOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)));
     return {
       customer: toCustomerDto(customer),
       obligations: s.obligations.map((row) => ({
@@ -1544,6 +1632,16 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           reference: st.reference,
           fundsConfirmed: st.fundsConfirmed,
           settledAt: st.settledAt,
+          receipt: ((r) =>
+            r
+              ? {
+                  id: r.id,
+                  idempotencyKey: r.idempotencyKey,
+                  provider: r.provider,
+                  reference: r.reference,
+                  total: { minor: r.amountMinor.toString(), currency: r.currency },
+                }
+              : null)(shares.get(st.id)),
         })),
       })),
       // One entry per currency, in a stable order so the screen does not reshuffle between reads.
@@ -1561,6 +1659,20 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           method: attempt.channel,
           reference: attempt.reference,
           fundsConfirmed: attempt.fundsConfirmed,
+          createdAt: attempt.createdAt,
+          status,
+        })),
+      pendingReceipts: ledger()
+        .openReceipts(customer.id)
+        .map(({ attempt, status }) => ({
+          idempotencyKey: attempt.key,
+          total: { minor: attempt.amountMinor.toString(), currency: attempt.currency },
+          provider: attempt.provider,
+          reference: attempt.reference,
+          allocations: attempt.lines.map((l) => ({
+            obligationId: l.obligationId,
+            amount: { minor: l.amountMinor.toString(), currency: attempt.currency },
+          })),
           createdAt: attempt.createdAt,
           status,
         })),

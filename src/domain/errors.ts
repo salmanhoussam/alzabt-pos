@@ -82,6 +82,11 @@ export type DomainErrorCode =
   | "DUPLICATE_PAYMENT_REFERENCE"
   // An earlier collection for this customer is not yet settled one way or the other.
   | "COLLECTION_UNRESOLVED"
+  // Migration 18 — one real external receipt shared across several debts (M17B-S1). Each is a
+  // refusal the owner can act on, with its own sentence.
+  | "RECEIPT_NEEDS_TWO_DEBTS"
+  | "RECEIPT_ALLOCATION_MISMATCH"
+  | "RECEIPT_CHANNEL_NOT_ALLOWED"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

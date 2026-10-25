@@ -77,9 +77,12 @@ describe("the customer channels", () => {
       "setCustomerActive",
       "getCustomerStatement",
       "recordCustomerPayment",
+      // 🔴 TRANSITION — SEVENTY-FIVE to SEVENTY-SIX with M17B-S1: the one added channel is
+      // `recordAllocatedReceipt`, owner-only, the SECOND and last money write. The old value was 75.
+      "recordAllocatedReceipt",
     ];
     for (const name of added) expect(Object.keys(CHANNELS)).toContain(name);
-    expect(Object.keys(CHANNELS)).toHaveLength(75);
+    expect(Object.keys(CHANNELS)).toHaveLength(76);
   });
 
   it("🔴 S3C adds ONE money write — a SETTLEMENT — and still no way to CREATE a debt", () => {
@@ -109,6 +112,12 @@ describe("the customer channels", () => {
     // added, this count moves and whoever adds it has to come and say so here.
     const financial = names.filter((n) => /payment|settle|obligation|balance|debt/i.test(n));
     expect(financial).toEqual(["recordCustomerPayment"]);
+    // 🔴 TRANSITION (M17B-S1): "exactly one money writer" became a CLOSED, NAMED list of exactly two.
+    // The new one shares one real external receipt across debts; it is owner-only and cannot post a
+    // debt. A third money-moving channel must come here and be named — never matched by a pattern.
+    const moneyWriters = names.filter((n) => /payment|receipt/i.test(n)).sort();
+    expect(moneyWriters).toEqual(["recordAllocatedReceipt", "recordCustomerPayment"]);
+    expect(accessFor("recordAllocatedReceipt")).toBe("owner");
   });
 
   it("🔴 every channel is classified, and the customer ones carry the intended level", () => {

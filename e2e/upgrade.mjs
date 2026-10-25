@@ -36,6 +36,7 @@
  * (operator_product_create_capability: the per-operator right to add products).
  */
 // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
+// 🔴 TRANSITION 17 -> 18 with migration 18 (external_receipt_allocation). The old value was 17.
 // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
 // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14
 // with migration 14 (credit_sale_identity_and_unpaid_state).
@@ -44,7 +45,7 @@
 // This file's own header explains why it is a literal rather than MIGRATIONS.length: these scripts
 // assert what the INSTALLED app did, so deriving it from the build under test would make the check
 // circular.
-const SCHEMA = 17;
+const SCHEMA = 18;
 
 import { _electron as electron } from "playwright-core";
 import { spawn, execFileSync } from "node:child_process";

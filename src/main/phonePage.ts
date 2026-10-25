@@ -103,7 +103,7 @@ const AR = {
   savedNote: "يمكنك إغلاق هذه الصفحة. انتهت صلاحية هذا الرمز.",
   offlineNote: "لا تحتاج إلى إنترنت — الصندوق هو الذي يخدم هذه الصفحة.",
   errorPrefix: "لم يتم الحفظ:",
-  errorNetwork: "انقطع الاتصال مع صندوق الزبط. لم يتم حفظ الصنف.",
+  errorNetwork: "انقطع الاتصال مع برنامج «عالضبط». لم يتم حفظ الصنف.",
 };
 
 /**
@@ -165,7 +165,7 @@ export function renderPhoneFormPage(data: PhoneFormData): string {
 <html lang="ar" dir="rtl">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>الزبط — ${esc(title)}</title>
+<title>عالضبط — ${esc(title)}</title>
 <style>
   :root { color-scheme: light dark; --bg:#faf9f7; --fg:#1a1a1a; --card:#ffffff; --line:#d9d6d0;
           --accent:#1f6f4a; --muted:#6b6b6b; --danger:#a4282b; }

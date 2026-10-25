@@ -14,6 +14,8 @@ import { type TempDir, tempDir } from "../helpers/harness";
 const V16 = 16;
 const V17 = 17;
 const MIGRATIONS_V16 = MIGRATIONS.slice(0, V16);
+// 🔴 TRANSITION with migration 18: this file proves migration 17 against ITS OWN registry, not the latest.
+const MIGRATIONS_V17 = MIGRATIONS.slice(0, V17);
 let t: TempDir;
 beforeEach(() => {
   t = tempDir();
@@ -70,7 +72,7 @@ describe("migration 17 on a populated v16 ledger", () => {
     pre.close();
 
     const backup = `${t.dir}/pre-m17.sqlite`;
-    const db = openDatabase(t.dbPath, MIGRATIONS, {
+    const db = openDatabase(t.dbPath, MIGRATIONS_V17, {
       beforeMigrations: (conn, pending) => {
         expect(pending).toEqual({ fromVersion: V16, toVersion: V17 });
         snapshotDatabase(conn, backup);
@@ -109,7 +111,7 @@ describe("migration 17 on a populated v16 ledger", () => {
 
   it("🔴 the database itself refuses an inconsistent collection shape and a repeated provider reference", () => {
     seedV16(t.dbPath);
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, MIGRATIONS_V17);
     try {
       const op = (db.prepare("SELECT id FROM operators ORDER BY id LIMIT 1").get() as { id: string }).id;
       const at = "2026-10-22T10:00:00.000Z";
@@ -139,7 +141,7 @@ describe("migration 17 on a populated v16 ledger", () => {
 
   it("🔴 collection_attempts starts empty, is bookkeeping only, and cannot be edited or deleted", () => {
     seedV16(t.dbPath);
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, MIGRATIONS_V17);
     try {
       expect(db.prepare("SELECT count(*) AS n FROM collection_attempts").get()).toEqual({ n: 0n });
       const op = (db.prepare("SELECT id FROM operators ORDER BY id LIMIT 1").get() as { id: string }).id;
@@ -181,7 +183,7 @@ describe("migration 17 on a populated v16 ledger", () => {
   });
 
   it("a fresh install reaches v17 and reopening does not migrate again", () => {
-    const fresh = openDatabase(`${t.dir}/fresh.sqlite`);
+    const fresh = openDatabase(`${t.dir}/fresh.sqlite`, MIGRATIONS_V17);
     try {
       expect(schemaVersion(fresh)).toBe(V17);
       expect(fresh.pragma("foreign_key_check")).toEqual([]);
@@ -192,7 +194,7 @@ describe("migration 17 on a populated v16 ledger", () => {
       fresh.close();
     }
     let calls = 0;
-    openDatabase(`${t.dir}/fresh.sqlite`, MIGRATIONS, { beforeMigrations: () => void (calls += 1) }).close();
+    openDatabase(`${t.dir}/fresh.sqlite`, MIGRATIONS_V17, { beforeMigrations: () => void (calls += 1) }).close();
     expect(calls).toBe(0);
   });
 });

@@ -42,7 +42,11 @@ import { useEffect, useState } from "react";
 import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../api";
 import { parseDecimal } from "../../domain/money";
 import { useT } from "../i18n";
+import { AllocatedReceiptForm } from "./AllocatedReceiptForm";
+import { type ReceiptReconciliation, reconcileReceiptOutcome, sharableCurrencies } from "./receiptAllocation";
 import type {
+  AllocatedReceiptRequest,
+  PendingReceiptDto,
   CollectionMethodDto,
   CustomerStatementDto,
   PendingCollectionDto,
@@ -100,7 +104,10 @@ export function CustomerStatement({ customerId }: Props) {
   const [busy, setBusy] = useState(false);
   const [payError, setPayError] = useState<string | null>(null);
   const [blocked, setBlocked] = useState(false);
-  const [notice, setNotice] = useState<"done" | "duplicate" | null>(null);
+  const [notice, setNotice] = useState<"done" | "duplicate" | "receipt" | null>(null);
+  /** M17B-S1: whether the "one payment for several debts" form is open. */
+  const [receiptOpen, setReceiptOpen] = useState(false);
+  const [receiptBusy, setReceiptBusy] = useState(false);
 
   const resetPaymentDetails = () => {
     setMethod("cash");
@@ -259,6 +266,55 @@ export function CustomerStatement({ customerId }: Props) {
     });
   };
 
+  /**
+   * Asks the ledger (through a fresh statement) what became of ONE receipt attempt. READ-ONLY: it never sends
+   * a receipt. The answer comes from `reconcileReceiptOutcome`, which treats a lookup that failed as
+   * "unknown" and a missing open attempt as "absent" (no evidence), never as "not recorded".
+   */
+  const askLedgerAboutReceipt = async (
+    key: string,
+    request: AllocatedReceiptRequest,
+  ): Promise<{ status: ReceiptReconciliation; statement: CustomerStatementDto | null }> => {
+    try {
+      const next = await call(pos().getCustomerStatement({ customerId }));
+      setStatement(next);
+      return { status: reconcileReceiptOutcome(next, key, request), statement: next };
+    } catch {
+      return { status: "unknown", statement: null }; // a failed lookup is never "not recorded"
+    }
+  };
+
+  /** The EXACT receipt again: the ledger's own record of the intent, under the ORIGINAL key. */
+  const repeatPendingReceipt = async (p: PendingReceiptDto) => {
+    if (receiptBusy) return;
+    setReceiptBusy(true);
+    const request: AllocatedReceiptRequest = {
+      customerId,
+      idempotencyKey: p.idempotencyKey,
+      channel: p.provider,
+      reference: p.reference,
+      fundsConfirmed: true,
+      currency: p.total.currency,
+      totalMinor: p.total.minor,
+      allocations: p.allocations.map((a) => ({ obligationId: a.obligationId, amountMinor: a.amount.minor })),
+    };
+    try {
+      const result = await call(pos().recordAllocatedReceipt(request));
+      setStatement(result.statement);
+      setNotice("receipt");
+    } catch (err) {
+      setPayError(collectErrorText(err));
+      // The failure may have followed a COMMIT: ask the ledger, and if exactly this receipt is in it say so.
+      const answer = await askLedgerAboutReceipt(p.idempotencyKey, request);
+      if (answer.status === "recorded") {
+        setPayError(null);
+        setNotice("duplicate");
+      }
+    } finally {
+      setReceiptBusy(false);
+    }
+  };
+
   useEffect(() => {
     let live = true;
     setStatement(null);
@@ -302,7 +358,10 @@ export function CustomerStatement({ customerId }: Props) {
 
   // 🔴 A collection the ledger could not answer keeps NEW collections closed for this customer — also
   // after navigation or a restart, because this comes from the statement, not from screen state.
-  const lockedByPending = statement.pendingCollections.some((p) => p.status === "unknown" || p.status === "conflict");
+  const lockedByPending =
+    statement.pendingCollections.some((p) => p.status === "unknown" || p.status === "conflict") ||
+    statement.pendingReceipts.some((p) => p.status === "unknown" || p.status === "conflict");
+  const canShareReceipt = sharableCurrencies(statement).length > 0;
 
   return (
     <section className="customer-statement" data-testid="customer-statement" data-customer={statement.customer.id}>
@@ -343,12 +402,37 @@ export function CustomerStatement({ customerId }: Props) {
         </div>
       )}
 
+      {statement.pendingReceipts.length > 0 && (
+        /* 🔴 RECOVERED FROM THE LEDGER, like a collection: a receipt that was started and never confirmed
+           survives navigation, a closed window and a restart; an unanswered one locks new payments. */
+        <div data-testid="receipt-pending-list">
+          {statement.pendingReceipts.map((p) => (
+            <div
+              key={p.idempotencyKey}
+              className={p.status === "unknown" || p.status === "conflict" ? "error" : "notice"}
+              data-testid="receipt-pending"
+              data-status={p.status}
+            >
+              <p>
+                <bdi dir="ltr">{fmt(p.total)}</bdi> · {t(`collect.method.${p.provider}`)} · <bdi dir="ltr">{p.reference}</bdi>
+              </p>
+              <p>{t(`allocReceipt.pending.${p.status}`)}</p>
+              {p.status === "not_recorded" && (
+                <button className="btn" type="button" disabled={receiptBusy} onClick={() => void repeatPendingReceipt(p)} data-testid="receipt-pending-retry">
+                  {t("allocReceipt.pending.retry")}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {notice !== null && (
         /* 🔴 "ALREADY RECORDED" IS NOT "RECORDED AGAIN". A replayed key returns the committed
            payment, and the owner is told the money was taken ONCE — never that a second one
            succeeded, which would invite them to hand back change twice. */
-        <p className="notice" data-testid={notice === "duplicate" ? "collect-duplicate" : "collect-done"}>
-          {t(notice === "duplicate" ? "collect.alreadyDone" : "collect.done")}
+        <p className="notice" data-testid={notice === "duplicate" ? "collect-duplicate" : notice === "receipt" ? "receipt-done" : "collect-done"}>
+          {t(notice === "duplicate" ? "collect.alreadyDone" : notice === "receipt" ? "allocReceipt.done" : "collect.done")}
         </p>
       )}
 
@@ -369,6 +453,34 @@ export function CustomerStatement({ customerId }: Props) {
               </li>
             ))}
           </ul>
+
+          {canShareReceipt &&
+            (receiptOpen ? (
+              <AllocatedReceiptForm
+                customerId={customerId}
+                statement={statement}
+                onClose={() => setReceiptOpen(false)}
+                onAskLedger={askLedgerAboutReceipt}
+                onRecorded={(next, duplicate) => {
+                  setStatement(next);
+                  setNotice(duplicate ? "duplicate" : "receipt");
+                  setReceiptOpen(false);
+                }}
+              />
+            ) : (
+              <button
+                className="btn"
+                type="button"
+                disabled={blocked || busy || lockedByPending || payingId !== null}
+                onClick={() => {
+                  setNotice(null);
+                  setReceiptOpen(true);
+                }}
+                data-testid="receipt-open"
+              >
+                {t("allocReceipt.action")}
+              </button>
+            ))}
 
           <ul className="statement-obligations">
             {statement.obligations.map((o) => (
@@ -420,6 +532,14 @@ export function CustomerStatement({ customerId }: Props) {
                           {s.reference !== null && (
                             <span className="muted small" data-testid="statement-settlement-reference">
                               <bdi dir="ltr">{s.reference}</bdi>{" "}
+                            </span>
+                          )}
+                          {s.receipt !== null && (
+                            /* M17B-S1: a SHARE of one real receipt. The provider and reference are the
+                               receipt's own, stated once; the amount named is the WHOLE receipt. */
+                            <span className="muted small" data-testid="statement-settlement-share" data-receipt={s.receipt.id}>
+                              {t(`statement.channel.${s.receipt.provider}`)} <bdi dir="ltr">{s.receipt.reference}</bdi> ·{" "}
+                              {t("allocReceipt.shareOf")} <bdi dir="ltr">{fmt(s.receipt.total)}</bdi>{" "}
                             </span>
                           )}
                           <span className="muted small">
@@ -565,7 +685,7 @@ export function CustomerStatement({ customerId }: Props) {
                     <button
                       className="btn"
                       type="button"
-                      disabled={blocked || busy || lockedByPending}
+                      disabled={blocked || busy || lockedByPending || receiptOpen}
                       onClick={() => openForm(o.id)}
                       data-testid="collect-open"
                     >

@@ -63,7 +63,8 @@ describe("the collection form cannot post twice", () => {
     expect(STATEMENT).toMatch(/onClick=\{closeForm\} disabled=\{blocked \|\| busy\} data-testid="collect-cancel"/);
     // TRANSITION with the M17A recovery work: the open button is ALSO closed while the ledger cannot
     // answer an earlier collection (lockedByPending), which comes from the statement, not screen state.
-    expect(STATEMENT).toMatch(/disabled=\{blocked \|\| busy \|\| lockedByPending\}\s+onClick=\{\(\) => openForm\(o.id\)\}\s+data-testid="collect-open"/);
+    // TRANSITION with M17B-S1: the per-debt open button is ALSO closed while the shared-receipt form is open.
+    expect(STATEMENT).toMatch(/disabled=\{blocked \|\| busy \|\| lockedByPending \|\| receiptOpen\}\s+onClick=\{\(\) => openForm\(o.id\)\}\s+data-testid="collect-open"/);
   });
 
   it("🔴 a vanished open attempt is NOT mistaken for a recorded payment after an UNKNOWN lookup", () => {
@@ -154,7 +155,9 @@ describe("the words and the contract", () => {
 
   it("🔴 the renderer reaches exactly one money-writing channel", () => {
     const used = Object.keys(CHANNELS).filter((c) => STATEMENT.includes(`pos().${c}(`));
-    expect(used.sort()).toEqual(["getCustomerStatement", "recordCustomerPayment"]);
+    // 🔴 TRANSITION with M17B-S1: "exactly one money-writing channel" is now a CLOSED, NAMED list of two.
+    // The second shares one real external receipt across debts; it is not reachable from anywhere else.
+    expect(used.sort()).toEqual(["getCustomerStatement", "recordAllocatedReceipt", "recordCustomerPayment"]);
   });
 });
 
@@ -214,8 +217,9 @@ describe("recovering an unfinished collection (source-level)", () => {
   });
   it("🔴 only a not-recorded attempt offers a repeat; unknown and conflict keep new collections closed", () => {
     expect(STATEMENT).toMatch(/p\.status === "not_recorded" &&/);
-    expect(STATEMENT).toMatch(/lockedByPending = statement\.pendingCollections\.some\(\(p\) => p\.status === "unknown" \|\| p\.status === "conflict"\)/);
-    expect(STATEMENT).toMatch(/disabled=\{blocked \|\| busy \|\| lockedByPending\}/);
+    // TRANSITION with M17B-S1: pending RECEIPTS that are unknown/conflict lock the same way.
+    expect(STATEMENT).toMatch(/lockedByPending =\s*statement\.pendingCollections\.some\(\(p\) => p\.status === "unknown" \|\| p\.status === "conflict"\) \|\|\s*statement\.pendingReceipts\.some\(\(p\) => p\.status === "unknown" \|\| p\.status === "conflict"\)/);
+    expect(STATEMENT).toMatch(/disabled=\{blocked \|\| busy \|\| lockedByPending/);
   });
   it("🔴 the lock is released only by an answer from the ledger, and a failed lookup stays locked", () => {
     const resolve = STATEMENT.slice(STATEMENT.indexOf("const resolveFromLedger"), STATEMENT.indexOf("const repeatPending"));

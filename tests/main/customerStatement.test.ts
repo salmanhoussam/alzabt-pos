@@ -123,6 +123,8 @@ const statementOf = (customerId: string): CustomerStatementDto => {
         reference: st.reference,
         fundsConfirmed: st.fundsConfirmed,
         settledAt: st.settledAt,
+        // TRANSITION with migration 18: null unless the row is a share of a receipt (none here).
+        receipt: null,
       })),
     })),
     balances: [...s.balances.entries()]
@@ -130,6 +132,8 @@ const statementOf = (customerId: string): CustomerStatementDto => {
       .map(([currency, minor]) => ({ minor: minor.toString(), currency })),
     // TRANSITION with migration 17: the statement carries the collections still open (none here).
     pendingCollections: [],
+    // TRANSITION with migration 18: receipts still open (none here).
+    pendingReceipts: [],
   };
 };
 

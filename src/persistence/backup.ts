@@ -96,6 +96,12 @@ export const COUNTED_TABLES = [
   // Migration 17 — the durable intent of a collection. A snapshot without it would restore the
   // settlements but forget an attempt that never committed, losing the operator's record of it.
   "collection_attempts",
+  // Migration 18 — a real external receipt, the durable intent of one, and that intent's lines. A
+  // snapshot without them would restore the allocation settlements but forget the money that paid
+  // them (or an attempt that never committed), and the verifier skips a table it does not know.
+  "receipts",
+  "receipt_attempts",
+  "receipt_attempt_lines",
   "schema_migrations",
 ] as const;
 const DAILY_RE = /^daily-(\d{4}-\d{2}-\d{2})\.sqlite$/;

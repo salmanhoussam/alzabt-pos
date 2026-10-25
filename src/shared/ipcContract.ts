@@ -60,6 +60,9 @@ export const CHANNELS = {
   // only from main. One owner-classified read, bound to a durable customer id.
   getCustomerStatement: "pos:getCustomerStatement",
   recordCustomerPayment: "pos:recordCustomerPayment",
+  // 🔴 M17B-S1 — THE SECOND (AND LAST) FINANCIAL WRITE CHANNEL: one real Whish/bank receipt shared
+  // across two or more debts of ONE customer. Owner-only. Closed list of exactly two money writers.
+  recordAllocatedReceipt: "pos:recordAllocatedReceipt",
   renameCategory: "pos:renameCategory",
   setCategoryActive: "pos:setCategoryActive",
   deleteCategory: "pos:deleteCategory",
@@ -640,6 +643,26 @@ export interface StatementSettlementDto {
   /** Migration 17. True when the operator confirmed the money was received; null on cash and history. */
   readonly fundsConfirmed: boolean | null;
   readonly settledAt: string;
+  /**
+   * Migration 18. Set when this row is a SHARE of one real external receipt: the receipt holds the
+   * provider and reference ONCE, and this settlement only says how much of it paid this debt. A share
+   * is never additional money. Null for every direct collection and every historical row.
+   */
+  readonly receipt: StatementReceiptDto | null;
+}
+
+/** The receipt a settlement is a share of (migration 18). Display only; the amount is the WHOLE receipt. */
+export interface StatementReceiptDto {
+  readonly id: string;
+  /**
+   * The ORIGINAL idempotency key the receipt was recorded under. It lets the screen prove that a receipt
+   * belongs to the attempt it is reconciling, not merely that one with the same details exists. Read-only,
+   * owner-only like the rest of the statement; it is never sent back to main as authority.
+   */
+  readonly idempotencyKey: string;
+  readonly provider: "whish" | "bank_transfer";
+  readonly reference: string;
+  readonly total: MoneyDto;
 }
 
 /** One posted debt, its payments, and what is left on it. */
@@ -680,6 +703,8 @@ export interface CustomerStatementDto {
   readonly balances: readonly MoneyDto[];
   /** Collections started and not yet closed, each with the ledger's answer. Usually empty. */
   readonly pendingCollections: readonly PendingCollectionDto[];
+  /** Migration 18. Receipts started and not yet closed, each with the ledger's answer. Usually empty. */
+  readonly pendingReceipts: readonly PendingReceiptDto[];
 }
 
 /**
@@ -752,6 +777,54 @@ export interface PendingCollectionDto {
   readonly fundsConfirmed: boolean | null;
   readonly createdAt: string;
   readonly status: "recorded" | "not_recorded" | "conflict" | "unknown";
+}
+
+/**
+ * M17B-S1. ONE real external receipt (a Whish or bank transfer) shared across TWO OR MORE existing
+ * debts of ONE customer, in ONE currency.
+ *
+ * 🔴 THE SHARES MUST ADD UP TO `totalMinor` EXACTLY: there is no remainder, no excess and no credit
+ * balance. `reference` is the provider's own transaction reference, stored ONCE; it is never split
+ * into suffixes. The owner must confirm the money was actually received — this till never contacts a
+ * provider. Every amount is a decimal string of minor units; `currency` is what the operator believes
+ * every debt is in and is CHECKED against each debt, never assumed.
+ */
+export interface AllocatedReceiptRequest {
+  readonly customerId: string;
+  readonly idempotencyKey: string;
+  readonly channel: "whish" | "bank_transfer";
+  readonly reference: string;
+  readonly fundsConfirmed: boolean;
+  readonly currency: string;
+  readonly totalMinor: string;
+  readonly allocations: ReadonlyArray<{ readonly obligationId: string; readonly amountMinor: string }>;
+}
+
+export interface ReceiptDto {
+  readonly id: string;
+  readonly total: MoneyDto;
+  readonly provider: "whish" | "bank_transfer";
+  readonly reference: string;
+  readonly allocationCount: number;
+  readonly receivedAt: string;
+}
+
+/** A receipt that was STARTED and is not yet closed — recovered from the ledger, never from screen state. */
+export interface PendingReceiptDto {
+  readonly idempotencyKey: string;
+  readonly total: MoneyDto;
+  readonly provider: "whish" | "bank_transfer";
+  readonly reference: string;
+  readonly allocations: ReadonlyArray<{ readonly obligationId: string; readonly amount: MoneyDto }>;
+  readonly createdAt: string;
+  /** `not_recorded` says only that ALZABT POS holds no receipt — not that the money did not arrive. */
+  readonly status: "recorded" | "not_recorded" | "conflict" | "unknown";
+}
+
+export interface AllocatedReceiptResponse {
+  readonly receipt: ReceiptDto;
+  readonly duplicate: boolean;
+  readonly statement: CustomerStatementDto;
 }
 
 /**
@@ -1295,6 +1368,7 @@ export interface PosApi {
    */
   getCustomerStatement(req: CustomerIdRequest): Promise<IpcResult<CustomerStatementDto>>;
   recordCustomerPayment(req: RecordPaymentRequest): Promise<IpcResult<RecordPaymentResponse>>;
+  recordAllocatedReceipt(req: AllocatedReceiptRequest): Promise<IpcResult<AllocatedReceiptResponse>>;
   renameCategory(req: RenameCategoryRequest): Promise<IpcResult<CategoryDto>>;
   setCategoryActive(req: SetCategoryActiveRequest): Promise<IpcResult<CategoryDto>>;
   deleteCategory(req: CategoryIdRequest): Promise<IpcResult<{ readonly deletedId: string }>>;

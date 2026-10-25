@@ -288,7 +288,8 @@ await app.close();
     // 🔴 TRANSITION 14 -> 15 with migration 15 (invoice_line_batch_identity). The old value was 14.
     // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
     // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 17, "the installed app's ledger is at schema v17");
+    // 🔴 TRANSITION 17 -> 18 with migration 18 (external_receipt_allocation). The old value was 17.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 18, "the installed app's ledger is at schema v18");
 
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
     const types = rows.map((r) => r.event_type);

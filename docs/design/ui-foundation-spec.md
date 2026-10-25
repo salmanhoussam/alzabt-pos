@@ -449,8 +449,10 @@ Two naming decisions to settle while doing this:
 
 - **Brand — decided (Salman, 2026-10-09).** `Alzabt POS` is the **product/brand name** and stays
   fixed in login, footer, About, the installer and every identity surface — it is not translated.
-  `صندوق الزبط` is the **Arabic label/translation inside the interface**. There are not two
-  competing identities. Practically: the brand string is a constant, NOT an i18n key; the in-app
+  **«عالضبط» is the official Arabic product name** (owner decision, 2026-10-25) and the Arabic
+  label inside the interface — alone, not «الضبط», «الزبط» or «صندوق الزبط» (the earlier label, now
+  superseded); «الصندوق» may still name the till/device in running text, never the product. There
+  are not two competing identities. Practically: the brand string is a constant, NOT an i18n key; the in-app
   Arabic label IS a key.
 - **`PENDING`** is a raw enum reaching the UI. It becomes a translated status badge; the enum value
   in the ledger does not change.

@@ -17,8 +17,9 @@
  */
 /**
  * 🔴 THE BRAND IS A CONSTANT, NOT A KEY. `Alzabt POS` is the product's name on the login screen,
- * the footer, About and the installer; it is never translated. «صندوق الزبط» is the Arabic
- * INTERFACE LABEL (`app.name`), not a second brand. If the brand were a key, someone would
+ * the footer, About and the installer; it is never translated. «عالضبط» is the OFFICIAL ARABIC
+ * PRODUCT NAME (`app.name`, owner decision 2026-10-25) — alone, never «الضبط», «الزبط» or «صندوق الزبط»
+ * — and is not a second brand. If the brand were a key, someone would
  * eventually translate it and the product would have two competing identities.
  */
 export const BRAND = "Alzabt POS";
@@ -52,7 +53,7 @@ type Dict = Readonly<Record<string, string>>;
 
 /** Arabic first, because Arabic is the default and a missing Arabic string must be obvious. */
 const AR: Dict = {
-  "app.name": "صندوق الزبط",
+  "app.name": "عالضبط",
   "nav.sell": "بيع",
   "nav.today": "مبيعات اليوم",
   "nav.history": "السجل",
@@ -502,10 +503,30 @@ const AR: Dict = {
   "collect.fundsHint": "لا يتّصل هذا الجهاز بويش ولا بالمصرف؛ التأكيد منك.",
   "collect.confirmRequired": "أكِّد أنّ المبلغ وصل قبل التسجيل.",
   "collect.pending.recorded": "وُجدت هذه الدفعة مسجَّلة في السجلّ. لم تُحصَّل مرّتين.",
-  "collect.pending.not_recorded": "ما في عملية قبض مسجّلة في الضبط لهالمحاولة. هيدا ما بيعني بالضرورة إن المبلغ ما وصل. تأكّد من استلام المبلغ فعلياً قبل إعادة محاولة تسجيل القبض.",
+  "collect.pending.not_recorded": "ما في عملية قبض مسجّلة في برنامج «عالضبط» لهالمحاولة. هيدا ما بيعني بالضرورة إن المبلغ ما وصل. تأكّد من استلام المبلغ فعلياً قبل إعادة محاولة تسجيل القبض.",
   "collect.pending.unknown": "تعذّر التأكّد من هذه الدفعة. لا تحصِّل المبلغ مرّة أخرى. أعد فتح الكشف أو أعد تشغيل التطبيق، وسيُسأل السجلّ من جديد.",
   "collect.pending.conflict": "يوجد في السجلّ دفعة مختلفة تحمل المفتاح نفسه. لا تحصِّل المبلغ مرّة أخرى واطلب مراجعة السجلّ.",
   "collect.pending.retry": "إعادة محاولة تسجيل القبض",
+  // ── M17B-S1 · ONE real external receipt shared across several debts of one customer ──────────────
+  "allocReceipt.action": "تسجيل دفعة واحدة على عدّة ديون",
+  "allocReceipt.title": "دفعة واحدة لعدّة ديون",
+  "allocReceipt.hint": "هذه دفعة واحدة حقيقية. تُسجَّل مرة واحدة وتُوزَّع على الديون أدناه، ولا يُجزَّأ مرجعها.",
+  "allocReceipt.currency": "العملة",
+  "allocReceipt.total": "المبلغ المستلم",
+  "allocReceipt.share": "حصة هذا الدَّين",
+  "allocReceipt.left": "المتبقي للتوزيع",
+  "allocReceipt.needsTwo": "يلزم دَينان مفتوحان على الأقل بالعملة نفسها.",
+  "allocReceipt.done": "سُجّلت الدفعة ووُزّعت على الديون.",
+  "allocReceipt.shareOf": "حصة من دفعة قدرها",
+  "allocReceipt.err.RECEIPT_ALLOCATION_MISMATCH": "يجب أن يساوي مجموع الحصص المبلغ المستلم.",
+  "allocReceipt.err.RECEIPT_NEEDS_TWO_DEBTS": "وزّعها على دَينين على الأقل.",
+  "allocReceipt.err.RECEIPT_CHANNEL_NOT_ALLOWED": "لا يمكن توزيع إلا حوالة ويش أو تحويل مصرفي على عدّة ديون.",
+  "allocReceipt.pending.recorded": "وُجدت هذه الدفعة مسجَّلة في السجلّ. لم تُسجَّل مرّتين.",
+  "allocReceipt.pending.not_recorded":
+    "ما في دفعة مسجّلة في برنامج «عالضبط» لهالمحاولة. هيدا ما بيعني بالضرورة إن المبلغ ما وصل. تأكّد من استلام المبلغ فعلياً قبل إعادة محاولة تسجيل الدفعة.",
+  "allocReceipt.pending.unknown": "ما قدر برنامج «عالضبط» يحدّد إذا كان هالقبض تسجّل. ما تبدأ عملية قبض جديدة. أعد فتح كشف الزبون ليتحقّق البرنامج من السجلّ من جديد.",
+  "allocReceipt.pending.conflict": "برنامج «عالضبط» لقى سجلّ قبض متعارض أو غير متطابق لهالمحاولة. ما تسجّل قبض جديد، واطلب مراجعة السجلّ.",
+  "allocReceipt.pending.retry": "إعادة محاولة تسجيل الدفعة",
   "collect.err.COLLECTION_UNRESOLVED": "توجد دفعة سابقة لهذا الزبون لم يُتأكَّد منها بعد. لا تحصِّل شيئاً جديداً قبل تأكيدها.",
   "collect.err.FUNDS_NOT_CONFIRMED": "أكِّد أنّ المبلغ وصل فعلاً قبل تسجيل الدفعة.",
   "collect.err.DUPLICATE_PAYMENT_REFERENCE": "هذا المرجع مسجَّل مسبقاً لدفعة أخرى. لا تسجِّل المبلغ نفسه مرّتين.",
@@ -1117,6 +1138,26 @@ const EN: Dict = {
   "collect.pending.unknown": "This payment could not be confirmed. Do not collect the money again. Reopen the statement or restart the app and the ledger will be asked again.",
   "collect.pending.conflict": "The ledger holds a DIFFERENT payment under the same key. Do not collect again; have the ledger reviewed.",
   "collect.pending.retry": "Retry recording this collection",
+  // ── M17B-S1 · ONE real external receipt shared across several debts of one customer ──────────────
+  "allocReceipt.action": "Record one payment for several debts",
+  "allocReceipt.title": "One payment for several debts",
+  "allocReceipt.hint": "This is ONE real payment. It is recorded once and shared across the debts below; its reference is never split.",
+  "allocReceipt.currency": "Currency",
+  "allocReceipt.total": "Total received",
+  "allocReceipt.share": "Share for this debt",
+  "allocReceipt.left": "Left to allocate",
+  "allocReceipt.needsTwo": "Needs at least two open debts in the same currency.",
+  "allocReceipt.done": "The payment was recorded and shared across the debts.",
+  "allocReceipt.shareOf": "share of a payment of",
+  "allocReceipt.err.RECEIPT_ALLOCATION_MISMATCH": "The shares must add up to the total received.",
+  "allocReceipt.err.RECEIPT_NEEDS_TWO_DEBTS": "Share it across at least two debts.",
+  "allocReceipt.err.RECEIPT_CHANNEL_NOT_ALLOWED": "Only a Whish or bank transfer can be shared across debts.",
+  "allocReceipt.pending.recorded": "This payment was found recorded in the ledger. It was not recorded twice.",
+  "allocReceipt.pending.not_recorded":
+    "No payment was recorded in ALZABT POS for this attempt. This does not confirm whether the money was received. Check the actual payment before retrying the recording.",
+  "allocReceipt.pending.unknown": "ALZABT POS could not determine whether this receipt was recorded. Do not start another collection. Reopen the customer statement to check the ledger again.",
+  "allocReceipt.pending.conflict": "ALZABT POS found a conflicting or inconsistent receipt record for this attempt. Do not record a new collection. Request a ledger review.",
+  "allocReceipt.pending.retry": "Retry recording this payment",
   "collect.err.COLLECTION_UNRESOLVED": "An earlier payment for this customer is not confirmed yet. Do not collect anything new until it is.",
   "collect.err.FUNDS_NOT_CONFIRMED": "Confirm that the money was actually received before recording the payment.",
   "collect.err.DUPLICATE_PAYMENT_REFERENCE": "That reference is already recorded for another payment. Do not record the same money twice.",

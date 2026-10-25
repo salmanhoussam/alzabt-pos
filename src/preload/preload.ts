@@ -152,6 +152,7 @@ const CH = {
   setCustomerActive: "pos:setCustomerActive",
   getCustomerStatement: "pos:getCustomerStatement",
   recordCustomerPayment: "pos:recordCustomerPayment",
+  recordAllocatedReceipt: "pos:recordAllocatedReceipt",
   renameCategory: "pos:renameCategory",
   setCategoryActive: "pos:setCategoryActive",
   deleteCategory: "pos:deleteCategory",
@@ -274,6 +275,18 @@ const api: PosApi = {
       method: req.method,
       reference: req.reference ?? null,
       fundsConfirmed: req.fundsConfirmed === true,
+    }),
+  // 🔴 EVERY FIELD NAMED EXPLICITLY, and each share rebuilt field by field: nothing rides along.
+  recordAllocatedReceipt: (req) =>
+    ipcRenderer.invoke(CH.recordAllocatedReceipt, {
+      customerId: req.customerId,
+      idempotencyKey: req.idempotencyKey,
+      channel: req.channel,
+      reference: req.reference,
+      fundsConfirmed: req.fundsConfirmed === true,
+      currency: req.currency,
+      totalMinor: req.totalMinor,
+      allocations: req.allocations.map((a) => ({ obligationId: a.obligationId, amountMinor: a.amountMinor })),
     }),
   renameCategory: (req) =>
     ipcRenderer.invoke(CH.renameCategory, { categoryId: req.categoryId, nameAr: req.nameAr, nameEn: req.nameEn }),

@@ -93,6 +93,8 @@ describe("IPC surface", () => {
         // obligation, records a settlement or sets a balance — the renderer cannot write money at
         // all, which is why this list is the right place to notice if that ever changes.
         "getCustomerStatement",
+        // TRANSITION with M17B-S1: one more name in the closed list — owner-only, shares ONE real external receipt.
+        "recordAllocatedReceipt",
         "recordCustomerPayment",
         "createCategory",
         "createSale",
@@ -192,7 +194,10 @@ describe("IPC surface", () => {
     // added: recordCustomerPayment. The old value was 74. It is this bridge's FIRST money write,
     // owner-classified, and it can only SETTLE an existing obligation — there is still no channel
     // anywhere here that creates one.
-    expect(CHANNEL_NAMES).toHaveLength(75);
+    // 🔴 TRANSITION — SEVENTY-FIVE to SEVENTY-SIX with M17B-S1. The one added: recordAllocatedReceipt,
+    // an owner-only money write that shares ONE real external receipt across two or more debts of one
+    // customer. The old value was 75.
+    expect(CHANNEL_NAMES).toHaveLength(76);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

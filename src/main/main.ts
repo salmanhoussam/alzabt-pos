@@ -25,6 +25,7 @@ import { PartyService } from "../application/partyService";
 import { LedgerService } from "../application/ledgerService";
 import { PartyRepository } from "../persistence/partyRepository";
 import { LedgerRepository } from "../persistence/ledgerRepository";
+import { ReceiptRepository } from "../persistence/receiptRepository";
 import { businessDateOf } from "../domain/businessDay";
 import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
@@ -819,6 +820,7 @@ function startTill(): void {
   // statement is read inside the same database session that wrote the rows.
   ledgerService = new LedgerService({
     ledger: new LedgerRepository(db),
+    receipts: new ReceiptRepository(db),
     parties: new PartyRepository(db),
     actor: () => {
       const cashier = service.currentCashier();

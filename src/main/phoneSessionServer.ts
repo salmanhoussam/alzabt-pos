@@ -550,7 +550,7 @@ export function renderPairedPage(view: PhonePageView): string {
 <html lang="ar" dir="rtl">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>الزبط — ${heading}</title>
+<title>عالضبط — ${heading}</title>
 <style>
   :root { color-scheme: light dark; }
   body { margin:0; padding:24px; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;

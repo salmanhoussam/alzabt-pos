@@ -25,6 +25,7 @@ import { ReconciliationRepository } from "../../src/persistence/reconciliationRe
 import { PartyRepository } from "../../src/persistence/partyRepository";
 import { PartyService } from "../../src/application/partyService";
 import { LedgerRepository } from "../../src/persistence/ledgerRepository";
+import { ReceiptRepository } from "../../src/persistence/receiptRepository";
 import { LedgerService } from "../../src/application/ledgerService";
 
 export interface TempDir {
@@ -69,6 +70,7 @@ export interface Harness {
   readonly partyStore: PartyRepository;
   readonly ledger: LedgerService;
   readonly ledgerStore: LedgerRepository;
+  readonly receiptStore: ReceiptRepository;
 }
 
 export function makeHarness(
@@ -188,8 +190,10 @@ export function makeHarness(
       now: clock.now,
     });
     const ledgerStore = opts.ledgerRepository?.(db) ?? new LedgerRepository(db);
+    const receiptStore = new ReceiptRepository(db);
     const ledger = new LedgerService({
       ledger: ledgerStore,
+      receipts: receiptStore,
       parties: partyStore,
       actor: () => {
         const cashier = service.currentCashier();
@@ -240,6 +244,7 @@ export function makeHarness(
       partyStore,
       ledger,
       ledgerStore,
+      receiptStore,
     };
   } catch (err) {
     db.close(); // never leave a handle open on a failed setup (Windows cannot delete open files)
