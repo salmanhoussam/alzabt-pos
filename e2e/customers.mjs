@@ -1500,6 +1500,107 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
     assert(received("LBP") === 500000000 + Number(d.prepare("SELECT coalesce(sum(amount_minor),0) AS n FROM settlements WHERE currency = 'LBP' AND receipt_id IS NULL").get().n), "LBP money received = the receipt + direct LBP settlements");
     assert(d.pragma("foreign_key_check").length === 0 && d.pragma("integrity_check", { simple: true }) === "ok", "the installed ledger is sound");
   });
+  // S1-5: installed renderer R1 — commit succeeded, acknowledgement converted to PAYMENT_RECORDED.
+  // No production hook: the interception exists only in the Playwright-controlled Electron main process.
+  {
+    const dbw = new Database(LEDGER);
+    try {
+      const op = dbw.prepare("SELECT id FROM operators ORDER BY id LIMIT 1").get().id;
+      const ins = dbw.prepare(`INSERT INTO obligations
+        (id,party_id,party_kind,direction,source_kind,source_ref,sale_id,currency,amount_minor,posted_by,posted_at,business_date)
+        VALUES (?,?,'customer','receivable','manual',?,NULL,'USD',?,?,?,'2026-10-25')`);
+      for (const [id, amount] of [["s1-R1-A",600],["s1-R1-B",400],["s1-R1-C",1000],["s1-R1-D",1000]]) {
+        ins.run(id, statementCustomerId, id, amount, op, OPEN);
+      }
+    } finally { dbw.close(); }
+    const beforeR1 = {
+      receipts: num("SELECT count(*) AS n FROM receipts"),
+      shares: num("SELECT count(*) AS n FROM settlements WHERE receipt_id IS NOT NULL"),
+    };
+    const r1App = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    try {
+      const p = await r1App.firstWindow();
+      await signIn(p, "Cashier One", "1111");
+      await p.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      await resizeReal(r1App, p);
+      await p.locator('[data-testid="tab-customers"]').click();
+      await testid(p, "customers-search").fill("0111111");
+      await p.locator(`[data-customer="${statementCustomerId}"]`).first().click();
+      await testid(p, "customer-statement").waitFor({ state: "visible" });
+      await testid(p, "receipt-open").click();
+      await testid(p, "receipt-form").waitFor({ state: "visible" });
+      assert((await testid(p, "receipt-currency").inputValue()) === "USD", "R1: USD selected");
+      await testid(p, "receipt-reference").fill("WH-S1-R1-UI");
+      await testid(p, "receipt-total").fill("10.00");
+      const share = (id) => p.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
+      await share("s1-R1-A").fill("6.00");
+      await share("s1-R1-B").fill("4.00");
+      await testid(p, "receipt-funds-confirmed").check();
+      assert((await testid(p, "receipt-left").getAttribute("data-complete")) === "yes", "R1: exact 6+4 allocation");
+      await r1App.evaluate(({ ipcMain }) => {
+        const handlers = ipcMain._invokeHandlers; // Test-only Electron internal; fail closed if unavailable.
+        if (!(handlers instanceof Map)) throw new Error("R1 test cannot access registered IPC handlers; do NOT add a production hook");
+        const writeChannel = "pos:recordAllocatedReceipt";
+        const readChannel = "pos:getCustomerStatement";
+        const originalWrite = handlers.get(writeChannel);
+        const originalRead = handlers.get(readChannel);
+        if (typeof originalWrite !== "function" || typeof originalRead !== "function") throw new Error("R1 expected IPC handlers missing");
+        const state = { originalWrite, originalRead, writeCalls: 0, readCalls: 0, injected: false, key: null };
+        globalThis.__alzabtR1InstalledTest = state;
+        ipcMain.removeHandler(writeChannel);
+        ipcMain.handle(writeChannel, async (event, request) => {
+          if (request?.reference !== "WH-S1-R1-UI") return originalWrite(event, request);
+          state.writeCalls += 1;
+          const actual = await originalWrite(event, request); // The REAL durable financial write.
+          if (!actual?.ok) return actual;
+          if (state.injected) return actual;
+          state.injected = true;
+          state.key = request.idempotencyKey;
+          // Reproduce exactly the failure code emitted when the response is lost after COMMIT.
+          return { ok: false, error: { code: "PAYMENT_RECORDED", message: "Receipt recorded; acknowledgement unavailable" } };
+        });
+        ipcMain.removeHandler(readChannel);
+        ipcMain.handle(readChannel, async (...args) => {
+          state.readCalls += 1;
+          return originalRead(...args);
+        });
+      });
+      await testid(p, "receipt-confirm").click();
+      await testid(p, "collect-duplicate").waitFor({ state: "visible", timeout: 30000 });
+      assert((await testid(p, "receipt-form").count()) === 0, "R1: the form is closed after authoritative reconciliation");
+      assert((await testid(p, "receipt-open").count()) === 1, "R1: OTHER shareable debts remain; form did not merely disappear from ineligibility");
+      const counter = await r1App.evaluate(() => {
+        const x = globalThis.__alzabtR1InstalledTest;
+        return { writeCalls: x.writeCalls, readCalls: x.readCalls, injected: x.injected, key: x.key };
+      });
+      assert(counter.injected && counter.writeCalls === 1, `R1: only ONE real write invoked (${JSON.stringify(counter)})`);
+      assert(counter.readCalls >= 1, "R1: renderer asked the REAL read-only statement after lost acknowledgement");
+      readDb((d) => {
+        const rs = d.prepare("SELECT id, idempotency_key AS k, amount_minor AS a FROM receipts WHERE reference = 'WH-S1-R1-UI'").all();
+        assert(rs.length === 1 && rs[0].k === counter.key && Number(rs[0].a) === 1000, "R1: exactly one receipt with original key and 10.00 USD");
+        const attempt = d.prepare("SELECT resolution FROM receipt_attempts WHERE idempotency_key = ?").get(counter.key);
+        assert(attempt?.resolution === "recorded", "R1: original durable attempt sealed as recorded");
+        const rows = d.prepare("SELECT obligation_id AS id, amount_minor AS a FROM settlements WHERE receipt_id = ? ORDER BY obligation_id").all(rs[0].id);
+        assert(JSON.stringify(rows.map((r) => [r.id, Number(r.a)])) === JSON.stringify([["s1-R1-A",600],["s1-R1-B",400]]), "R1: only exact two allocations exist");
+      });
+      assert(num("SELECT count(*) AS n FROM receipts") === beforeR1.receipts + 1, "R1: no second receipt");
+      assert(num("SELECT count(*) AS n FROM settlements WHERE receipt_id IS NOT NULL") === beforeR1.shares + 2, "R1: no duplicate settlement shares");
+      await p.screenshot({ path: SHOTS + "M18-S1-R1-postcommit-response-lost.png" });
+      log("M17B-S1 installed R1 post-commit response-loss recovery COMPLETE");
+    } finally {
+      await r1App.evaluate(({ ipcMain }) => {
+        const state = globalThis.__alzabtR1InstalledTest;
+        if (!state) return;
+        ipcMain.removeHandler("pos:recordAllocatedReceipt");
+        ipcMain.handle("pos:recordAllocatedReceipt", state.originalWrite);
+        ipcMain.removeHandler("pos:getCustomerStatement");
+        ipcMain.handle("pos:getCustomerStatement", state.originalRead);
+        delete globalThis.__alzabtR1InstalledTest;
+      }).catch(() => undefined);
+      await r1App.close().catch(() => undefined);
+    }
+  }
+
   log("M17B-S1 shared-receipt E2E complete");
 
   log("customer collection E2E complete");
