@@ -24,7 +24,8 @@
 import { _electron as electron } from "playwright-core";
 import { signIn } from "./_signin.mjs";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -962,6 +963,251 @@ try {
     assert(n("SELECT count(*) AS n FROM obligations") === 3, "and still exactly three obligations — a collection never creates or rewrites a debt");
     assert(n("SELECT amount_minor AS n FROM obligations WHERE id = 'o-part'") === 4000, "the original debt principal is untouched");
     db.close();
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // M17A acceptance findings B and C — evidence on the REAL installed window, in ARABIC.
+  //
+  // B · four different "sizes" exist and are NOT interchangeable, so each is recorded separately:
+  //     (1) Playwright viewport — a browser-context emulation, NOT used in this block;
+  //     (2) document size      — window.innerWidth/Height and the layout's own scroll width;
+  //     (3) BrowserWindow      — Electron's native getSize/getBounds/getContentSize, for the window
+  //                              `electronApp.browserWindow(page)` resolves FROM the page under test,
+  //                              so the association is not assumed;
+  //     (4) Windows OS bounds  — GetWindowRect / DWM frame / GetDpiForWindow on that window's HWND,
+  //                              whose owning process id must be the app's own.
+  //     The window is resized with the real BrowserWindow API before measuring. A screenshot's pixel
+  //     size alone proves none of this and is not used as proof.
+  // C · the Whish form and the pending-collection recovery, with Arabic actually selected.
+  // Synthetic fixtures only: nothing here contacts a payment provider.
+  // ═══════════════════════════════════════════════════════
+  const evidence = { generatedBy: "e2e/customers.mjs (M17A findings B and C)", platform: process.platform, requestedDip: { width: 1024, height: 640 } };
+  const persistEvidence = () => writeFileSync(SHOTS + "M17A-B-window-evidence.json", JSON.stringify(evidence, null, 2));
+  const launchArabic = async () => {
+    const a = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    try {
+      const p = await a.firstWindow();
+      await signIn(p, "Cashier One", "1111");
+      await p.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      if ((await p.evaluate(() => document.documentElement.lang)) !== "ar") await testid(p, "lang-toggle").click();
+      await p.waitForFunction(() => document.documentElement.lang === "ar" && document.documentElement.dir === "rtl", undefined, { timeout: 10000 });
+      await p.locator('[data-testid="tab-customers"]').click();
+      await testid(p, "customers-search").fill("0111111");
+      await p.locator(`[data-customer="${statementCustomerId}"]`).first().click();
+      await testid(p, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+      return { a, p };
+    } catch (e) {
+      await a.close().catch(() => undefined);
+      throw e;
+    }
+  };
+  const resizeReal = async (a, p) => {
+    const bw = await a.browserWindow(p); // the BrowserWindow that hosts THIS page
+    const id = await bw.evaluate((w) => {
+      if (w.isMaximized()) w.unmaximize();
+      if (w.isFullScreen()) w.setFullScreen(false);
+      w.setSize(1024, 640);
+      return w.id;
+    });
+    await p.waitForFunction(() => window.innerWidth <= 1024, undefined, { timeout: 10000 });
+    await p.waitForTimeout(500);
+    return id;
+  };
+  const readNative = (a, id) =>
+    a.evaluate(({ BrowserWindow, screen }, wid) => {
+      const w = BrowserWindow.fromId(wid);
+      const b = w.getBounds();
+      const d = screen.getDisplayMatching(b);
+      return {
+        title: w.getTitle(),
+        size: w.getSize(),
+        bounds: b,
+        contentSize: w.getContentSize(),
+        minimumSize: w.getMinimumSize(),
+        isMaximized: w.isMaximized(),
+        isFullScreen: w.isFullScreen(),
+        isMinimized: w.isMinimized(),
+        zoomFactor: w.webContents.getZoomFactor(),
+        displayScaleFactor: d.scaleFactor,
+        hwnd: process.platform === "win32" ? w.getNativeWindowHandle().readBigUInt64LE(0).toString() : null,
+        electronPid: process.pid,
+      };
+    }, id);
+  const readOs = (hwnd) => {
+    if (process.platform !== "win32" || !hwnd) return { status: "not-windows" };
+    const ps = `
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class W {
+  [StructLayout(LayoutKind.Sequential)] public struct R { public int L, T, Rt, B; }
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out R r);
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int a, out R r, int s);
+}
+"@
+[void][W]::SetProcessDPIAware()
+$h = [IntPtr]::new([int64]${hwnd})
+$r = New-Object W+R; $f = New-Object W+R; $pid2 = [uint32]0
+[void][W]::GetWindowRect($h, [ref]$r)
+$dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
+[void][W]::GetWindowThreadProcessId($h, [ref]$pid2)
+@{ windowRect = @{ left=$r.L; top=$r.T; width=($r.Rt-$r.L); height=($r.B-$r.T) };
+   dwmFrame = @{ hr=$dwm; width=($f.Rt-$f.L); height=($f.B-$f.T) };
+   dpi = [W]::GetDpiForWindow($h); ownerPid = $pid2 } | ConvertTo-Json -Depth 4 -Compress`;
+    const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(ps, "utf16le").toString("base64")], { encoding: "utf8", timeout: 60000 });
+    if (r.status !== 0) return { status: "blocked", reason: `powershell exit ${r.status}: ${String(r.stderr).slice(0, 300)}` };
+    try {
+      return { status: "ok", ...JSON.parse(r.stdout) };
+    } catch (e) {
+      return { status: "blocked", reason: `unparseable output: ${String(r.stdout).slice(0, 200)}` };
+    }
+  };
+  const readable = (loc) =>
+    loc.evaluate((el) => ({ fontPx: parseFloat(getComputedStyle(el).fontSize), clippedX: el.scrollWidth > el.clientWidth + 1, text: el.innerText.trim() }));
+
+  // ── C1 · Arabic Whish form on the REAL window resized to 1024×640 ──────────────────────────────
+  evidence.bStatus = "failed"; // until proven otherwise: an exception before the end leaves "failed" on disk
+  const { a: ar1, p: pa } = await launchArabic();
+  try {
+  assert((await pa.evaluate(() => document.documentElement.lang)) === "ar", "🔴 Arabic is actually selected (<html lang=ar>)");
+  assert((await pa.evaluate(() => document.documentElement.dir)) === "rtl", "🔴 the layout direction is RTL");
+  const winId = await resizeReal(ar1, pa);
+  await pa.locator(`[data-obligation="o-part"]`).locator('[data-testid="collect-open"]').click();
+  await testid(pa, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+  await testid(pa, "collect-method").selectOption("whish");
+  await testid(pa, "collect-payment-reference").waitFor({ state: "visible", timeout: 30000 });
+  const methodLabel = await testid(pa, "collect-method").evaluate((s) => s.selectedOptions[0].textContent.trim());
+  assert(methodLabel === "ويش (مؤكَّد يدوياً)", `🔴 the Whish method is labelled in Arabic (${methodLabel})`);
+  const formText = await testid(pa, "collect-form").innerText();
+  for (const s of ["المرجع (رقم العملية)", "أؤكّد أنّ المبلغ وصلني فعلاً.", "لا يتّصل هذا الجهاز بويش ولا بالمصرف؛ التأكيد منك."])
+    assert(formText.includes(s), `🔴 the Arabic form shows «${s}»`);
+  assert(!(await testid(pa, "collect-funds-confirmed").isChecked()), "🔴 the funds-received confirmation starts UNCHECKED");
+
+  const native = await readNative(ar1, winId);
+  const os = readOs(native.hwnd);
+  const doc = await pa.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    devicePixelRatio: window.devicePixelRatio,
+    scrollOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  }));
+  const controls = {};
+  for (const id of ["collect-confirm", "collect-cancel"]) {
+    const el = testid(pa, id);
+    await el.scrollIntoViewIfNeeded();
+    const box = await el.boundingBox();
+    const r = await readable(el);
+    let actionable = true;
+    try {
+      await el.click({ trial: true, timeout: 10000 }); // actionable: visible, stable, enabled, and nothing covers it
+    } catch (e) {
+      actionable = String(e.message).slice(0, 300);
+    }
+    controls[id] = { box, actionable, ...r };
+  }
+  evidence.native = native;
+  evidence.os = os;
+  evidence.document = doc;
+  evidence.controlsArabicWhishForm = controls;
+  if (os.status === "ok") {
+    const scale = os.dpi / 96;
+    evidence.osDipSize = { width: os.windowRect.width / scale, height: os.windowRect.height / scale, dpiScale: scale };
+  }
+  persistEvidence(); // RAW measurements are on disk BEFORE any assertion below can fail
+  for (const id of ["collect-confirm", "collect-cancel"]) {
+    const { box, actionable, fontPx, clippedX, text } = controls[id];
+    assert(actionable === true, `🔴 ${id} is actionable — visible, stable and not covered (${actionable})`);
+    assert(
+      box !== null && box.x >= 0 && box.y >= 0 && box.x + box.width <= doc.innerWidth && box.y + box.height <= doc.innerHeight,
+      `🔴 ${id} is fully inside the real ${doc.innerWidth}x${doc.innerHeight} document once scrolled to (${JSON.stringify(box)})`,
+    );
+    assert(fontPx >= 12 && !clippedX && text.length > 0, `🔴 ${id} is readable and not clipped (${fontPx}px «${text}»)`);
+  }
+  assert(doc.scrollOverflowX <= 0, `🔴 no horizontal overflow in the Arabic form (${doc.scrollOverflowX}px)`);
+  assert(native.size[0] === 1024 && native.size[1] === 640, `🔴 BrowserWindow outer size is 1024x640 DIP (${native.size})`);
+  assert(!native.isMaximized && !native.isFullScreen && !native.isMinimized, "the window is neither maximized, full-screen nor minimized");
+  assert(native.zoomFactor === 1, "page zoom is 1");
+  assert(Math.abs(doc.innerWidth - native.contentSize[0]) <= 1, `the document width equals the window's content width (${doc.innerWidth} vs ${native.contentSize[0]})`);
+  if (os.status === "ok") {
+    assert(os.ownerPid === native.electronPid, `🔴 the OS window belongs to the app process (${os.ownerPid} = ${native.electronPid})`);
+    assert(
+      Math.abs(evidence.osDipSize.width - 1024) <= 2 && Math.abs(evidence.osDipSize.height - 640) <= 2,
+      `🔴 the Windows OS window rect is 1024x640 DIP (${JSON.stringify(evidence.osDipSize)})`,
+    );
+    evidence.bStatus = "measured";
+  } else {
+    // 🔴 never a pass: the OS-level bounds were not obtained, so Finding B cannot be called proven here.
+    evidence.bStatus = "blocked";
+    log(`OS-level window bounds NOT measured (B stays OPEN): ${os.status} ${os.reason ?? ""}`);
+  }
+  persistEvidence();
+  await pa.screenshot({ path: SHOTS + "M17A-C1-whish-arabic.png" });
+  await testid(pa, "collect-cancel").click();
+  } catch (e) {
+    evidence.bStatus = "failed";
+    evidence.failure = String(e && e.message ? e.message : e).slice(0, 600);
+    persistEvidence(); // keep the diagnostics of the failing run
+    throw e;
+  } finally {
+    await ar1.close().catch(() => undefined);
+  }
+
+  // ── C2 · a SECOND synthetic unfinished attempt, shown in Arabic ───────────────────────────────
+  {
+    const dbw = new Database(LEDGER);
+    const op = dbw.prepare("SELECT id FROM operators ORDER BY id LIMIT 1").get().id;
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify({ obligationId: "o-part", partyId: statementCustomerId, amountMinor: "100", currency: "USD", method: "external", provider: "whish", reference: "WH-E2E-AR", fundsConfirmed: true }))
+      .digest("hex");
+    dbw
+      .prepare(
+        `INSERT INTO collection_attempts (idempotency_key, customer_id, obligation_id, currency, amount_minor, channel,
+                                          reference, funds_confirmed, request_fingerprint, created_by, created_at)
+         VALUES ('e2e-pending-key-02', ?, 'o-part', 'USD', 100, 'whish', 'WH-E2E-AR', 1, ?, ?, '2026-10-25T08:00:00.000Z')`,
+      )
+      .run(statementCustomerId, fingerprint, op);
+    dbw.close();
+  }
+  const settlementsC = (() => {
+    const d = new Database(LEDGER, { readonly: true });
+    const c = Number(d.prepare("SELECT count(*) AS n FROM settlements").get().n);
+    d.close();
+    return c;
+  })();
+  const { a: ar2, p: pb } = await launchArabic();
+  try {
+  await resizeReal(ar2, pb);
+  await testid(pb, "collect-pending").waitFor({ state: "visible", timeout: 30000 });
+  assert((await testid(pb, "collect-pending").getAttribute("data-status")) === "not_recorded", "🔴 the ledger reports the Arabic-test attempt as NOT recorded");
+  const banner = await testid(pb, "collect-pending").innerText();
+  const WARN = "ما في عملية قبض مسجّلة في الضبط لهالمحاولة. هيدا ما بيعني بالضرورة إن المبلغ ما وصل. تأكّد من استلام المبلغ فعلياً قبل إعادة محاولة تسجيل القبض.";
+  assert(banner.includes(WARN), "🔴 the Arabic recovery warning is the corrected text");
+  assert(!banner.includes("لم يُؤخَذ"), "🔴 it no longer says nothing was taken");
+  assert(banner.includes("WH-E2E-AR"), "and carries the attempt's own reference");
+  const retry = testid(pb, "collect-pending-retry");
+  await retry.scrollIntoViewIfNeeded();
+  const retryR = await readable(retry);
+  assert(retryR.text === "إعادة محاولة تسجيل القبض", `🔴 the Arabic retry button has the corrected label («${retryR.text}»)`);
+  assert(retryR.fontPx >= 12 && !retryR.clippedX, "the retry button is readable and not clipped");
+  await retry.click({ trial: true, timeout: 10000 });
+  const bannerBox = await testid(pb, "collect-pending").boundingBox();
+  const docB = await pb.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight, overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth }));
+  assert(docB.overflowX <= 0, `no horizontal overflow around the Arabic recovery banner (${docB.overflowX}px)`);
+  assert(bannerBox !== null && bannerBox.x >= 0 && bannerBox.x + bannerBox.width <= docB.w, "the banner sits inside the window width");
+  evidence.recoveryBannerArabic = { box: bannerBox, document: docB, retry: retryR };
+  persistEvidence();
+  await pb.screenshot({ path: SHOTS + "M17A-C2-pending-recovery-arabic.png" });
+  const settlementsAfterC = (() => {
+    const d = new Database(LEDGER, { readonly: true });
+    const c = Number(d.prepare("SELECT count(*) AS n FROM settlements").get().n);
+    d.close();
+    return c;
+  })();
+  assert(settlementsAfterC === settlementsC, "🔴 looking at the Arabic recovery screen collected nothing");
+  } finally {
+    await ar2.close().catch(() => undefined);
   }
 
   log("customer collection E2E complete");
