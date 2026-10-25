@@ -235,3 +235,36 @@ describe("recovering an unfinished collection (source-level)", () => {
     expect(translate("ar", "collect.err.COLLECTION_UNRESOLVED")).not.toBe("collect.err.COLLECTION_UNRESOLVED");
   });
 });
+
+describe("🔴 finding A — a missing settlement never claims the money was not received", () => {
+  const en = translate("en", "collect.pending.not_recorded");
+  const ar = translate("ar", "collect.pending.not_recorded");
+  it("neither language says nothing was taken / not received, and both tell the operator to check the real payment", () => {
+    expect(en).not.toMatch(/nothing was taken|not in the ledger|no money/i);
+    expect(en).toMatch(/does not confirm whether the money was received/i);
+    expect(en).toMatch(/check the actual payment/i);
+    expect(en).toContain("ALZABT POS");
+    expect(ar).not.toContain("لم يُؤخَذ");
+    expect(ar).toContain("ما بيعني بالضرورة");
+    expect(ar).toContain("تأكّد من استلام المبلغ فعلياً");
+  });
+  it("the retry button names retrying the POS RECORDING, never paying again", () => {
+    expect(translate("en", "collect.pending.retry")).toBe("Retry recording this collection");
+    expect(translate("ar", "collect.pending.retry")).toBe("إعادة محاولة تسجيل القبض");
+    for (const t of [translate("en", "collect.pending.retry"), translate("ar", "collect.pending.retry")]) {
+      expect(t).not.toMatch(/pay again|collect again|دفعة جديدة/i);
+    }
+  });
+  it("both texts render through the pending banner and button and stay short enough for 1024x640", () => {
+    expect(STATEMENT).toContain("t(`collect.pending.${p.status}`)");
+    expect(STATEMENT).toContain('t("collect.pending.retry")');
+    expect(en.length).toBeLessThan(200);
+    expect(ar.length).toBeLessThan(200);
+  });
+  it("the safety wording and behaviour of unknown/conflict are unchanged", () => {
+    expect(translate("en", "collect.pending.unknown")).toMatch(/do not collect the money again/i);
+    expect(translate("en", "collect.pending.conflict")).toMatch(/do not collect again/i);
+    expect(STATEMENT).toContain("lockedByPending");
+    expect(STATEMENT).toContain("repeatPending");
+  });
+});

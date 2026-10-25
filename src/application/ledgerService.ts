@@ -505,7 +505,7 @@ export class LedgerService {
    * (owner-only, READ-ONLY — it writes nothing).
    *
    *   recorded      the ledger has a settlement under the original key and it matches the intent;
-   *   not_recorded  the ledger was read successfully and has none — nothing was taken;
+   *   not_recorded  the ledger was read successfully and has none — this says nothing about whether external money was received;
    *   conflict      a settlement exists under the key but is a DIFFERENT payment — fail closed;
    *   unknown       the lookup itself failed — never reported as "not recorded".
    */

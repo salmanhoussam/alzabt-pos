@@ -737,7 +737,7 @@ export type CollectionMethodDto = "cash" | "card" | "whish" | "bank_transfer" | 
  * screen's memory, so it survives navigation, a closed window and a restart.
  *
  *   recorded      the ledger holds a settlement under the original key that matches this intent;
- *   not_recorded  the ledger was read and holds none — nothing was taken. It may be repeated EXACTLY
+ *   not_recorded  the ledger was read and holds none — which does NOT prove external money was not received. It may be repeated EXACTLY
  *                 (same key, same payload) or a new payment may be started;
  *   conflict      a settlement under the key is a DIFFERENT payment — fail closed;
  *   unknown       the lookup failed — never to be read as "not recorded", and a new collection for
