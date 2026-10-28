@@ -73,6 +73,40 @@ jobs:
       # build, smoke and installed E2E still run and produce evidence. Their real outcome is kept in
       # steps.<id>.outcome and the "Final gate" at the end fails the job if either did not pass. The
       # installer is uploaded only if both passed. Remove this block once the crash is understood.
+      # Measures the cpSync hypothesis on its own: fs.cpSync({ recursive: true }) in a SEPARATE node
+      # process, once on an ASCII folder and once on Arabic + spaces. A measurement, never a gate:
+      # it always exits 0, records each child's exit code (0xC0000409 = native fail-fast), stdout
+      # and stderr in e2e-output/diagnostics/cpsync-probe.txt, and is not part of the Final gate.
+      - name: "DIAGNOSTIC: fs.cpSync probe in its own node process (ASCII vs Arabic + spaces)"
+        id: cpsync_probe
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Force -Path e2e-output/diagnostics | Out-Null
+          $script = Join-Path $env:RUNNER_TEMP "cpsync-probe.js"
+          @'
+          const fs = require("fs"), path = require("path"), os = require("os");
+          const name = process.argv[2] === "arabic" ? "\u0645\u062c\u0644\u062f \u0627\u062e\u062a\u0628\u0627\u0631 probe" : "ascii-probe";
+          const root = fs.mkdtempSync(path.join(os.tmpdir(), "cpsync-"));
+          const src = path.join(root, name, "src");
+          fs.mkdirSync(path.join(src, "sub"), { recursive: true });
+          fs.writeFileSync(path.join(src, "a.txt"), "x");
+          fs.writeFileSync(path.join(src, "sub", "b.txt"), "y");
+          fs.cpSync(src, path.join(root, name, "dst"), { recursive: true });
+          console.log("node", process.version, "case", process.argv[2], "copied", fs.existsSync(path.join(root, name, "dst", "sub", "b.txt")));
+          '@ | Set-Content -Path $script -Encoding utf8
+          $report = "e2e-output/diagnostics/cpsync-probe.txt"
+          "" | Set-Content -Path $report
+          foreach ($case in @("ascii", "arabic")) {
+            $out = Join-Path $env:RUNNER_TEMP "cpsync-$case.out"
+            $err = Join-Path $env:RUNNER_TEMP "cpsync-$case.err"
+            $p = Start-Process -FilePath node -ArgumentList @($script, $case) -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+            $line = "case=$case exit=$($p.ExitCode) hex=0x$('{0:X8}' -f $p.ExitCode)"
+            $line | Tee-Object -FilePath $report -Append
+            "  stdout: $((Get-Content $out -Raw) -replace '\s+$','')" | Tee-Object -FilePath $report -Append
+            "  stderr: $((Get-Content $err -Raw) -replace '\s+$','')" | Tee-Object -FilePath $report -Append
+          }
+          exit 0
+
       - name: "DIAGNOSTIC: backupRestore.test.ts alone (forks), with markers"
         id: br_isolated
         continue-on-error: true

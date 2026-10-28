@@ -35,7 +35,7 @@ import { createHash } from "node:crypto";
 import { connect } from "node:net";
 import {
   copyFileSync,
-  cpSync,
+  lstatSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -311,6 +311,31 @@ function dyingFs(k) {
   return { fs, ops: () => n };
 }
 
+/**
+ * Recursive copy WITHOUT fs.cpSync — folders and plain files only, through mkdirSync / readdirSync /
+ * copyFileSync (the way the product's own restore engine copies).
+ *
+ * 🔴 WHY (Windows runs 40733299552, 40737989211, 40743546977). Every native worker death
+ * (0xC0000409) landed on the FIRST fs.cpSync({ recursive: true }) of a path containing Arabic and
+ * spaces, on Node 22.23.4; cpSync on ASCII temp paths passes there. That is a HYPOTHESIS backed by
+ * those observations (a separate probe in the workflow measures it), not a proven cause. The
+ * Arabic paths are deliberately KEPT — only the copying primitive changes.
+ *
+ * Every file is copied, the SQLite companions (-wal, -shm, -journal) included. A symbolic link is
+ * REFUSED rather than followed, so nothing outside the test folder can be reached through one.
+ */
+function copyTree(from, to) {
+  const st = lstatSync(from);
+  if (st.isSymbolicLink()) throw new Error(`copyTree refuses to follow a link: ${from}`);
+  if (st.isDirectory()) {
+    mkdirSync(to, { recursive: true });
+    for (const name of readdirSync(from)) copyTree(join(from, name), join(to, name));
+    return;
+  }
+  if (!st.isFile()) throw new Error(`copyTree: not a file or folder: ${from}`);
+  copyFileSync(from, to);
+}
+
 const tcpOpen = (host, port) =>
   new Promise((resolve) => {
     const s = connect({ host, port, timeout: 3000 });
@@ -476,12 +501,12 @@ try {
 
     // The package changes between preview and confirmation → refused, nothing staged.
     const swap = join(ROOT, "نسخة مبدلة");
-    cpSync(pkgComplete, swap, { recursive: true });
+    copyTree(pkgComplete, swap);
     await stubFolder(app, swap);
     await testid(page, "restore-choose").click();
     await testid(page, "restore-preview").waitFor();
     rmSync(swap, { recursive: true });
-    cpSync(pkgIncomplete, swap, { recursive: true });
+    copyTree(pkgIncomplete, swap);
     await testid(page, "restore-confirm").check();
     await testid(page, "restore-apply").click();
     await testid(page, "restore-refused").waitFor({ timeout: 30000 });
@@ -656,7 +681,7 @@ try {
     // Count the operations of a clean apply on a throwaway copy, then die half way on the real one.
     const D = await preparedProfile("بيانات المحل د", 1);
     const probe = join(ROOT, "probe copy", "userData");
-    cpSync(D, probe, { recursive: true });
+    copyTree(D, probe);
     stageWithEngine(probe, pkgComplete);
     const counter = dyingFs(Number.MAX_SAFE_INTEGER);
     check(engine.applyPendingRestore({ userDataDir: probe, now: new Date(), fs: counter.fs }).kind === "restored", "E · probe: a clean apply restores");

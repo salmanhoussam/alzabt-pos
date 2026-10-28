@@ -8,7 +8,7 @@
  * by closing the ledger and running the startup half (restoreStartup.ts), exactly as main.ts does.
  */
 import { createHash } from "node:crypto";
-import { closeSync, copyFileSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { basename, join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -262,6 +262,31 @@ function markedFs(): BackupFs | undefined {
   return fs as unknown as BackupFs;
 }
 
+/**
+ * Recursive copy WITHOUT fs.cpSync — folders and plain files only, through mkdirSync / readdirSync /
+ * copyFileSync (the way the product's own restore engine copies).
+ *
+ * 🔴 WHY (Windows runs 40733299552, 40737989211, 40743546977). Every native worker death
+ * (0xC0000409) landed on the FIRST fs.cpSync({ recursive: true }) of a path containing Arabic and
+ * spaces, on Node 22.23.4; cpSync on ASCII temp paths passes there. That is a HYPOTHESIS backed by
+ * those observations (a separate probe in the workflow measures it), not a proven cause. The
+ * Arabic paths are deliberately KEPT — only the copying primitive changes.
+ *
+ * Every file is copied, the SQLite companions (-wal, -shm, -journal) included. A symbolic link is
+ * REFUSED rather than followed, so nothing outside the test folder can be reached through one.
+ */
+function copyTree(from: string, to: string): void {
+  const st = lstatSync(from);
+  if (st.isSymbolicLink()) throw new Error(`copyTree refuses to follow a link: ${basename(from)}`);
+  if (st.isDirectory()) {
+    mkdirSync(to, { recursive: true });
+    for (const name of readdirSync(from)) copyTree(join(from, name), join(to, name));
+    return;
+  }
+  if (!st.isFile()) throw new Error(`copyTree: not a file or folder: ${basename(from)}`);
+  copyFileSync(from, to);
+}
+
 const opened: Shop[] = [];
 beforeEach(() => {
   mark(`TEST BEGIN ${expect.getState().currentTestName ?? "?"}`);
@@ -447,7 +472,7 @@ describe("🔴 restore — preview, consent, stage, restart, open", () => {
     a.h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: 199n });
     const other = exportPackage(a);
     rmSync(pkg, { recursive: true });
-    cpSync(other, pkg, { recursive: true });
+    copyTree(other, pkg);
     expect(data(b.ipc.applyRestore({ manifestSha256: p.preview.manifestSha256, acceptMissingAssets: false }))).toMatchObject({ status: "refused", reason: "CHANGED" });
     expect(journal(b)).toBe(false);
     expect(b.calls.relaunches).toBe(0);
@@ -460,13 +485,13 @@ describe("🔴 restore — preview, consent, stage, restart, open", () => {
     const b = open("shop b");
 
     const damaged = join(t.dir, "damaged copy");
-    cpSync(pkg, damaged, { recursive: true });
+    copyTree(pkg, damaged);
     writeFileSync(join(damaged, "settings.json"), "{}");
     b.picked["restore-backup"] = damaged;
     expect(data(b.ipc.inspectRestoreBackup(undefined))).toEqual({ status: "refused", reason: "DAMAGED", detail: "CHECKSUM_MISMATCH" });
 
     const partial = join(t.dir, `pkg.partial-${"a".repeat(12)}`);
-    cpSync(pkg, partial, { recursive: true });
+    copyTree(pkg, partial);
     b.picked["restore-backup"] = partial;
     expect(data(b.ipc.inspectRestoreBackup(undefined))).toMatchObject({ status: "refused", reason: "UNPUBLISHED" });
 
