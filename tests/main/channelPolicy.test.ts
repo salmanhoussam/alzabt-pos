@@ -153,6 +153,10 @@ describe("the owner-only set", () => {
       // inspecting a phone session remain an owner's acts.
       "cancelPhoneSession",
       "phoneSessionState",
+      // Track 2: the whole shop's data out (with logos), and an older state back in.
+      "exportFullBackup",
+      "inspectRestoreBackup",
+      "applyRestore",
     ] as const;
     const wrong = ownerOnly.filter((c) => CHANNEL_POLICY[c] !== "owner");
     expect(wrong).toEqual([]);

@@ -1232,6 +1232,18 @@ export class PosService {
   // outer door, enforced before a payload is even examined; this is the lock on the thing itself.
   // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+  /**
+   * Refuses anyone but the live owner — for operations that live in MAIN, not in this service.
+   *
+   * 🔴 Track 2's full backup and restore read and replace the whole shop's data through files main
+   * owns, so there is no service method to put `requireOwner()` inside. The channel policy already
+   * refuses a cashier; this is the second, independent lock the money and catalogue operations
+   * have, re-reading the durable role so a demotion takes effect at once.
+   */
+  assertOwner(): void {
+    this.requireOwner();
+  }
+
   /** The live owner, or a refusal. Re-reads the durable role, exactly as `requireLiveRole` does. */
   private requireOwner(): Cashier {
     const live = this.liveSession();

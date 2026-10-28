@@ -173,6 +173,11 @@ describe("IPC surface", () => {
         "startPhoneSession",
         "cancelPhoneSession",
         "phoneSessionState",
+        // 🔴 Track 2 phase 3: full backup and restore, all owner-only. None takes a path: main runs
+        // the pickers and stages only the package IT previewed.
+        "exportFullBackup",
+        "inspectRestoreBackup",
+        "applyRestore",
       ].sort(),
     );
     // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
@@ -197,7 +202,10 @@ describe("IPC surface", () => {
     // 🔴 TRANSITION — SEVENTY-FIVE to SEVENTY-SIX with M17B-S1. The one added: recordAllocatedReceipt,
     // an owner-only money write that shares ONE real external receipt across two or more debts of one
     // customer. The old value was 75.
-    expect(CHANNEL_NAMES).toHaveLength(76);
+    // 🔴 TRANSITION — SEVENTY-SIX to SEVENTY-NINE with Track 2 phase 3 (full backup and restore).
+    // The three added: exportFullBackup, inspectRestoreBackup, applyRestore — owner-only, and
+    // refused again by PosService.assertOwner. The old value was 76.
+    expect(CHANNEL_NAMES).toHaveLength(79);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

@@ -53,9 +53,14 @@ import { renderInvoiceDocument } from "./invoiceDocument";
 import {
   type InvoiceIssuerLogo,
   type InvoiceLogoFs,
+  logoUnverifiedFor,
   logoWarningFor,
   resolveInvoiceLogo,
 } from "./invoiceLogo";
+import { createBackupRestoreActions } from "./backupRestore";
+import { restoreNoticeFor, runPendingRestore } from "./restoreStartup";
+import { RestoreLock } from "./restoreLock";
+import { JOURNAL_FILE, RESTORE_DIR } from "../persistence/restoreEngine";
 import { AUTO_START_MARKER_FILE, applyAutoStart } from "./autoStart";
 import { diag, diagEnabled } from "./diagnostics";
 import { buildLabel, readBuildInfo } from "./buildInfo";
@@ -348,7 +353,6 @@ function logoPathFor(stored: string | null, dir: string): string | null {
  */
 const invoiceLogoFs: InvoiceLogoFs = {
   frozen: (assetName) => logoPathFor(assetName, join(BRANDING_DIR, FROZEN_DIR)),
-  live: (storedName) => logoPathFor(storedName, BRANDING_DIR),
 };
 
 /**
@@ -359,13 +363,16 @@ const invoiceLogoFs: InvoiceLogoFs = {
  * resolves to NO logo plus a warning — never to the shop's current branding, which is a different
  * image under a fixed name. See src/main/invoiceLogo.ts for why that mattered.
  */
-function invoiceLogo(issuer: InvoiceIssuerLogo | null): { readonly url: string | null; readonly missing: boolean } {
+function invoiceLogo(issuer: InvoiceIssuerLogo | null): {
+  readonly url: string | null;
+  readonly missing: boolean;
+  readonly unverified: boolean;
+} {
   const resolution = resolveInvoiceLogo(issuer, invoiceLogoFs);
-  const url =
-    resolution.kind === "frozen" || resolution.kind === "legacy"
-      ? pathToFileURL(resolution.path).toString()
-      : null;
-  return { url, missing: logoWarningFor(resolution) };
+  // Only an archived asset is printed. An invoice that never archived its logo prints none
+  // (`unverified`) rather than today's file under the same name — see invoiceLogo.ts.
+  const url = resolution.kind === "frozen" ? pathToFileURL(resolution.path).toString() : null;
+  return { url, missing: logoWarningFor(resolution), unverified: logoUnverifiedFor(resolution) };
 }
 
 /** Where a document being printed is staged. One file, overwritten per render, removed after. */
@@ -420,7 +427,7 @@ function stagePrintable(html: string, name: string): { readonly url: string; rea
  * surface that cannot execute script is one less thing to reason about. The HTML comes from
  * `renderInvoiceDocument`, which takes the frozen DTO and nothing else.
  */
-async function renderInvoicePdf(invoiceId: string): Promise<{ pdf: Buffer; logoMissing: boolean }> {
+async function renderInvoicePdf(invoiceId: string): Promise<{ pdf: Buffer; logoMissing: boolean; logoUnverified: boolean }> {
   if (!invoices) throw new DomainError("NOT_AVAILABLE", "Invoices are not available");
   const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
   const logo = invoiceLogo(view.invoice.issuer ?? null);
@@ -440,7 +447,7 @@ async function renderInvoicePdf(invoiceId: string): Promise<{ pdf: Buffer; logoM
       // default of ~1cm would be added on top of it, silently narrowing the page the tests measured.
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
-    return { pdf, logoMissing: logo.missing };
+    return { pdf, logoMissing: logo.missing, logoUnverified: logo.unverified };
   } finally {
     win.destroy();
     staged.cleanup();
@@ -449,7 +456,7 @@ async function renderInvoicePdf(invoiceId: string): Promise<{ pdf: Buffer; logoM
 
 async function printInvoiceDocument(
   invoiceId: string,
-): Promise<{ status: "printed" | "cancelled"; logoMissing: boolean }> {
+): Promise<{ status: "printed" | "cancelled"; logoMissing: boolean; logoUnverified: boolean }> {
   if (!invoices) throw new DomainError("NOT_AVAILABLE", "Invoices are not available");
   const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
   const logo = invoiceLogo(view.invoice.issuer ?? null);
@@ -469,8 +476,9 @@ async function printInvoiceDocument(
       number: view.invoice.invoiceNumber,
       printed,
       logoMissing: logo.missing,
+      logoUnverified: logo.unverified,
     });
-    return { status: printed ? "printed" : "cancelled", logoMissing: logo.missing };
+    return { status: printed ? "printed" : "cancelled", logoMissing: logo.missing, logoUnverified: logo.unverified };
   } finally {
     win.destroy();
     staged.cleanup();
@@ -478,7 +486,9 @@ async function printInvoiceDocument(
 }
 
 /** Native "save as" + the A4 PDF of the frozen invoice. */
-async function saveInvoicePdfFile(invoiceId: string): Promise<(SavedFile & { logoMissing: boolean }) | null> {
+async function saveInvoicePdfFile(
+  invoiceId: string,
+): Promise<(SavedFile & { logoMissing: boolean; logoUnverified: boolean }) | null> {
   if (!mainWindow || !invoices) return null;
   const view = toInvoiceViewDto(invoices.getInvoice(invoiceId));
   const suggested = `invoice-${view.invoice.invoiceNumber ?? "draft"}.pdf`;
@@ -488,15 +498,16 @@ async function saveInvoicePdfFile(invoiceId: string): Promise<(SavedFile & { log
     filters: [{ name: "PDF", extensions: ["pdf"] }],
   });
   if (!path) return null;
-  const { pdf, logoMissing } = await renderInvoicePdf(invoiceId);
+  const { pdf, logoMissing, logoUnverified } = await renderInvoicePdf(invoiceId);
   writeFileSync(path, pdf);
   log.info("invoice-pdf-saved", {
     id: invoiceId,
     number: view.invoice.invoiceNumber,
     bytes: pdf.length,
     logoMissing,
+    logoUnverified,
   });
-  return { fileName: basename(path), logoMissing };
+  return { fileName: basename(path), logoMissing, logoUnverified };
 }
 
 /** Native "save as" + a verified consistent snapshot of the live ledger (never a raw file copy). */
@@ -673,7 +684,14 @@ if (!gotSingleInstanceLock) {
 function startTill(): void {
   const userData = app.getPath("userData");
   const backupDir = join(userData, BACKUP_DIR_NAME);
+  // 🔴 FIRST, before planLedgerOpen and before any SQLite connection exists in this process: the
+  // only moment a ledger file may be replaced. `halted` throws RestoreHaltedError → failStartup, so
+  // the till, its services and the phone bridge's service never come up on an undecided profile.
+  const restore = runPendingRestore({ userDataDir: userData, now: new Date(), log });
   const plan = planLedgerOpen(userData, ledgerFs);
+  // Shut the moment a restore is staged, until this process ends (src/main/restoreLock.ts). Every
+  // transaction provider below checks it first — the phone server writes through them, not IPC.
+  const restoreLock = new RestoreLock(() => existsSync(join(userData, RESTORE_DIR, JOURNAL_FILE)));
   log.info("db-open-start", { existingLedger: plan.existing, schemaVersionOfBuild: MIGRATIONS.length });
 
   db = openDatabase(plan.ledgerPath, MIGRATIONS, {
@@ -758,7 +776,10 @@ function startTill(): void {
     operators: new OperatorService({
       operators: new OperatorRepository(db),
       audit: auditStore,
-      transact: (fn) => ledger.transaction(fn).immediate(),
+      transact: (fn) => {
+        restoreLock.assertOpen();
+        return ledger.transaction(fn).immediate();
+      },
       terminal: FIXTURE_TERMINAL,
     }),
     terminal: FIXTURE_TERMINAL,
@@ -769,6 +790,7 @@ function startTill(): void {
     creditSaleServices: () => creditSaleServices,
     transact: (fn) => {
       if (!db) throw new Error("ledger is not open");
+      restoreLock.assertOpen();
       return db.transaction(fn).immediate();
     },
     // The rotating logfile now MIRRORS committed audit rows, for field support. It is no longer the
@@ -793,6 +815,7 @@ function startTill(): void {
     sales: saleStore,
     transact: (fn) => {
       if (!db) throw new Error("ledger is not open");
+      restoreLock.assertOpen();
       return db.transaction(fn).immediate();
     },
     terminal: FIXTURE_TERMINAL,
@@ -811,6 +834,7 @@ function startTill(): void {
     },
     transact: (fn) => {
       if (!db) throw new Error("ledger is not open");
+      restoreLock.assertOpen();
       return db.transaction(fn).immediate();
     },
   });
@@ -830,6 +854,7 @@ function startTill(): void {
     },
     transact: (fn) => {
       if (!db) throw new Error("ledger is not open");
+      restoreLock.assertOpen();
       return db.transaction(fn).immediate();
     },
     terminal: { timeZone: FIXTURE_TERMINAL.timeZone },
@@ -856,6 +881,36 @@ function startTill(): void {
     saveInvoicePdf: saveInvoicePdfFile,
     saveCatalogExport,
     exportBackup: () => exportBackup(plan.ledgerPath),
+    restoreLock,
+    backupRestore: createBackupRestoreActions({
+      userDataDir: userData,
+      ledger: () => db,
+      appVersion: BUILD_INFO.version,
+      now: () => new Date(),
+      // Looked up on `dialog` at call time so the E2E can stub it, like every other picker here.
+      chooseFolder: (purpose) => {
+        if (!mainWindow) return null;
+        const picked = dialog.showOpenDialogSync(mainWindow, {
+          title: purpose === "export-backup" ? "Choose where to save the full backup" : "Choose the backup folder to restore",
+          properties: purpose === "export-backup" ? ["openDirectory", "createDirectory"] : ["openDirectory"],
+        });
+        return picked?.[0] ?? null;
+      },
+      // After the answer has reached the window: the restore runs at the next start, before the
+      // ledger opens. `will-quit` closes the phone surface and the ledger on the way out.
+      lock: restoreLock,
+      relaunch: () => {
+        // The phone surface closes NOW: its listener calls the service directly, so it must not
+        // outlive the moment the data was promised to the restore (the transactions refuse anyway).
+        void phoneSessions.appClosing();
+        setTimeout(() => {
+          log.info("restore-relaunch");
+          app.relaunch();
+          app.quit();
+        }, 1500);
+      },
+      log,
+    }),
     exportOnlineCatalog: (snapshot) => exportOnlineCatalogPackage(service, snapshot),
     // Slice H1. The bridge owns the listener, the port and the QR; the SERVICE owns who may open
     // one. Created unconditionally because a till with a window can always serve a phone — the
@@ -870,6 +925,15 @@ function startTill(): void {
     },
   });
   mainWindow = createWindow();
+
+  // What happened to a restore that ran at this start, told once, in the operator's language.
+  const notice = restoreNoticeFor(restore, settings.get().terminalLanguage);
+  if (notice) {
+    const win = mainWindow;
+    win.once("ready-to-show", () => {
+      void dialog.showMessageBox(win, { type: restore.kind === "restored" ? "info" : "warning", title: notice.title, message: notice.title, detail: notice.body, buttons: ["OK"], noLink: true });
+    });
+  }
 
   // Best-effort, after the till is already up: a failure here is logged, never fatal.
   const autoStart = applyAutoStart({

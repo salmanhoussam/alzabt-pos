@@ -82,7 +82,10 @@ describe("the customer channels", () => {
       "recordAllocatedReceipt",
     ];
     for (const name of added) expect(Object.keys(CHANNELS)).toContain(name);
-    expect(Object.keys(CHANNELS)).toHaveLength(76);
+    // 🔴 TRANSITION — SEVENTY-SIX to SEVENTY-NINE with Track 2 phase 3: exportFullBackup,
+    // inspectRestoreBackup, applyRestore. None of them is a money write; the closed list of
+    // money writers below is unchanged. The old value was 76.
+    expect(Object.keys(CHANNELS)).toHaveLength(79);
   });
 
   it("🔴 S3C adds ONE money write — a SETTLEMENT — and still no way to CREATE a debt", () => {

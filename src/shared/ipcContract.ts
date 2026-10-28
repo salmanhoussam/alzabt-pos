@@ -31,6 +31,15 @@ export const CHANNELS = {
   exportCatalog: "pos:exportCatalog",
   exportOnlineCatalog: "pos:exportOnlineCatalog",
   exportBackup: "pos:exportBackup",
+  // ── Full backup and restore (Track 2) ────────────────────────────────────────────────────────
+  //
+  // 🔴 OWNER ONLY, AND NO PATH CROSSES IN EITHER DIRECTION THAT MAIN WILL ACT ON. Main runs the
+  // folder pickers and remembers the package it previewed; `applyRestore` names only the manifest
+  // hash the owner saw and whether they accepted its missing files. Main stages exactly the package
+  // it previewed, re-verifies it, and restarts — the swap itself happens at the next start.
+  exportFullBackup: "pos:exportFullBackup",
+  inspectRestoreBackup: "pos:inspectRestoreBackup",
+  applyRestore: "pos:applyRestore",
   getAppInfo: "pos:getAppInfo",
   listProducts: "pos:listProducts",
   createProduct: "pos:createProduct",
@@ -334,6 +343,82 @@ export interface OnlineCatalogExportDto {
 export type ExportResponse =
   | { readonly status: "cancelled" }
   | { readonly status: "saved"; readonly fileName: string; readonly productCount?: number };
+
+/** A file a full backup could not carry. `reason` is a code the UI words; `name` is data only. */
+export interface BackupMissingAssetDto {
+  readonly kind: "frozen-logo" | "live-logo";
+  readonly name: string;
+  readonly reason: "absent-at-source" | "not-a-regular-file" | "unsafe-name" | "content-mismatch" | "too-large" | "changed-during-backup";
+}
+
+export type BackupSettingsState = "included" | "absent" | "invalid-at-source" | "changed-during-backup";
+
+/**
+ * The result of a full backup. `location` is the folder the owner chose, for DISPLAY only: no
+ * channel accepts a path back.
+ */
+export type FullBackupExportResponse =
+  | { readonly status: "cancelled" }
+  | {
+      readonly status: "saved";
+      readonly folderName: string;
+      readonly location: string;
+      /** False when a logo the ledger references could not be included — listed below. */
+      readonly complete: boolean;
+      readonly missingAssets: ReadonlyArray<BackupMissingAssetDto>;
+      readonly settings: BackupSettingsState;
+    }
+  | { readonly status: "failed"; readonly reason: "IN_APP_FOLDER" | "DESTINATION_EXISTS" | "FAILED" };
+
+/** Why a backup folder cannot be restored. Each has its own sentence in the UI. */
+export type RestoreRefusalReason =
+  /** The chosen folder is inside the program's own data folder. */
+  | "IN_APP_FOLDER"
+  | "UNPUBLISHED"
+  | "NOT_A_BACKUP"
+  | "DAMAGED"
+  | "NEWER_THAN_APP"
+  | "OTHER_DATABASE"
+  | "CHANGED"
+  | "RESTORE_PENDING"
+  | "NO_PREVIEW"
+  | "PREVIEW_MISMATCH"
+  | "MISSING_NOT_ACCEPTED"
+  | "FAILED";
+
+/** What the owner sees before deciding. Everything here was read by MAIN from the verified package. */
+export interface RestorePreviewDto {
+  /** What `applyRestore` must name. */
+  readonly manifestSha256: string;
+  readonly folderName: string;
+  readonly createdAt: string;
+  readonly appVersion: string;
+  readonly schemaVersion: number;
+  /** This build's schema. A lower backup schema is upgraded at the next start. */
+  readonly appSchemaVersion: number;
+  /** Row counts in the backup, for the tables an owner recognises. Null when the table is absent. */
+  readonly counts: Readonly<Record<"sales" | "invoices" | "parties" | "obligations" | "settlements" | "receipts" | "operators", number | null>>;
+  readonly complete: boolean;
+  readonly missingAssets: ReadonlyArray<BackupMissingAssetDto>;
+  readonly settings: BackupSettingsState;
+}
+
+export type InspectRestoreResponse =
+  | { readonly status: "cancelled" }
+  | { readonly status: "ready"; readonly preview: RestorePreviewDto }
+  | { readonly status: "refused"; readonly reason: RestoreRefusalReason; readonly detail: string | null };
+
+export interface ApplyRestoreRequest {
+  /** The hash of the preview the owner confirmed. Main compares it with the preview IT holds. */
+  readonly manifestSha256: string;
+  /** Explicit acceptance of the preview's missing files. Required (true) for an incomplete backup. */
+  readonly acceptMissingAssets: boolean;
+}
+
+export type ApplyRestoreResponse =
+  /** Staged; the program restarts now and performs the restore before it opens the ledger. */
+  | { readonly status: "staged" }
+  | { readonly status: "refused"; readonly reason: RestoreRefusalReason; readonly detail: string | null };
 
 /** Installation identity, shown in the UI for field support. */
 export interface AppInfoDto {
@@ -1296,14 +1381,19 @@ export type PickInvoiceLogoResponse =
  * unchanged and the print still succeeded. See src/main/invoiceLogo.ts.
  */
 export type PrintInvoiceResponse =
-  | { readonly status: "printed"; readonly logoMissing?: boolean }
-  | { readonly status: "cancelled"; readonly logoMissing?: boolean }
+  | { readonly status: "printed"; readonly logoMissing?: boolean; readonly logoUnverified?: boolean }
+  | { readonly status: "cancelled"; readonly logoMissing?: boolean; readonly logoUnverified?: boolean }
   | { readonly status: "unavailable" };
 
-/** Like ExportResponse, plus the same archived-logo truth as PrintInvoiceResponse. */
+/**
+ * Like ExportResponse, plus the same archived-logo truth as PrintInvoiceResponse.
+ *
+ * `logoUnverified` (Track 2 phase 3): the invoice named a logo that was never archived, so its
+ * original cannot be confirmed and it printed WITHOUT one rather than with today's file.
+ */
 export type SaveInvoicePdfResponse =
   | { readonly status: "cancelled" }
-  | { readonly status: "saved"; readonly fileName: string; readonly logoMissing?: boolean };
+  | { readonly status: "saved"; readonly fileName: string; readonly logoMissing?: boolean; readonly logoUnverified?: boolean };
 
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
@@ -1336,6 +1426,12 @@ export interface PosApi {
    */
   exportOnlineCatalog(): Promise<IpcResult<OnlineCatalogExportDto | null>>;
   exportBackup(): Promise<IpcResult<ExportResponse>>;
+  /** Owner only. Main picks the folder, builds and verifies the package. */
+  exportFullBackup(): Promise<IpcResult<FullBackupExportResponse>>;
+  /** Owner only. Main picks a backup folder, verifies it and REMEMBERS it. Stages nothing. */
+  inspectRestoreBackup(): Promise<IpcResult<InspectRestoreResponse>>;
+  /** Owner only. Stages the previewed package and restarts the program. */
+  applyRestore(req: ApplyRestoreRequest): Promise<IpcResult<ApplyRestoreResponse>>;
   getAppInfo(): Promise<IpcResult<AppInfoDto>>;
   listProducts(): Promise<IpcResult<AdminProductDto[]>>;
   createProduct(req: CreateProductRequest): Promise<IpcResult<AdminProductDto>>;

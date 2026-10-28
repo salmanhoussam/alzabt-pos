@@ -1,0 +1,551 @@
+/**
+ * Track 2 phase 3 — full backup and restore through the REAL IPC handlers, the real channel policy
+ * and the real backup/restore actions, on temp folders whose names carry spaces and Arabic.
+ *
+ * Only the native folder picker and the restart are replaced (they are Electron), each by a
+ * function that records being called — so "no picker opened for a cashier" and "restarted exactly
+ * once, and only after staging" are assertions, not assumptions. The restart itself is simulated
+ * by closing the ledger and running the startup half (restoreStartup.ts), exactly as main.ts does.
+ */
+import { createHash } from "node:crypto";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import Database from "better-sqlite3";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { InvoiceService, type LogoVault } from "../../src/application/invoiceService";
+import { FIXTURE_TERMINAL } from "../../src/fixtures/terminal";
+import { createBackupRestoreActions } from "../../src/main/backupRestore";
+import { CHANNEL_NAMES, RESTORE_LOCK_READS, createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
+import { RestoreLock } from "../../src/main/restoreLock";
+import { planLedgerOpen } from "../../src/main/ledgerGuard";
+import { nullLogger } from "../../src/main/logger";
+import { runPendingRestore } from "../../src/main/restoreStartup";
+import { verifyBackupPackage } from "../../src/persistence/backupPackage";
+import { openDatabase } from "../../src/persistence/db";
+import { MIGRATIONS } from "../../src/persistence/migrations";
+import { CatalogRepository } from "../../src/persistence/catalogRepository";
+import { InvoiceRepository } from "../../src/persistence/invoiceRepository";
+import { ReconciliationRepository } from "../../src/persistence/reconciliationRepository";
+import { SaleRepository } from "../../src/persistence/saleRepository";
+import { LIVE_LEDGER_FILE } from "../../src/persistence/restoreEngine";
+import type {
+  ApplyRestoreResponse,
+  FullBackupExportResponse,
+  InspectRestoreResponse,
+} from "../../src/shared/ipcContract";
+import { type Harness, type TempDir, makeHarness, newKey, tempDir } from "../helpers/harness";
+
+const NOW = new Date("2026-10-28T11:00:00.000Z");
+const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
+
+let t: TempDir;
+let tick = 0;
+
+// ── A shop, its profile folder, its pickers ───────────────────────────────────────────────────
+
+interface Shop {
+  readonly userData: string;
+  h: Harness;
+  readonly picked: { "export-backup": string | null; "restore-backup": string | null };
+  readonly calls: { pickers: number; relaunches: number };
+  ipc: ReturnType<typeof syncHandlers>;
+  /** The raw handlers, for channels that answer asynchronously. */
+  raw: ReturnType<typeof createIpcHandlers>;
+  migrations: typeof MIGRATIONS;
+  lock: RestoreLock;
+  relaunchThrows: boolean;
+}
+
+function shop(name: string): Shop {
+  const userData = join(t.dir, name);
+  mkdirSync(userData, { recursive: true });
+  const s: Shop = {
+    userData,
+    h: makeHarness(join(userData, LIVE_LEDGER_FILE)),
+    picked: { "export-backup": null, "restore-backup": null },
+    calls: { pickers: 0, relaunches: 0 },
+    ipc: undefined as never,
+    raw: undefined as never,
+    migrations: MIGRATIONS,
+    lock: undefined as never,
+    relaunchThrows: false,
+  };
+  wire(s);
+  return s;
+}
+
+/** The handlers main.ts registers, with only the picker and the restart replaced. */
+function wire(s: Shop): void {
+  // Exactly as main.ts builds it: engaged on staging, and by a journal on disk.
+  s.lock = new RestoreLock(() => existsSync(join(s.userData, "restore", "journal.json")));
+  const actions = createBackupRestoreActions({
+    userDataDir: s.userData,
+    ledger: () => s.h.db,
+    appVersion: "0.1.1",
+    // One second per call: two exports in the same second would (correctly) be refused as
+    // DESTINATION_EXISTS, since a package folder is named after its time and never overwritten.
+    now: () => new Date(NOW.getTime() + 1000 * tick++),
+    chooseFolder: (purpose) => {
+      s.calls.pickers++;
+      return s.picked[purpose];
+    },
+    relaunch: () => {
+      s.calls.relaunches++;
+      if (s.relaunchThrows) throw new Error("relaunch refused by the OS");
+    },
+    lock: s.lock,
+    log: nullLogger,
+    migrations: s.migrations,
+  });
+  s.raw = createIpcHandlers(s.h.service, {
+    backupRestore: actions,
+    restoreLock: s.lock,
+    invoices: s.h.invoices,
+    parties: s.h.parties,
+    ledger: s.h.ledger,
+  });
+  s.ipc = syncHandlers(s.raw);
+}
+
+function seed(s: Shop): void {
+  const vault: LogoVault = {
+    freeze(storedName) {
+      const bytes = readFileSync(join(s.userData, "branding", storedName));
+      const name = `${sha(bytes).slice(0, 32)}.png`;
+      mkdirSync(join(s.userData, "branding", "frozen"), { recursive: true });
+      writeFileSync(join(s.userData, "branding", "frozen", name), bytes);
+      return name;
+    },
+  };
+  mkdirSync(join(s.userData, "branding"), { recursive: true });
+  writeFileSync(join(s.userData, "branding", "invoice-logo.png"), "SHOP A LOGO");
+  writeFileSync(join(s.userData, "settings.json"), JSON.stringify({ terminalLanguage: "ar" }));
+  for (let i = 0; i < 3; i++) {
+    s.h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: 199n });
+  }
+  s.h.invoices.saveCompanyProfile({ nameAr: "متجر أ", logoPath: "invoice-logo.png" });
+  const svc = new InvoiceService({
+    invoices: new InvoiceRepository(s.h.db),
+    reconciliation: new ReconciliationRepository(s.h.db),
+    company: s.h.companyStore,
+    catalogStore: new CatalogRepository(s.h.db),
+    products: s.h.service,
+    sales: new SaleRepository(s.h.db),
+    logoVault: vault,
+    transact: (fn) => s.h.db.transaction(fn).immediate(),
+    terminal: FIXTURE_TERMINAL,
+    now: s.h.clock.now,
+  });
+  const { invoice } = svc.createDraft();
+  svc.addLine(invoice.id, { description: "صنف", unitLabel: "حبة", quantity: "1", unitPrice: "10.00", productId: null });
+  svc.finalizeInvoice(invoice.id);
+  const c = s.h.parties.create({ kind: "customer", displayName: "محمد علي" }).party;
+  const owe = (ref: string, minor: bigint) =>
+    s.h.ledger.postObligation({ partyId: c.id, direction: "receivable", sourceKind: "manual", sourceRef: ref, currency: "USD", amountMinor: minor }).record;
+  const a = owe("A", 6000n);
+  const b = owe("B", 4000n);
+  s.h.ledger.recordAllocatedReceipt(receiptReq(c.id, a.id, b.id));
+}
+
+function receiptReq(customerId: string, a: string, b: string) {
+  return {
+    customerId,
+    idempotencyKey: "receipt-key-0001",
+    channel: "whish",
+    reference: "WH-123",
+    fundsConfirmed: true,
+    currency: "USD",
+    totalMinor: 10000n,
+    allocations: [
+      { obligationId: a, amountMinor: 6000n },
+      { obligationId: b, amountMinor: 4000n },
+    ],
+  };
+}
+
+const data = <T>(r: unknown): T => {
+  const res = r as { ok: boolean; data?: T; error?: unknown };
+  if (!res.ok) throw new Error(`expected ok, got ${JSON.stringify(res.error)}`);
+  return res.data as T;
+};
+const code = (r: unknown) => ((r as { ok: boolean; error?: { code: string } }).ok ? null : (r as { error: { code: string } }).error.code);
+
+/** Exports shop `s` to a USB-like folder and returns the package folder. */
+function exportPackage(s: Shop): string {
+  const usb = join(t.dir, "ذاكرة USB", "نسخ احتياطية");
+  mkdirSync(usb, { recursive: true });
+  s.picked["export-backup"] = usb;
+  const r = data<FullBackupExportResponse>(s.ipc.exportFullBackup(undefined));
+  if (r.status !== "saved") throw new Error(`export failed: ${JSON.stringify(r)}`);
+  return join(r.location, r.folderName);
+}
+
+const MONEY = ["sales", "sale_lines", "invoices", "invoice_lines", "parties", "obligations", "settlements", "receipts", "receipt_attempts", "receipt_attempt_lines"];
+function rows(path: string) {
+  const db = new Database(path, { readonly: true, fileMustExist: true });
+  db.defaultSafeIntegers(true);
+  try {
+    return Object.fromEntries(MONEY.map((tb) => [tb, db.prepare(`SELECT * FROM ${tb} ORDER BY rowid`).all()]));
+  } finally {
+    db.close();
+  }
+}
+
+const journal = (s: Shop) => existsSync(join(s.userData, "restore", "journal.json"));
+const realLedgerFs = { exists: existsSync, writeAtomic: (p: string, c: string) => writeFileSync(p, c) };
+
+const opened: Shop[] = [];
+beforeEach(() => {
+  t = tempDir();
+});
+afterEach(() => {
+  for (const s of opened.splice(0)) {
+    try {
+      s.h.db.close();
+    } catch {
+      // already closed by a simulated restart
+    }
+  }
+  t.cleanup();
+});
+const open = (name: string) => {
+  const s = shop(name);
+  opened.push(s);
+  return s;
+};
+
+// ── Tests ─────────────────────────────────────────────────────────────────────────────────────
+
+describe("full backup — owner, through the real channel", () => {
+  it("writes a complete, verifiable package into the chosen folder (Arabic and spaces in every path)", () => {
+    const a = open("بيانات المحل أ");
+    seed(a);
+    const dir = exportPackage(a);
+    expect(dir).toContain("ذاكرة USB");
+    const verified = verifyBackupPackage(dir);
+    expect(verified.complete).toBe(true);
+    expect(verified.manifest.tableCounts.receipts).toBe(1);
+    const r = data<FullBackupExportResponse>(a.ipc.exportFullBackup(undefined));
+    expect(r).toMatchObject({ status: "saved", complete: true, missingAssets: [], settings: "included" });
+  });
+
+  it("the owner cancelling the picker writes nothing and is not an error", () => {
+    const a = open("shop a");
+    a.picked["export-backup"] = null;
+    expect(data(a.ipc.exportFullBackup(undefined))).toEqual({ status: "cancelled" });
+  });
+
+  it("a folder inside the program's own data folder is refused, and nothing is written there", () => {
+    const a = open("shop a");
+    a.picked["export-backup"] = a.userData;
+    expect(data(a.ipc.exportFullBackup(undefined))).toEqual({ status: "failed", reason: "IN_APP_FOLDER" });
+    expect(readdirSync(a.userData).some((n) => n.startsWith("alzabt-pos-fullbackup-"))).toBe(false);
+  });
+});
+
+describe("🔴 a cashier is refused on all three channels — before any picker opens", () => {
+  it("exportFullBackup, inspectRestoreBackup and applyRestore answer NOT_AUTHORIZED", () => {
+    const a = open("shop a");
+    seed(a);
+    a.picked["export-backup"] = join(t.dir, "usb");
+    a.picked["restore-backup"] = join(t.dir, "usb");
+    a.ipc.login({ cashierId: "cashier-02", pin: "2222" });
+    expect(code(a.ipc.exportFullBackup(undefined))).toBe("NOT_AUTHORIZED");
+    expect(code(a.ipc.inspectRestoreBackup(undefined))).toBe("NOT_AUTHORIZED");
+    expect(code(a.ipc.applyRestore({ manifestSha256: "0".repeat(64), acceptMissingAssets: false }))).toBe("NOT_AUTHORIZED");
+    expect(a.calls.pickers).toBe(0);
+    expect(a.calls.relaunches).toBe(0);
+    expect(existsSync(join(t.dir, "usb"))).toBe(false);
+  });
+
+  it("the second lock: PosService.assertOwner refuses a cashier on its own", () => {
+    const a = open("shop a");
+    a.ipc.login({ cashierId: "cashier-02", pin: "2222" });
+    expect(() => a.h.service.assertOwner()).toThrow(/Only the shop owner/);
+  });
+
+  it("a malformed applyRestore payload is refused before anything is looked at", () => {
+    const a = open("shop a");
+    expect(code(a.ipc.applyRestore({ manifestSha256: "0".repeat(64), acceptMissingAssets: false, packageDir: "/tmp" }))).toBe("INVALID_INPUT");
+    expect(code(a.ipc.applyRestore({ manifestSha256: "not-a-hash", acceptMissingAssets: false }))).toBe("INVALID_INPUT");
+    expect(code(a.ipc.applyRestore({ manifestSha256: "0".repeat(64), acceptMissingAssets: "yes" }))).toBe("INVALID_INPUT");
+    expect(a.calls.relaunches).toBe(0);
+  });
+});
+
+describe("🔴 restore — preview, consent, stage, restart, open", () => {
+  it("previewing stages NOTHING; confirming stages and restarts once; the next start restores; the ledger opens with the backup's money", () => {
+    const a = open("بيانات المحل أ");
+    seed(a);
+    const pkg = exportPackage(a);
+    const aLedger = rows(join(pkg, "ledger.sqlite"));
+
+    const b = open("بيانات المحل ب");
+    b.h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: 199n });
+    writeFileSync(join(b.userData, "ledger.json"), JSON.stringify({ ledgerFile: LIVE_LEDGER_FILE }));
+    const markerBefore = readFileSync(join(b.userData, "ledger.json"));
+    b.picked["restore-backup"] = pkg;
+
+    const inspected = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    expect(inspected.status).toBe("ready");
+    if (inspected.status !== "ready") return;
+    expect(inspected.preview).toMatchObject({
+      complete: true,
+      missingAssets: [],
+      schemaVersion: MIGRATIONS.length,
+      appSchemaVersion: MIGRATIONS.length,
+      settings: "included",
+      counts: { sales: 4, invoices: 1, receipts: 1, obligations: 2, settlements: 2 },
+    });
+    expect(journal(b)).toBe(false); // a preview is not a restore
+    expect(b.calls.relaunches).toBe(0);
+
+    expect(data<ApplyRestoreResponse>(b.ipc.applyRestore({ manifestSha256: inspected.preview.manifestSha256, acceptMissingAssets: false }))).toEqual({ status: "staged" });
+    expect(b.calls.relaunches).toBe(1);
+    expect(journal(b)).toBe(true);
+
+    // ── The restart: main closes the ledger, and the next start runs the engine first. ──
+    b.h.db.close();
+    const outcome = runPendingRestore({ userDataDir: b.userData, now: NOW, log: nullLogger });
+    expect(outcome.kind).toBe("restored");
+    const plan = planLedgerOpen(b.userData, realLedgerFs);
+    expect(plan.existing).toBe(true);
+    expect(readFileSync(join(b.userData, "ledger.json"))).toEqual(markerBefore); // marker untouched
+    const db = openDatabase(plan.ledgerPath, MIGRATIONS, { fileMustExist: true });
+    db.close();
+    expect(rows(plan.ledgerPath)).toEqual(aLedger);
+
+    // The same receipt key on the restored ledger is a duplicate — no second receipt.
+    b.h = makeHarness(plan.ledgerPath);
+    const c = b.h.db.prepare("SELECT id FROM parties").get() as { id: string };
+    const [oa, ob] = b.h.db.prepare("SELECT id FROM obligations ORDER BY source_ref").all() as Array<{ id: string }>;
+    const before = Number((b.h.db.prepare("SELECT count(*) AS n FROM receipts").get() as { n: bigint }).n);
+    expect(b.h.ledger.recordAllocatedReceipt(receiptReq(c.id, oa!.id, ob!.id)).duplicate).toBe(true);
+    expect(Number((b.h.db.prepare("SELECT count(*) AS n FROM receipts").get() as { n: bigint }).n)).toBe(before);
+
+    // The pre-restore copy is kept, and it is shop B's own ledger.
+    const kept = readdirSync(join(b.userData, "restore")).find((n) => n.startsWith("pre-restore-"))!;
+    const old = new Database(join(b.userData, "restore", kept, LIVE_LEDGER_FILE), { readonly: true });
+    expect(Number((old.prepare("SELECT count(*) AS n FROM sales").get() as { n: number }).n)).toBe(1);
+    old.close();
+  });
+
+  it("refusals: no preview, a different hash, a package REPLACED after preview — nothing staged, no restart", () => {
+    const a = open("shop a");
+    seed(a);
+    const pkg = exportPackage(a);
+    const b = open("shop b");
+    expect(data(b.ipc.applyRestore({ manifestSha256: "0".repeat(64), acceptMissingAssets: false }))).toEqual({
+      status: "refused",
+      reason: "NO_PREVIEW",
+      detail: null,
+    });
+    b.picked["restore-backup"] = pkg;
+    const p = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    if (p.status !== "ready") throw new Error("not ready");
+    expect(data(b.ipc.applyRestore({ manifestSha256: "f".repeat(64), acceptMissingAssets: false }))).toMatchObject({ reason: "PREVIEW_MISMATCH" });
+
+    // Swap the folder's contents for ANOTHER valid backup, same path, after the preview.
+    a.h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: 199n });
+    const other = exportPackage(a);
+    rmSync(pkg, { recursive: true });
+    cpSync(other, pkg, { recursive: true });
+    expect(data(b.ipc.applyRestore({ manifestSha256: p.preview.manifestSha256, acceptMissingAssets: false }))).toMatchObject({ status: "refused", reason: "CHANGED" });
+    expect(journal(b)).toBe(false);
+    expect(b.calls.relaunches).toBe(0);
+  });
+
+  it("refusals at preview: damaged, unpublished, newer than this build", () => {
+    const a = open("shop a");
+    seed(a);
+    const pkg = exportPackage(a);
+    const b = open("shop b");
+
+    const damaged = join(t.dir, "damaged copy");
+    cpSync(pkg, damaged, { recursive: true });
+    writeFileSync(join(damaged, "settings.json"), "{}");
+    b.picked["restore-backup"] = damaged;
+    expect(data(b.ipc.inspectRestoreBackup(undefined))).toEqual({ status: "refused", reason: "DAMAGED", detail: "CHECKSUM_MISMATCH" });
+
+    const partial = join(t.dir, `pkg.partial-${"a".repeat(12)}`);
+    cpSync(pkg, partial, { recursive: true });
+    b.picked["restore-backup"] = partial;
+    expect(data(b.ipc.inspectRestoreBackup(undefined))).toMatchObject({ status: "refused", reason: "UNPUBLISHED" });
+
+    b.migrations = MIGRATIONS.slice(0, -1);
+    wire(b);
+    b.picked["restore-backup"] = pkg;
+    expect(data(b.ipc.inspectRestoreBackup(undefined))).toEqual({ status: "refused", reason: "NEWER_THAN_APP", detail: "SCHEMA_NEWER" });
+    expect(journal(b)).toBe(false);
+  });
+
+  it("🔴 an INCOMPLETE backup: refused without explicit acceptance, staged with it", () => {
+    const a = open("shop a");
+    seed(a);
+    for (const f of readdirSync(join(a.userData, "branding", "frozen"))) rmSync(join(a.userData, "branding", "frozen", f));
+    const pkg = exportPackage(a);
+    const b = open("shop b");
+    b.picked["restore-backup"] = pkg;
+    const p = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    if (p.status !== "ready") throw new Error("not ready");
+    expect(p.preview.complete).toBe(false);
+    expect(p.preview.missingAssets).toEqual([expect.objectContaining({ kind: "frozen-logo", reason: "absent-at-source" })]);
+
+    expect(data(b.ipc.applyRestore({ manifestSha256: p.preview.manifestSha256, acceptMissingAssets: false }))).toMatchObject({ reason: "MISSING_NOT_ACCEPTED" });
+    expect(journal(b)).toBe(false);
+    expect(data(b.ipc.applyRestore({ manifestSha256: p.preview.manifestSha256, acceptMissingAssets: true }))).toEqual({ status: "staged" });
+    expect(journal(b)).toBe(true);
+    // 🔴 TRANSITION (P0 lock). This used to inspect AGAIN and expect `RESTORE_PENDING` from apply.
+    // Once staged, the lock now refuses even the inspection — no second restore can begin at all.
+    b.picked["restore-backup"] = pkg;
+    expect(code(b.ipc.inspectRestoreBackup(undefined))).toBe("NOT_AVAILABLE");
+    expect(code(b.ipc.applyRestore({ manifestSha256: p.preview.manifestSha256, acceptMissingAssets: true }))).toBe("NOT_AVAILABLE");
+    expect(b.calls.relaunches).toBe(1);
+  });
+
+  it("a restore folder chosen INSIDE the program's data folder is refused with its own reason", () => {
+    const b = open("shop b");
+    mkdirSync(join(b.userData, "some folder"));
+    b.picked["restore-backup"] = join(b.userData, "some folder");
+    expect(data(b.ipc.inspectRestoreBackup(undefined))).toEqual({ status: "refused", reason: "IN_APP_FOLDER", detail: null });
+  });
+});
+
+describe("🔴 P0 — after a restore is staged, nothing can change the data until the restart", () => {
+  const n = (s: Shop, table: string) => Number((s.h.db.prepare(`SELECT count(*) AS c FROM ${table}`).get() as { c: bigint }).c);
+  const MONEY_COUNTS = ["sales", "voids", "invoices", "obligations", "settlements", "receipts", "parties", "catalog_products", "operators"];
+  const snapshot = (s: Shop) => Object.fromEntries(MONEY_COUNTS.map((tb) => [tb, n(s, tb)]));
+
+  function stagedShop(): Shop {
+    const a = open("shop a");
+    seed(a);
+    const pkg = exportPackage(a);
+    const b = open("بيانات المحل ب");
+    seed(b);
+    b.picked["restore-backup"] = pkg;
+    const p = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    if (p.status !== "ready") throw new Error("not ready");
+    expect(data(b.ipc.applyRestore({ manifestSha256: p.preview.manifestSha256, acceptMissingAssets: false }))).toEqual({ status: "staged" });
+    return b;
+  }
+
+  it("🔴 EVERY channel except three reads is refused — derived from the whole contract, not a hand list", async () => {
+    const b = stagedShop();
+    const before = snapshot(b);
+    const answered: string[] = [];
+    for (const name of CHANNEL_NAMES) {
+      const r = await (b.raw[name] as (p: unknown) => unknown)(undefined);
+      if (RESTORE_LOCK_READS.has(name)) {
+        expect((r as { ok: boolean }).ok, name).toBe(true);
+        answered.push(name);
+      } else {
+        expect(code(r), name).toBe("NOT_AVAILABLE");
+      }
+    }
+    expect(answered.sort()).toEqual(["currentCashier", "getAppInfo", "getSettings"]);
+    expect(snapshot(b)).toEqual(before);
+  });
+
+  it("🔴 real, well-formed money writes are refused too — a sale, a collection, a shared receipt", () => {
+    const b = stagedShop();
+    const before = snapshot(b);
+    const c = b.h.db.prepare("SELECT id FROM parties LIMIT 1").get() as { id: string };
+    const ob = b.h.db.prepare("SELECT id FROM obligations LIMIT 1").get() as { id: string };
+    expect(code(b.ipc.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: "199" }))).toBe("NOT_AVAILABLE");
+    expect(code(b.ipc.recordCustomerPayment({ customerId: c.id, obligationId: ob.id, idempotencyKey: newKey(), amountMinor: "100", channel: "cash", reference: null, fundsConfirmed: true }))).toBe("NOT_AVAILABLE");
+    expect(code(b.ipc.recordAllocatedReceipt({ customerId: c.id, idempotencyKey: "receipt-key-0099", channel: "whish", reference: "WH-9", fundsConfirmed: true, currency: "USD", totalMinor: "100", allocations: [] }))).toBe("NOT_AVAILABLE");
+    expect(snapshot(b)).toEqual(before);
+  });
+
+  /**
+   * 🔴 MEASURED, AND IT CORRECTED THE FIRST VERSION OF THIS TEST. Cash sales, voids, catalog imports
+   * and PIN state commit through their REPOSITORIES' own transactions, not main's providers — so
+   * the provider guard does NOT cover them, and a test that used `createSale` here failed. Those
+   * writes are reachable only through IPC, where the IPC gate refuses them (tests above). The phone
+   * server, the one caller that bypasses IPC, writes only through `savePhoneProduct`, whose
+   * transaction IS the provider (`requireAuditedStack().transact`) — represented here by a product
+   * write on that same provider.
+   */
+  it("🔴 the phone path writes through the service's transaction provider — guarded the same way, no IPC involved", () => {
+    const u = join(t.dir, "phone path");
+    mkdirSync(u);
+    const lock = new RestoreLock(() => false);
+    const h = makeHarness(join(u, LIVE_LEDGER_FILE), {
+      // main.ts's provider, verbatim in shape: check the lock, then BEGIN IMMEDIATE.
+      serviceTransact: (db, fn) => {
+        lock.assertOpen();
+        return db.transaction(fn).immediate();
+      },
+    });
+    try {
+      let i = 0;
+      const product = () => h.service.createProduct({ nameAr: "صنف", nameEn: "Item", sku: `SYN-${++i}`, price: "4.00", baseUnit: "piece" });
+      const count = () => Number((h.db.prepare("SELECT count(*) AS c FROM catalog_products").get() as { c: bigint }).c);
+      product(); // normal before staging
+      const before = count();
+      lock.engage();
+      expect(product).toThrow(/restore is waiting/);
+      expect(count()).toBe(before);
+    } finally {
+      h.db.close();
+    }
+  });
+
+  it("🔴 the phone surface reaches the service through exactly two calls — one read, and savePhoneProduct on the provider", () => {
+    const strip = (x: string) => x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    const phone = ["src/main/phoneSessionBridge.ts", "src/main/phoneSessionServer.ts"].map((f) => strip(readFileSync(f, "utf8"))).join("\n");
+    const calls = [...new Set([...phone.matchAll(/\bservice\.([a-zA-Z]+)\(/g)].map((m) => m[1]))].sort();
+    expect(calls).toEqual(["phoneSessionForm", "savePhoneProduct"]);
+    const pos = strip(readFileSync("src/application/posService.ts", "utf8"));
+    const save = pos.slice(pos.indexOf("savePhoneProduct("), pos.indexOf("savePhoneProduct(") + 3000);
+    expect(save).toContain("this.requireAuditedStack()");
+  });
+
+  it("🔴 main.ts checks the lock in EVERY transaction provider it hands out", () => {
+    const main = readFileSync("src/main/main.ts", "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    const providers = main.match(/transact: \(fn\) => \{[^}]*\}/g) ?? [];
+    expect(providers.length).toBe(5);
+    for (const p of providers) expect(p).toMatch(/restoreLock\.assertOpen\(\);[\s\S]*\.transaction\(fn\)\.immediate\(\)/);
+    expect(main.match(/\.transaction\(fn\)\.immediate\(\)/g)).toHaveLength(5);
+  });
+
+  it("normal operation is untouched while nothing is staged — including after a REFUSED restore", () => {
+    const b = open("shop b");
+    const sale = () => b.ipc.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: "199" });
+    expect(code(sale())).toBeNull();
+    expect(data(b.ipc.applyRestore({ manifestSha256: "0".repeat(64), acceptMissingAssets: false }))).toMatchObject({ reason: "NO_PREVIEW" });
+    expect(b.lock.engaged).toBe(false);
+    expect(code(sale())).toBeNull();
+    expect(n(b, "sales")).toBe(2);
+  });
+
+  it("🔴 a FAILED restart: still staged, still locked, and the next start restores", () => {
+    const a = open("shop a");
+    seed(a);
+    const pkg = exportPackage(a);
+    const b = open("shop b");
+    b.relaunchThrows = true;
+    b.picked["restore-backup"] = pkg;
+    const p = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    if (p.status !== "ready") throw new Error("not ready");
+    expect(data(b.ipc.applyRestore({ manifestSha256: p.preview.manifestSha256, acceptMissingAssets: false }))).toEqual({ status: "staged" });
+    expect(b.calls.relaunches).toBe(1);
+    expect(b.lock.engaged).toBe(true);
+    expect(code(b.ipc.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: "199" }))).toBe("NOT_AVAILABLE");
+    // A brand-new lock in the same profile (another process) is engaged by the journal alone.
+    expect(new RestoreLock(() => existsSync(join(b.userData, "restore", "journal.json"))).engaged).toBe(true);
+    // The owner closes the program by hand; the next start runs the restore first.
+    b.h.db.close();
+    expect(runPendingRestore({ userDataDir: b.userData, now: NOW, log: nullLogger }).kind).toBe("restored");
+  });
+
+  it("the restart is never asked for before staging has SUCCEEDED (every refusal leaves it at zero)", () => {
+    const b = open("shop b");
+    b.picked["restore-backup"] = join(t.dir, "nothing here");
+    mkdirSync(join(t.dir, "nothing here"));
+    expect(data(b.ipc.inspectRestoreBackup(undefined))).toMatchObject({ status: "refused" });
+    expect(data(b.ipc.applyRestore({ manifestSha256: "0".repeat(64), acceptMissingAssets: true }))).toMatchObject({ status: "refused" });
+    expect(b.calls.relaunches).toBe(0);
+    expect(b.lock.engaged).toBe(false);
+  });
+});

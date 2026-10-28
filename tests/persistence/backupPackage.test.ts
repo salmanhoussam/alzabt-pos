@@ -116,7 +116,8 @@ function seedShop(): { frozenName: string } {
     });
   }
 
-  // Legacy invoice: the profile named old-logo.png and the freeze FAILED, so it resolves the live file.
+  // Legacy invoice: the profile named old-logo.png and the freeze FAILED. It prints no logo now
+  // (`unverified`), so old-logo.png is NOT a required file of the backup.
   h.invoices.saveCompanyProfile({ nameAr: "متجر اختباري", logoPath: "old-logo.png" });
   finalizeInvoice(realVault(true));
   // Current invoice: frozen.
@@ -235,13 +236,16 @@ describe("createFullBackup — a complete package of a live shop", () => {
       [
         "ledger:ledger.sqlite",
         `frozen-logo:branding/frozen/${frozenName}`,
-        "live-logo:branding/live/old-logo.png",
+        // 🔴 TRANSITION (phase 3): "live-logo:branding/live/old-logo.png" was listed here — the
+        // legacy invoice's live file. It is no longer required: that invoice prints no logo now
+        // (`unverified`), so the package carries only the shop's CURRENT live logo.
         "live-logo:branding/live/shop-logo.png",
         "settings:settings.json",
       ].sort(),
     );
     expect(readFileSync(join(out, "pkg", "branding", "frozen", frozenName))).toEqual(PNG_A);
-    expect(readFileSync(join(out, "pkg", "branding", "live", "old-logo.png"))).toEqual(PNG_OLD);
+    expect(readFileSync(join(out, "pkg", "branding", "live", "shop-logo.png"))).toEqual(PNG_A);
+    expect(existsSync(join(out, "pkg", "branding", "live", "old-logo.png"))).toBe(false);
     // Nothing but the package itself in the destination's parent: no partial folder left behind.
     expect(readdirSync(out)).toEqual(["pkg"]);
     // And it verifies from disk, independently of the object that created it.
@@ -363,11 +367,36 @@ describe("missing and optional files — recorded, never hidden", () => {
     expect(existsSync(join(out, "pkg", "branding", "frozen", frozenName))).toBe(false);
   });
 
-  it("a legacy invoice's live logo absent at the source is recorded as a missing live-logo", () => {
+  // 🔴 TRANSITION (phase 3). This test used to read "a legacy invoice's live logo absent at the
+  // source is recorded as a missing live-logo" and expected { live-logo, old-logo.png,
+  // absent-at-source }. That file is no longer printed for any invoice, so its absence no longer
+  // makes a backup incomplete — required here is now exactly what is printed there.
+  it("🔴 an OLD invoice's never-archived logo absent at the source: the backup is still COMPLETE", () => {
     seedShop();
     rmSync(join(userData, "branding", "old-logo.png"));
     const created = backup();
-    expect(created.manifest.missingAssets).toEqual([{ kind: "live-logo", name: "old-logo.png", reason: "absent-at-source" }]);
+    expect(created.complete).toBe(true);
+    expect(created.manifest.missingAssets).toEqual([]);
+    expect(verifyBackupPackage(join(out, "pkg")).complete).toBe(true);
+  });
+
+  it("🔴 the shop's CURRENT logo absent at the source is still a missing live-logo (incomplete)", () => {
+    seedShop();
+    rmSync(join(userData, "branding", "shop-logo.png"));
+    const created = backup();
+    expect(created.complete).toBe(false);
+    expect(created.manifest.missingAssets).toEqual([{ kind: "live-logo", name: "shop-logo.png", reason: "absent-at-source" }]);
+  });
+
+  it("a package cannot smuggle the old invoice's logo back in: a declared file the ledger does not require is refused", () => {
+    seedShop();
+    const pkg = backup().path;
+    mkdirSync(join(pkg, "branding", "live"), { recursive: true });
+    writeFileSync(join(pkg, "branding", "live", "old-logo.png"), PNG_OLD);
+    resign(pkg, (m) => {
+      m.files = [...m.files, { path: "branding/live/old-logo.png", role: "live-logo", size: 0, sha256: "0".repeat(64) }];
+    });
+    expect(refusal(() => verifyBackupPackage(pkg))).toBe("REFERENCE_MISMATCH");
   });
 
   it("a referenced name that is not a safe file name is never joined to a path: unsafe-name", () => {
@@ -437,13 +466,13 @@ describe("files that change while they are being copied", () => {
       },
     };
   }
-  const isLive = (p: string) => p === join(userData, "branding", "old-logo.png");
+  const isLive = (p: string) => p === join(userData, "branding", "shop-logo.png");
 
   it("a live logo replaced once mid-copy is copied again, and the package holds the settled bytes", () => {
     seedShop();
     const created = backup({ fs: churning(isLive, 1) });
     expect(created.complete).toBe(true);
-    expect(readFileSync(join(out, "pkg", "branding", "live", "old-logo.png")).toString()).toBe("replaced-while-copying-1");
+    expect(readFileSync(join(out, "pkg", "branding", "live", "shop-logo.png")).toString()).toBe("replaced-while-copying-1");
     expect(verifyBackupPackage(join(out, "pkg")).complete).toBe(true);
   });
 
@@ -451,8 +480,8 @@ describe("files that change while they are being copied", () => {
     seedShop();
     const created = backup({ fs: churning(isLive, Number.POSITIVE_INFINITY) });
     expect(created.complete).toBe(false);
-    expect(created.manifest.missingAssets).toEqual([{ kind: "live-logo", name: "old-logo.png", reason: "changed-during-backup" }]);
-    expect(existsSync(join(out, "pkg", "branding", "live", "old-logo.png"))).toBe(false);
+    expect(created.manifest.missingAssets).toEqual([{ kind: "live-logo", name: "shop-logo.png", reason: "changed-during-backup" }]);
+    expect(existsSync(join(out, "pkg", "branding", "live", "shop-logo.png"))).toBe(false);
     expect(verifyBackupPackage(join(out, "pkg")).complete).toBe(false);
   });
 
@@ -502,7 +531,7 @@ describe("verifyBackupPackage — refusals", () => {
   });
 
   it("a missing listed file → MISSING_FILE", () => {
-    rmSync(join(pkg, "branding", "live", "old-logo.png"));
+    rmSync(join(pkg, "branding", "live", "shop-logo.png"));
     expect(refusal(() => verifyBackupPackage(pkg))).toBe("MISSING_FILE");
   });
 
@@ -574,8 +603,8 @@ describe("verifyBackupPackage — refusals", () => {
 
   it("the same file listed twice, differing only in case → DUPLICATE_ENTRY", () => {
     const m = manifestOf(pkg);
-    const live = m.files.find((f) => f.path === "branding/live/old-logo.png")!;
-    writeManifest(pkg, { ...m, files: [...m.files, { ...live, path: "branding/live/OLD-logo.png" }] });
+    const live = m.files.find((f) => f.path === "branding/live/shop-logo.png")!;
+    writeManifest(pkg, { ...m, files: [...m.files, { ...live, path: "branding/live/SHOP-logo.png" }] });
     expect(refusal(() => verifyBackupPackage(pkg))).toBe("DUPLICATE_ENTRY");
   });
 
@@ -595,8 +624,8 @@ describe("verifyBackupPackage — refusals", () => {
 
   it("a symlink anywhere in the package — or the package itself — → SYMLINK", () => {
     const target = join(userData, "branding", "shop-logo.png");
-    rmSync(join(pkg, "branding", "live", "old-logo.png"));
-    symlinkSync(target, join(pkg, "branding", "live", "old-logo.png"));
+    rmSync(join(pkg, "branding", "live", "shop-logo.png"));
+    symlinkSync(target, join(pkg, "branding", "live", "shop-logo.png"));
     expect(refusal(() => verifyBackupPackage(pkg))).toBe("SYMLINK");
     const link = join(out, "link-to-pkg");
     symlinkSync(pkg, link);
@@ -604,7 +633,7 @@ describe("verifyBackupPackage — refusals", () => {
   });
 
   it("an oversized logo → TOO_LARGE, decided from its size before it is hashed", () => {
-    writeFileSync(join(pkg, "branding", "live", "old-logo.png"), Buffer.alloc(LIMITS.assetBytes + 1));
+    writeFileSync(join(pkg, "branding", "live", "shop-logo.png"), Buffer.alloc(LIMITS.assetBytes + 1));
     resign(pkg);
     expect(refusal(() => verifyBackupPackage(pkg))).toBe("TOO_LARGE");
   });
@@ -710,7 +739,7 @@ describe("createFullBackup — failure never publishes a package", () => {
       ...nodeBackupFs,
       sha256(p) {
         const r = nodeBackupFs.sha256(p);
-        if (p.endsWith(rel("live", "old-logo.png")) && p.includes(".partial-") && ++copyHashes === 2) {
+        if (p.endsWith(rel("live", "shop-logo.png")) && p.includes(".partial-") && ++copyHashes === 2) {
           writeFileSync(p, "changed after hashing");
         }
         return r;

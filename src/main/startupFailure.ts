@@ -10,7 +10,8 @@
  */
 import { BackupError } from "../persistence/backup";
 import { MigrationMismatchError, SchemaNewerThanAppError } from "../persistence/db";
-import { LedgerMissingError } from "./ledgerGuard";
+import { LedgerMissingError, LedgerRestorePendingError } from "./ledgerGuard";
+import { RestoreHaltedError } from "./restoreStartup";
 
 export type StartupFailureCode =
   | "DB_NEWER_THAN_APP"
@@ -19,6 +20,8 @@ export type StartupFailureCode =
   | "DB_UNAVAILABLE"
   | "LEDGER_MISSING"
   | "BACKUP_FAILED"
+  /** A backup restore could neither be finished nor undone, or is still undecided. */
+  | "RESTORE_INCOMPLETE"
   | "STARTUP_FAILED";
 
 const SQLITE_CORRUPT = new Set(["SQLITE_CORRUPT", "SQLITE_NOTADB"]);
@@ -34,6 +37,7 @@ export function classifyStartupError(err: unknown): StartupFailureCode {
   if (err instanceof MigrationMismatchError) return "DB_MIGRATION_MISMATCH";
   if (err instanceof LedgerMissingError) return "LEDGER_MISSING";
   if (err instanceof BackupError) return "BACKUP_FAILED";
+  if (err instanceof RestoreHaltedError || err instanceof LedgerRestorePendingError) return "RESTORE_INCOMPLETE";
   const code = codeOf(err);
   if (SQLITE_CORRUPT.has(code) || code.startsWith("SQLITE_CORRUPT")) return "DB_CORRUPT";
   if (UNAVAILABLE.has(code) || code.startsWith("SQLITE_IOERR") || code.startsWith("SQLITE_CANTOPEN")) return "DB_UNAVAILABLE";
@@ -65,6 +69,10 @@ const DETAIL: Record<StartupFailureCode, { en: string; ar: string }> = {
     en: "A safety backup could not be made before updating the database, so the update was not applied.",
     ar: "تعذّر إنشاء نسخة احتياطية قبل تحديث قاعدة البيانات، لذلك لم يُطبَّق التحديث.",
   },
+  RESTORE_INCOMPLETE: {
+    en: "A backup restore could not be finished or undone safely, so the till was not opened. Nothing was deleted: the data from before the restore is kept in the program's restore folder.",
+    ar: "تعذّر إكمال استعادة النسخة الاحتياطيّة أو التراجع عنها بأمان، لذلك لم يُفتح البرنامج. لم يُحذف شيء: البيانات التي كانت قبل الاستعادة محفوظة في مجلّد الاستعادة داخل بيانات البرنامج.",
+  },
   STARTUP_FAILED: {
     en: "An unexpected error occurred while starting.",
     ar: "حدث خطأ غير متوقع أثناء التشغيل.",
@@ -78,16 +86,19 @@ export interface StartupFailureMessage {
 
 export function startupFailureMessage(code: StartupFailureCode, buildLabel: string): StartupFailureMessage {
   const d = DETAIL[code];
+  // 🔴 "NOT MODIFIED" IS FALSE MID-RESTORE: files were moved aside. That case says what IS true
+  // (nothing was deleted, and where the old data is) instead of reusing the generic reassurance.
+  const restore = code === "RESTORE_INCOMPLETE";
   return {
     title: "Alzabt POS — cannot start",
     body: [
       "Alzabt POS could not open its local database.",
-      "Your sales data was not modified.",
+      ...(restore ? [] : ["Your sales data was not modified."]),
       d.en,
       "Please contact support.",
       "",
       "تعذّر على Alzabt POS فتح قاعدة البيانات المحلية.",
-      "لم يتم تعديل بيانات المبيعات.",
+      ...(restore ? [] : ["لم يتم تعديل بيانات المبيعات."]),
       d.ar,
       "يرجى التواصل مع الدعم.",
       "",

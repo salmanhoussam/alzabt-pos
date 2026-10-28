@@ -174,6 +174,12 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   exportOnlineCatalog: "owner",
   // 🔴 The export is EVERY sale the shop ever made. A data-exfiltration surface, not a convenience.
   exportBackup: "owner",
+  // Track 2. A full backup carries every sale, debt and receipt PLUS the shop's logos; a restore
+  // replaces all of them with an older state and restarts the till. Owner, and the service checks
+  // again (`PosService.assertOwner`) before main touches a dialog.
+  exportFullBackup: "owner",
+  inspectRestoreBackup: "owner",
+  applyRestore: "owner",
   // The shop's legal identity and its invoice numbering.
   getCompanyProfile: "owner",
   saveCompanyProfile: "owner",

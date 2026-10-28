@@ -218,8 +218,8 @@ describe("what the renderer cannot send", () => {
     const id = ok<{ invoice: { id: string } }>(ipc.createInvoiceDraft(undefined)).invoice.id;
     const handlers = createIpcHandlers(h.service, {
       invoices: h.invoices,
-      printInvoice: async () => ({ status: "printed" as const, logoMissing: false }),
-      saveInvoicePdf: async () => ({ fileName: "x.pdf", logoMissing: false }),
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: false, logoUnverified: false }),
+      saveInvoicePdf: async () => ({ fileName: "x.pdf", logoMissing: false, logoUnverified: false }),
     });
     expect(errCode((await handlers.printInvoice({ invoiceId: id })) as { ok: boolean; error?: { code: string } })).toBe(
       "INVOICE_NOT_DRAFT",
@@ -242,28 +242,53 @@ describe("what the renderer cannot send", () => {
     ok(ipc.finalizeInvoice({ invoiceId: id }));
     const handlers = createIpcHandlers(h.service, {
       invoices: h.invoices,
-      printInvoice: async () => ({ status: "printed" as const, logoMissing: true }),
-      saveInvoicePdf: async () => ({ fileName: "inv.pdf", logoMissing: true }),
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: true, logoUnverified: false }),
+      saveInvoicePdf: async () => ({ fileName: "inv.pdf", logoMissing: true, logoUnverified: false }),
     });
 
     expect(await handlers.printInvoice({ invoiceId: id })).toEqual({
       ok: true,
-      data: { status: "printed", logoMissing: true },
+      data: { status: "printed", logoMissing: true, logoUnverified: false },
     });
     expect(await handlers.saveInvoicePdf({ invoiceId: id })).toEqual({
       ok: true,
-      data: { status: "saved", fileName: "inv.pdf", logoMissing: true },
+      data: { status: "saved", fileName: "inv.pdf", logoMissing: true, logoUnverified: false },
     });
 
     // And the ordinary case stays ordinary: no warning when the asset was there.
     const quiet = createIpcHandlers(h.service, {
       invoices: h.invoices,
-      printInvoice: async () => ({ status: "printed" as const, logoMissing: false }),
-      saveInvoicePdf: async () => ({ fileName: "inv.pdf", logoMissing: false }),
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: false, logoUnverified: false }),
+      saveInvoicePdf: async () => ({ fileName: "inv.pdf", logoMissing: false, logoUnverified: false }),
     });
     expect(await quiet.printInvoice({ invoiceId: id })).toEqual({
       ok: true,
-      data: { status: "printed", logoMissing: false },
+      data: { status: "printed", logoMissing: false, logoUnverified: false },
+    });
+  });
+
+  /**
+   * Track 2 phase 3. An invoice that named a logo but never archived it now prints WITHOUT one —
+   * and that fact crosses the boundary on its own field, with its own sentence in the renderer,
+   * because "your archived logo is missing" would be false for it.
+   */
+  it("🔴 an unverified (never archived) logo is reported separately by BOTH document channels", async () => {
+    ok(ipc.saveCompanyProfile(PROFILE));
+    const id = ok<{ invoice: { id: string } }>(ipc.createInvoiceDraft(undefined)).invoice.id;
+    ok(ipc.addInvoiceLine({ invoiceId: id, line: LINE }));
+    ok(ipc.finalizeInvoice({ invoiceId: id }));
+    const handlers = createIpcHandlers(h.service, {
+      invoices: h.invoices,
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: false, logoUnverified: true }),
+      saveInvoicePdf: async () => ({ fileName: "inv.pdf", logoMissing: false, logoUnverified: true }),
+    });
+    expect(await handlers.printInvoice({ invoiceId: id })).toEqual({
+      ok: true,
+      data: { status: "printed", logoMissing: false, logoUnverified: true },
+    });
+    expect(await handlers.saveInvoicePdf({ invoiceId: id })).toEqual({
+      ok: true,
+      data: { status: "saved", fileName: "inv.pdf", logoMissing: false, logoUnverified: true },
     });
   });
 

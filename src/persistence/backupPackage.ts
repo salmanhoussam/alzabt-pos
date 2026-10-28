@@ -17,11 +17,15 @@
  *                                  `logo_asset`. The name is sha256(bytes) cut to 32 hex chars plus
  *                                  the lowercased extension (main.ts `freezeLogo`), so the content
  *                                  is checked against the name, not just the name's shape.
- *   branding/live/<name>           the live branding files the snapshot still RESOLVES: the
- *                                  company profile's current `logo_path`, and the `logo_path` of
- *                                  every finalized invoice WITHOUT a `logo_asset` (issued before
- *                                  freezing existed, or whose freeze failed) — `resolveInvoiceLogo`
- *                                  prints today's live file for exactly those.
+ *   branding/live/<name>           the shop's CURRENT logo: the company profile's `logo_path`,
+ *                                  which the next finalized invoice will freeze.
+ *                                  🔴 NOT the `logo_path` of an old invoice without a `logo_asset`.
+ *                                  Until Track 2 phase 3 those were required too, because
+ *                                  `resolveInvoiceLogo` printed today's live file for them. It no
+ *                                  longer does (`unverified`: no logo, a warning) — so such a file
+ *                                  is not needed to reproduce any document, and requiring it made a
+ *                                  backup "incomplete" over a file nothing prints. The two modules
+ *                                  now agree: required here = printed there.
  *   settings.json                  OPTIONAL — operator preferences (language). Never required.
  *   manifest.json                  written LAST; lists every file above with its size and SHA-256.
  *
@@ -321,7 +325,7 @@ export function fullBackupFolderName(now: Date): string {
 interface References {
   /** `logo_asset` names on finalized invoices. */
   readonly frozen: ReadonlySet<string>;
-  /** Live branding files the snapshot resolves: the profile's logo, and legacy invoices' logo_path. */
+  /** The shop's current logo (the company profile's logo_path), if it has one. */
   readonly live: ReadonlySet<string>;
   readonly liveLogo: string | null;
 }
@@ -361,9 +365,9 @@ function readReferences(db: Database.Database): References {
       }
       // The column's CHECK requires a JSON object, but a CHECK is not re-proven by integrity_check.
       if (!isRecord(issuer)) throw new BackupPackageError("LEDGER_CORRUPT", "An invoice's issuer snapshot is not a JSON object");
-      // Mirrors resolveInvoiceLogo: a recorded asset NEVER falls back to the live file.
+      // Mirrors resolveInvoiceLogo: only a recorded asset is ever printed. An invoice without one
+      // prints no logo (`unverified`), so its `logo_path` names nothing this backup must carry.
       if (typeof issuer.logo_asset === "string") frozen.add(issuer.logo_asset);
-      else if (typeof issuer.logo_path === "string") live.add(issuer.logo_path);
     }
   }
   return { frozen, live, liveLogo };

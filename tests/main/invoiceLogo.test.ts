@@ -15,16 +15,16 @@
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 import { describe, expect, it } from "vitest";
-import { type InvoiceLogoFs, logoWarningFor, resolveInvoiceLogo } from "../../src/main/invoiceLogo";
+import { type InvoiceLogoFs, logoUnverifiedFor, logoWarningFor, resolveInvoiceLogo } from "../../src/main/invoiceLogo";
 
-/** A filesystem where only the named files exist. Paths are the identity, so assertions read plainly. */
-function fsWith(present: { frozen?: readonly string[]; live?: readonly string[] }): InvoiceLogoFs {
+/**
+ * A filesystem where only the named frozen assets exist — plus a live branding folder the resolver
+ * must NEVER be able to reach. `liveFolder` is here only so a test can put today's logo on disk
+ * and prove it is not used: the port has no way to ask for it.
+ */
+function fsWith(present: { frozen?: readonly string[] }): InvoiceLogoFs {
   const frozen = new Set(present.frozen ?? []);
-  const live = new Set(present.live ?? []);
-  return {
-    frozen: (name) => (frozen.has(name) ? `/userData/branding/frozen/${name}` : null),
-    live: (name) => (name !== null && live.has(name) ? `/userData/branding/${name}` : null),
-  };
+  return { frozen: (name) => (frozen.has(name) ? `/userData/branding/frozen/${name}` : null) };
 }
 
 const FROZEN_NAME = "a1b2c3d4e5f60718293a4b5c6d7e8f90.png";
@@ -32,29 +32,29 @@ const LIVE_NAME = "invoice-logo.png";
 
 describe("the logo a finalized invoice prints", () => {
   it("1 · uses exactly the frozen asset when the invoice named one and it is on disk", () => {
-    const r = resolveInvoiceLogo(
-      { logoAsset: FROZEN_NAME, logoPath: LIVE_NAME },
-      fsWith({ frozen: [FROZEN_NAME], live: [LIVE_NAME] }),
-    );
+    const r = resolveInvoiceLogo({ logoAsset: FROZEN_NAME, logoPath: LIVE_NAME }, fsWith({ frozen: [FROZEN_NAME] }));
     expect(r).toEqual({ kind: "frozen", path: `/userData/branding/frozen/${FROZEN_NAME}` });
     expect(logoWarningFor(r)).toBe(false);
+    expect(logoUnverifiedFor(r)).toBe(false);
   });
 
   it("🔴 2 · a NAMED but MISSING frozen asset prints NO logo — it never substitutes the current one", () => {
-    // The live logo is present and would have been chosen by the old resolver. It must not be.
-    const r = resolveInvoiceLogo(
-      { logoAsset: FROZEN_NAME, logoPath: LIVE_NAME },
-      fsWith({ frozen: [], live: [LIVE_NAME] }),
-    );
+    const r = resolveInvoiceLogo({ logoAsset: FROZEN_NAME, logoPath: LIVE_NAME }, fsWith({ frozen: [] }));
     expect(r).toEqual({ kind: "missing" });
     expect(logoWarningFor(r)).toBe(true);
-    // Said once more as the property, not the shape: no path at all comes back.
+    expect(logoUnverifiedFor(r)).toBe(false);
     expect(JSON.stringify(r)).not.toContain(LIVE_NAME);
   });
 
-  it("3 · logoAsset === null keeps the legacy behaviour: the live branding file", () => {
-    const r = resolveInvoiceLogo({ logoAsset: null, logoPath: LIVE_NAME }, fsWith({ live: [LIVE_NAME] }));
-    expect(r).toEqual({ kind: "legacy", path: `/userData/branding/${LIVE_NAME}` });
+  // 🔴 TRANSITION (Track 2 phase 3, owner decision 2026-10-28). Cases 3 and 5 used to read
+  // "logoAsset === null keeps the legacy behaviour: the live branding file" → { kind: "legacy" },
+  // and "a legacy invoice whose live file has since gone is 'none', NOT a warning". Both are
+  // replaced: nothing proves today's file under that name is the logo the invoice was issued with.
+  it("🔴 3 · an invoice that named a logo but never archived it prints NO logo, and says why", () => {
+    const r = resolveInvoiceLogo({ logoAsset: null, logoPath: LIVE_NAME }, fsWith({}));
+    expect(r).toEqual({ kind: "unverified" });
+    expect(logoUnverifiedFor(r)).toBe(true);
+    // Not the "archived file is missing" warning: nothing was ever archived for it.
     expect(logoWarningFor(r)).toBe(false);
   });
 
@@ -62,51 +62,52 @@ describe("the logo a finalized invoice prints", () => {
     const r = resolveInvoiceLogo({ logoAsset: null, logoPath: null }, fsWith({}));
     expect(r).toEqual({ kind: "none" });
     expect(logoWarningFor(r)).toBe(false);
-  });
-
-  it("5 · a legacy invoice whose live file has since gone is 'none', NOT a warning", () => {
-    // Nothing was ever archived for this document, so nothing was lost. Printing without a logo is
-    // what that build always did; telling the operator an asset is missing would be false.
-    const r = resolveInvoiceLogo({ logoAsset: null, logoPath: LIVE_NAME }, fsWith({ live: [] }));
-    expect(r).toEqual({ kind: "none" });
-    expect(logoWarningFor(r)).toBe(false);
+    expect(logoUnverifiedFor(r)).toBe(false);
   });
 
   it("6 · no issuer snapshot at all is 'none' rather than a crash", () => {
-    expect(resolveInvoiceLogo(null, fsWith({ live: [LIVE_NAME] }))).toEqual({ kind: "none" });
+    expect(resolveInvoiceLogo(null, fsWith({}))).toEqual({ kind: "none" });
   });
 
-  it("7 · the frozen asset is asked for BY ITS OWN NAME, and the live file is never consulted for it", () => {
+  it("7 · the frozen asset is asked for BY ITS OWN NAME — and that is the only thing ever asked", () => {
     const asked: string[] = [];
     const spy: InvoiceLogoFs = {
       frozen: (name) => {
-        asked.push(`frozen:${name}`);
-        return `/f/${name}`;
-      },
-      live: (name) => {
-        asked.push(`live:${String(name)}`);
+        asked.push(name);
         return null;
       },
     };
-    resolveInvoiceLogo({ logoAsset: FROZEN_NAME, logoPath: LIVE_NAME }, spy);
-    expect(asked).toEqual([`frozen:${FROZEN_NAME}`]);
+    expect(resolveInvoiceLogo({ logoAsset: FROZEN_NAME, logoPath: LIVE_NAME }, spy)).toEqual({ kind: "missing" });
+    expect(resolveInvoiceLogo({ logoAsset: null, logoPath: LIVE_NAME }, spy)).toEqual({ kind: "unverified" });
+    expect(asked).toEqual([FROZEN_NAME]);
+  });
+});
+
+describe("🔴 an old invoice across a logo change — the substitution the owner ruled out", () => {
+  // A legacy invoice, issued when the shop's logo was saved as invoice-logo.png and never archived.
+  const legacy = { logoAsset: null, logoPath: LIVE_NAME } as const;
+  // An invoice issued after freezing existed, with its own archived asset.
+  const archived = { logoAsset: FROZEN_NAME, logoPath: LIVE_NAME } as const;
+
+  it("before the shop changes its logo: the archived invoice prints its asset; the legacy one prints none", () => {
+    const fs = fsWith({ frozen: [FROZEN_NAME] });
+    expect(resolveInvoiceLogo(archived, fs).kind).toBe("frozen");
+    expect(resolveInvoiceLogo(legacy, fs).kind).toBe("unverified");
   });
 
-  it("8 · and a MISSING frozen asset still does not consult the live file", () => {
-    const asked: string[] = [];
-    const spy: InvoiceLogoFs = {
-      frozen: (name) => {
-        asked.push(`frozen:${name}`);
-        return null;
-      },
-      live: (name) => {
-        asked.push(`live:${String(name)}`);
-        return `/live/${String(name)}`;
-      },
-    };
-    const r = resolveInvoiceLogo({ logoAsset: FROZEN_NAME, logoPath: LIVE_NAME }, spy);
-    expect(r).toEqual({ kind: "missing" });
-    // 🔴 The whole fix, as a call trace: the live file is not even LOOKED UP, so it cannot leak in.
-    expect(asked).toEqual([`frozen:${FROZEN_NAME}`]);
+  it("after the shop saves a NEW logo under the same name: neither invoice changes", () => {
+    // The live file was overwritten in place (pickInvoiceLogo copies over invoice-logo.png). The
+    // port cannot even see it — which is the point.
+    const fs = fsWith({ frozen: [FROZEN_NAME] });
+    expect(resolveInvoiceLogo(archived, fs)).toEqual({ kind: "frozen", path: `/userData/branding/frozen/${FROZEN_NAME}` });
+    expect(resolveInvoiceLogo(legacy, fs)).toEqual({ kind: "unverified" });
+  });
+
+  it("archived asset lost (e.g. an incomplete restore), then a new file appears under the same name: still no logo, still warned", () => {
+    const lost = fsWith({ frozen: [] });
+    expect(resolveInvoiceLogo(archived, lost)).toEqual({ kind: "missing" });
+    // A new logo saved afterwards changes nothing for this invoice: it is not its asset.
+    expect(resolveInvoiceLogo(archived, lost)).toEqual({ kind: "missing" });
+    expect(resolveInvoiceLogo(legacy, lost)).toEqual({ kind: "unverified" });
   });
 });

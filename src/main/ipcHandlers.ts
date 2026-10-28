@@ -29,6 +29,8 @@ import { invoiceOutcomeError } from "./invoiceOutcomeText";
 import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
 import type { LedgerService } from "../application/ledgerService";
+import type { BackupRestoreActions } from "./backupRestore";
+import type { RestoreLock } from "./restoreLock";
 import type { PartyRow } from "../persistence/partyRepository";
 import type { CustomerDto, CustomerStatementDto } from "../shared/ipcContract";
 import {
@@ -136,6 +138,16 @@ export interface IpcHandlerOptions {
   /** Native "save as" dialog + verified consistent snapshot of the ledger. Absent means unavailable. */
   readonly exportBackup?: () => SavedFile | null;
   /**
+   * Track 2: full backup, restore preview and restore staging (src/main/backupRestore.ts). Absent
+   * (headless, a test that does not wire it) means all three channels answer NOT_AVAILABLE.
+   */
+  readonly backupRestore?: BackupRestoreActions;
+  /**
+   * Engaged once a restore is staged: every channel except RESTORE_LOCK_READS is refused until the
+   * program restarts. Absent means no restore can be staged here, so nothing is ever locked.
+   */
+  readonly restoreLock?: Pick<RestoreLock, "engaged">;
+  /**
    * Shows the native "choose a folder" dialog and writes the Online Catalog package into it.
    *
    * 🔴 THE WHOLE OPERATION LIVES IN MAIN, deliberately. The renderer cannot name a destination,
@@ -177,11 +189,11 @@ export interface IpcHandlerOptions {
    */
   readonly printInvoice?: (
     invoiceId: string,
-  ) => Promise<{ readonly status: "printed" | "cancelled"; readonly logoMissing: boolean }>;
+  ) => Promise<{ readonly status: "printed" | "cancelled"; readonly logoMissing: boolean; readonly logoUnverified: boolean }>;
   /** Save-as dialog + printToPDF of the frozen invoice. Null when the operator cancelled. */
   readonly saveInvoicePdf?: (
     invoiceId: string,
-  ) => Promise<(SavedFile & { readonly logoMissing: boolean }) | null>;
+  ) => Promise<(SavedFile & { readonly logoMissing: boolean; readonly logoUnverified: boolean }) | null>;
   /**
    * Native image picker. Main copies the chosen file into its own branding folder and returns a
    * BARE FILE NAME; the renderer never sees or supplies a path.
@@ -584,9 +596,22 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     }
   }
 
+  /**
+   * 🔴 FIRST, before authorization and before any payload is looked at: while a restore is staged
+   * the only answers are three reads the shell needs to stay on screen. Everything else — every
+   * sale, collection, receipt, invoice, product, customer, setting, export and a second restore — is
+   * refused with one code, so no write can slip in between staging and the restart.
+   */
+  function assertNotRestoring(channel: ChannelName): void {
+    if (options.restoreLock?.engaged && !RESTORE_LOCK_READS.has(channel)) {
+      throw new DomainError("NOT_AVAILABLE", "A backup restore is waiting for the program to restart; nothing can be changed until then");
+    }
+  }
+
   function wrap(channel: ChannelName, fn: (payload: unknown) => unknown, onInternal?: (payload: unknown) => IpcError): Handler {
     return (payload) => {
       try {
+        assertNotRestoring(channel);
         authorize(channel);
         return { ok: true, data: fn(payload) };
       } catch (err) {
@@ -601,6 +626,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   function wrapAsync(channel: ChannelName, fn: (payload: unknown) => Promise<unknown>): Handler {
     return async (payload) => {
       try {
+        assertNotRestoring(channel);
         authorize(channel);
         return { ok: true, data: await fn(payload) };
       } catch (err) {
@@ -613,6 +639,11 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   }
 
   const stamp = () => now().toISOString().slice(0, 10).replace(/-/g, "");
+
+  function backupRestore(): BackupRestoreActions {
+    if (!options.backupRestore) throw new DomainError("NOT_AVAILABLE", "Backup and restore are not available here");
+    return options.backupRestore;
+  }
 
   /** The operator service, or a refusal. A terminal without accounts has no management surface. */
   function operators() {
@@ -872,6 +903,28 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       const saved = options.exportBackup();
       if (!saved) return { status: "cancelled" };
       return { status: "saved", fileName: saved.fileName };
+    }),
+    // ── Full backup and restore (Track 2) ────────────────────────────────────────────────────────
+    //
+    // 🔴 TWO LOCKS, LIKE THE MONEY WRITES. The channel policy refuses a cashier before this body
+    // runs; `service.assertOwner()` re-reads the durable role and refuses again before main opens a
+    // dialog — so no picker ever appears for anyone but the owner.
+    exportFullBackup: wrap("exportFullBackup", (p) => {
+      noPayload(p);
+      service.assertOwner();
+      return backupRestore().exportFullBackup();
+    }),
+    inspectRestoreBackup: wrap("inspectRestoreBackup", (p) => {
+      noPayload(p);
+      service.assertOwner();
+      return backupRestore().inspectRestoreBackup();
+    }),
+    applyRestore: wrap("applyRestore", (p) => {
+      const o = exactObject(p, ["manifestSha256", "acceptMissingAssets"]);
+      if (typeof o.manifestSha256 !== "string" || !/^[0-9a-f]{64}$/.test(o.manifestSha256)) invalid("'manifestSha256' must be 64 hex characters");
+      if (typeof o.acceptMissingAssets !== "boolean") invalid("'acceptMissingAssets' must be true or false");
+      service.assertOwner();
+      return backupRestore().applyRestore({ manifestSha256: o.manifestSha256, acceptMissingAssets: o.acceptMissingAssets });
     }),
     getAppInfo: wrap("getAppInfo", (p) => {
       noPayload(p);
@@ -1549,7 +1602,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       if (!options.printInvoice) return { status: "unavailable" as const };
       requireFinalized(id);
       const printed = await options.printInvoice(id);
-      return { status: printed.status, logoMissing: printed.logoMissing };
+      return { status: printed.status, logoMissing: printed.logoMissing, logoUnverified: printed.logoUnverified };
     }),
     saveInvoicePdf: wrapAsync("saveInvoicePdf", async (p) => {
       const id = invoiceId(p);
@@ -1557,7 +1610,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       requireFinalized(id);
       const saved = await options.saveInvoicePdf(id);
       return saved
-        ? { status: "saved" as const, fileName: saved.fileName, logoMissing: saved.logoMissing }
+        ? { status: "saved" as const, fileName: saved.fileName, logoMissing: saved.logoMissing, logoUnverified: saved.logoUnverified }
         : { status: "cancelled" as const };
     }),
   };
@@ -1768,3 +1821,6 @@ export function syncHandlers(
 
 /** Every handler maps to exactly one fixed channel string. */
 export const CHANNEL_NAMES = Object.keys(CHANNELS) as ChannelName[];
+
+/** The only channels answered while a restore is staged: reads the shell needs, none that writes. */
+export const RESTORE_LOCK_READS: ReadonlySet<ChannelName> = new Set<ChannelName>(["getSettings", "getAppInfo", "currentCashier"]);

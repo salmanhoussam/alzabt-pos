@@ -182,6 +182,11 @@ export function InvoiceSheet({
   const [error, setError] = useState<string | null>(null);
   /** This document printed without its own archived logo. A warning, never an error — see below. */
   const [logoWarning, setLogoWarning] = useState(false);
+  /**
+   * This document named a logo that was never archived, so it printed WITHOUT one rather than with
+   * today's file (Track 2 phase 3). A different fact from `logoWarning`, with its own sentence.
+   */
+  const [logoUnverified, setLogoUnverified] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [exiting, setExiting] = useState(false);
@@ -654,12 +659,16 @@ export function InvoiceSheet({
 
   const print = async () => {
     setLogoWarning(false);
+    setLogoUnverified(false);
     try {
       const result = await call(pos().printInvoice({ invoiceId }));
       if (result.status === "unavailable") setError(t("inv.sheet.print") + " — " + t("inv.review.none"));
       // Reported on a cancelled print too: the document was rendered before the dialog opened, so
       // the archived logo was already found to be missing and the operator should know either way.
-      else if (result.logoMissing === true) setLogoWarning(true);
+      else {
+        if (result.logoMissing === true) setLogoWarning(true);
+        if (result.logoUnverified === true) setLogoUnverified(true);
+      }
     } catch (e) {
       setError(errorText(e));
     }
@@ -667,9 +676,11 @@ export function InvoiceSheet({
 
   const savePdf = async () => {
     setLogoWarning(false);
+    setLogoUnverified(false);
     try {
       const result = await call(pos().saveInvoicePdf({ invoiceId }));
       if (result.status === "saved" && result.logoMissing === true) setLogoWarning(true);
+      if (result.status === "saved" && result.logoUnverified === true) setLogoUnverified(true);
     } catch (e) {
       setError(errorText(e));
     }
@@ -1174,12 +1185,17 @@ export function InvoiceSheet({
 
             aria-live="polite" on the container announces whichever appears, without interrupting.
             ════════════════════════════════════════════════════════════════════════════════════ */}
-        {(error || logoWarning) && (
+        {(error || logoWarning || logoUnverified) && (
           <div className="inv-feedback" role="status" aria-live="polite" data-testid="sheet-feedback">
             {error && <p className="error" data-testid="sheet-error">{error}</p>}
             {logoWarning && (
               <p className="small" data-testid="sheet-logo-warning">
                 <span className="badge warn">{t("tools.noticeTag")}</span> {t("inv.sheet.logoMissing")}
+              </p>
+            )}
+            {logoUnverified && (
+              <p className="small" data-testid="sheet-logo-unverified">
+                <span className="badge warn">{t("tools.noticeTag")}</span> {t("inv.sheet.logoUnverified")}
               </p>
             )}
           </div>

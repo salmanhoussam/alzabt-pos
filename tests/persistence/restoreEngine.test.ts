@@ -86,7 +86,7 @@ function seedSource(h: Harness, userData: string): void {
     h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: 199n });
   }
   h.invoices.saveCompanyProfile({ nameAr: "متجر المصدر", logoPath: "old-logo.png" });
-  finalize(true); // legacy: resolves the live old-logo.png
+  finalize(true); // legacy: no archived logo, prints none (`unverified`); old-logo.png is not packaged
   h.invoices.saveCompanyProfile({ nameAr: "متجر المصدر", logoPath: "shop-logo.png" });
   finalize(false); // frozen
   const c = h.parties.create({ kind: "customer", displayName: "محمد علي" }).party;
@@ -496,10 +496,12 @@ describe("🔴 an INCOMPLETE restore, with explicit consent", () => {
     db.close();
     const at = (dir: string, name: string | null) => (name && existsSync(join(u, "branding", dir, name)) ? join(u, "branding", dir, name) : null);
     const resolutions = issuers.map((i) =>
-      resolveInvoiceLogo({ logoAsset: i.logo_asset ?? null, logoPath: i.logo_path ?? null }, { frozen: (n) => at("frozen", n), live: (n) => at("", n) }).kind,
+      resolveInvoiceLogo({ logoAsset: i.logo_asset ?? null, logoPath: i.logo_path ?? null }, { frozen: (n: string) => at("frozen", n) }).kind,
     );
-    // The frozen invoice prints NO logo and warns; the legacy one prints its own live file.
-    expect(resolutions.sort()).toEqual(["legacy", "missing"]);
+    // The frozen invoice prints NO logo and warns ("missing"). 🔴 TRANSITION (phase 3): the legacy
+    // invoice used to resolve "legacy" — today's live file by name. It is now "unverified": no logo,
+    // its own warning, because nothing proves the restored live file is the one it was issued with.
+    expect(resolutions.sort()).toEqual(["missing", "unverified"]);
   });
 });
 
@@ -687,7 +689,7 @@ describe("conflicts, lost entries and a damaged journal", () => {
   it("a staged copy damaged between stage and start → ABORTED, nothing touched", () => {
     const u = env();
     const { id } = stage(u);
-    writeFileSync(join(u, "restore", `staging-${id}`, "branding", "live", "old-logo.png"), "damaged");
+    writeFileSync(join(u, "restore", `staging-${id}`, "branding", "live", "shop-logo.png"), "damaged");
     const outcome = apply(u);
     expect(outcome.kind).toBe("aborted");
     expect(fingerprint(u)).toEqual(ORIGINAL());

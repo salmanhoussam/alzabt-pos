@@ -137,6 +137,9 @@ const CH = {
   exportCatalog: "pos:exportCatalog",
   exportOnlineCatalog: "pos:exportOnlineCatalog",
   exportBackup: "pos:exportBackup",
+  exportFullBackup: "pos:exportFullBackup",
+  inspectRestoreBackup: "pos:inspectRestoreBackup",
+  applyRestore: "pos:applyRestore",
   getAppInfo: "pos:getAppInfo",
   listProducts: "pos:listProducts",
   createProduct: "pos:createProduct",
@@ -227,6 +230,11 @@ const api: PosApi = {
   exportCatalog: () => ipcRenderer.invoke(CH.exportCatalog),
   exportOnlineCatalog: () => ipcRenderer.invoke(CH.exportOnlineCatalog),
   exportBackup: () => ipcRenderer.invoke(CH.exportBackup),
+  exportFullBackup: () => ipcRenderer.invoke(CH.exportFullBackup),
+  inspectRestoreBackup: () => ipcRenderer.invoke(CH.inspectRestoreBackup),
+  // Field by field, like the money writes: nothing the renderer adds to the object crosses.
+  applyRestore: (req) =>
+    ipcRenderer.invoke(CH.applyRestore, { manifestSha256: req.manifestSha256, acceptMissingAssets: req.acceptMissingAssets }),
   getAppInfo: () => ipcRenderer.invoke(CH.getAppInfo),
   listProducts: () => ipcRenderer.invoke(CH.listProducts),
   // 🔴 THE DRAFT IS NOW REBUILT, where it used to be forwarded by reference. Two reasons, and the
