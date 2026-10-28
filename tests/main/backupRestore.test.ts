@@ -8,10 +8,11 @@
  * by closing the ledger and running the startup half (restoreStartup.ts), exactly as main.ts does.
  */
 import { createHash } from "node:crypto";
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { basename, join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { type BackupFs, nodeBackupFs } from "../../src/persistence/backupPackage";
 import { InvoiceService, type LogoVault } from "../../src/application/invoiceService";
 import { FIXTURE_TERMINAL } from "../../src/fixtures/terminal";
 import { createBackupRestoreActions } from "../../src/main/backupRestore";
@@ -226,19 +227,59 @@ function rows(path: string) {
 const journal = (s: Shop) => existsSync(join(s.userData, "restore", "journal.json"));
 const realLedgerFs = { exists: existsSync, writeAtomic: (p: string, c: string) => writeFileSync(p, c) };
 
+// ── TEMPORARY DIAGNOSTICS (Windows runs 40733299552 / 40737989211: native 0xC0000409) ─────────
+//
+// When BR_MARKERS names a file, each marker is appended, fsync'd and closed before the next
+// statement runs — so the LAST line written is the last step that completed even if the worker
+// dies natively before stdout is flushed. Labels only: no paths, no data. Off when unset, and it
+// changes nothing the test does.
+const MARKERS = process.env.BR_MARKERS;
+let markSeq = 0;
+function mark(label: string): void {
+  if (!MARKERS) return;
+  const fd = openSync(MARKERS, "a");
+  try {
+    writeSync(fd, `${String(++markSeq).padStart(4, "0")} ${new Date().toISOString()} pid=${process.pid} ${label}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+/** The engine's own file port, passed through unchanged, marking each operation by file NAME only. */
+function markedFs(): BackupFs | undefined {
+  if (!MARKERS) return undefined;
+  const fs: Record<string, unknown> = {};
+  for (const [k, fn] of Object.entries(nodeBackupFs)) {
+    fs[k] = (...args: string[]) => {
+      // File NAMES only. writeFile's second argument is the data written — never logged.
+      const names = (k === "writeFile" ? args.slice(0, 1) : args).map((a) => basename(String(a))).join(" -> ");
+      mark(`  fs.${k} ${names} BEGIN`);
+      const r = (fn as (...a: string[]) => unknown)(...args);
+      mark(`  fs.${k} ${names} END`);
+      return r;
+    };
+  }
+  return fs as unknown as BackupFs;
+}
+
 const opened: Shop[] = [];
 beforeEach(() => {
+  mark(`TEST BEGIN ${expect.getState().currentTestName ?? "?"}`);
   t = tempDir();
 });
 afterEach(() => {
+  mark("afterEach BEGIN");
   for (const s of opened.splice(0)) {
     try {
+      mark("afterEach close a shop's ledger");
       s.h.db.close();
     } catch {
       // already closed by a simulated restart
     }
   }
+  mark("afterEach temp cleanup");
   t.cleanup();
+  mark("afterEach END");
 });
 const open = (name: string) => {
   const s = shop(name);
@@ -307,18 +348,26 @@ describe("🔴 a cashier is refused on all three channels — before any picker 
 
 describe("🔴 restore — preview, consent, stage, restart, open", () => {
   it("previewing stages NOTHING; confirming stages and restarts once; the next start restores; the ledger opens with the backup's money", () => {
+    mark("T7 01 open shop A (live harness, first connection)");
     const a = open("بيانات المحل أ");
+    mark("T7 02 seed shop A");
     seed(a);
+    mark("T7 03 export package from A");
     const pkg = exportPackage(a);
+    mark("T7 04 read package ledger rows (copy)");
     const aLedger = rows(join(pkg, "ledger.sqlite"));
 
+    mark("T7 05 open shop B (live harness)");
     const b = open("بيانات المحل ب");
+    mark("T7 06 B createSale");
     b.h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: 199n });
     writeFileSync(join(b.userData, "ledger.json"), JSON.stringify({ ledgerFile: LIVE_LEDGER_FILE }));
     const markerBefore = readFileSync(join(b.userData, "ledger.json"));
     b.picked["restore-backup"] = pkg;
 
+    mark("T7 07 inspectRestoreBackup (preview)");
     const inspected = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    mark("T7 08 preview returned");
     expect(inspected.status).toBe("ready");
     if (inspected.status !== "ready") return;
     expect(inspected.preview).toMatchObject({
@@ -332,36 +381,51 @@ describe("🔴 restore — preview, consent, stage, restart, open", () => {
     expect(journal(b)).toBe(false); // a preview is not a restore
     expect(b.calls.relaunches).toBe(0);
 
+    mark("T7 09 applyRestore (stage)");
     expect(data<ApplyRestoreResponse>(b.ipc.applyRestore({ manifestSha256: inspected.preview.manifestSha256, acceptMissingAssets: false }))).toEqual({ status: "staged" });
+    mark("T7 10 staged");
     expect(b.calls.relaunches).toBe(1);
     expect(journal(b)).toBe(true);
 
     // ── The restart: main closes the ledger, and the next start runs the engine first. ──
+    mark("T7 11 close B's first SQLite connection");
     b.h.db.close();
-    const outcome = runPendingRestore({ userDataDir: b.userData, now: NOW, log: nullLogger });
+    mark("T7 12 runPendingRestore BEGIN (engine file operations follow)");
+    const engineFs = markedFs();
+    const outcome = runPendingRestore({ userDataDir: b.userData, now: NOW, log: nullLogger, ...(engineFs ? { fs: engineFs } : {}) });
+    mark(`T7 13 runPendingRestore END outcome=${outcome.kind}`);
     expect(outcome.kind).toBe("restored");
+    mark("T7 14 planLedgerOpen");
     const plan = planLedgerOpen(b.userData, realLedgerFs);
     expect(plan.existing).toBe(true);
     expect(readFileSync(join(b.userData, "ledger.json"))).toEqual(markerBefore); // marker untouched
+    mark("T7 15 openDatabase on the restored ledger");
     const db = openDatabase(plan.ledgerPath, MIGRATIONS, { fileMustExist: true });
+    mark("T7 16 close that connection");
     db.close();
+    mark("T7 17 read restored rows (copy)");
     expect(rows(plan.ledgerPath)).toEqual(aLedger);
 
     // The same receipt key on the restored ledger is a duplicate — no second receipt.
+    mark("T7 18 makeHarness #2 on the SAME path");
     b.h = makeHarness(plan.ledgerPath);
+    mark("T7 19 harness #2 open; querying");
     const c = b.h.db.prepare("SELECT id FROM parties").get() as { id: string };
     const [oa, ob] = b.h.db.prepare("SELECT id FROM obligations ORDER BY source_ref").all() as Array<{ id: string }>;
     const before = Number((b.h.db.prepare("SELECT count(*) AS n FROM receipts").get() as { n: bigint }).n);
+    mark("T7 20 replay the receipt key");
     expect(b.h.ledger.recordAllocatedReceipt(receiptReq(c.id, oa!.id, ob!.id)).duplicate).toBe(true);
     expect(Number((b.h.db.prepare("SELECT count(*) AS n FROM receipts").get() as { n: bigint }).n)).toBe(before);
 
     // The pre-restore copy is kept, and it is shop B's own ledger.
+    mark("T7 21 read the pre-restore copy (copy)");
     const kept = readdirSync(join(b.userData, "restore")).find((n) => n.startsWith("pre-restore-"))!;
     const old = withLedgerCopy(join(b.userData, "restore", kept, LIVE_LEDGER_FILE), (db) => ({
       integrity: db.pragma("integrity_check", { simple: true }),
       sales: Number((db.prepare("SELECT count(*) AS n FROM sales").get() as { n: bigint }).n),
     }));
     expect(old).toEqual({ integrity: "ok", sales: 1 });
+    mark("T7 22 body END");
   });
 
   it("refusals: no preview, a different hash, a package REPLACED after preview — nothing staged, no restart", () => {

@@ -67,8 +67,41 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # ── TEMPORARY DIAGNOSTICS (runs 40733299552 / 40737989211) ─────────────────────────────────
+      # The vitest worker running tests/main/backupRestore.test.ts died natively (0xC0000409) twice.
+      # These two steps record WHERE (fsync'd markers, BR_MARKERS) and are continue-on-error ONLY so
+      # build, smoke and installed E2E still run and produce evidence. Their real outcome is kept in
+      # steps.<id>.outcome and the "Final gate" at the end fails the job if either did not pass. The
+      # installer is uploaded only if both passed. Remove this block once the crash is understood.
+      - name: "DIAGNOSTIC: backupRestore.test.ts alone (forks), with markers"
+        id: br_isolated
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Force -Path e2e-output/diagnostics | Out-Null
+          $env:BR_MARKERS = Join-Path $PWD "e2e-output/diagnostics/br-markers-isolated.log"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          npx vitest run tests/main/backupRestore.test.ts --pool=forks --reporter=verbose | Tee-Object -FilePath e2e-output/diagnostics/vitest-isolated.log
+          $code = $LASTEXITCODE
+          $sw.Stop()
+          "exit=$code seconds=$([math]::Round($sw.Elapsed.TotalSeconds, 1))" | Tee-Object -FilePath e2e-output/diagnostics/br-isolated-result.txt
+          Write-Host "── last markers (isolated) ──"
+          Get-Content $env:BR_MARKERS -Tail 25 -ErrorAction SilentlyContinue
+          exit $code
+
       - name: Automated tests
-        run: npx vitest run --reporter=verbose
+        id: unit_tests
+        continue-on-error: true # DIAGNOSTIC run only — see the block above and the Final gate.
+        run: |
+          New-Item -ItemType Directory -Force -Path e2e-output/diagnostics | Out-Null
+          $env:BR_MARKERS = Join-Path $PWD "e2e-output/diagnostics/br-markers-full.log"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          npx vitest run --reporter=verbose | Tee-Object -FilePath e2e-output/diagnostics/vitest-full.log
+          $code = $LASTEXITCODE
+          $sw.Stop()
+          "exit=$code seconds=$([math]::Round($sw.Elapsed.TotalSeconds, 1))" | Tee-Object -FilePath e2e-output/diagnostics/full-suite-result.txt
+          Write-Host "── last markers (full suite) ──"
+          Get-Content $env:BR_MARKERS -Tail 25 -ErrorAction SilentlyContinue
+          exit $code
 
       - name: Build (main + renderer)
         run: npm run build
@@ -487,9 +520,24 @@ jobs:
           retention-days: 14
 
       - name: Upload installer (only after every check passed)
+        # The two diagnostic steps are continue-on-error, so "every check passed" must be said here.
+        if: steps.br_isolated.outcome == 'success' && steps.unit_tests.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: alzabt-pos-windows-installer
           path: release/*Setup*.exe
           if-no-files-found: error
           retention-days: 14
+
+      # 🔴 THE TRUE RESULT. The diagnostic steps above are continue-on-error so that the rest of the
+      # gates run; this fails the job unless BOTH of them and every other step passed.
+      - name: Final gate (no green unless every gate passed)
+        if: always()
+        run: |
+          $isolated = "${{ steps.br_isolated.outcome }}"
+          $unit = "${{ steps.unit_tests.outcome }}"
+          $job = "${{ job.status }}"
+          Write-Host "backupRestore isolated=$isolated · full vitest=$unit · every other step=$job"
+          if ($isolated -ne "success" -or $unit -ne "success" -or $job -ne "success") {
+            throw "FAILED: a required gate did not pass (isolated=$isolated, vitest=$unit, job=$job)"
+          }
