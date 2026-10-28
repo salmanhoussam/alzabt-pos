@@ -8,8 +8,8 @@
  * by closing the ledger and running the startup half (restoreStartup.ts), exactly as main.ts does.
  */
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InvoiceService, type LogoVault } from "../../src/application/invoiceService";
@@ -181,14 +181,46 @@ function exportPackage(s: Shop): string {
 }
 
 const MONEY = ["sales", "sale_lines", "invoices", "invoice_lines", "parties", "obligations", "settlements", "receipts", "receipt_attempts", "receipt_attempt_lines"];
-function rows(path: string) {
-  const db = new Database(path, { readonly: true, fileMustExist: true });
+
+/** The ledger file and whichever of its companions exist RIGHT NOW. */
+const ledgerFiles = (path: string) => ["", "-wal", "-shm", "-journal"].map((s) => `${path}${s}`).filter((f) => existsSync(f));
+const fingerprintOf = (path: string) => ledgerFiles(path).map((f) => [basename(f), createHash("sha256").update(readFileSync(f)).digest("hex")]);
+
+/**
+ * Reads a ledger through an ISOLATED COPY — never by opening the original.
+ *
+ * 🔴 WHY (Windows run 40733299552). This file's worker died natively (0xC0000409) inside the test
+ * that opened a WAL-mode ledger with `readonly: true` and no `-shm` beside it — twice. That is a
+ * HYPOTHESIS for the crash, not a proven cause, and this helper does not depend on it being right:
+ * it is simply the reading pattern the installed E2E already uses (`readLedger`).
+ *
+ *   - the ledger is copied WITH whichever `-wal` / `-shm` / `-journal` exist, so transactions not
+ *     yet checkpointed into the main file are read, not silently dropped;
+ *   - the copy is opened WRITABLE, so SQLite can read (and, if needed, recover) the WAL — on the
+ *     copy; nothing is checkpointed or written on the original;
+ *   - the original files are hashed before and after, and the read FAILS if any of them changed.
+ */
+function withLedgerCopy<T>(path: string, fn: (db: Database.Database) => T): T {
+  const before = fingerprintOf(path);
+  expect(before.length, `${path} does not exist`).toBeGreaterThan(0);
+  const scratch = mkdtempSync(join(t.dir, "read-"));
+  for (const f of ledgerFiles(path)) copyFileSync(f, join(scratch, basename(f)));
+  const db = new Database(join(scratch, basename(path)), { fileMustExist: true });
   db.defaultSafeIntegers(true);
   try {
-    return Object.fromEntries(MONEY.map((tb) => [tb, db.prepare(`SELECT * FROM ${tb} ORDER BY rowid`).all()]));
+    return fn(db);
   } finally {
     db.close();
+    rmSync(scratch, { recursive: true, force: true });
+    expect(fingerprintOf(path), "reading must not modify the original ledger").toEqual(before);
   }
+}
+
+function rows(path: string) {
+  return withLedgerCopy(path, (db) => {
+    expect(db.pragma("integrity_check", { simple: true })).toBe("ok");
+    return Object.fromEntries(MONEY.map((tb) => [tb, db.prepare(`SELECT * FROM ${tb} ORDER BY rowid`).all()]));
+  });
 }
 
 const journal = (s: Shop) => existsSync(join(s.userData, "restore", "journal.json"));
@@ -325,9 +357,11 @@ describe("🔴 restore — preview, consent, stage, restart, open", () => {
 
     // The pre-restore copy is kept, and it is shop B's own ledger.
     const kept = readdirSync(join(b.userData, "restore")).find((n) => n.startsWith("pre-restore-"))!;
-    const old = new Database(join(b.userData, "restore", kept, LIVE_LEDGER_FILE), { readonly: true });
-    expect(Number((old.prepare("SELECT count(*) AS n FROM sales").get() as { n: number }).n)).toBe(1);
-    old.close();
+    const old = withLedgerCopy(join(b.userData, "restore", kept, LIVE_LEDGER_FILE), (db) => ({
+      integrity: db.pragma("integrity_check", { simple: true }),
+      sales: Number((db.prepare("SELECT count(*) AS n FROM sales").get() as { n: bigint }).n),
+    }));
+    expect(old).toEqual({ integrity: "ok", sales: 1 });
   });
 
   it("refusals: no preview, a different hash, a package REPLACED after preview — nothing staged, no restart", () => {
@@ -616,6 +650,43 @@ describe("🔴 P0 — a write already IN FLIGHT when the owner confirms the rest
       lock.engage();
       expect(() => h.service.createProduct({ nameAr: "صنف", nameEn: "Item", sku: "SYN-PHONE", price: "4.00", baseUnit: "piece" })).toThrow(/restore is waiting/);
       expect(Number((h.db.prepare("SELECT count(*) AS c FROM catalog_products WHERE sku = 'SYN-PHONE'").get() as { c: bigint }).c)).toBe(0);
+    } finally {
+      h.db.close();
+    }
+  });
+});
+
+describe("the ledger-reading helper itself — it must not hide WAL-only transactions", () => {
+  it("🔴 committed rows that live ONLY in the -wal are read; the main file alone would miss them; the original is untouched", () => {
+    const u = join(t.dir, "wal only");
+    mkdirSync(u);
+    const path = join(u, LIVE_LEDGER_FILE);
+    const h = makeHarness(path);
+    try {
+      h.db.pragma("wal_autocheckpoint = 0"); // keep every commit in the -wal
+      for (let i = 0; i < 3; i++) {
+        h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: 199n });
+      }
+      expect(existsSync(`${path}-wal`)).toBe(true);
+      const viaHelper = withLedgerCopy(path, (db) => Number((db.prepare("SELECT count(*) AS n FROM sales").get() as { n: bigint }).n));
+      expect(viaHelper).toBe(3);
+      // The negative control: the main file WITHOUT its -wal does not hold them — so a helper that
+      // dropped the WAL would fail the assertion above instead of passing on an incomplete ledger.
+      const mainOnly = join(t.dir, "main only");
+      mkdirSync(mainOnly);
+      copyFileSync(path, join(mainOnly, LIVE_LEDGER_FILE));
+      const db = new Database(join(mainOnly, LIVE_LEDGER_FILE), { fileMustExist: true });
+      let fromMain: number;
+      try {
+        fromMain = Number((db.prepare("SELECT count(*) AS n FROM sales").get() as { n: number }).n);
+      } catch (e) {
+        // Even the schema may still be only in the -wal: then the main file holds no sales at all.
+        if (!/no such table/.test(String(e))) throw e;
+        fromMain = 0;
+      } finally {
+        db.close();
+      }
+      expect(fromMain).toBeLessThan(3);
     } finally {
       h.db.close();
     }
