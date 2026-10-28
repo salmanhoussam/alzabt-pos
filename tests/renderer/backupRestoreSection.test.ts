@@ -70,6 +70,7 @@ describe("every state the section can show has a sentence, in both languages", (
     "NO_PREVIEW",
     "PREVIEW_MISMATCH",
     "MISSING_NOT_ACCEPTED",
+    "BUSY",
     "FAILED",
   ];
   const missingReasons: BackupMissingAssetDto["reason"][] = [

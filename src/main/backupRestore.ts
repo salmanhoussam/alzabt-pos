@@ -199,6 +199,12 @@ export function createBackupRestoreActions(deps: BackupRestoreDeps): BackupResto
       if (!p) return { status: "refused", reason: "NO_PREVIEW", detail: null };
       if (req.manifestSha256 !== p.manifestSha256) return { status: "refused", reason: "PREVIEW_MISMATCH", detail: null };
       if (!p.complete && !req.acceptMissingAssets) return { status: "refused", reason: "MISSING_NOT_ACCEPTED", detail: null };
+      // 🔴 IN-FLIGHT WRITES (phase 4 P0). better-sqlite3 transactions are synchronous and refuse an
+      // async body, and IPC messages are handled one at a time, so a write cannot be paused half
+      // way while this runs. This is the check that the claim stays true: if a transaction is open
+      // on the ledger at this instant, nothing is staged and nothing is locked — the restore is
+      // simply refused, and the write finishes as if the owner had not asked.
+      if (deps.ledger()?.inTransaction) return { status: "refused", reason: "BUSY", detail: null };
       try {
         const staged = stageRestore({
           userDataDir: deps.userDataDir,

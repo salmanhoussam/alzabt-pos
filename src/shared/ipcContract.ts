@@ -384,6 +384,8 @@ export type RestoreRefusalReason =
   | "NO_PREVIEW"
   | "PREVIEW_MISMATCH"
   | "MISSING_NOT_ACCEPTED"
+  /** A write to the ledger was still in progress at that moment; nothing was staged. */
+  | "BUSY"
   | "FAILED";
 
 /** What the owner sees before deciding. Everything here was read by MAIN from the verified package. */

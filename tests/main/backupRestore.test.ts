@@ -549,3 +549,75 @@ describe("🔴 P0 — after a restore is staged, nothing can change the data unt
     expect(b.lock.engaged).toBe(false);
   });
 });
+
+describe("🔴 P0 — a write already IN FLIGHT when the owner confirms the restore", () => {
+  const n = (s: Shop, table: string) => Number((s.h.db.prepare(`SELECT count(*) AS c FROM ${table}`).get() as { c: bigint }).c);
+
+  function previewed(): { b: Shop; hash: string } {
+    const a = open("shop a");
+    seed(a);
+    const pkg = exportPackage(a);
+    const b = open("shop b");
+    b.picked["restore-backup"] = pkg;
+    const p = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    if (p.status !== "ready") throw new Error("not ready");
+    return { b, hash: p.preview.manifestSha256 };
+  }
+
+  it("🔴 a transaction can never be paused across an await — better-sqlite3 refuses an async body", () => {
+    const b = open("shop b");
+    expect(() => b.h.db.transaction(async () => undefined)()).toThrow(/promise/i);
+  });
+
+  it("🔴 the restore confirmed from INSIDE an open write is refused (BUSY): nothing staged, nothing locked, the write commits", () => {
+    const { b, hash } = previewed();
+    const before = n(b, "sales");
+    let answer: unknown;
+    // A sale that has reached the point just before COMMIT, and the owner's confirmation landing
+    // in exactly that gap — the interleaving the event loop cannot produce, forced here.
+    b.h.db.transaction(() => {
+      b.h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: 199n });
+      answer = data(b.ipc.applyRestore({ manifestSha256: hash, acceptMissingAssets: false }));
+    }).immediate();
+    expect(answer).toEqual({ status: "refused", reason: "BUSY", detail: null });
+    expect(journal(b)).toBe(false);
+    expect(b.lock.engaged).toBe(false);
+    expect(b.calls.relaunches).toBe(0);
+    expect(n(b, "sales")).toBe(before + 1); // the in-flight write finished, counted, not lost
+    // And once it has finished, the same confirmation stages normally.
+    expect(data(b.ipc.applyRestore({ manifestSha256: hash, acceptMissingAssets: false }))).toEqual({ status: "staged" });
+  });
+
+  it("🔴 a MULTI-STEP operation started before staging is cut at its next write: a draft cannot be finalized afterwards", () => {
+    const { b, hash } = previewed();
+    data(b.ipc.saveCompanyProfile({ nameAr: "متجر ب", nameEn: null, legalName: null, tagline: null, address: null, phone1: null, phone2: null, email: null, logoPath: null, taxpayerNumber: null, commercialRegister: null, vatNumber: null, taxEnabled: false, taxRatePercent: null, taxLabel: null }));
+    const draft = data<{ invoice: { id: string } }>(b.ipc.createInvoiceDraft(undefined)).invoice.id;
+    data(b.ipc.addInvoiceLine({ invoiceId: draft, line: { description: "صنف", unitLabel: "حبة", canonicalUnit: null, productId: null, quantity: "1", unitPrice: "10.00" } }));
+    const salesBefore = n(b, "sales");
+    expect(data(b.ipc.applyRestore({ manifestSha256: hash, acceptMissingAssets: false }))).toEqual({ status: "staged" });
+    expect(code(b.ipc.finalizeInvoice({ invoiceId: draft }))).toBe("NOT_AVAILABLE");
+    expect(n(b, "sales")).toBe(salesBefore);
+    expect(Number((b.h.db.prepare("SELECT count(*) AS c FROM invoices WHERE status = 'finalized'").get() as { c: bigint }).c)).toBe(0);
+  });
+
+  it("🔴 the phone's two-step save (photo staged BEFORE, save AFTER staging) is refused at its transaction", () => {
+    const u = join(t.dir, "phone in flight");
+    mkdirSync(u);
+    const lock = new RestoreLock(() => false);
+    const h = makeHarness(join(u, LIVE_LEDGER_FILE), {
+      serviceTransact: (db, fn) => {
+        lock.assertOpen();
+        return db.transaction(fn).immediate();
+      },
+    });
+    try {
+      // Step one happened before staging (the photo is held in memory, nothing written); staging
+      // then engages the lock; step two is the write, and it goes through the provider.
+      lock.engage();
+      expect(() => h.service.createProduct({ nameAr: "صنف", nameEn: "Item", sku: "SYN-PHONE", price: "4.00", baseUnit: "piece" })).toThrow(/restore is waiting/);
+      expect(Number((h.db.prepare("SELECT count(*) AS c FROM catalog_products WHERE sku = 'SYN-PHONE'").get() as { c: bigint }).c)).toBe(0);
+    } finally {
+      h.db.close();
+    }
+  });
+});
