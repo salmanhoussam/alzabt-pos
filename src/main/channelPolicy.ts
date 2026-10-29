@@ -52,6 +52,12 @@ export type Access =
  *
  * So the set is SEVEN, each one named with the reason it cannot wait for a session: the five above
  * plus `login` itself and `logout`, which must work from a half-broken state and reveals nothing.
+ *
+ * 🔴 EIGHT since 2026-10-29: `getAppInfo`, which WAS session-level. The build line is drawn under
+ * the login and setup screens too, and there it was refused (NOT_LOGGED_IN), so the screen read
+ * "Alzabt POS unknown · Build unknown" — the one place field support needs it most. It returns
+ * exactly `{ version, build }`: the package version and the 7-hex commit of the build, both
+ * already printed in the installer's file name. No path, no shop data, no session state.
  * It is a list of individually justified exceptions, not a category called "pre-session" that future
  * channels can drift into — which is what was actually being guarded against.
  *
@@ -68,6 +74,7 @@ export type Access =
  *     after  online catalog: 7 public · 26 session · 31 owner · 64 total   (slice G3)
  *     after  phone sessions: 7 public · 26 session · 33 owner · 66 total   (slice H1)
  *     after  the phone form: 7 public · 26 session · 34 owner · 67 total   (slice H2)
+ *     getAppInfo made public: 8 public — the ONE move of the public set, named in PUBLIC_REASON
  *
  * THE PUBLIC SET DID NOT MOVE, which is the only one of the three numbers that is a security
  * claim — the four new reads (listCategories, listBrands and, once the products list had to show
@@ -85,6 +92,8 @@ export const PUBLIC_REASON: Readonly<Record<string, string>> = Object.freeze({
   getSettings: "the app reads its language before it can render anything, including the login screen",
   setTerminalLanguage: "the pre-auth language toggle on the login screen (UI unification v1)",
   logout: "must always work, including from a half-broken state, and reveals nothing",
+  getAppInfo:
+    "the build line under the login screen identifies the install for field support; returns {version, build} from the packaged build-info and nothing else",
 });
 
 /**
@@ -103,6 +112,8 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   logout: "public",
   getSettings: "public",
   setTerminalLanguage: "public",
+  // 🔴 RECLASSIFIED 2026-10-29 — the old value was "session". See PUBLIC_REASON.getAppInfo.
+  getAppInfo: "public",
 
   // ── Any signed-in operator: the cashier's daily work ──────────────────────────────────────────
   getCatalog: "session",
@@ -110,7 +121,6 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   getTodaySales: "session",
   getSaleHistory: "session",
   listProducts: "session",
-  getAppInfo: "session",
 
   // Product Master READS a cashier needs to make sense of the products list: a product shows the
   // NAME of its category, not its id, and the Brand field offers what the shop has already typed.

@@ -45,16 +45,19 @@ describe("every channel is classified", () => {
 describe("the public set", () => {
   const publicChannels = names.filter((n) => CHANNEL_POLICY[n] === "public").sort();
 
-  it("🔴 is EXACTLY these seven, each with a stated reason", () => {
+  it("🔴 is EXACTLY these eight, each with a stated reason", () => {
     // Salman asked for three — listCashiers, login, completeBootstrapSetup. Three is not
     // achievable: the renderer also calls getSettings (the app reads its language before it can
     // render anything, the login screen included), setTerminalLanguage (the PRE-AUTH language
     // toggle shipped in UI unification v1), currentCashier (App.tsx asking at startup whether
     // anyone is signed in) and logout. Each is named individually, so this stays a list of
     // justified exceptions rather than a category future channels can drift into.
+    // TRANSITION 2026-10-29: getAppInfo joins (old value "session") — the build line under the
+    // login screen read "unknown" because it was refused there.
     expect(publicChannels).toEqual([
       "completeBootstrapSetup",
       "currentCashier",
+      "getAppInfo",
       "getSettings",
       "listCashiers",
       "login",
@@ -267,8 +270,40 @@ describe("a CASHIER session is refused every owner-only channel", () => {
     try {
       const ipc = syncHandlers(createIpcHandlers(h.service));
       ipc.login({ cashierId: "cashier-02", pin: "2222" });
-      for (const channel of ["getCatalog", "getTodaySales", "listProducts", "getAppInfo"] as const) {
+      for (const channel of ["getCatalog", "getTodaySales", "listProducts"] as const) {
         expect((ipc[channel](undefined) as { ok: boolean }).ok, channel).toBe(true);
+      }
+    } finally {
+      h.db.close();
+      t.cleanup();
+    }
+  });
+
+  it("🔴 with NO session, getAppInfo answers the real version and build — and ONLY those two fields", () => {
+    // The login screen's build line read "Alzabt POS unknown · Build unknown": getAppInfo was
+    // session-level, so before sign-in it was refused and BuildLine fell back to "unknown".
+    const t = tempDir();
+    const h = makeHarness(t.dbPath, { login: false });
+    try {
+      const ipc = syncHandlers(createIpcHandlers(h.service, { appInfo: () => ({ version: "9.8.7", build: "abc1234" }) }));
+      expect(ipc.getAppInfo(undefined)).toEqual({ ok: true, data: { version: "9.8.7", build: "abc1234" } });
+      expect(h.service.currentRole()).toBeNull(); // answering it signed nobody in
+    } finally {
+      h.db.close();
+      t.cleanup();
+    }
+  });
+
+  it("🔴 with NO session, every non-public channel is still refused — making getAppInfo public widened nothing else", () => {
+    const t = tempDir();
+    const h = makeHarness(t.dbPath, { login: false });
+    try {
+      const ipc = syncHandlers(createIpcHandlers(h.service));
+      const sync = ["getCatalog", "getTodaySales", "getSaleHistory", "listProducts", "listCategories", "listOperators", "exportBackup", "getCompanyProfile"] as const;
+      for (const channel of sync) {
+        const r = ipc[channel](undefined) as { ok: boolean; error?: { code: string } };
+        expect(r.ok, channel).toBe(false);
+        expect(r.error?.code, channel).toBe("NOT_LOGGED_IN");
       }
     } finally {
       h.db.close();
