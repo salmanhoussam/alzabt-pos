@@ -140,8 +140,43 @@ export interface LogoVault {
   freeze(storedName: string): string | null;
 }
 
+/**
+ * What an invoice needs from the customer directory and the ledger, and nothing more.
+ *
+ * 🔴 A PORT, NOT THE SERVICES. The invoice service never gets a way to post an arbitrary obligation
+ * or to read another account's statement: only "is the live operator the owner", "give me this ACTIVE
+ * customer or refuse", "post THE receivable for this invoice's sale", and "what receivable does this
+ * sale carry". The composition root builds it from the same `PartyService` and `LedgerService` the
+ * rest of the app uses, on the same connection and transaction provider.
+ */
+export interface InvoiceCreditPort {
+  /** Re-reads the DURABLE role. Throws unless the signed-in operator is currently an owner. */
+  requireLiveOwner(): void;
+  /** An active CUSTOMER by id, or PARTY_NOT_FOUND (missing, inactive, or a supplier). */
+  activeCustomer(id: string): { readonly id: string; readonly display_name: string };
+  /** Posts the one receivable for an invoice's sale. Idempotent per sale (UNIQUE source). */
+  postReceivable(input: {
+    readonly customerId: string;
+    readonly saleId: string;
+    readonly currency: string;
+    readonly amountMinor: bigint;
+  }): { readonly id: string; readonly duplicate: boolean };
+  /** The receivable carried by a sale, if any. */
+  receivableForSale(saleId: string): ObligationFacts | null;
+}
+
+export interface ObligationFacts {
+  readonly id: string;
+  readonly partyId: string;
+  readonly direction: string;
+  readonly currency: string;
+  readonly amountMinor: bigint;
+}
+
 export interface InvoiceServiceDeps {
   readonly invoices: InvoiceRepository;
+  /** Migration 16. Absent on a terminal without the ledger services; linking and credit then refuse. */
+  readonly credit?: InvoiceCreditPort;
   readonly reconciliation: ReconciliationRepository;
   readonly company: CompanyProfileRepository;
   /** Read-only here. Every WRITE goes through `products`. */
@@ -171,6 +206,8 @@ export interface InvoiceHeaderDraft {
   readonly customerAddress?: string | null;
   readonly customerPhone?: string | null;
   readonly notes?: string | null;
+  /** Migration 16. The exact customer account (id), or null to unlink. Never matched by name. */
+  readonly customerPartyId?: string | null;
   /** Typed text, e.g. "100.00". Null or absent means nothing paid. */
   readonly paid?: string | null;
 }
@@ -517,6 +554,12 @@ export class InvoiceService {
             ? cleanText(header.customerPhone, "customer_phone", MAX_CUSTOMER_FIELD)
             : invoice.customer_phone,
         notes: header && header.notes !== undefined ? cleanText(header.notes, "notes", MAX_NOTES) : invoice.notes,
+        // 🔴 EXPLICIT ONLY. The link changes only when the caller names it, and it is validated by
+        // identity (an active customer), never by comparing the printed name to anything.
+        customerPartyId:
+          header && header.customerPartyId !== undefined
+            ? this.resolveCustomerLink(header.customerPartyId)
+            : invoice.customer_party_id,
         paidMinor: totals.paid.minor,
       },
       {
@@ -527,6 +570,13 @@ export class InvoiceService {
       },
       instant,
     );
+  }
+
+  private resolveCustomerLink(value: unknown): string | null {
+    if (value === null || value === "") return null;
+    if (typeof value !== "string") throw new DomainError("INVALID_INPUT", "A customer account must be chosen by id");
+    if (!this.deps.credit) throw new DomainError("NOT_AVAILABLE", "Customer accounts are not available on this terminal");
+    return this.deps.credit.activeCustomer(value).id;
   }
 
   private resolvePaid(invoice: InvoiceRow, header: InvoiceHeaderDraft | null, currency: string): Money {
@@ -618,10 +668,49 @@ export class InvoiceService {
    * Totals are rewritten ONCE at the end rather than per row — the same arithmetic, read by the
    * database's own CHECK constraints, done once instead of N times.
    */
-  addLines(invoiceId: string, drafts: ReadonlyArray<InvoiceLineDraft>): InvoiceView {
+  addLines(invoiceId: string, drafts: ReadonlyArray<InvoiceLineDraft>, idempotencyKey: string): InvoiceView {
     this.requireCashier();
+    if (typeof idempotencyKey !== "string" || !/^[A-Za-z0-9-]{8,100}$/.test(idempotencyKey)) {
+      throw new DomainError("INVALID_INPUT", "A valid batch idempotency key is required");
+    }
+    // 🔴 THE FINGERPRINT BINDS THE INVOICE AND THE EXACT ORDERED PAYLOAD, as received. Nothing is
+    // normalised: "2" and "2.0" hash differently, which can only ever produce a conflict, never a
+    // silent merge. It is never used to DEDUPLICATE rows — only to recognise the same request again.
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify({
+          v: 1,
+          invoiceId,
+          lines: drafts.map((d) => [
+            d.description ?? null,
+            d.unitLabel ?? null,
+            d.canonicalUnit ?? null,
+            d.productId ?? null,
+            d.quantity,
+            d.unitPrice,
+          ]),
+        }),
+      )
+      .digest("hex");
     const instant = this.now();
     return this.deps.transact(() => {
+      // 🔴 THE KEY IS READ INSIDE THE WRITE TRANSACTION, before anything else. A key that is already
+      // recorded NEVER writes again: it reports the invoice as it stands now, so lines the operator
+      // has since edited or removed are not recreated, and a batch whose invoice was meanwhile
+      // finalized is still answered rather than refused.
+      const prior = this.deps.invoices.findLineBatch(idempotencyKey);
+      if (prior) {
+        if (prior.request_fingerprint !== fingerprint || prior.invoice_id !== invoiceId) {
+          throw new DomainError("IDEMPOTENCY_CONFLICT", "This batch key was already used for different lines");
+        }
+        if (Number(prior.line_count) !== drafts.length) {
+          // Same fingerprint but a different recorded size cannot happen unless the record is damaged.
+          throw new DomainError("LEDGER_INTEGRITY", "The recorded line batch is inconsistent; check the invoice lines");
+        }
+        const existing = this.deps.invoices.findById(invoiceId);
+        if (!existing) throw new DomainError("INVOICE_NOT_FOUND", "This invoice no longer exists");
+        return { invoice: existing, lines: this.deps.invoices.listLines(invoiceId) };
+      }
       const invoice = this.requireDraft(invoiceId);
       const existing = this.deps.invoices.countLines(invoiceId);
       if (existing + drafts.length > MAX_INVOICE_LINES) {
@@ -633,6 +722,17 @@ export class InvoiceService {
       for (const input of parsed) {
         this.deps.invoices.addLine(this.newId(), invoiceId, this.deps.invoices.nextLineNo(invoiceId), input, instant);
       }
+      // The marker is written in the SAME transaction as the lines: both commit or neither does.
+      this.deps.invoices.insertLineBatch(
+        {
+          id: this.newId(),
+          invoice_id: invoiceId,
+          idempotency_key: idempotencyKey,
+          request_fingerprint: fingerprint,
+          line_count: drafts.length,
+        },
+        instant,
+      );
       const updated = this.rewriteTotals(invoice, null, instant);
       return { invoice: updated, lines: this.deps.invoices.listLines(invoiceId) };
     });
@@ -692,14 +792,36 @@ export class InvoiceService {
    * is returned, no reconciliation row survives, and the invoice is still an editable draft. That
    * is asserted by a failure-injection test, not assumed from the word "transaction".
    */
-  finalizeInvoice(invoiceId: string): InvoiceView {
+  finalizeInvoice(invoiceId: string, options?: { readonly issueOnAccount?: boolean }): InvoiceView {
     const cashier = this.requireCashier();
     const instant = this.now();
+    // 🔴 ON ACCOUNT IS AN EXPLICIT ACT, never inferred from a linked customer or an unpaid balance.
+    const onAccount = options?.issueOnAccount === true;
+    const credit = onAccount ? this.requireCreditPort() : null;
+    // Refused before any work, and re-read INSIDE the transaction below.
+    credit?.requireLiveOwner();
 
     return this.deps.transact((): InvoiceView => {
+      if (credit) {
+        credit.requireLiveOwner();
+        // A repeat of a request that already committed (its response was lost): verify, never redo.
+        const existing = this.deps.invoices.findById(invoiceId);
+        if (existing && existing.status === "final") return this.verifiedAccountReplay(existing, credit);
+      }
       // 1 · reread from the database; whatever the UI believed is irrelevant
       const invoice = this.requireDraft(invoiceId);
       const lines = this.deps.invoices.listLines(invoiceId);
+      let accountCustomerId: string | null = null;
+      if (credit) {
+        if (!invoice.customer_party_id) {
+          throw new DomainError("CREDIT_NEEDS_CUSTOMER", "Choose the customer account before issuing on account");
+        }
+        if (invoice.paid_minor !== 0n) {
+          throw new DomainError("CREDIT_NEEDS_UNPAID", "An invoice issued on account must have nothing paid yet");
+        }
+        // Re-read NOW: the account may have been archived since the draft was linked.
+        accountCustomerId = credit.activeCustomer(invoice.customer_party_id).id;
+      }
 
       // 2 · the shop must have an identity to snapshot onto the document
       const profile = this.deps.company.find();
@@ -808,6 +930,23 @@ export class InvoiceService {
       // 10 · THE SALE. A finalized invoice is a real sale for business reporting (migration 7).
       this.createSaleForInvoice(finalized, lines, cashier, instant);
 
+      // 10b · ON ACCOUNT: the one matching receivable, in THIS transaction, then verified by reading
+      //       both rows back. Any mismatch throws and rolls the whole finalization back.
+      if (credit && accountCustomerId) {
+        if (finalized.paid_minor !== 0n || finalized.total_minor <= 0n) {
+          throw new DomainError("CREDIT_NEEDS_UNPAID", "An invoice issued on account must have nothing paid yet");
+        }
+        const sale = this.deps.sales.findByInvoiceId(finalized.id);
+        if (!sale) throw new DomainError("LEDGER_INTEGRITY", "The invoice sale was not recorded");
+        credit.postReceivable({
+          customerId: accountCustomerId,
+          saleId: sale.id,
+          currency: finalized.currency,
+          amountMinor: finalized.balance_due_minor,
+        });
+        this.assertAccountPair(finalized, credit);
+      }
+
       // 11 · classify every line against the catalog AS IT IS NOW, and write the review queue
       this.createReconciliation(finalized, lines, cashier, instant);
 
@@ -832,6 +971,69 @@ export class InvoiceService {
    * `payment_method` is NULL, which means NOT RECORDED. `payment_status` carries the truth that
    * matters — paid, partial or unpaid — and the history screen says so in words.
    */
+  private requireCreditPort(): InvoiceCreditPort {
+    if (!this.deps.credit) throw new DomainError("NOT_AVAILABLE", "Customer accounts are not available on this terminal");
+    return this.deps.credit;
+  }
+
+  /**
+   * Reads the finalized invoice, its sale and its receivable back and demands that they agree.
+   * Throws LEDGER_INTEGRITY on any disagreement — inside the finalize transaction that rolls it all
+   * back; on a replay it is the "cannot verify, fail closed" answer.
+   */
+  private assertAccountPair(invoice: InvoiceRow, credit: InvoiceCreditPort): void {
+    const sale = this.deps.sales.findByInvoiceId(invoice.id);
+    const ob = sale ? credit.receivableForSale(sale.id) : null;
+    if (
+      !sale ||
+      !ob ||
+      // A matching obligation by itself does NOT prove the invoice-origin sale agrees with the
+      // document. Verify the persisted sale's own identity and financial fields on every replay.
+      sale.sourceType !== "invoice" ||
+      sale.invoiceId !== invoice.id ||
+      sale.customerId !== null ||
+      sale.currency !== invoice.currency ||
+      sale.paymentMethod !== null ||
+      sale.paymentStatus !== "unpaid" ||
+      sale.subtotal.minor !== invoice.subtotal_minor ||
+      sale.tax.minor !== invoice.tax_minor ||
+      sale.total.minor !== invoice.total_minor ||
+      sale.paid.minor !== 0n ||
+      sale.balanceDue.minor !== invoice.balance_due_minor ||
+      !invoice.customer_party_id ||
+      ob.partyId !== invoice.customer_party_id ||
+      ob.direction !== "receivable" ||
+      ob.currency !== invoice.currency ||
+      ob.amountMinor !== invoice.balance_due_minor ||
+      ob.amountMinor !== invoice.total_minor ||
+      invoice.paid_minor !== 0n
+    ) {
+      throw new DomainError(
+        "LEDGER_INTEGRITY",
+        "The invoice, its sale and its customer receivable could not be verified together",
+      );
+    }
+  }
+
+  /**
+   * An on-account request for an invoice that is already final.
+   *
+   * It answers ONLY when the receivable that request would have created really exists and matches;
+   * it never writes. A final invoice with no receivable was issued some other way and is refused
+   * plainly rather than reported as having been put on the account.
+   */
+  private verifiedAccountReplay(invoice: InvoiceRow, credit: InvoiceCreditPort): InvoiceView {
+    const sale = this.deps.sales.findByInvoiceId(invoice.id);
+    if (!sale) {
+      throw new DomainError("LEDGER_INTEGRITY", "The finalized invoice's sale is missing");
+    }
+    if (!credit.receivableForSale(sale.id)) {
+      throw new DomainError("CREDIT_NOT_ISSUED", "This invoice was issued without a customer account");
+    }
+    this.assertAccountPair(invoice, credit);
+    return { invoice, lines: this.deps.invoices.listLines(invoice.id) };
+  }
+
   private createSaleForInvoice(
     invoice: InvoiceRow,
     lines: ReadonlyArray<InvoiceLineRow>,
@@ -891,6 +1093,8 @@ export class InvoiceService {
         .digest("hex"),
       sourceType: "invoice",
       invoiceId: invoice.id,
+      customerId: null,
+      customerNameSnapshot: null,
       cashierId: cashier.id,
       cashierName: cashier.name,
       currency,

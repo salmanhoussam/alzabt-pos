@@ -24,6 +24,17 @@ describe("the i18n foundation", () => {
     expect(dirFor("en")).toBe("ltr");
   });
 
+  it("explains that customer creation saves only the directory record in both languages", () => {
+    expect(translate("ar", "customers.saveExplanation")).toBe(
+      "حفظ العميل يضيفه إلى دليل العملاء فقط. لا يُكمل عملية بيع ولا يُنشئ ديناً.",
+    );
+    expect(translate("en", "customers.saveExplanation")).toBe(
+      "Saving adds the customer to the directory only. It does not complete a sale or create debt.",
+    );
+    expect(translate("ar", "inv.sheet.rowsIncomplete")).toContain("سطر غير مكتمل");
+    expect(translate("en", "inv.sheet.rowsIncomplete")).toContain("row is incomplete");
+  });
+
   it("every sellable unit has an Arabic and an English label", () => {
     expect(unitLabel("ar", "piece")).toBe("حبة");
     expect(unitLabel("ar", "kg")).toBe("كيلو");

@@ -22,9 +22,13 @@ import type {
   ReconciliationDto,
 } from "../../../shared/ipcContract";
 import { INVOICE_HEADER_PATCH_KEYS } from "../../../shared/ipcContract";
-import { call, errorText, fmt, pos } from "../../api";
+import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../../api";
+import { CustomerFinder } from "../CustomerFinder";
 import { useT } from "../../i18n";
 import { DEFAULT_UNIT, UnitCell } from "../../components/UnitCell";
+import { DraftRowStore } from "./draftRowStore";
+import { isTypedTaxRateUnsaved } from "./taxRateDirty";
+import { classifyFlushFailure } from "./flushOutcome";
 
 const EMPTY_LINE: InvoiceLineRequest = {
   description: null,
@@ -85,6 +89,8 @@ function rowUnfinished(r: DraftRow): boolean {
 }
 
 type FinalizedNotice = {
+  /** The customer whose account the whole total was put on, when it was issued on account. */
+  readonly onAccountOf?: string;
   readonly number: number;
   readonly items: ReadonlyArray<ReconciliationDto>;
 };
@@ -128,7 +134,13 @@ export function InvoiceSheet({
   readonly onClosed: () => void;
 }) {
   const { t, unit } = useT();
-  const [view, setView] = useState<InvoiceViewDto | null>(null);
+  const [view, setViewState] = useState<InvoiceViewDto | null>(null);
+  /** The newest view, readable from an async handler without trusting the render it began in. */
+  const viewRef = useRef<InvoiceViewDto | null>(null);
+  const setView = (next: InvoiceViewDto | null) => {
+    viewRef.current = next;
+    setViewState(next);
+  };
   const [products, setProducts] = useState<AdminProductDto[]>([]);
   /**
    * The rows the operator is typing, NOT yet in the database.
@@ -143,16 +155,53 @@ export function InvoiceSheet({
    * React would otherwise carry a typed value from a removed row into the row that replaced it.
    */
   const [draftRows, setDraftRows] = useState<ReadonlyArray<DraftRow>>([]);
+  /** Rows belonging to a batch that is being saved: not editable, removable or re-pickable. */
+  const [frozenRows, setFrozenRows] = useState<ReadonlySet<string>>(new Set());
+  /**
+   * 🔴 THE ROWS LIVE IN THIS STORE, NOT IN A RENDER'S CLOSURE. See draftRowStore.ts: an async handler
+   * that reads `draftRows` reads the render it started in, which is exactly how an edit made while a
+   * batch was in the air used to be lost or mistaken for what was saved. React state above is only a
+   * mirror for drawing.
+   */
+  const storeRef = useRef<DraftRowStore<InvoiceLineRequest, InvoiceViewDto> | null>(null);
+  if (storeRef.current === null) {
+    storeRef.current = new DraftRowStore<InvoiceLineRequest, InvoiceViewDto>({
+      isReady: rowReady,
+      newKey: newIdempotencyKey,
+      classify: classifyFlushFailure,
+      onChange: () => {
+        setDraftRows(storeRef.current!.rows);
+        setFrozenRows(storeRef.current!.frozenSnapshot());
+      },
+    });
+  }
+  const rowStore = storeRef.current;
   const nextRowKey = useRef(1);
   const [pickerFor, setPickerFor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /** This document printed without its own archived logo. A warning, never an error — see below. */
+  const [logoWarning, setLogoWarning] = useState(false);
+  /**
+   * This document named a logo that was never archived, so it printed WITHOUT one rather than with
+   * today's file (Track 2 phase 3). A different fact from `logoWarning`, with its own sentence.
+   */
+  const [logoUnverified, setLogoUnverified] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [exiting, setExiting] = useState(false);
   const [saved, setSaved] = useState(false);
   const [finalized, setFinalized] = useState<FinalizedNotice | null>(null);
+  /** Migration 16. The linked account's name for DISPLAY only — the link itself is the id on the invoice. */
+  const [linkedName, setLinkedName] = useState<string | null>(null);
+  const [findingCustomer, setFindingCustomer] = useState(false);
+  /** Convenience only: the owner-only option is drawn for owners; the service re-reads the live role. */
+  const [isOwner, setIsOwner] = useState(false);
+  /** Explicit, per attempt, never remembered: issuing on account is a deliberate act every time. */
+  const [issueOnAccount, setIssueOnAccount] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** The tax-rate input, so Finalize can read what is typed instead of trusting that a blur happened. */
+  const taxInput = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     call(pos().getInvoice({ invoiceId }))
@@ -162,6 +211,28 @@ export function InvoiceSheet({
       .then(setProducts)
       .catch(() => setProducts([]));
   }, [invoiceId]);
+
+  useEffect(() => {
+    call(pos().currentCashier())
+      .then((c) => setIsOwner(c?.role === "owner"))
+      .catch(() => setIsOwner(false));
+  }, []);
+
+  const linkedId = view?.invoice.customerPartyId ?? null;
+  useEffect(() => {
+    if (!linkedId) {
+      setLinkedName(null);
+      setIssueOnAccount(false);
+      return;
+    }
+    let live = true;
+    call(pos().getCustomer({ customerId: linkedId }))
+      .then((c) => live && setLinkedName(c.displayName))
+      .catch(() => live && setLinkedName(null));
+    return () => {
+      live = false;
+    };
+  }, [linkedId]);
 
   const readOnly = view?.invoice.status === "final";
 
@@ -222,7 +293,7 @@ export function InvoiceSheet({
     for (const key of INVOICE_HEADER_PATCH_KEYS) {
       if (fieldRefs.current[key]) patch[key] = typed(key);
     }
-    if (Object.keys(patch).length === 0) return view;
+    if (Object.keys(patch).length === 0) return viewRef.current;
     const next = await call(pos().updateInvoiceHeader({ invoiceId, patch: patch as InvoiceHeaderPatch }));
     setView(next);
     return next;
@@ -244,6 +315,16 @@ export function InvoiceSheet({
   };
 
   /**
+   * Compare exactly as the service parses percentages: a numerically equal but invalid value
+   * (e.g. "11.000" or "11e0") must still count as unsaved, never permit a false Saved claim.
+   */
+  const taxDirty = (): boolean => {
+    const el = taxInput.current;
+    if (!el || !taxOn || !snapshot) return false;
+    return isTypedTaxRateUnsaved(el.value, snapshot.rateBasisPoints);
+  };
+
+  /**
    * Is anything typed but not yet stored?
    *
    * 🔴 THE EXIT RULE NEEDS A REAL ANSWER, not an optimistic one. Comparing each bound input's
@@ -253,6 +334,7 @@ export function InvoiceSheet({
   const isDirty = (): boolean => {
     const inv = view?.invoice;
     if (!inv) return false;
+    if (taxDirty()) return true;
     for (const key of INVOICE_HEADER_PATCH_KEYS) {
       if (!fieldRefs.current[key]) continue;
       if ((typed(key) ?? "") !== storedDisplay(key)) return true;
@@ -279,15 +361,24 @@ export function InvoiceSheet({
       ),
     );
 
-  const saveDraft = () =>
-    run(async () => {
+  const saveDraft = () => {
+    setSaved(false);
+    return run(async () => {
       // Rows first, then the header: the operator pressed one button and means "save what I see".
       await flushRows();
-      const next = await flushHeader();
+      const next = await afterRowsSaved(async () => {
+        await flushTax();
+        return flushHeader();
+      });
       if (!next) throw new Error("the draft could not be read back");
+      if (rowStore.rows.some(rowUnfinished)) {
+        setError(t("inv.sheet.rowsIncomplete"));
+        return next;
+      }
       setSaved(true);
       return next;
     });
+  };
 
   /**
    * Writes a row's line, PRESERVING whatever the unit cell is mid-deciding.
@@ -298,11 +389,9 @@ export function InvoiceSheet({
    * and only the catalog picker (which always supplies a real base unit) clears it.
    */
   const setRow = (key: string, line: InvoiceLineRequest, unitResolved = false) =>
-    setDraftRows((rows) =>
-      rows.map((r) => (r.key === key ? { key, line, unitIncomplete: unitResolved ? false : r.unitIncomplete } : r)),
-    );
+    rowStore.edit(key, (r) => ({ key, line, unitIncomplete: unitResolved ? false : r.unitIncomplete }));
 
-  const dropRow = (key: string) => setDraftRows((rows) => rows.filter((r) => r.key !== key));
+  const dropRow = (key: string) => rowStore.remove(key);
 
   /**
    * Persists every row that is ready, in ONE transaction, and leaves the rest alone.
@@ -315,13 +404,18 @@ export function InvoiceSheet({
    * from this component's.
    */
   const flushRows = async (): Promise<InvoiceViewDto | null> => {
-    const ready = draftRows.filter(rowReady);
-    if (ready.length === 0) return view;
-    const next = await call(pos().addInvoiceLines({ invoiceId, lines: ready.map((r) => r.line) }));
-    const persisted = new Set(ready.map((r) => r.key));
-    setDraftRows((rows) => rows.filter((r) => !persisted.has(r.key)));
-    setView(next);
-    return next;
+    const sent = await rowStore.flush(
+      async (key, lines) => {
+        const next = await call(pos().addInvoiceLines({ invoiceId, lines: [...lines], idempotencyKey: key }));
+        setView(next);
+        return next;
+      },
+      {
+        unknown: () => new Error(t("inv.sheet.flushUnknown")),
+        editedWhileSaving: () => new Error(t("inv.sheet.rowChangedAfterSave")),
+      },
+    );
+    return sent ?? viewRef.current;
   };
 
   /**
@@ -337,7 +431,7 @@ export function InvoiceSheet({
     // The dropdown's default is `piece`, exactly as the Add/Edit Product form defaults, so a known
     // unit is valid immediately and the operator has one less field to visit.
     const line: InvoiceLineRequest = { ...EMPTY_LINE, unitLabel: unit(DEFAULT_UNIT), canonicalUnit: DEFAULT_UNIT };
-    setDraftRows((rows) => [...rows, { key, line, unitIncomplete: false }]);
+    rowStore.add({ key, line, unitIncomplete: false });
     try {
       await flushRows();
     } catch (e) {
@@ -371,9 +465,8 @@ export function InvoiceSheet({
   /**
    * Leaves the draft WITHOUT destroying it — the safe exit this screen did not have.
    *
-   * Until now `onClosed` was reachable only from discard(), so leaving an open draft meant deleting
-   * it: an operator had to finalize or lose the work. This flushes the typed header first, so
-   * navigating away cannot silently lose a value either.
+   * Leaving with a changed header or entered row requires an explicit save, discard, or cancel
+   * choice. Saving writes all completed rows and the header before the sheet closes.
    */
   /**
    * Leaving the draft.
@@ -383,7 +476,8 @@ export function InvoiceSheet({
    * not make, and an unconditional prompt punishes leaving a screen that has not changed.
    */
   const leave = () => {
-    if (isDirty()) {
+    if (isDirty() || rowStore.rows.some((row) => !rowBlank(row.line))) {
+      setError(null);
       setExiting(true);
       return;
     }
@@ -394,12 +488,115 @@ export function InvoiceSheet({
     setBusy(true);
     setError(null);
     try {
-      await flushHeader();
+      await flushRows();
+      await afterRowsSaved(async () => {
+        await flushTax();
+        await flushHeader();
+      });
+      if (rowStore.rows.some(rowUnfinished)) {
+        setError(t("inv.sheet.rowsIncomplete"));
+        return;
+      }
       setExiting(false);
       onClosed();
     } catch (e) {
       setError(errorText(e));
-      setExiting(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Runs a step that comes AFTER the rows were stored, and says so if it fails.
+   *
+   * 🔴 THE ROWS ARE ALREADY IN THE LEDGER by then. A bare refusal from the header or the tax would
+   * read as though the whole save had failed, and the operator would retype rows that exist.
+   */
+  const afterRowsSaved = async <T,>(step: () => Promise<T>): Promise<T> => {
+    try {
+      return await step();
+    } catch (e) {
+      if (!rowStore.rowsWritten) throw e;
+      throw new Error(`${t("inv.sheet.partialSaved")} ${errorText(e)}`);
+    }
+  };
+
+  /** The operator's own language for the account refusals; every other error keeps its normal text. */
+  const accountErrorText = (e: unknown): string => {
+    if (e instanceof ApiError && e.code.startsWith("CREDIT_")) {
+      const key = `inv.account.err.${e.code}`;
+      const text = t(key);
+      if (text !== key) return text;
+    }
+    return errorText(e);
+  };
+
+  /** Links (or unlinks) an exact account through the ordinary header write, then adopts the answer. */
+  const chooseAccount = async (customerId: string | null, displayName: string | null) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const previousCustomerId = viewRef.current?.invoice.customerPartyId ?? null;
+      const next = await call(pos().updateInvoiceHeader({ invoiceId, patch: { customerPartyId: customerId } }));
+      setView(next);
+      setLinkedName(displayName);
+      // A checked credit instruction belongs to the PREVIOUS customer's identity. Changing the
+      // account (including unlinking) must require an explicit fresh tick for the new customer.
+      if (next.invoice.customerPartyId !== previousCustomerId) setIssueOnAccount(false);
+      // Convenience: an EMPTY printed name is prefilled with the account's name. The printed name
+      // stays its own field — it is a snapshot the operator may edit, and never drives the link.
+      const nameInput = fieldRefs.current.customerName;
+      if (displayName && nameInput && nameInput.value.trim() === "") nameInput.value = displayName;
+    } catch (e) {
+      setError(accountErrorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Stores a tax rate that is typed but not yet blurred, so the total is the stored one. */
+  const flushTax = async () => {
+    const el = taxInput.current;
+    if (!el || !taxOn) return;
+    if (!taxDirty()) return;
+    const typedRate = el.value.trim();
+    const next = await call(
+      pos().setInvoiceTax({
+        invoiceId,
+        enabled: true,
+        ratePercent: typedRate === "" ? "0" : typedRate,
+        label: snapshot?.label ?? null,
+      }),
+    );
+    setView(next);
+  };
+
+  const prepareFinalize = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      // 🔴 EVERYTHING THE CONFIRMATION SHOWS MUST BE STORED BEFORE IT SHOWS IT. Rows first (they set
+      // the subtotal), then the tax rate (applied only on blur, so a rate still being typed is not
+      // yet on the document), then the header (customer, paid, balance). Any refusal stops here and
+      // leaves the draft exactly as it was; the confirmation only ever reads what was read back.
+      await flushRows();
+      if (rowStore.rows.some(rowUnfinished)) {
+        setError(t("inv.sheet.rowsIncomplete"));
+        return;
+      }
+      await afterRowsSaved(async () => {
+        await flushTax();
+        await flushHeader();
+      });
+      // On account means the WHOLE total is owed: refuse here, on the stored values, rather than
+      // after the operator has confirmed.
+      if (issueOnAccount && viewRef.current && viewRef.current.invoice.paid.minor !== "0") {
+        setError(t("inv.account.err.CREDIT_NEEDS_UNPAID"));
+        return;
+      }
+      setConfirming(true);
+    } catch (e) {
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -421,33 +618,69 @@ export function InvoiceSheet({
       // 🔴 An INCOMPLETE row refuses finalization rather than being silently dropped. Issuing an
       // invoice is the one irreversible act here, and quietly discarding a half-typed item is how
       // an operator ends up printing a document that is missing a line they entered.
-      if (draftRows.some(rowUnfinished)) {
-        throw new Error(t("inv.sheet.finalizeIncomplete"));
+      if (rowStore.rows.some(rowUnfinished)) {
+        setError(t("inv.sheet.rowsIncomplete"));
+        return;
       }
       await flushHeader();
-      const next = await call(pos().finalizeInvoice({ invoiceId }));
+      // Never silently downgrade a checked on-account instruction to an ordinary unpaid invoice.
+      // The service remains the authority and will refuse a missing/inactive account.
+      const account = issueOnAccount;
+      let next: InvoiceViewDto;
+      try {
+        next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: account }));
+      } catch (e) {
+        // 🔴 ON ACCOUNT, an unclear outcome is resolved by ASKING the ledger, never by guessing: the
+        // same request again verifies the invoice, its sale and its receivable and writes nothing
+        // if they already exist (and refuses plainly if they do not).
+        const unclear =
+          !(e instanceof ApiError) || e.code === "INVOICE_FINALIZED" || e.code === "INVOICE_STATUS_UNKNOWN" || e.code === "INTERNAL";
+        if (!account || !unclear) throw e;
+        try {
+          next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: true }));
+        } catch (again) {
+          if (again instanceof ApiError && again.code.startsWith("CREDIT_")) throw again;
+          throw new Error(t("inv.account.unknown"));
+        }
+      }
       setView(next);
       const items = await call(pos().listReconciliation({ invoiceId }));
-      setFinalized({ number: next.invoice.invoiceNumber!, items });
+      setFinalized({
+        number: next.invoice.invoiceNumber!,
+        items,
+        onAccountOf: account ? (linkedName ?? undefined) : undefined,
+      });
     } catch (e) {
-      setError(errorText(e));
+      setError(accountErrorText(e));
     } finally {
       setBusy(false);
     }
   };
 
   const print = async () => {
+    setLogoWarning(false);
+    setLogoUnverified(false);
     try {
       const result = await call(pos().printInvoice({ invoiceId }));
       if (result.status === "unavailable") setError(t("inv.sheet.print") + " — " + t("inv.review.none"));
+      // Reported on a cancelled print too: the document was rendered before the dialog opened, so
+      // the archived logo was already found to be missing and the operator should know either way.
+      else {
+        if (result.logoMissing === true) setLogoWarning(true);
+        if (result.logoUnverified === true) setLogoUnverified(true);
+      }
     } catch (e) {
       setError(errorText(e));
     }
   };
 
   const savePdf = async () => {
+    setLogoWarning(false);
+    setLogoUnverified(false);
     try {
-      await call(pos().saveInvoicePdf({ invoiceId }));
+      const result = await call(pos().saveInvoicePdf({ invoiceId }));
+      if (result.status === "saved" && result.logoMissing === true) setLogoWarning(true);
+      if (result.status === "saved" && result.logoUnverified === true) setLogoUnverified(true);
     } catch (e) {
       setError(errorText(e));
     }
@@ -474,7 +707,9 @@ export function InvoiceSheet({
   const pick = (p: AdminProductDto) => {
     const line = prefill(p);
     const draft = pickerFor?.startsWith("draft:") ? pickerFor.slice("draft:".length) : null;
-    if (draft) setRow(draft, line, true);
+    if (draft) {
+      if (!setRow(draft, line, true)) setError(t("inv.sheet.rowSaving"));
+    }
     else if (pickerFor) {
       const existing = view.lines.find((l) => l.id === pickerFor);
       if (existing) void editLine(existing.id, { ...line, quantity: String(existing.quantityMilli / 1000) });
@@ -561,6 +796,50 @@ export function InvoiceSheet({
             onBlur={(e) => void header({ notes: e.target.value.trim() === "" ? null : e.target.value })}
           />
         </label>
+        {/* 🔴 MIGRATION 16 · THE CUSTOMER ACCOUNT. Chosen from the directory by identity, never typed
+            and never matched by name — two customers called the same thing are two accounts.
+            Choosing one only LINKS the invoice; it creates no debt. Issuing on account is a
+            separate, explicit, owner-only act below. */}
+        <div className="field wide inv-account" data-testid="sheet-account">
+          <span>{t("inv.account.title")}</span>
+          {linkedId ? (
+            <div className="inv-account-row">
+              <strong dir="auto" data-testid="sheet-account-name">{linkedName ?? "…"}</strong>
+              {!readOnly && (
+                <>
+                  <button className="btn ghost small" disabled={busy} onClick={() => setFindingCustomer(true)} data-testid="account-change">
+                    {t("inv.account.change")}
+                  </button>
+                  <button className="btn ghost small" disabled={busy} onClick={() => void chooseAccount(null, null)} data-testid="account-unlink">
+                    {t("inv.account.unlink")}
+                  </button>
+                </>
+              )}
+            </div>
+          ) : (
+            !readOnly && (
+              <button className="btn ghost small" disabled={busy} onClick={() => setFindingCustomer(true)} data-testid="account-choose">
+                {t("inv.account.choose")}
+              </button>
+            )
+          )}
+          {!readOnly && <span className="muted small">{t("inv.account.hint")}</span>}
+          {!readOnly && linkedId && isOwner && (
+            <label className="field inline" data-testid="account-issue-row">
+              <input
+                type="checkbox"
+                checked={issueOnAccount}
+                disabled={busy}
+                onChange={(e) => setIssueOnAccount(e.target.checked)}
+                data-testid="account-issue"
+              />
+              <span>{t("inv.account.issue")}</span>
+            </label>
+          )}
+          {!readOnly && linkedId && isOwner && issueOnAccount && (
+            <span className="muted small" data-testid="account-issue-hint">{t("inv.account.issueHint")}</span>
+          )}
+        </div>
       </section>
 
       {/* 🔴 PER-INVOICE TAX, not a global switch. Issuing one taxed invoice used to mean toggling
@@ -584,6 +863,7 @@ export function InvoiceSheet({
                 dir="ltr"
                 inputMode="decimal"
                 defaultValue={taxRate}
+                ref={taxInput}
                 onBlur={(e) => void applyTax(true, e.target.value)}
                 data-testid="tax-rate"
               />
@@ -725,6 +1005,7 @@ export function InvoiceSheet({
                   <input
                     autoFocus={i === draftRows.length - 1}
                     value={r.line.description ?? ""}
+                    disabled={frozenRows.has(r.key)}
                     onChange={(e) => setRow(r.key, { ...r.line, description: e.target.value || null })}
                     data-testid="new-line-description"
                   />
@@ -739,6 +1020,7 @@ export function InvoiceSheet({
                     dir="ltr"
                     inputMode="decimal"
                     value={r.line.quantity}
+                    disabled={frozenRows.has(r.key)}
                     onChange={(e) => setRow(r.key, { ...r.line, quantity: e.target.value })}
                     data-testid="new-line-quantity"
                   />
@@ -748,22 +1030,13 @@ export function InvoiceSheet({
                     unitLabel={r.line.unitLabel}
                     canonicalUnit={r.line.canonicalUnit}
                     idSuffix={r.key}
+                    disabled={frozenRows.has(r.key)}
                     onChange={(choice) =>
-                      setDraftRows((rows) =>
-                        rows.map((x) =>
-                          x.key === r.key
-                            ? {
-                                key: x.key,
-                                unitIncomplete: choice.incomplete,
-                                line: {
-                                  ...x.line,
-                                  unitLabel: choice.unitLabel,
-                                  canonicalUnit: choice.canonicalUnit,
-                                },
-                              }
-                            : x,
-                        ),
-                      )
+                      rowStore.edit(r.key, (x) => ({
+                        key: x.key,
+                        unitIncomplete: choice.incomplete,
+                        line: { ...x.line, unitLabel: choice.unitLabel, canonicalUnit: choice.canonicalUnit },
+                      }))
                     }
                   />
                 </td>
@@ -772,17 +1045,23 @@ export function InvoiceSheet({
                     dir="ltr"
                     inputMode="decimal"
                     value={r.line.unitPrice}
+                    disabled={frozenRows.has(r.key)}
                     onChange={(e) => setRow(r.key, { ...r.line, unitPrice: e.target.value })}
                     data-testid="new-line-price"
                   />
                 </td>
                 <td className="num muted">—</td>
                 <td className="row-actions">
-                  <button className="btn ghost small" onClick={() => setPickerFor(`draft:${r.key}`)}>
+                  <button
+                    className="btn ghost small"
+                    disabled={frozenRows.has(r.key)}
+                    onClick={() => setPickerFor(`draft:${r.key}`)}
+                  >
                     {t("inv.sheet.pick")}
                   </button>
                   <button
                     className="btn ghost small"
+                    disabled={frozenRows.has(r.key)}
                     onClick={() => dropRow(r.key)}
                     data-testid="sheet-draft-row-remove"
                   >
@@ -878,18 +1157,54 @@ export function InvoiceSheet({
         </div>
       </section>
 
-      {error && <p className="error" data-testid="sheet-error">{error}</p>}
-
       {/* 🔴 inv-keep: the action bar stays in view while the sheet scrolls past it. The class
           already existed and was used by one screen only; the sheet it was written for did not
           have it. Reused because this sheet scrolls inside the same .content scrollport, not
           because the class happened to exist — verified in the installed-app screenshots. */}
       <div className="inv-actions inv-keep">
+        {/* ════════════════════════════════════════════════════════════════════════════════════
+            🔴 FEEDBACK LIVES WITH THE BUTTONS, BECAUSE THAT IS WHERE THE OPERATOR IS LOOKING.
+
+            Both of these used to render ABOVE this bar, in normal document flow. Measured in the
+            installed Windows app, the missing-logo warning appeared at y=709 in a 681px viewport
+            — ENTIRELY BELOW THE FOLD, 28px past anything the merchant could see. They pressed
+            "حفظ PDF", got a document with no logo, and the sentence explaining why was off-screen
+            with nothing to scroll them to it. The E2E screenshot looked fine because the test
+            scrolled; a merchant gets no such scroll.
+
+            The bar is `position: sticky; bottom: 0`, so anything inside it stays visible while the
+            sheet scrolls. `.inv-feedback` is `flex: 1 0 100%`, which takes a full row of the
+            wrapping flex container and therefore sits ABOVE the buttons without displacing them.
+
+            🔴 TWO STATES, NEVER ONE. A genuine print/save failure and "this document has no
+            archived logo" are different facts: the first means the operator's action did not
+            happen, the second means it happened and the document is honest about what it lacks.
+            They render as separate elements with their own testids, and the error is first — a
+            warning must never stand in for a failure, and a failure must never be dressed as a
+            warning.
+
+            aria-live="polite" on the container announces whichever appears, without interrupting.
+            ════════════════════════════════════════════════════════════════════════════════════ */}
+        {(error || logoWarning || logoUnverified) && (
+          <div className="inv-feedback" role="status" aria-live="polite" data-testid="sheet-feedback">
+            {error && <p className="error" data-testid="sheet-error">{error}</p>}
+            {logoWarning && (
+              <p className="small" data-testid="sheet-logo-warning">
+                <span className="badge warn">{t("tools.noticeTag")}</span> {t("inv.sheet.logoMissing")}
+              </p>
+            )}
+            {logoUnverified && (
+              <p className="small" data-testid="sheet-logo-unverified">
+                <span className="badge warn">{t("tools.noticeTag")}</span> {t("inv.sheet.logoUnverified")}
+              </p>
+            )}
+          </div>
+        )}
         {!readOnly ? (
           <>
             <button
               className="btn primary"
-              onClick={() => setConfirming(true)}
+              onClick={() => void prepareFinalize()}
               // An invoice whose only rows are still unsaved is finalizable: finalize flushes them
               // first. What it refuses is an INCOMPLETE row, and it says so.
               disabled={busy || (view.lines.length === 0 && !draftRows.some((r) => !rowBlank(r.line)))}
@@ -930,7 +1245,7 @@ export function InvoiceSheet({
         )}
         {/* The way out of a sheet, in every state including read-only. It had no testid, so a
             script could not leave an issued invoice without restarting the application. */}
-        <button className="btn ghost" onClick={onClosed} data-testid="sheet-close">
+        <button className="btn ghost" onClick={readOnly ? onClosed : leave} data-testid="sheet-close">
           {t("action.cancel")}
         </button>
       </div>
@@ -943,6 +1258,14 @@ export function InvoiceSheet({
             <dl className="inv-confirm">
               <dt>{t("inv.sheet.customer")}</dt>
               <dd>{inv.customerName ?? "—"}</dd>
+              {issueOnAccount && linkedId && (
+                <>
+                  <dt>{t("inv.account.confirmRow")}</dt>
+                  <dd data-testid="confirm-account">
+                    <bdi dir="auto">{linkedName ?? "—"}</bdi> — <bdi dir="ltr">{fmt(inv.total)}</bdi>
+                  </dd>
+                </>
+              )}
               <dt>{t("inv.sheet.lineCount")}</dt>
               <dd dir="ltr">{view.lines.length}</dd>
               <dt>{t("inv.sheet.subtotal")}</dt>
@@ -972,6 +1295,7 @@ export function InvoiceSheet({
           <div className="card dialog" role="dialog" aria-modal="true" data-testid="exit-confirm">
             <h2>{t("inv.exit.title")}</h2>
             <p className="muted small">{t("inv.exit.body")}</p>
+            {error && <p className="error" data-testid="exit-error">{error}</p>}
             <div className="inv-actions">
               <button
                 className="btn primary"
@@ -1019,12 +1343,27 @@ export function InvoiceSheet({
         </div>
       )}
 
+      {findingCustomer && (
+        <CustomerFinder
+          onClose={() => setFindingCustomer(false)}
+          onPick={(c) => {
+            setFindingCustomer(false);
+            void chooseAccount(c.id, c.displayName);
+          }}
+        />
+      )}
+
       {finalized && (
         <div className="overlay">
           <div className="card dialog" data-testid="finalized-notice">
             <h2>
               {t("inv.sheet.finalized")} <bdi dir="ltr">#{finalized.number}</bdi>
             </h2>
+            {finalized.onAccountOf !== undefined && (
+              <p data-testid="finalized-on-account">
+                {t("inv.account.issued")} <bdi dir="auto">{finalized.onAccountOf}</bdi>
+              </p>
+            )}
             {summarize(finalized.items, t).length > 0 ? (
               <>
                 <p>

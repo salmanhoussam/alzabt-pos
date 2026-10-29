@@ -24,6 +24,8 @@ describe("money: exact minor-unit representation", () => {
 
   it("formats without rounding", () => {
     expect(formatDecimal(money(1250n, "USD"))).toBe("12.50");
+    expect(formatDecimal(money(3000n, "USD"))).toBe("30.00");
+    expect(formatDecimal(money(3000n, "LBP"))).toBe("30.00");
     expect(formatDecimal(money(5n, "USD"))).toBe("0.05");
     expect(formatDecimal(money(0n, "USD"))).toBe("0.00");
     expect(formatDecimal(money(1234n, "JOD"))).toBe("1.234");

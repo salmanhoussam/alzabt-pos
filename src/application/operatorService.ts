@@ -52,6 +52,12 @@ export interface OperatorView {
   readonly role: OperatorRole;
   readonly isActive: boolean;
   readonly mustResetPin: boolean;
+  /**
+   * 🔴 THE CAPABILITY, SHOWN SO AN OWNER CAN MANAGE IT — never so a renderer can decide with it.
+   * Every authorization decision re-reads the durable row; this is what the management list paints
+   * a switch from.
+   */
+  readonly mayCreateProducts: boolean;
 }
 
 export type LoginOutcome =
@@ -78,6 +84,7 @@ export function toOperatorView(row: OperatorRow): OperatorView {
     role: row.role,
     isActive: row.is_active === 1,
     mustResetPin: row.must_reset_pin === 1,
+    mayCreateProducts: row.may_create_products === 1,
   };
 }
 
@@ -142,10 +149,25 @@ export class OperatorService {
    * deleted or deactivated must stop working, and "the sale is refused" is the correct answer to a
    * torn database, not a regrettable one.
    */
-  liveRow(id: string): { readonly id: string; readonly name: string; readonly role: OperatorRole; readonly isActive: boolean } | null {
+  liveRow(id: string): {
+    readonly id: string;
+    readonly name: string;
+    readonly role: OperatorRole;
+    readonly isActive: boolean;
+    readonly mayCreateProducts: boolean;
+  } | null {
     const row = this.deps.operators.findById(id);
     if (!row) return null;
-    return { id: row.id, name: row.name, role: row.role, isActive: row.is_active === 1 };
+    // 🔴 THE CAPABILITY TRAVELS WITH THE ROLE, and for the same reason: it is re-read here on every
+    // decision rather than captured at login, so a revoked permission stops working on the very
+    // next action with no logout and no restart — exactly as a demotion already does.
+    return {
+      id: row.id,
+      name: row.name,
+      role: row.role,
+      isActive: row.is_active === 1,
+      mayCreateProducts: row.may_create_products === 1,
+    };
   }
 
   /** Everyone, for the owner's management list. */
@@ -423,6 +445,48 @@ export class OperatorService {
     });
   }
 
+  /**
+   * Grant or revoke the narrow "may create products" capability.
+   *
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   * 🔴 IT IS A CAPABILITY FOR A CASHIER, AND AN OWNER IS NOT ONE. An owner already creates products
+   * through `role`, so setting the flag on an owner would record a permission that decides nothing
+   * — and would read, months later, as though their authority came from it. It is refused rather
+   * than quietly ignored, because a switch that appears to do something and does not is worse than
+   * no switch.
+   *
+   * 🔴 NO SELF-GRANT. `setRole` already refuses an operator changing their own role; the same
+   * reasoning applies with more force here, since this is the one permission a cashier would most
+   * like to give themselves. An owner grants it to somebody else, never to themselves.
+   * ════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  setMayCreateProducts(actor: OperatorSession, id: string, allowed: boolean): OperatorView {
+    const row = this.require(id);
+    if (actor.id === id) {
+      throw new DomainError("SELF_PERMISSION_CHANGE", "An operator cannot change their own permissions");
+    }
+    if (row.role === "owner") {
+      throw new DomainError(
+        "INVALID_INPUT",
+        "An owner can already add products; this permission is for a cashier",
+      );
+    }
+    // Nothing changed is not an event. The trail records acts, not clicks.
+    if ((row.may_create_products === 1) === allowed) return toOperatorView(row);
+    const instant = this.now();
+    return this.inTransaction(() => {
+      const updated = this.deps.operators.setMayCreateProducts(id, allowed, instant.toISOString());
+      this.writeAudit(
+        allowed ? "OPERATOR_PRODUCT_CREATE_GRANTED" : "OPERATOR_PRODUCT_CREATE_REVOKED",
+        updated,
+        row,
+        instant,
+        actor,
+      );
+      return toOperatorView(updated);
+    });
+  }
+
   // ── Internals ─────────────────────────────────────────────────────────────────────────────────
 
   private require(id: string): OperatorRow {
@@ -504,7 +568,12 @@ export class OperatorService {
     origin?: string,
   ): void {
     if (!this.deps.audit) return;
-    const state = (r: OperatorRow) => ({ is_active: r.is_active, name: r.name, role: r.role });
+    const state = (r: OperatorRow) => ({
+      is_active: r.is_active,
+      may_create_products: r.may_create_products,
+      name: r.name,
+      role: r.role,
+    });
     const changes =
       before === null
         ? diffAuditedFields(null, state(after), AUDITED_OPERATOR_FIELDS)

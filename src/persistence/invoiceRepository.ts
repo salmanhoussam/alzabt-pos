@@ -18,6 +18,14 @@
  */
 import type { Db } from "./db";
 
+export interface LineBatchRow {
+  readonly id: string;
+  readonly invoice_id: string;
+  readonly idempotency_key: string;
+  readonly request_fingerprint: string;
+  readonly line_count: number | bigint;
+}
+
 export interface InvoiceRow {
   readonly id: string;
   readonly status: string;
@@ -27,6 +35,8 @@ export interface InvoiceRow {
   readonly customer_name: string | null;
   readonly customer_address: string | null;
   readonly customer_phone: string | null;
+  /** Migration 16. The exact customer account this document is for; NULL = not linked. */
+  readonly customer_party_id: string | null;
   readonly notes: string | null;
   readonly subtotal_minor: bigint;
   readonly tax_minor: bigint;
@@ -64,6 +74,7 @@ export interface InvoiceHeaderEdit {
   readonly customerAddress: string | null;
   readonly customerPhone: string | null;
   readonly notes: string | null;
+  readonly customerPartyId: string | null;
   readonly paidMinor: bigint;
 }
 
@@ -94,7 +105,7 @@ export interface InvoiceFinalization {
 }
 
 const INVOICE_COLUMNS = `id, status, invoice_number, invoice_date, currency, customer_name,
-  customer_address, customer_phone, notes, subtotal_minor, tax_minor, total_minor, paid_minor,
+  customer_address, customer_phone, customer_party_id, notes, subtotal_minor, tax_minor, total_minor, paid_minor,
   balance_due_minor, amount_in_words, issuer_snapshot_json, tax_snapshot_json, created_by_id,
   created_by_name, created_at, updated_at, finalized_at`;
 
@@ -121,7 +132,7 @@ export class InvoiceRepository {
     this.db
       .prepare(
         `INSERT INTO invoices (${INVOICE_COLUMNS})
-         VALUES (@id, 'draft', NULL, NULL, @currency, NULL, NULL, NULL, NULL,
+         VALUES (@id, 'draft', NULL, NULL, @currency, NULL, NULL, NULL, NULL, NULL,
                  0, 0, 0, 0, 0, NULL, NULL, NULL, @byId, @byName, @now, @now, NULL)`,
       )
       .run({ id, currency, byId: createdBy.id, byName: createdBy.name, now: stamp });
@@ -190,6 +201,7 @@ export class InvoiceRepository {
         `UPDATE invoices
             SET invoice_date = @invoiceDate, customer_name = @customerName,
                 customer_address = @customerAddress, customer_phone = @customerPhone,
+                customer_party_id = @customerPartyId,
                 notes = @notes, subtotal_minor = @subtotal, tax_minor = @tax,
                 total_minor = @total, paid_minor = @paid, balance_due_minor = @balance,
                 updated_at = @now
@@ -201,6 +213,7 @@ export class InvoiceRepository {
         customerName: header.customerName,
         customerAddress: header.customerAddress,
         customerPhone: header.customerPhone,
+        customerPartyId: header.customerPartyId,
         notes: header.notes,
         subtotal: totals.subtotalMinor,
         tax: totals.taxMinor,
@@ -244,6 +257,7 @@ export class InvoiceRepository {
 
   /** Discards a draft and its lines. The triggers make this impossible once final. */
   deleteDraft(id: string): void {
+    this.db.prepare("DELETE FROM invoice_line_batches WHERE invoice_id = ?").run(id);
     this.db.prepare("DELETE FROM invoice_lines WHERE invoice_id = ?").run(id);
     this.db.prepare("DELETE FROM invoices WHERE id = ?").run(id);
   }
@@ -262,6 +276,27 @@ export class InvoiceRepository {
         | InvoiceLineRow
         | undefined) ?? null
     );
+  }
+
+  /** The recorded identity of a line batch, or null when this key was never used. */
+  findLineBatch(key: string): LineBatchRow | null {
+    return (
+      (this.db
+        .prepare(
+          `SELECT id, invoice_id, idempotency_key, request_fingerprint, line_count
+           FROM invoice_line_batches WHERE idempotency_key = ?`,
+        )
+        .get(key) as LineBatchRow | undefined) ?? null
+    );
+  }
+
+  insertLineBatch(row: LineBatchRow, now: Date): void {
+    this.db
+      .prepare(
+        `INSERT INTO invoice_line_batches (id, invoice_id, idempotency_key, request_fingerprint, line_count, created_at)
+         VALUES (@id, @invoice_id, @idempotency_key, @request_fingerprint, @line_count, @now)`,
+      )
+      .run({ ...row, now: now.toISOString() });
   }
 
   countLines(invoiceId: string): number {

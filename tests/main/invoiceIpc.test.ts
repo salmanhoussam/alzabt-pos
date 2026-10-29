@@ -94,7 +94,17 @@ describe("the invoice channels exist and answer", () => {
     }
   });
 
-  it("printInvoice and saveInvoicePdf are the ONLY asynchronous channels", () => {
+  // 🔴 THE OLD VALUE WAS `["printInvoice", "saveInvoicePdf"]` — exactly two, and this test's title
+  // said so. Slice H1 adds two more, and they are async for a real reason rather than a style
+  // choice: `startPhoneSession` binds a TCP socket and encodes a QR from 647 KB of WebAssembly,
+  // and `cancelPhoneSession` waits for the socket to actually close. Pretending either were
+  // synchronous would mean returning before the surface was open (or shut), which is the one thing
+  // a shutdown assertion must never be allowed to do.
+  //
+  // The list stays EXHAUSTIVE and pinned by name rather than counted: a channel that becomes async
+  // by accident is a caller somewhere receiving a Promise it treats as a value, and `syncHandlers`
+  // throwing is how that gets caught.
+  it("printInvoice, saveInvoicePdf and the two phone-session channels are the ONLY asynchronous channels", () => {
     // `syncHandlers` assumes exactly this. Asserting it keeps that assumption honest rather than
     // leaving a cast that would quietly hand a Promise to a caller expecting a result.
     const handlers = createIpcHandlers(h.service, { invoices: h.invoices });
@@ -112,7 +122,12 @@ describe("the invoice channels exist and answer", () => {
         void (result as Promise<unknown>).catch(() => undefined);
       }
     }
-    expect(async_.sort()).toEqual(["printInvoice", "saveInvoicePdf"]);
+    expect(async_.sort()).toEqual([
+      "cancelPhoneSession",
+      "printInvoice",
+      "saveInvoicePdf",
+      "startPhoneSession",
+    ]);
   });
 
   it("without the invoice service wired, every invoice channel says NOT_AVAILABLE", () => {
@@ -203,8 +218,8 @@ describe("what the renderer cannot send", () => {
     const id = ok<{ invoice: { id: string } }>(ipc.createInvoiceDraft(undefined)).invoice.id;
     const handlers = createIpcHandlers(h.service, {
       invoices: h.invoices,
-      printInvoice: async () => "printed",
-      saveInvoicePdf: async () => ({ fileName: "x.pdf" }),
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: false, logoUnverified: false }),
+      saveInvoicePdf: async () => ({ fileName: "x.pdf", logoMissing: false, logoUnverified: false }),
     });
     expect(errCode((await handlers.printInvoice({ invoiceId: id })) as { ok: boolean; error?: { code: string } })).toBe(
       "INVOICE_NOT_DRAFT",
@@ -212,6 +227,69 @@ describe("what the renderer cannot send", () => {
     expect(errCode((await handlers.saveInvoicePdf({ invoiceId: id })) as { ok: boolean; error?: { code: string } })).toBe(
       "INVOICE_NOT_DRAFT",
     );
+  });
+
+  /**
+   * 🔴 THE WARNING MUST CROSS THE BOUNDARY, OR THE OPERATOR NEVER SEES IT. `resolveInvoiceLogo`
+   * decides that a named-but-absent frozen asset prints nothing; this is the other half — the
+   * channel carrying that fact to the screen. A pure-helper test alone would pass while the
+   * renderer stayed silent, which is the exact failure mode this slice exists to prevent.
+   */
+  it("🔴 a missing archived logo is reported to the renderer by BOTH document channels", async () => {
+    ok(ipc.saveCompanyProfile(PROFILE));
+    const id = ok<{ invoice: { id: string } }>(ipc.createInvoiceDraft(undefined)).invoice.id;
+    ok(ipc.addInvoiceLine({ invoiceId: id, line: LINE }));
+    ok(ipc.finalizeInvoice({ invoiceId: id }));
+    const handlers = createIpcHandlers(h.service, {
+      invoices: h.invoices,
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: true, logoUnverified: false }),
+      saveInvoicePdf: async () => ({ fileName: "inv.pdf", logoMissing: true, logoUnverified: false }),
+    });
+
+    expect(await handlers.printInvoice({ invoiceId: id })).toEqual({
+      ok: true,
+      data: { status: "printed", logoMissing: true, logoUnverified: false },
+    });
+    expect(await handlers.saveInvoicePdf({ invoiceId: id })).toEqual({
+      ok: true,
+      data: { status: "saved", fileName: "inv.pdf", logoMissing: true, logoUnverified: false },
+    });
+
+    // And the ordinary case stays ordinary: no warning when the asset was there.
+    const quiet = createIpcHandlers(h.service, {
+      invoices: h.invoices,
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: false, logoUnverified: false }),
+      saveInvoicePdf: async () => ({ fileName: "inv.pdf", logoMissing: false, logoUnverified: false }),
+    });
+    expect(await quiet.printInvoice({ invoiceId: id })).toEqual({
+      ok: true,
+      data: { status: "printed", logoMissing: false, logoUnverified: false },
+    });
+  });
+
+  /**
+   * Track 2 phase 3. An invoice that named a logo but never archived it now prints WITHOUT one —
+   * and that fact crosses the boundary on its own field, with its own sentence in the renderer,
+   * because "your archived logo is missing" would be false for it.
+   */
+  it("🔴 an unverified (never archived) logo is reported separately by BOTH document channels", async () => {
+    ok(ipc.saveCompanyProfile(PROFILE));
+    const id = ok<{ invoice: { id: string } }>(ipc.createInvoiceDraft(undefined)).invoice.id;
+    ok(ipc.addInvoiceLine({ invoiceId: id, line: LINE }));
+    ok(ipc.finalizeInvoice({ invoiceId: id }));
+    const handlers = createIpcHandlers(h.service, {
+      invoices: h.invoices,
+      printInvoice: async () => ({ status: "printed" as const, logoMissing: false, logoUnverified: true }),
+      saveInvoicePdf: async () => ({ fileName: "inv.pdf", logoMissing: false, logoUnverified: true }),
+    });
+    expect(await handlers.printInvoice({ invoiceId: id })).toEqual({
+      ok: true,
+      data: { status: "printed", logoMissing: false, logoUnverified: true },
+    });
+    expect(await handlers.saveInvoicePdf({ invoiceId: id })).toEqual({
+      ok: true,
+      data: { status: "saved", fileName: "inv.pdf", logoMissing: false, logoUnverified: true },
+    });
   });
 
   it("print is unavailable rather than pretending when no printer path is wired", async () => {

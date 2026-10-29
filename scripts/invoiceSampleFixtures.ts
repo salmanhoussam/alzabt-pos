@@ -80,6 +80,7 @@ export function view(opts: {
       customerName: "شركة المقاولات النموذجية",
       customerAddress: "شارع الاختبار، بناية رقم ١٢، الطابق الثاني",
       customerPhone: "70-000000",
+      customerPartyId: null,
       notes: opts.lines === 1 ? null : "التسليم خلال ثلاثة أيام عمل",
       subtotal: money(subtotal),
       tax: money(tax),

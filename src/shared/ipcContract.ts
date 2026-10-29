@@ -20,6 +20,7 @@ export const CHANNELS = {
   resetOperatorPin: "pos:resetOperatorPin",
   setOperatorActive: "pos:setOperatorActive",
   setOperatorRole: "pos:setOperatorRole",
+  setOperatorMayCreateProducts: "pos:setOperatorMayCreateProducts",
   currentCashier: "pos:currentCashier",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
@@ -28,12 +29,64 @@ export const CHANNELS = {
   getSaleHistory: "pos:getSaleHistory",
   importCatalog: "pos:importCatalog",
   exportCatalog: "pos:exportCatalog",
+  exportOnlineCatalog: "pos:exportOnlineCatalog",
   exportBackup: "pos:exportBackup",
+  // ── Full backup and restore (Track 2) ────────────────────────────────────────────────────────
+  //
+  // 🔴 OWNER ONLY, AND NO PATH CROSSES IN EITHER DIRECTION THAT MAIN WILL ACT ON. Main runs the
+  // folder pickers and remembers the package it previewed; `applyRestore` names only the manifest
+  // hash the owner saw and whether they accepted its missing files. Main stages exactly the package
+  // it previewed, re-verifies it, and restarts — the swap itself happens at the next start.
+  exportFullBackup: "pos:exportFullBackup",
+  inspectRestoreBackup: "pos:inspectRestoreBackup",
+  applyRestore: "pos:applyRestore",
   getAppInfo: "pos:getAppInfo",
   listProducts: "pos:listProducts",
   createProduct: "pos:createProduct",
   updateProduct: "pos:updateProduct",
   setProductActive: "pos:setProductActive",
+  // ── Product Master (migration 9) ─────────────────────────────────────────────────────────────
+  //
+  // 🔴 THERE IS NO CHANNEL THAT CARRIES IMAGE BYTES INTO MAIN. `setProductImage` names a product
+  // and nothing else; main runs the picker, decodes and normalizes, exactly as `pickInvoiceLogo`
+  // already does for the invoice logo. The renderer never supplies a path or a buffer.
+  listCategories: "pos:listCategories",
+  listBrands: "pos:listBrands",
+  createCategory: "pos:createCategory",
+  // ── Customer directory (migration 12, slice S1B) ──────────────────────────────────────────────
+  //
+  // 🔴 CUSTOMER-ONLY CHANNELS, AND NO `kind` PARAMETER ANYWHERE. The service handles both kinds,
+  // but the BRIDGE exposes only customers, so there is no supplier operation to reach from the
+  // renderer at all — not even a refused one. A shared `partyX({ kind })` channel would have made
+  // the supplier boundary a runtime check on an untrusted string; this makes it structural.
+  searchCustomers: "pos:searchCustomers",
+  getCustomer: "pos:getCustomer",
+  createCustomer: "pos:createCustomer",
+  updateCustomerContact: "pos:updateCustomerContact",
+  setCustomerActive: "pos:setCustomerActive",
+  // 🔴 S3B — THE ONLY FINANCIAL CHANNEL ON THE BRIDGE, AND IT IS READ-ONLY. There is no channel
+  // that posts an obligation or records a payment: those exist in the service and are reachable
+  // only from main. One owner-classified read, bound to a durable customer id.
+  getCustomerStatement: "pos:getCustomerStatement",
+  recordCustomerPayment: "pos:recordCustomerPayment",
+  // 🔴 M17B-S1 — THE SECOND (AND LAST) FINANCIAL WRITE CHANNEL: one real Whish/bank receipt shared
+  // across two or more debts of ONE customer. Owner-only. Closed list of exactly two money writers.
+  recordAllocatedReceipt: "pos:recordAllocatedReceipt",
+  renameCategory: "pos:renameCategory",
+  setCategoryActive: "pos:setCategoryActive",
+  deleteCategory: "pos:deleteCategory",
+  getProductImageMeta: "pos:getProductImageMeta",
+  getProductImageBytes: "pos:getProductImageBytes",
+  setProductImage: "pos:setProductImage",
+  removeProductImage: "pos:removeProductImage",
+  // ── Phone entry over the LAN (slice H1) ──────────────────────────────────────────────────────
+  //
+  // 🔴 NEITHER CHANNEL EVER RETURNS THE TOKEN. `startPhoneSession` answers with the QR to show and
+  // the address to read out for support — the secret is inside the encoded URL and nowhere else in
+  // the DTO, so a renderer (or a screenshot of one) cannot leak a reusable credential.
+  startPhoneSession: "pos:startPhoneSession",
+  cancelPhoneSession: "pos:cancelPhoneSession",
+  phoneSessionState: "pos:phoneSessionState",
   getSettings: "pos:getSettings",
   setTerminalLanguage: "pos:setTerminalLanguage",
   // ── Manual invoices (migration 6) ────────────────────────────────────────────────────────────
@@ -78,6 +131,12 @@ export interface CashierDto {
   readonly name: string;
   /** Migration 8. Present on a SESSION; the login list deliberately carries only id and name. */
   readonly role?: OperatorRoleDto;
+  /**
+   * Migration 11. Present on a SESSION only, and CONVENIENCE ONLY: it decides which buttons are
+   * worth drawing, never whether an act is allowed. The service re-reads the durable row on every
+   * create, so a stale `true` here buys a renderer nothing but a refusal.
+   */
+  readonly mayCreateProducts?: boolean;
 }
 
 export type OperatorRoleDto = "owner" | "admin" | "cashier";
@@ -89,6 +148,8 @@ export interface OperatorDto {
   readonly role: OperatorRoleDto;
   readonly isActive: boolean;
   readonly mustResetPin: boolean;
+  /** Migration 11 — the narrow "may add products" grant. Meaningless on an owner, who always may. */
+  readonly mayCreateProducts: boolean;
 }
 
 /**
@@ -133,6 +194,10 @@ export interface SetOperatorActiveRequest extends OperatorIdRequest {
 
 export interface SetOperatorRoleRequest extends OperatorIdRequest {
   readonly role: OperatorRoleDto;
+}
+
+export interface SetOperatorMayCreateProductsRequest extends OperatorIdRequest {
+  readonly mayCreateProducts: boolean;
 }
 
 export interface ProductDto {
@@ -259,10 +324,103 @@ export type ImportCatalogResponse =
     }
   | { readonly status: "rejected"; readonly rejected: ReadonlyArray<{ readonly line: number; readonly reason: string }> };
 
+/**
+ * What a finished Online Catalog export tells the owner.
+ *
+ * 🔴 `folderName`, NOT A PATH. The owner chose the parent folder a moment ago, so naming the
+ * package inside it is all they need — and an absolute path on screen is one that ends up in a
+ * screenshot, a support email, or a log, carrying the operator's Windows username with it.
+ */
+export interface OnlineCatalogExportDto {
+  readonly folderName: string;
+  readonly products: number;
+  readonly images: number;
+  /** Exported products missing a photo, English name, category, brand or description. */
+  readonly incomplete: number;
+}
+
 /** exportCatalog / exportBackup take NO payload: the main process shows the save dialog and writes. */
 export type ExportResponse =
   | { readonly status: "cancelled" }
   | { readonly status: "saved"; readonly fileName: string; readonly productCount?: number };
+
+/** A file a full backup could not carry. `reason` is a code the UI words; `name` is data only. */
+export interface BackupMissingAssetDto {
+  readonly kind: "frozen-logo" | "live-logo";
+  readonly name: string;
+  readonly reason: "absent-at-source" | "not-a-regular-file" | "unsafe-name" | "content-mismatch" | "too-large" | "changed-during-backup";
+}
+
+export type BackupSettingsState = "included" | "absent" | "invalid-at-source" | "changed-during-backup";
+
+/**
+ * The result of a full backup. `location` is the folder the owner chose, for DISPLAY only: no
+ * channel accepts a path back.
+ */
+export type FullBackupExportResponse =
+  | { readonly status: "cancelled" }
+  | {
+      readonly status: "saved";
+      readonly folderName: string;
+      readonly location: string;
+      /** False when a logo the ledger references could not be included — listed below. */
+      readonly complete: boolean;
+      readonly missingAssets: ReadonlyArray<BackupMissingAssetDto>;
+      readonly settings: BackupSettingsState;
+    }
+  | { readonly status: "failed"; readonly reason: "IN_APP_FOLDER" | "DESTINATION_EXISTS" | "FAILED" };
+
+/** Why a backup folder cannot be restored. Each has its own sentence in the UI. */
+export type RestoreRefusalReason =
+  /** The chosen folder is inside the program's own data folder. */
+  | "IN_APP_FOLDER"
+  | "UNPUBLISHED"
+  | "NOT_A_BACKUP"
+  | "DAMAGED"
+  | "NEWER_THAN_APP"
+  | "OTHER_DATABASE"
+  | "CHANGED"
+  | "RESTORE_PENDING"
+  | "NO_PREVIEW"
+  | "PREVIEW_MISMATCH"
+  | "MISSING_NOT_ACCEPTED"
+  /** A write to the ledger was still in progress at that moment; nothing was staged. */
+  | "BUSY"
+  | "FAILED";
+
+/** What the owner sees before deciding. Everything here was read by MAIN from the verified package. */
+export interface RestorePreviewDto {
+  /** What `applyRestore` must name. */
+  readonly manifestSha256: string;
+  readonly folderName: string;
+  readonly createdAt: string;
+  readonly appVersion: string;
+  readonly schemaVersion: number;
+  /** This build's schema. A lower backup schema is upgraded at the next start. */
+  readonly appSchemaVersion: number;
+  /** Row counts in the backup, for the tables an owner recognises. Null when the table is absent. */
+  readonly counts: Readonly<Record<"sales" | "invoices" | "parties" | "obligations" | "settlements" | "receipts" | "operators", number | null>>;
+  readonly complete: boolean;
+  readonly missingAssets: ReadonlyArray<BackupMissingAssetDto>;
+  readonly settings: BackupSettingsState;
+}
+
+export type InspectRestoreResponse =
+  | { readonly status: "cancelled" }
+  | { readonly status: "ready"; readonly preview: RestorePreviewDto }
+  | { readonly status: "refused"; readonly reason: RestoreRefusalReason; readonly detail: string | null };
+
+export interface ApplyRestoreRequest {
+  /** The hash of the preview the owner confirmed. Main compares it with the preview IT holds. */
+  readonly manifestSha256: string;
+  /** Explicit acceptance of the preview's missing files. Required (true) for an incomplete backup. */
+  readonly acceptMissingAssets: boolean;
+}
+
+export type ApplyRestoreResponse =
+  /** Staged; the program restarts now and performs the restore before it opens the ledger. */
+  | { readonly status: "staged" }
+  | { readonly status: "refused"; readonly reason: RestoreRefusalReason; readonly detail: string | null };
 
 /** Installation identity, shown in the UI for field support. */
 export interface AppInfoDto {
@@ -292,15 +450,164 @@ export interface AdminProductDto {
   readonly priceNeedsReview: boolean;
   readonly isActive: boolean;
   readonly updatedAt: string;
+  // ── Product Master (migration 9) ─────────────────────────────────────────────────────────────
+  //
+  // 🔴 EVERY ONE OF THESE IS OPTIONAL FOR SELLING, and they travel on the ordinary list because
+  // they are small: an id, a code and some text. What does NOT travel is the photo — `hasImage` is
+  // a boolean computed from one small query over the image table, never the bytes. The products
+  // screen renders every product, and a blob here would load the shop's whole photo library to
+  // draw a list that shows none of them.
+  readonly categoryId: string | null;
+  /** Canonical form only — a 12-digit UPC-A is already its 13-digit EAN-13 here. */
+  readonly barcode: string | null;
+  readonly brand: string | null;
+  readonly descriptionAr: string | null;
+  readonly descriptionEn: string | null;
+  readonly isOnlineVisible: boolean;
+  // ── The product's photo, as STATE rather than as an image ────────────────────────────────────
+  //
+  // 🔴 EXACTLY ENOUGH TO DRAW A LIST AND THEN ASK FOR WHAT IS ON SCREEN. `hasImage` decides
+  // thumbnail-or-placeholder with no further call; `primaryImageId` is what
+  // `getProductImageBytes` takes; `imageVersion` is the stored CONTENT HASH, so a renderer cache
+  // keyed on it is exact — replacing a photo changes the key, and nothing has to guess whether a
+  // cached thumbnail is stale. Three small scalars, and still not one byte of any photo.
+  readonly hasImage: boolean;
+  readonly primaryImageId: string | null;
+  readonly imageMime: "image/jpeg" | "image/png" | null;
+  /** The sha256 of the stored bytes. A cache key that cannot be wrong, not a version counter. */
+  readonly imageVersion: string | null;
 }
 
-/** What the operator typed. Optional fields are null when not given — never an empty string. */
+/** One category, as every surface sees it. Flat: there is no parent and no tree in V1. */
+export interface CategoryDto {
+  readonly id: string;
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+  readonly isActive: boolean;
+  readonly sortOrder: number;
+  readonly updatedAt: string;
+}
+
+/**
+ * A product photo's metadata. There is no `bytes` field, in the DTO as in the repository row.
+ *
+ * 🔴 The absence is the contract, not an omission: a screen holding this object cannot reach the
+ * image data, so it must ask for it by name through `getProductImageBytes`.
+ */
+/**
+ * Asking for a phone session. `productId` is present only for an edit.
+ *
+ * 🔴 The renderer names an ACTION and, for an edit, a product. It cannot choose the port, the
+ * address, the token or the expiry — all four are main's, so a compromised or buggy renderer
+ * cannot widen the surface or weaken the credential.
+ */
+export interface StartPhoneSessionRequest {
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  readonly productId?: string | null;
+}
+
+/** One plausible LAN address, offered when the machine has more than one real candidate. */
+export interface LanCandidateDto {
+  readonly interfaceName: string;
+  readonly address: string;
+  readonly note: string;
+}
+
+/**
+ * What the desktop needs to display a pairing QR — and deliberately not one field more.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WHAT IS ABSENT IS THE CONTRACT. There is no `token`, no `url`, no operator id, no operator
+ * name, no product name and no database path. The token exists only inside `qrSvg`'s encoded
+ * symbol, which is the one place it has to be, because that is what the phone's camera reads.
+ *
+ * `host` and `port` ARE present: the approved design requires a visible address so a merchant
+ * whose phone cannot connect can be asked to read it out, and so a future retry UI can offer the
+ * other adapter. An address is not a secret — the token is.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export interface PhoneSessionDto {
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  readonly host: string;
+  readonly port: number;
+  /** ISO-8601. The desktop counts down from this rather than inventing its own ten minutes. */
+  readonly expiresAt: string;
+  /** A self-contained SVG. No object URL, no `blob:`, nothing for the renderer's CSP to refuse. */
+  readonly qrSvg: string;
+  /** True when the machine had more than one real candidate and this one was a best guess. */
+  readonly addressAmbiguous: boolean;
+  /** Every plausible address, when ambiguous — so a retry path exists without re-measuring. */
+  readonly addressCandidates: readonly LanCandidateDto[];
+}
+
+/**
+ * The live state of the phone session, for the desktop dialog.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WHY POLLING RATHER THAN A PUSH EVENT. This bridge has no main→renderer event channel and
+ * never has: every one of the 60-odd channels is a request the renderer makes. Adding a push
+ * channel for one dialog would be a new direction of travel across the contextIsolation boundary,
+ * and the thing it would carry — "the phone saved" — is checkable in a poll the dialog is already
+ * running to count down the expiry. So the smaller change is the honest one.
+ *
+ * 🔴 `saved` IS REPORTED EXACTLY ONCE. The bridge clears it on read, so a dialog that keeps
+ * polling does not re-announce a save the owner has already been shown.
+ *
+ * 🔴 AND THERE IS NO TOKEN HERE EITHER. The states are what the owner needs to see; the credential
+ * stays inside the QR symbol.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export interface PhoneSessionState {
+  /**
+   * `waiting` — open, no phone has scanned yet.
+   * `claimed` — a phone has the form open.
+   * `saved`   — a product was saved; `savedProductId` names it. Reported once.
+   * `closed`  — nothing open (cancelled, expired, or never started).
+   */
+  readonly state: "waiting" | "claimed" | "saved" | "closed";
+  readonly savedProductId: string | null;
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | null;
+  /** ISO-8601 while the session is live, so the dialog counts down from the real deadline. */
+  readonly expiresAt: string | null;
+  readonly claimed: boolean;
+}
+
+export interface ProductImageMetaDto {
+  readonly id: string;
+  readonly productId: string;
+  readonly mime: "image/jpeg" | "image/png";
+  readonly sha256Hex: string;
+  readonly byteSize: number;
+  readonly widthPx: number;
+  readonly heightPx: number;
+  readonly origin: "desktop" | "phone";
+  readonly updatedAt: string;
+}
+
+/**
+ * The bytes of one named photo, with the metadata to interpret them.
+ *
+ * A `Uint8Array` rather than a Buffer: that is what a structured clone delivers to the renderer,
+ * and naming it honestly stops a caller assuming Buffer methods that will not be there.
+ */
+export interface ProductImageBytesDto {
+  readonly meta: ProductImageMetaDto;
+  readonly bytes: Uint8Array;
+}
+
+/**
+ * What the operator typed. Optional fields are null when not given — never an empty string.
+ *
+ * `master` is OPTIONAL AS A WHOLE. Omitting it means this caller does not deal in enrichment, which
+ * is what the import path and invoice reconciliation mean; it never means "clear those fields".
+ */
 export interface ProductDraftRequest {
   readonly nameAr: string;
   readonly nameEn: string | null;
   readonly sku: string | null;
   readonly price: string;
   readonly baseUnit: string;
+  readonly master?: ProductMasterPatch;
 }
 
 export interface CreateProductRequest {
@@ -318,13 +625,368 @@ export interface SetProductActiveRequest {
   readonly isActive: boolean;
 }
 
+/**
+ * The Product Master enrichment group, as a PATCH.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 EVERY KEY IS OPTIONAL, AND ABSENT IS NOT NULL. An absent key means "this caller is not
+ * touching that field"; `null` means "clear it". They are different on the wire, in the handler, in
+ * the domain and in the repository, and the whole chain exists so that the import path and invoice
+ * reconciliation — neither of which knows what a category is — cannot erase a category, a brand or
+ * a description the owner typed simply by saving a product.
+ *
+ * This is why it is a patch and not six more fields on `ProductDraftRequest`: an exact-shape object
+ * would force every caller to send all six, and a caller that does not know them would send nulls.
+ * The invoice header patch (`InvoiceHeaderPatch`) is the same shape for the same reason.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+export interface ProductMasterPatch {
+  readonly categoryId?: string | null;
+  /** Raw, as typed or as a decoder returned it. Main canonicalizes; a screen never pre-processes. */
+  readonly barcode?: string | null;
+  readonly brand?: string | null;
+  readonly descriptionAr?: string | null;
+  readonly descriptionEn?: string | null;
+  readonly isOnlineVisible?: boolean;
+}
+
+/** The patch keys, as data, so the preload bridge and the handler cannot drift from this list. */
+export const PRODUCT_MASTER_PATCH_KEYS = [
+  "categoryId",
+  "barcode",
+  "brand",
+  "descriptionAr",
+  "descriptionEn",
+  "isOnlineVisible",
+] as const satisfies ReadonlyArray<keyof ProductMasterPatch>;
+
+export type ProductMasterPatchKey = (typeof PRODUCT_MASTER_PATCH_KEYS)[number];
+
+export interface CreateCategoryRequest {
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+}
+
+export interface RenameCategoryRequest {
+  readonly categoryId: string;
+  readonly nameAr: string;
+  readonly nameEn: string | null;
+}
+
+export interface SetCategoryActiveRequest {
+  readonly categoryId: string;
+  readonly isActive: boolean;
+}
+
+export interface CategoryIdRequest {
+  readonly categoryId: string;
+}
+
+export interface ProductIdRequest {
+  readonly productId: string;
+}
+
+export interface ImageIdRequest {
+  readonly imageId: string;
+}
+
 export interface SetTerminalLanguageRequest {
   readonly language: Language;
+}
+
+// ── Customer directory (migration 12, slice S1B) ───────────────────────────────────────────────
+
+/**
+ * One customer, as the renderer sees it.
+ *
+ * 🔴 WHAT IS ABSENT IS THE CONTRACT: no balance, no amount owed, no obligation count, no currency.
+ * S1B ships identity only, and a field here would have to be invented.
+ */
+export interface CustomerDto {
+  readonly id: string;
+  readonly displayName: string;
+  readonly phone: string | null;
+  readonly address: string | null;
+  readonly note: string | null;
+  readonly isActive: boolean;
+  readonly createdAt: string;
+}
+
+/**
+ * One posted payment, as a statement shows it.
+ *
+ * 🔴 EVERY AMOUNT HERE IS A `MoneyDto` — minor units as a STRING, with its currency beside it.
+ * Never a number: a float cannot represent 0.1 exactly, and a statement is the one screen where
+ * that would be read as the shop's own word on what a customer owes.
+ */
+export interface StatementSettlementDto {
+  readonly id: string;
+  readonly amount: MoneyDto;
+  readonly method: "cash" | "card" | "external" | "other";
+  /** Migration 17. Which provider an 'external' payment came through; null otherwise and on history. */
+  readonly provider: "whish" | "bank_transfer" | null;
+  /** Migration 17. The operator-entered, non-sensitive reference; null when none. */
+  readonly reference: string | null;
+  /** Migration 17. True when the operator confirmed the money was received; null on cash and history. */
+  readonly fundsConfirmed: boolean | null;
+  readonly settledAt: string;
+  /**
+   * Migration 18. Set when this row is a SHARE of one real external receipt: the receipt holds the
+   * provider and reference ONCE, and this settlement only says how much of it paid this debt. A share
+   * is never additional money. Null for every direct collection and every historical row.
+   */
+  readonly receipt: StatementReceiptDto | null;
+}
+
+/** The receipt a settlement is a share of (migration 18). Display only; the amount is the WHOLE receipt. */
+export interface StatementReceiptDto {
+  readonly id: string;
+  /**
+   * The ORIGINAL idempotency key the receipt was recorded under. It lets the screen prove that a receipt
+   * belongs to the attempt it is reconciling, not merely that one with the same details exists. Read-only,
+   * owner-only like the rest of the statement; it is never sent back to main as authority.
+   */
+  readonly idempotencyKey: string;
+  readonly provider: "whish" | "bank_transfer";
+  readonly reference: string;
+  readonly total: MoneyDto;
+}
+
+/** One posted debt, its payments, and what is left on it. */
+export interface StatementObligationDto {
+  readonly id: string;
+  /** What was originally owed. Immutable, straight from the posted row. */
+  readonly amount: MoneyDto;
+  /**
+   * 🔴 CALCULATED BY THE LEDGER, NEVER STORED. `amount − sum(settlements)`, computed in main by
+   * S3A's own `outstanding()`. The renderer does no money arithmetic at all — it prints what it
+   * is given, so a UI bug cannot change what a customer appears to owe.
+   */
+  readonly outstanding: MoneyDto;
+  readonly fullyPaid: boolean;
+  readonly sourceKind: "sale" | "manual";
+  readonly sourceRef: string;
+  /** The sale this debt came from, when it came from one. Null for a manual entry. */
+  readonly saleId: string | null;
+  readonly postedAt: string;
+  readonly settlements: readonly StatementSettlementDto[];
+}
+
+/**
+ * A customer's account statement. Read-only.
+ *
+ * 🔴 `balances` IS A LIST, ONE ENTRY PER CURRENCY, AND IT IS NEVER SUMMED. There is no exchange
+ * rate anywhere in this product, so a customer who owes 50 USD and 2,000,000 LBP owes exactly
+ * that — two facts. One blended figure would require inventing a rate, and a wrong rate in a
+ * merchant's books is worse than two numbers.
+ *
+ * 🔴 AN EMPTY `obligations` IS NOT A ZERO BALANCE. It means nothing has been posted, and the
+ * screen says so in those words rather than printing "0.00", which would read as an authoritative
+ * accounting statement that the ledger never made.
+ */
+export interface CustomerStatementDto {
+  readonly customer: CustomerDto;
+  readonly obligations: readonly StatementObligationDto[];
+  readonly balances: readonly MoneyDto[];
+  /** Collections started and not yet closed, each with the ledger's answer. Usually empty. */
+  readonly pendingCollections: readonly PendingCollectionDto[];
+  /** Migration 18. Receipts started and not yet closed, each with the ledger's answer. Usually empty. */
+  readonly pendingReceipts: readonly PendingReceiptDto[];
+}
+
+/**
+ * An OWNER recording a payment against ONE already-posted debt. S3C.
+ *
+ * 🔴 THIS DOES NOT CREATE A DEBT. `obligationId` must already exist; there is no channel on this
+ * contract that posts an obligation, so a payment can only ever reduce something the ledger
+ * already holds. Selecting a customer still creates nothing.
+ *
+ * 🔴 `customerId` IS SENT AND IS CHECKED, not trusted. `LedgerService.settle` compares it to the
+ * obligation's own `partyId` and refuses a mismatch, so a screen that has drifted onto another
+ * account cannot pay the wrong person — and two customers really can share a name, which is why
+ * the id is what travels.
+ *
+ * 🔴 NO CURRENCY FIELD, DELIBERATELY. The settlement's currency is taken from the obligation
+ * itself in main. A caller cannot name one, so a wrong-currency payment is not merely refused —
+ * it is unrepresentable.
+ *
+ * 🔴 `amountMinor` IS A DECIMAL STRING OF MINOR UNITS, like every other amount on this contract.
+ * A JS number cannot hold 0.1 exactly and a payment is the last place to discover that.
+ *
+ * 🔴 `method` IS ONLY "cash" IN S3C. The ledger's own column accepts more, but this slice records
+ * cash collection and nothing else — Whish and Credit are a separate, still-unauthorized decision,
+ * and a method this screen cannot truthfully take must not be offerable through it.
+ */
+export interface RecordPaymentRequest {
+  readonly customerId: string;
+  readonly obligationId: string;
+  /**
+   * Caller-supplied and MANDATORY — main never invents one. The same key replayed with the same
+   * payload returns the committed payment with `duplicate: true` instead of taking the money
+   * twice; the same key with a different amount or method is refused outright.
+   */
+  readonly idempotencyKey: string;
+  readonly amountMinor: string;
+  /**
+   * HOW the money arrived (migration 17). Whish and bank transfer are operator-RECORDED payments:
+   * this till never contacts a provider, so the operator must confirm the funds were received.
+   */
+  readonly method: CollectionMethodDto;
+  /**
+   * A non-sensitive reference (a Whish/bank transaction number, a card slip number): never a PIN,
+   * credential or card number. Required for whish, bank_transfer and other; optional for card;
+   * refused for cash. Omit or null when not applicable.
+   */
+  readonly reference?: string | null;
+  /** True only when the operator explicitly confirmed the money was actually received. */
+  readonly fundsConfirmed?: boolean;
+}
+
+export type CollectionMethodDto = "cash" | "card" | "whish" | "bank_transfer" | "other";
+
+/**
+ * A collection that was STARTED and is not yet closed — recovered from the ledger, not from the
+ * screen's memory, so it survives navigation, a closed window and a restart.
+ *
+ *   recorded      the ledger holds a settlement under the original key that matches this intent;
+ *   not_recorded  the ledger was read and holds none — which does NOT prove external money was not received. It may be repeated EXACTLY
+ *                 (same key, same payload) or a new payment may be started;
+ *   conflict      a settlement under the key is a DIFFERENT payment — fail closed;
+ *   unknown       the lookup failed — never to be read as "not recorded", and a new collection for
+ *                 this customer is refused until it can be answered.
+ */
+export interface PendingCollectionDto {
+  readonly idempotencyKey: string;
+  readonly obligationId: string;
+  readonly amount: MoneyDto;
+  readonly method: CollectionMethodDto;
+  readonly reference: string | null;
+  readonly fundsConfirmed: boolean | null;
+  readonly createdAt: string;
+  readonly status: "recorded" | "not_recorded" | "conflict" | "unknown";
+}
+
+/**
+ * M17B-S1. ONE real external receipt (a Whish or bank transfer) shared across TWO OR MORE existing
+ * debts of ONE customer, in ONE currency.
+ *
+ * 🔴 THE SHARES MUST ADD UP TO `totalMinor` EXACTLY: there is no remainder, no excess and no credit
+ * balance. `reference` is the provider's own transaction reference, stored ONCE; it is never split
+ * into suffixes. The owner must confirm the money was actually received — this till never contacts a
+ * provider. Every amount is a decimal string of minor units; `currency` is what the operator believes
+ * every debt is in and is CHECKED against each debt, never assumed.
+ */
+export interface AllocatedReceiptRequest {
+  readonly customerId: string;
+  readonly idempotencyKey: string;
+  readonly channel: "whish" | "bank_transfer";
+  readonly reference: string;
+  readonly fundsConfirmed: boolean;
+  readonly currency: string;
+  readonly totalMinor: string;
+  readonly allocations: ReadonlyArray<{ readonly obligationId: string; readonly amountMinor: string }>;
+}
+
+export interface ReceiptDto {
+  readonly id: string;
+  readonly total: MoneyDto;
+  readonly provider: "whish" | "bank_transfer";
+  readonly reference: string;
+  readonly allocationCount: number;
+  readonly receivedAt: string;
+}
+
+/** A receipt that was STARTED and is not yet closed — recovered from the ledger, never from screen state. */
+export interface PendingReceiptDto {
+  readonly idempotencyKey: string;
+  readonly total: MoneyDto;
+  readonly provider: "whish" | "bank_transfer";
+  readonly reference: string;
+  readonly allocations: ReadonlyArray<{ readonly obligationId: string; readonly amount: MoneyDto }>;
+  readonly createdAt: string;
+  /** `not_recorded` says only that ALZABT POS holds no receipt — not that the money did not arrive. */
+  readonly status: "recorded" | "not_recorded" | "conflict" | "unknown";
+}
+
+export interface AllocatedReceiptResponse {
+  readonly receipt: ReceiptDto;
+  readonly duplicate: boolean;
+  readonly statement: CustomerStatementDto;
+}
+
+/**
+ * What the owner gets back after recording a payment.
+ *
+ * 🔴 THE REFRESHED STATEMENT TRAVELS WITH IT, computed by S3A after the commit. The screen never
+ * subtracts anything to show the new balance — it replaces what it is holding. That removes the
+ * one window in which a renderer could display a balance the ledger does not agree with.
+ *
+ * 🔴 `duplicate` IS THE RETRY ANSWER, not an error. True means this exact payment was already
+ * committed and is being handed back, so a lost response can be retried safely and the operator is
+ * told the money was already taken once — never twice.
+ */
+export interface RecordPaymentResponse {
+  readonly settlement: StatementSettlementDto;
+  readonly duplicate: boolean;
+  readonly statement: CustomerStatementDto;
+}
+
+export interface SearchCustomersRequest {
+  /** Matched against the name and the phone. Empty means "the whole directory". */
+  readonly query: string;
+  readonly includeArchived: boolean;
+}
+
+export interface CustomerIdRequest {
+  readonly customerId: string;
+}
+
+export interface CreateCustomerRequest {
+  readonly displayName: string;
+  readonly phone: string | null;
+  readonly address: string | null;
+  readonly note: string | null;
+}
+
+/**
+ * The new customer, AND the accounts that already read as the same name.
+ *
+ * 🔴 `sameName` IS INFORMATION, NOT A REFUSAL. Two customers may genuinely share a name, so the
+ * creation already succeeded; this lets the screen say "there is also another محمد علي" so the
+ * operator can tell them apart, without anything being merged or rejected.
+ */
+export interface CreateCustomerResponse {
+  readonly customer: CustomerDto;
+  readonly sameName: ReadonlyArray<CustomerDto>;
+}
+
+export interface UpdateCustomerContactRequest {
+  readonly customerId: string;
+  /** Only the keys present are changed. A key set to null clears that field. */
+  readonly patch: {
+    readonly displayName?: string;
+    readonly phone?: string | null;
+    readonly address?: string | null;
+    readonly note?: string | null;
+  };
+}
+
+export interface SetCustomerActiveRequest {
+  readonly customerId: string;
+  readonly isActive: boolean;
 }
 
 export interface IpcError {
   readonly code: string;
   readonly message: string;
+  readonly context?: CustomerPaymentOverpaymentErrorContext;
+}
+
+export interface CustomerPaymentOverpaymentErrorContext {
+  readonly reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING";
+  /** Decimal string of minor units; BigInt never crosses the IPC boundary. */
+  readonly outstandingMinor: string;
+  readonly currency: string;
 }
 
 export type IpcResult<T> = { readonly ok: true; readonly data: T } | { readonly ok: false; readonly error: IpcError };
@@ -431,6 +1093,8 @@ export interface InvoiceDto {
   readonly customerName: string | null;
   readonly customerAddress: string | null;
   readonly customerPhone: string | null;
+  /** Migration 16. The linked customer account, if the operator chose one. */
+  readonly customerPartyId: string | null;
   readonly notes: string | null;
   readonly subtotal: MoneyDto;
   readonly tax: MoneyDto;
@@ -471,6 +1135,8 @@ export interface InvoiceHeaderPatch {
   readonly customerAddress?: string | null;
   readonly customerPhone?: string | null;
   readonly notes?: string | null;
+  /** Migration 16. The exact customer ACCOUNT id, or null to unlink. Never matched by name. */
+  readonly customerPartyId?: string | null;
   /** A typed decimal ("100.00"), or null for nothing paid. NOT a computed balance. */
   readonly paid?: string | null;
 }
@@ -484,6 +1150,13 @@ export const INVOICE_HEADER_PATCH_KEYS = [
   "notes",
   "paid",
 ] as const;
+
+/**
+ * Header keys that are CHOSEN, not typed (migration 16). They are deliberately not in
+ * INVOICE_HEADER_PATCH_KEYS: every key there is a text input the sheet must flush on demand, and an
+ * account is picked through the customer directory, never typed into a field.
+ */
+export const INVOICE_HEADER_LINK_KEYS = ["customerPartyId"] as const;
 
 export type InvoiceHeaderPatchKey = (typeof INVOICE_HEADER_PATCH_KEYS)[number];
 
@@ -533,6 +1206,12 @@ export interface AddInvoiceLineRequest {
 export interface AddInvoiceLinesRequest {
   readonly invoiceId: string;
   readonly lines: ReadonlyArray<InvoiceLineRequest>;
+  /**
+   * Names THIS batch. The ledger remembers it, so a request whose response was lost can be sent
+   * again with the SAME key and never inserts twice. Generate one per batch, keep it across retries
+   * of that batch, and use a fresh one for the next.
+   */
+  readonly idempotencyKey: string;
 }
 
 export interface UpdateInvoiceLineRequest {
@@ -548,6 +1227,16 @@ export interface InvoiceLineRefRequest {
 
 export interface InvoiceIdRequest {
   readonly invoiceId: string;
+}
+
+/**
+ * Issuing a draft. `issueOnAccount` is an EXPLICIT, owner-only act: it puts the whole unpaid total
+ * on the linked customer's account, atomically with the invoice and its sale. Omitting it (or false)
+ * is the ordinary finalization, unchanged.
+ */
+export interface FinalizeInvoiceRequest {
+  readonly invoiceId: string;
+  readonly issueOnAccount?: boolean;
 }
 
 export interface InvoiceNumberRequest {
@@ -687,10 +1376,26 @@ export type PickInvoiceLogoResponse =
   | { readonly status: "chosen"; readonly logoPath: string }
   | { readonly status: "unavailable" };
 
+/**
+ * 🔴 `logoMissing` IS A TRUTH ABOUT THE DOCUMENT THAT WAS JUST PRODUCED, not a failure. The invoice
+ * named a frozen logo asset that is no longer on disk, so it printed without its own branding
+ * rather than borrowing the shop's current logo. The operator is told; the commercial content is
+ * unchanged and the print still succeeded. See src/main/invoiceLogo.ts.
+ */
 export type PrintInvoiceResponse =
-  | { readonly status: "printed" }
-  | { readonly status: "cancelled" }
+  | { readonly status: "printed"; readonly logoMissing?: boolean; readonly logoUnverified?: boolean }
+  | { readonly status: "cancelled"; readonly logoMissing?: boolean; readonly logoUnverified?: boolean }
   | { readonly status: "unavailable" };
+
+/**
+ * Like ExportResponse, plus the same archived-logo truth as PrintInvoiceResponse.
+ *
+ * `logoUnverified` (Track 2 phase 3): the invoice named a logo that was never archived, so its
+ * original cannot be confirmed and it printed WITHOUT one rather than with today's file.
+ */
+export type SaveInvoicePdfResponse =
+  | { readonly status: "cancelled" }
+  | { readonly status: "saved"; readonly fileName: string; readonly logoMissing?: boolean; readonly logoUnverified?: boolean };
 
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
@@ -704,6 +1409,7 @@ export interface PosApi {
   resetOperatorPin(req: ResetOperatorPinRequest): Promise<IpcResult<OperatorDto>>;
   setOperatorActive(req: SetOperatorActiveRequest): Promise<IpcResult<OperatorDto>>;
   setOperatorRole(req: SetOperatorRoleRequest): Promise<IpcResult<OperatorDto>>;
+  setOperatorMayCreateProducts(req: SetOperatorMayCreateProductsRequest): Promise<IpcResult<OperatorDto>>;
   currentCashier(): Promise<IpcResult<CashierDto | null>>;
   getCatalog(): Promise<IpcResult<CatalogDto>>;
   createSale(req: CreateSaleRequest): Promise<IpcResult<CreateSaleResponse>>;
@@ -712,12 +1418,83 @@ export interface PosApi {
   getSaleHistory(req: HistoryRequest): Promise<IpcResult<SaleWithVoidDto[]>>;
   importCatalog(): Promise<IpcResult<ImportCatalogResponse>>;
   exportCatalog(): Promise<IpcResult<ExportResponse>>;
+  /**
+   * Writes the Online Catalog package to a folder the OWNER chooses.
+   *
+   * 🔴 NO PAYLOAD, AND NO PATH IN EITHER DIRECTION. The renderer names nothing: main shows the
+   * directory picker, main writes, and what comes back is a narrow summary. A renderer that could
+   * name a destination would be a filesystem write primitive, which is the one thing this bridge
+   * has never granted. `null` means the owner cancelled — not an error, and nothing was written.
+   */
+  exportOnlineCatalog(): Promise<IpcResult<OnlineCatalogExportDto | null>>;
   exportBackup(): Promise<IpcResult<ExportResponse>>;
+  /** Owner only. Main picks the folder, builds and verifies the package. */
+  exportFullBackup(): Promise<IpcResult<FullBackupExportResponse>>;
+  /** Owner only. Main picks a backup folder, verifies it and REMEMBERS it. Stages nothing. */
+  inspectRestoreBackup(): Promise<IpcResult<InspectRestoreResponse>>;
+  /** Owner only. Stages the previewed package and restarts the program. */
+  applyRestore(req: ApplyRestoreRequest): Promise<IpcResult<ApplyRestoreResponse>>;
   getAppInfo(): Promise<IpcResult<AppInfoDto>>;
   listProducts(): Promise<IpcResult<AdminProductDto[]>>;
   createProduct(req: CreateProductRequest): Promise<IpcResult<AdminProductDto>>;
   updateProduct(req: UpdateProductRequest): Promise<IpcResult<AdminProductDto>>;
   setProductActive(req: SetProductActiveRequest): Promise<IpcResult<AdminProductDto>>;
+
+  // ── Product Master (migration 9) ─────────────────────────────────────────────────────────────
+  //
+  // `listCategories` returns ACTIVE AND INACTIVE rows, deliberately: the form must still display
+  // the retired category a product already carries, and it filters the chooser itself. A second
+  // "active only" channel would invite a screen to pick the wrong one and lose a product's label.
+  listCategories(): Promise<IpcResult<CategoryDto[]>>;
+  listBrands(): Promise<IpcResult<string[]>>;
+  createCategory(req: CreateCategoryRequest): Promise<IpcResult<CategoryDto>>;
+
+  // ── Customer directory (S1B) ──────────────────────────────────────────────────────────────────
+  //
+  // 🔴 NO BALANCE, NO AMOUNT, NO OBLIGATION ANYWHERE IN THIS DTO. A customer created here has a
+  // DIRECTORY RECORD, not a posted account. Returning `balanceMinor: "0"` would have been a
+  // fabricated accounting statement, and the UI would have shown it as if a ledger had said it.
+  searchCustomers(req: SearchCustomersRequest): Promise<IpcResult<CustomerDto[]>>;
+  getCustomer(req: CustomerIdRequest): Promise<IpcResult<CustomerDto>>;
+  createCustomer(req: CreateCustomerRequest): Promise<IpcResult<CreateCustomerResponse>>;
+  updateCustomerContact(req: UpdateCustomerContactRequest): Promise<IpcResult<CustomerDto>>;
+  setCustomerActive(req: SetCustomerActiveRequest): Promise<IpcResult<CustomerDto>>;
+  /**
+   * 🔴 OWNER ONLY, AND READ-ONLY. The one financial channel on this bridge. It returns what the
+   * ledger has posted; there is no channel anywhere that creates a debt or records a payment, so
+   * an untrusted renderer cannot write money at all — not even a refused attempt.
+   */
+  getCustomerStatement(req: CustomerIdRequest): Promise<IpcResult<CustomerStatementDto>>;
+  recordCustomerPayment(req: RecordPaymentRequest): Promise<IpcResult<RecordPaymentResponse>>;
+  recordAllocatedReceipt(req: AllocatedReceiptRequest): Promise<IpcResult<AllocatedReceiptResponse>>;
+  renameCategory(req: RenameCategoryRequest): Promise<IpcResult<CategoryDto>>;
+  setCategoryActive(req: SetCategoryActiveRequest): Promise<IpcResult<CategoryDto>>;
+  deleteCategory(req: CategoryIdRequest): Promise<IpcResult<{ readonly deletedId: string }>>;
+
+  getProductImageMeta(req: ProductIdRequest): Promise<IpcResult<ProductImageMetaDto | null>>;
+  /** Bytes, by image id, asked for on purpose. The only route to them. */
+  getProductImageBytes(req: ImageIdRequest): Promise<IpcResult<ProductImageBytesDto>>;
+  /** Names a product; MAIN runs the picker and owns the file. No bytes cross this bridge. */
+  setProductImage(req: ProductIdRequest): Promise<IpcResult<ProductImageMetaDto | null>>;
+  removeProductImage(req: ProductIdRequest): Promise<IpcResult<{ readonly removed: boolean }>>;
+
+  // ── Phone entry over the LAN (slice H1) ──────────────────────────────────────────────────────
+  /** Owner only. Opens a temporary listener and returns the QR to show. Never returns the token. */
+  startPhoneSession(req: StartPhoneSessionRequest): Promise<IpcResult<PhoneSessionDto>>;
+  /** Owner only. Closes whatever session is open; answers honestly when there was none. */
+  cancelPhoneSession(): Promise<IpcResult<{ readonly closed: boolean }>>;
+  /**
+   * Owner only. What the open dialog polls: waiting / claimed / saved / closed. No token.
+   *
+   * 🔴 NAMED `...State`, NOT `...Status`, AND THE RENAME WAS FORCED BY A REAL ASSERTION.
+   * `invoiceIpc.test.ts` requires that NO channel name matches `/status|setReconcil|markResolved|
+   * setPrice|writeCatalog/i`, guarding against the renderer ever being able to set a
+   * reconciliation status. `phoneSessionStatus` tripped it. The choice was to weaken a protective
+   * assertion or to pick a more precise name; the name was wrong anyway, since the DTO's own field
+   * is `state`.
+   */
+  phoneSessionState(): Promise<IpcResult<PhoneSessionState>>;
+
   getSettings(): Promise<IpcResult<TerminalSettings>>;
   setTerminalLanguage(req: SetTerminalLanguageRequest): Promise<IpcResult<TerminalSettings>>;
 
@@ -736,7 +1513,7 @@ export interface PosApi {
   removeInvoiceLine(req: InvoiceLineRefRequest): Promise<IpcResult<InvoiceViewDto>>;
   discardInvoiceDraft(req: InvoiceIdRequest): Promise<IpcResult<null>>;
 
-  finalizeInvoice(req: InvoiceIdRequest): Promise<IpcResult<InvoiceViewDto>>;
+  finalizeInvoice(req: FinalizeInvoiceRequest): Promise<IpcResult<InvoiceViewDto>>;
 
   listInvoices(req: InvoiceSearchRequest): Promise<IpcResult<InvoiceDto[]>>;
   listInvoiceDrafts(req: InvoiceSearchRequest): Promise<IpcResult<InvoiceDto[]>>;
@@ -754,5 +1531,5 @@ export interface PosApi {
   pickInvoiceLogo(): Promise<IpcResult<PickInvoiceLogoResponse>>;
   /** The renderer sends an INVOICE ID. Main loads the frozen invoice and owns the print. */
   printInvoice(req: InvoiceIdRequest): Promise<IpcResult<PrintInvoiceResponse>>;
-  saveInvoicePdf(req: InvoiceIdRequest): Promise<IpcResult<ExportResponse>>;
+  saveInvoicePdf(req: InvoiceIdRequest): Promise<IpcResult<SaveInvoicePdfResponse>>;
 }

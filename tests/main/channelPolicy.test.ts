@@ -33,25 +33,31 @@ describe("every channel is classified", () => {
     expect(() => accessFor("")).toThrow(/no authorization classification/);
   });
 
-  it("uses only the three known access levels", () => {
+  it("uses only the four known access levels", () => {
+    // 🔴 THREE UNTIL MIGRATION 11. "create-products" was added when creating a product stopped
+    // being an owner-only act: an owner may always, and a cashier may when the owner has granted
+    // it on that operator's durable row. The old value was ["owner", "public", "session"].
     const levels = new Set(Object.values(CHANNEL_POLICY));
-    expect([...levels].sort()).toEqual(["owner", "public", "session"]);
+    expect([...levels].sort()).toEqual(["create-products", "owner", "public", "session"]);
   });
 });
 
 describe("the public set", () => {
   const publicChannels = names.filter((n) => CHANNEL_POLICY[n] === "public").sort();
 
-  it("🔴 is EXACTLY these seven, each with a stated reason", () => {
+  it("🔴 is EXACTLY these eight, each with a stated reason", () => {
     // Salman asked for three — listCashiers, login, completeBootstrapSetup. Three is not
     // achievable: the renderer also calls getSettings (the app reads its language before it can
     // render anything, the login screen included), setTerminalLanguage (the PRE-AUTH language
     // toggle shipped in UI unification v1), currentCashier (App.tsx asking at startup whether
     // anyone is signed in) and logout. Each is named individually, so this stays a list of
     // justified exceptions rather than a category future channels can drift into.
+    // TRANSITION 2026-10-29: getAppInfo joins (old value "session") — the build line under the
+    // login screen read "unknown" because it was refused there.
     expect(publicChannels).toEqual([
       "completeBootstrapSetup",
       "currentCashier",
+      "getAppInfo",
       "getSettings",
       "listCashiers",
       "login",
@@ -92,13 +98,31 @@ describe("the public set", () => {
   });
 });
 
+describe("the create-products set", () => {
+  /**
+   * 🔴 EXACTLY TWO CHANNELS, NAMED. The new level exists to let a granted cashier create a product
+   * and open a NEW_PRODUCT phone session — nothing else. A third channel appearing here is a
+   * widening of a permission that was deliberately narrow, and it fails this test by name.
+   *
+   * `startPhoneSession` carries both actions and a static table cannot see which; the service's
+   * `authorizePhoneSession` refuses EDIT_PRODUCT to anyone who is not an owner, which
+   * `tests/main/phoneSessionAuth.test.ts` proves by execution rather than by this table.
+   */
+  it("🔴 is EXACTLY these two channels", () => {
+    const create = names.filter((n) => CHANNEL_POLICY[n] === "create-products").sort();
+    expect(create).toEqual(["createProduct", "startPhoneSession"]);
+  });
+});
+
 describe("the owner-only set", () => {
   it("🔴 contains every action Salman restricted, by name", () => {
     const ownerOnly = [
       // Reversing money.
       "voidSale",
-      // Master data.
-      "createProduct",
+      // Master data. 🔴 `createProduct` WAS IN THIS LIST AND IS NOT ANY MORE — migration 11 made
+      // it "owner, or a cashier explicitly granted it", which is asserted on its own below.
+      // Editing and retiring an EXISTING product stay owner-only, and that is the whole of the
+      // narrowing: the capability stops at the product's first save.
       "updateProduct",
       "setProductActive",
       "importCatalog",
@@ -125,6 +149,17 @@ describe("the owner-only set", () => {
       "resetOperatorPin",
       "setOperatorActive",
       "setOperatorRole",
+      // Granting the create capability is itself owner-only, or the permission could grant itself
+      // onwards.
+      "setOperatorMayCreateProducts",
+      // 🔴 STILL OWNER-ONLY EVEN THOUGH THE SESSION THAT OPENS A CREATE IS NOT. Cancelling and
+      // inspecting a phone session remain an owner's acts.
+      "cancelPhoneSession",
+      "phoneSessionState",
+      // Track 2: the whole shop's data out (with logos), and an older state back in.
+      "exportFullBackup",
+      "inspectRestoreBackup",
+      "applyRestore",
     ] as const;
     const wrong = ownerOnly.filter((c) => CHANNEL_POLICY[c] !== "owner");
     expect(wrong).toEqual([]);
@@ -161,22 +196,36 @@ describe("a CASHIER session is refused every owner-only channel", () => {
     (c) => CHANNEL_POLICY[c] === "owner",
   );
 
-  it("refuses all of them with NOT_AUTHORIZED, and none with a different code", () => {
+  // 🔴 THIS TEST IS `async` AND AWAITS EVERY CHANNEL, and that is a deliberate widening — it used
+  // to go through `syncHandlers`, which THROWS on an asynchronous channel. That was fine while
+  // every owner channel was synchronous, and it silently stopped being fine in slice H1:
+  // `startPhoneSession` and `cancelPhoneSession` must be async (they bind a socket and encode a
+  // QR), so the old helper would have failed here rather than proving anything about them.
+  //
+  // The failure mode worth naming is the one that did NOT happen: had the enumeration been a hand
+  // written list instead of a derivation from CHANNEL_POLICY, the two new channels would simply
+  // have been absent and this test would have stayed green while proving nothing about the only
+  // network surface in the product. Awaiting a non-promise is a no-op, so every previously
+  // covered channel is covered identically.
+  it("refuses all of them with NOT_AUTHORIZED, and none with a different code", async () => {
     const t = tempDir();
     const h = makeHarness(t.dbPath, { login: false });
     try {
-      const ipc = syncHandlers(createIpcHandlers(h.service));
+      const raw = createIpcHandlers(h.service);
+      const ipc = syncHandlers(raw);
       // Cashier Two is a real cashier in this database.
       const login = ipc.login({ cashierId: "cashier-02", pin: "2222" }) as { ok: boolean };
       expect(login.ok).toBe(true);
 
-      const outcomes = owners.map((channel) => {
-        // The payload does not matter: authorization runs BEFORE any payload is examined, which is
-        // itself the point — a restricted channel must not even tell you whether your payload was
-        // well formed.
-        const r = ipc[channel](undefined) as { ok: boolean; error?: { code: string } };
-        return { channel, ok: r.ok, code: r.error?.code };
-      });
+      const outcomes = await Promise.all(
+        owners.map(async (channel) => {
+          // The payload does not matter: authorization runs BEFORE any payload is examined, which
+          // is itself the point — a restricted channel must not even tell you whether your payload
+          // was well formed.
+          const r = (await raw[channel](undefined)) as { ok: boolean; error?: { code: string } };
+          return { channel, ok: r.ok, code: r.error?.code };
+        }),
+      );
 
       const notRefused = outcomes.filter((o) => o.ok);
       expect(notRefused, "an owner-only channel answered a cashier").toEqual([]);
@@ -221,8 +270,40 @@ describe("a CASHIER session is refused every owner-only channel", () => {
     try {
       const ipc = syncHandlers(createIpcHandlers(h.service));
       ipc.login({ cashierId: "cashier-02", pin: "2222" });
-      for (const channel of ["getCatalog", "getTodaySales", "listProducts", "getAppInfo"] as const) {
+      for (const channel of ["getCatalog", "getTodaySales", "listProducts"] as const) {
         expect((ipc[channel](undefined) as { ok: boolean }).ok, channel).toBe(true);
+      }
+    } finally {
+      h.db.close();
+      t.cleanup();
+    }
+  });
+
+  it("🔴 with NO session, getAppInfo answers the real version and build — and ONLY those two fields", () => {
+    // The login screen's build line read "Alzabt POS unknown · Build unknown": getAppInfo was
+    // session-level, so before sign-in it was refused and BuildLine fell back to "unknown".
+    const t = tempDir();
+    const h = makeHarness(t.dbPath, { login: false });
+    try {
+      const ipc = syncHandlers(createIpcHandlers(h.service, { appInfo: () => ({ version: "9.8.7", build: "abc1234" }) }));
+      expect(ipc.getAppInfo(undefined)).toEqual({ ok: true, data: { version: "9.8.7", build: "abc1234" } });
+      expect(h.service.currentRole()).toBeNull(); // answering it signed nobody in
+    } finally {
+      h.db.close();
+      t.cleanup();
+    }
+  });
+
+  it("🔴 with NO session, every non-public channel is still refused — making getAppInfo public widened nothing else", () => {
+    const t = tempDir();
+    const h = makeHarness(t.dbPath, { login: false });
+    try {
+      const ipc = syncHandlers(createIpcHandlers(h.service));
+      const sync = ["getCatalog", "getTodaySales", "getSaleHistory", "listProducts", "listCategories", "listOperators", "exportBackup", "getCompanyProfile"] as const;
+      for (const channel of sync) {
+        const r = ipc[channel](undefined) as { ok: boolean; error?: { code: string } };
+        expect(r.ok, channel).toBe(false);
+        expect(r.error?.code, channel).toBe("NOT_LOGGED_IN");
       }
     } finally {
       h.db.close();

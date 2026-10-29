@@ -20,6 +20,31 @@
  * Both now stage a file; this script is the proof that the PRODUCT's path embeds an image.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 WHAT PROVES WHAT HERE — because one green run already produced a lying picture.
+ *
+ * Run 39503757417 attempt 2 was 46/46 steps and 1304/1304 tests green, and still shipped
+ * `L3-frozen-logo-missing-warning.png` with no warning in it and `L4-cold-copy-recovery.png`
+ * byte-identical to `L2`. The assertions were true; the screenshots were not evidence. So this
+ * script is explicit about which instrument answers which question:
+ *
+ *   PDF BYTES (embedsImage)      does the printed DOCUMENT carry a raster image?
+ *                                The only thing that can answer it — the renderer never shows the
+ *                                logo, so no screenshot of the app can. Has a NEGATIVE CONTROL in
+ *                                §7: a shop with no logo must produce a PDF with NO image.
+ *   FILESYSTEM (sha of files)    which bytes are on disk, and did a copy carry them?
+ *   LEDGER (SQLite reads)        what the invoice RECORDS — number, total, status, logo_asset —
+ *                                read before and after, so "unchanged" compares two readings.
+ *   DOM (locator counts/text)    is the warning present, and is it not an error?
+ *   SCREENSHOT (shotVisibleNow)  what the OPERATOR can see — captured only after the required
+ *                                elements are measured as ALREADY visible, with no scrolling:
+ *                                the helper refuses to save a file whose name claims an element the
+ *                                merchant could not see.
+ *
+ * A screenshot is therefore used for exactly one claim in this script: that the missing-logo
+ * warning is visible to a person. Everything about the logo itself is proven by bytes.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ *
  * 🔴 Synthetic data only. The two logos are generated here in a few lines of zlib — flat colour
  * rectangles, no shop's mark, nothing from any real business.
  *
@@ -31,7 +56,17 @@
 import { _electron as electron } from "playwright-core";
 import { signIn } from "./_signin.mjs";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -134,6 +169,126 @@ async function launch() {
 const tab = (page, name) => page.locator(`[data-testid="tab-${name}"]`).click();
 const testid = (page, id) => page.locator(`[data-testid="${id}"]`);
 const textOf = async (page, id) => (await testid(page, id).innerText()).trim();
+
+/**
+ * Measure, then capture — and REFUSE to write a file whose name claims something off-screen.
+ *
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * 🔴 THIS DELIBERATELY DOES NOT SCROLL, AND THAT IS THE WHOLE POINT NOW.
+ *
+ * An earlier version scrolled the required elements into view before capturing. That produced an
+ * honest picture of a thing the MERCHANT COULD NOT SEE: measured in the installed Windows app, the
+ * missing-logo warning sat at y=709 in a 681px viewport — 28px below the fold — and the test
+ * scrolled to it while a real operator got no such scroll. A screenshot arranged by scrolling
+ * proves the file is not lying; it proves nothing about normal use.
+ *
+ * So the contract is now stricter: every required element must ALREADY be visible, exactly as the
+ * operator finds it, or the check fails. The fix belongs in the product, not in the camera.
+ *
+ * 🔴 AND THE VIEWPORT'S BOTTOM IS NOT THE VISIBLE BOTTOM. `.inv-actions.inv-keep` is
+ * `position: sticky; bottom: 0` with an opaque `background: var(--card)`, so it PAINTS OVER content
+ * beneath it: an element can satisfy `bottom <= innerHeight` and still be invisible. Any
+ * bottom-anchored fixed/sticky element is measured, never assumed, so this keeps working if that
+ * bar is restyled. An element INSIDE that bar is not occluded by it, which is why `within` is
+ * measured against the bar's own box when the element lives in it.
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ */
+async function visibleNow(page, ids) {
+  // Two animation frames: a composited frame exists before anything is measured or photographed.
+  await page
+    .evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))
+    .catch(() => undefined);
+
+  return page.evaluate((wanted) => {
+    const vh = window.innerHeight;
+    const vw = window.innerWidth;
+
+    // The lowest edge an operator can actually see, and the bar that defines it.
+    let limit = vh;
+    let bar = null;
+    for (const el of document.body.getElementsByTagName("*")) {
+      const cs = getComputedStyle(el);
+      if (cs.position !== "fixed" && cs.position !== "sticky") continue;
+      if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      if (r.bottom >= vh - 2 && r.top < limit) {
+        limit = r.top;
+        bar = el;
+      }
+    }
+
+    const out = { viewportHeight: vh, viewportWidth: vw, visibleBottom: Math.round(limit), elements: {} };
+    if (bar) {
+      const b = bar.getBoundingClientRect();
+      out.stickyBar = { top: Math.round(b.top), bottom: Math.round(b.bottom), height: Math.round(b.height) };
+    }
+
+    /**
+     * The nearest sticky/fixed ANCESTOR — a structural fact, independent of scroll position.
+     *
+     * 🔴 THIS IS THE CORRECTION. The first version asked `bar.contains(el)`, where `bar` was
+     * whatever sticky element was CURRENTLY anchored to the viewport bottom. A `position: sticky`
+     * element only sticks once its natural position would scroll away; on a short sheet the action
+     * bar sits at its natural place (measured: 589..637 in a 681px viewport) and is therefore not
+     * detected at all. So the check answered "is the bar stuck right now", when what it must
+     * answer is "does this element ride WITH the bar" — which is true whether or not it is stuck.
+     */
+    const stickyAncestor = (el) => {
+      for (let n = el.parentElement; n && n !== document.body; n = n.parentElement) {
+        const cs = getComputedStyle(n);
+        if (cs.position === "sticky" || cs.position === "fixed") return n;
+      }
+      return null;
+    };
+
+    for (const id of wanted) {
+      const el = document.querySelector(`[data-testid="${id}"]`);
+      if (!el) {
+        out.elements[id] = { present: false };
+        continue;
+      }
+      const r = el.getBoundingClientRect();
+      const anchor = stickyAncestor(el);
+      const insideBar = anchor !== null;
+      if (insideBar && !out.stickyContainer) {
+        const a = anchor.getBoundingClientRect();
+        out.stickyContainer = {
+          top: Math.round(a.top),
+          bottom: Math.round(a.bottom),
+          height: Math.round(a.height),
+          position: getComputedStyle(anchor).position,
+        };
+      }
+      // An element inside the bottom-anchored bar is not hidden BY that bar.
+      const floor = bar !== null && bar.contains(el) ? vh : limit;
+      out.elements[id] = {
+        present: true,
+        top: Math.round(r.top),
+        bottom: Math.round(r.bottom),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+        insideStickyBar: insideBar,
+        visible: r.height > 0 && r.width > 0 && r.top >= 0 && r.bottom <= floor + 1 && r.left >= 0 && r.right <= vw + 1,
+      };
+    }
+    return out;
+  }, ids);
+}
+
+/** Assert every id is visible WITHOUT scrolling, then capture. Names the real geometry on failure. */
+async function shotVisibleNow(page, ids, name) {
+  const m = await visibleNow(page, ids);
+  const bad = ids
+    .filter((id) => !m.elements[id]?.visible)
+    .map((id) => `${id}=${JSON.stringify(m.elements[id])}`);
+  assert(
+    bad.length === 0,
+    `🔴 ${name}.png shows what its name claims WITHOUT scrolling (viewport ${m.viewportHeight}, visible bottom ${m.visibleBottom}${bad.length ? ", off-frame: " + bad.join(", ") : ""})`,
+  );
+  await page.screenshot({ path: SHOTS + name + ".png" });
+  return m;
+}
 
 /** Points the NATIVE open dialog at one synthetic file, exactly as the other scripts do. */
 const stubOpen = (app, path) =>
@@ -311,6 +466,15 @@ await stubSave(app, pdfReprint);
 await testid(page, "save-pdf").click();
 await until(`the reprint at ${pdfReprint}`, () => existsSync(pdfReprint) && statSync(pdfReprint).size > 0);
 assert(embedsImage(pdfReprint), "the reprint still embeds an image after the shop changed its logo");
+// 🔴 THE ORDINARY CASE MUST STAY SILENT. A warning that appears when nothing is wrong teaches the
+// operator to ignore it, which costs more than never showing one. The asset is present here, so
+// the feedback area must be empty — and this is the control that makes the §6b assertion mean
+// something: without it, "the warning appeared" could just be "the warning always appears".
+assert(
+  (await testid(page, "sheet-logo-warning").count()) === 0,
+  "🔴 NO missing-logo warning on a normal successful save — the archived asset is right there",
+);
+assert((await testid(page, "sheet-error").count()) === 0, "and no error either");
 await page.screenshot({ path: SHOTS + "L2-reprint-after-rebrand.png" });
 await app.close();
 
@@ -328,6 +492,215 @@ await testid(page, "save-pdf").click();
 await until(`the post-restart PDF at ${pdfRestart}`, () => existsSync(pdfRestart) && statSync(pdfRestart).size > 0);
 assert(embedsImage(pdfRestart), "after a full restart the frozen logo still resolves and is embedded");
 await app.close();
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 6b · 🔴 THE FROZEN ASSET IS GONE — the document must NOT borrow the shop's current logo
+//
+// This is what a database-only restore onto a clean machine looks like: `issuer_snapshot_json`
+// still names logo ONE's asset, and `branding/frozen/` no longer holds it, while the live branding
+// file (logo TWO, under the FIXED name `invoice-logo.png`) is sitting right there. The resolver
+// used to fall through to it, so a historical invoice reprinted carrying the NEW branding — a
+// document that looks right and is not. It must now print no logo and say so.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// Captured BEFORE anything is removed, so "unchanged" below compares two real readings.
+const beforeLost = one("SELECT invoice_number AS n, status AS s, total_minor AS t FROM invoices WHERE status = 'final'");
+assert(existsSync(frozenPath), "the frozen asset is present before this step removes it");
+rmSync(frozenPath);
+assert(!existsSync(frozenPath), "the archived logo file has been removed, as a lost backup would leave it");
+assert(sha(liveLogo) === SHA_TWO, "while the shop's CURRENT logo (logo TWO) is still on disk under its fixed name");
+// The DB is untouched: the invoice still NAMES the asset it can no longer find.
+const issuerLost = JSON.parse(one("SELECT issuer_snapshot_json AS j FROM invoices WHERE status = 'final'").j);
+assert(issuerLost.logo_asset === `${SHA_ONE}.png`, "and the invoice still names logo ONE's asset in the ledger");
+
+({ app, page } = await launch());
+await tab(page, "invoices");
+await page.waitForSelector('[data-testid="history-table"]');
+await testid(page, "history-open").first().click();
+await page.waitForSelector('[data-testid="sheet-readonly"]');
+const pdfLost = join(home, "invoice-frozen-logo-lost.pdf");
+await stubSave(app, pdfLost);
+await testid(page, "save-pdf").click();
+await until(`the PDF at ${pdfLost}`, () => existsSync(pdfLost) && statSync(pdfLost).size > 0);
+
+// 🔴 THE ASSERTION THIS WHOLE SECTION EXISTS FOR.
+assert(!embedsImage(pdfLost), "🔴 the reprint embeds NO image — the current logo was NOT substituted");
+assert(statSync(pdfLost).size > 2000, `and it is still a real, complete invoice (${statSync(pdfLost).size}B)`);
+
+// And the operator is TOLD, in the workflow they are standing in — not only in a log file.
+await page.waitForSelector('[data-testid="sheet-logo-warning"]');
+const warning = await textOf(page, "sheet-logo-warning");
+assert(warning.length > 0, `the operator sees a visible warning: "${warning}"`);
+assert(
+  (await testid(page, "sheet-error").count()) === 0,
+  "and it is NOT shown as an error — the print succeeded and the figures are intact",
+);
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 🔴 NORMAL-USE DISCOVERABILITY — MEASURED BEFORE ANY TEST-CONTROLLED SCROLL.
+//
+// This is the assertion the previous round did not have, and its absence shipped a green gate over
+// an invisible warning: in run 39567481554 this measured
+//   {"top":709,"bottom":733,"viewportHeight":681,"visibleBottom":681,"visibleWithoutScrolling":false}
+// — the whole element 28px BELOW the fold. The screenshot looked right only because the test
+// scrolled to it. A merchant gets no scroll, so the warning has to be where they already are.
+//
+// Nothing here scrolls. If the warning is not visible exactly as the operator finds it, this FAILS.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const seenUnscrolled = await visibleNow(page, ["sheet-logo-warning", "save-pdf", "print", "sheet-feedback"]);
+log(`WARNING DISCOVERABILITY (as it appears, unscrolled): ${JSON.stringify(seenUnscrolled)}`);
+
+const warnBox = seenUnscrolled.elements["sheet-logo-warning"];
+assert(warnBox.present === true, "the warning element exists after the save");
+assert(
+  warnBox.visible === true,
+  `🔴 the warning is VISIBLE WITHOUT SCROLLING — top ${warnBox.top}, bottom ${warnBox.bottom}, viewport ${seenUnscrolled.viewportHeight}, visible bottom ${seenUnscrolled.visibleBottom}`,
+);
+assert(
+  warnBox.insideStickyBar === true,
+  `and it rides INSIDE the sticky action bar (${seenUnscrolled.stickyContainer?.position}), so scrolling the sheet cannot carry it away`,
+);
+assert(warnBox.height > 0 && warnBox.width > 0, `its text really occupies space (${warnBox.width}x${warnBox.height})`);
+
+// The buttons must still be reachable — feedback that covers the controls would be a worse defect
+// than feedback nobody sees.
+for (const id of ["save-pdf", "print"]) {
+  const b = seenUnscrolled.elements[id];
+  assert(b.present && b.visible, `${id} is still visible and reachable alongside the warning`);
+}
+
+// And the bar must not have swollen to eat the document. Measured, not eyeballed: a feedback row
+// that pushed the sticky bar past a third of the viewport would be obscuring the invoice itself.
+const barHeight = seenUnscrolled.stickyContainer?.height ?? 0;
+assert(
+  barHeight > 0 && barHeight < seenUnscrolled.viewportHeight / 3,
+  `the sticky action bar stays compact (${barHeight}px of ${seenUnscrolled.viewportHeight}px viewport)`,
+);
+
+// 🔴 CAPTURED WITHOUT SCROLLING FIRST. shotVisibleNow asserts visibility as found and then shoots;
+// it never moves the page. The file therefore shows the operator's own view, not an arranged one.
+await shotVisibleNow(page, ["sheet-logo-warning", "save-pdf"], "L3-frozen-logo-missing-warning");
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 6b-ii · A GENUINE SAVE FAILURE IS STILL VISIBLE, AND IS NOT DRESSED AS A WARNING
+//
+// Two different facts share one feedback area now, so the risk is that one masks the other. A real
+// failure means the operator's action DID NOT HAPPEN; the logo warning means it did and the
+// document is honest about what it lacks. Reporting the first as the second would be the worst
+// outcome of this change.
+//
+// The failure is induced the way a merchant could really cause one — the save dialog returns a
+// path whose directory does not exist, so the write throws. No production logic is weakened to
+// manufacture it.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const impossible = join(home, "no-such-directory", "nested", "invoice.pdf");
+await stubSave(app, impossible);
+await testid(page, "save-pdf").click();
+await page.waitForSelector('[data-testid="sheet-error"]');
+const errText = await textOf(page, "sheet-error");
+assert(errText.length > 0, `a failed save shows a real error: "${errText}"`);
+assert(!existsSync(impossible), "and no file was written, so the failure is real and not cosmetic");
+
+const seenErr = await visibleNow(page, ["sheet-error", "save-pdf"]);
+log(`ERROR DISCOVERABILITY (unscrolled): ${JSON.stringify(seenErr)}`);
+assert(
+  seenErr.elements["sheet-error"].visible === true,
+  `🔴 the genuine error is VISIBLE WITHOUT SCROLLING — top ${seenErr.elements["sheet-error"].top}, visible bottom ${seenErr.visibleBottom}`,
+);
+assert(
+  seenErr.elements["save-pdf"].present && seenErr.elements["save-pdf"].visible,
+  "and the action button is still reachable so the operator can retry",
+);
+// 🔴 NOT MASKED, AND NOT MASKING. savePdf clears the warning before it runs, so a failure shows the
+// error alone — the previous attempt's warning must not linger and claim this one also printed.
+assert(
+  (await testid(page, "sheet-logo-warning").count()) === 0,
+  "🔴 the stale logo warning is GONE — a failed save is never reported as a document that printed",
+);
+await shotVisibleNow(page, ["sheet-error", "save-pdf"], "L5-save-error-visible");
+
+// The commercial content is unchanged by any of this: same number, same total, still final.
+const afterLost = one("SELECT invoice_number AS n, status AS s, total_minor AS t FROM invoices WHERE status = 'final'");
+assert(afterLost.s === "final" && beforeLost.s === "final", "the invoice is still final");
+assert(String(afterLost.n) === String(beforeLost.n), `its number is unchanged (${afterLost.n})`);
+assert(String(afterLost.t) === String(beforeLost.t), `and its total is unchanged (${afterLost.t} minor units)`);
+await app.close();
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 6c · THE SUPPORT RUNBOOK'S CENTRAL CLAIM, REHEARSED
+//
+// docs/SUPPORT-BACKUP-RECOVERY.md tells support that a WHOLE-FOLDER cold copy carries the frozen
+// invoice logos that a `.sqlite`-only export cannot. That is a promise about recovery, and an
+// untested recovery procedure is not a procedure — so it is exercised here, on a disposable
+// fixture, never on a shop machine.
+//
+// 6b above is the other half of the same proof: with the asset gone, the document prints without
+// branding. Here the asset travels with the folder, and the document prints WITH it.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// Put logo ONE's frozen asset back, exactly as a cold copy taken before the loss would have held it.
+writeFileSync(frozenPath, readFileSync(LOGO_ONE));
+assert(sha(frozenPath) === SHA_ONE, "the fixture is restored to the state a cold copy would have captured");
+
+const coldRoot = mkdtempSync(join(tmpdir(), "pos-e2e-coldcopy-"));
+const coldUserData = join(coldRoot, "userData");
+// This is step 4 of the runbook: copy the WHOLE data folder, with the app closed.
+cpSync(join(home, "userData"), coldUserData, { recursive: true });
+assert(
+  existsSync(join(coldUserData, "alzabt-pos-ledger.sqlite")),
+  "the cold copy carries the ledger",
+);
+assert(
+  existsSync(join(coldUserData, "branding", "frozen", `${SHA_ONE}.png`)),
+  "🔴 and it carries the FROZEN invoice logo — the file a .sqlite export leaves behind",
+);
+assert(
+  sha(join(coldUserData, "branding", "frozen", `${SHA_ONE}.png`)) === SHA_ONE,
+  "byte for byte, logo ONE",
+);
+
+{
+  const coldEnv = { ...process.env, ALZABT_POS_USER_DATA: coldUserData };
+  delete coldEnv.ELECTRON_RUN_AS_NODE;
+  const a = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env: coldEnv });
+  const p = await a.firstWindow();
+  // The recovered profile keeps its operators, so the same credentials sign in — which is itself
+  // part of what the runbook claims a cold copy preserves.
+  await signIn(p, "Cashier One", "1111");
+  await p.locator('[data-testid="tab-invoices"]').click();
+  await p.waitForSelector('[data-testid="history-table"]');
+  await p.locator('[data-testid="history-open"]').first().click();
+  await p.waitForSelector('[data-testid="sheet-readonly"]');
+  const pdfRecovered = join(coldRoot, "invoice-after-cold-recovery.pdf");
+  await a.evaluate(({ dialog }, target) => {
+    dialog.showSaveDialogSync = () => target;
+  }, pdfRecovered);
+  await p.locator('[data-testid="save-pdf"]').click();
+  await until(`the recovered PDF at ${pdfRecovered}`, () => existsSync(pdfRecovered) && statSync(pdfRecovered).size > 0);
+  assert(embedsImage(pdfRecovered), "🔴 the historical invoice reprints WITH its logo after a cold-copy recovery");
+  assert(
+    (await p.locator('[data-testid="sheet-logo-warning"]').count()) === 0,
+    "and no missing-asset warning is shown, because nothing is missing",
+  );
+  // 🔴 NO SCREENSHOT HERE, DELIBERATELY — AND THIS IS THE POINT, NOT AN OMISSION.
+  //
+  // `L4-cold-copy-recovery.png` existed in run 39503757417 and was BYTE-IDENTICAL to
+  // `L2-reprint-after-rebrand.png` (both sha256 0374d00e…). It could not be anything else: the
+  // renderer NEVER displays the invoice logo — a search of src/renderer finds no logo rendering
+  // outside the company-profile form — so the invoice sheet looks the same whether the archived
+  // asset is present, missing or recovered. A screenshot of this screen cannot show recovery, and
+  // a file named as though it does is a false witness.
+  //
+  // Manufacturing a visually distinct frame would be worse: it would be a picture arranged to look
+  // like proof. What actually proves this recovery is above and below, and it is stronger:
+  //
+  //   filesystem  the cold copy CARRIES branding/frozen/<sha>.png, and sha(copy) === SHA_ONE
+  //   PDF         the recovered invoice's document EMBEDS a raster image (embedsImage)
+  //   DOM         NO missing-asset warning is present after recovery
+  //   ledger      invoice number and total are unchanged, read before and after
+  //   control     a shop with no logo produces a PDF with NO image, so the image check is real
+  //
+  // That is bytes, a rendered document and durable rows — not pixels of a form that was never
+  // going to differ.
+  await a.close();
+}
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 7 · A shop with NO logo prints a correct document — no broken image, no refusal

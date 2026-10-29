@@ -28,6 +28,10 @@ export interface NewSaleHeader {
   readonly sourceType: SaleSourceType;
   /** Required when sourceType is "invoice", null otherwise. The database CHECK enforces both ways. */
   readonly invoiceId: string | null;
+  /** Null for ordinary paid checkout and invoice-origin sales. */
+  readonly customerId: string | null;
+  /** Sale-time customer name; null with customerId for non-credit sales. */
+  readonly customerNameSnapshot: string | null;
   readonly cashierId: string;
   readonly cashierName: string;
   readonly currency: string;
@@ -37,7 +41,7 @@ export interface NewSaleHeader {
   readonly paidMinor: bigint;
   readonly balanceDueMinor: bigint;
   readonly paymentStatus: PaymentStatus;
-  /** Null ONLY for an invoice-origin sale that recorded no method. Never a fabricated value. */
+  /** Null for an invoice with no captured method or a fully unpaid customer-credit POS sale. */
   readonly paymentMethod: PaymentMethod | null;
   readonly businessDate: string;
   readonly completedAt: string;
@@ -69,6 +73,8 @@ interface SaleRow {
   request_fingerprint: string;
   source_type: SaleSourceType;
   invoice_id: string | null;
+  customer_id: string | null;
+  customer_name_snapshot: string | null;
   cashier_id: string;
   cashier_name: string;
   currency: string;
@@ -123,18 +129,41 @@ export class SaleRepository {
 
   /** Atomically records a completed sale. Returns the receipt number assigned inside the transaction. */
   commitSale(header: NewSaleHeader, lines: ReadonlyArray<NewSaleLine>): number {
-    const run = this.db.transaction((): number => {
-      const receiptNumber = this.nextReceiptNumber();
-      this.insertSaleHeader(header, receiptNumber, lines.length);
-      for (const line of lines) this.insertSaleLine(header.id, line);
-      this.verifySale(header.id);
-      return receiptNumber;
-    });
-    return run.immediate();
+    return this.db.transaction(() => this.commitSaleWithinTransaction(header, lines)).immediate();
+  }
+
+  /**
+   * The transaction-aware half of sale creation, for the internal credit-sale coordinator only.
+   * It deliberately does not start or commit a transaction: the caller must own the outer
+   * `BEGIN IMMEDIATE` that also posts and verifies the matching obligation.
+   */
+  commitSaleWithinTransaction(header: NewSaleHeader, lines: ReadonlyArray<NewSaleLine>): number {
+    if (!this.db.inTransaction) {
+      throw new DomainError("NOT_AVAILABLE", "Atomic sale posting requires an active database transaction");
+    }
+    const receiptNumber = this.nextReceiptNumber();
+    this.insertSaleHeader(header, receiptNumber, lines.length);
+    for (const line of lines) this.insertSaleLine(header.id, line);
+    this.verifySale(header.id);
+    return receiptNumber;
+  }
+
+  /** Final sale-line/arithmetic verification while a coordinating transaction is still open. */
+  verifySaleWithinTransaction(saleId: string): void {
+    if (!this.db.inTransaction) {
+      throw new DomainError("NOT_AVAILABLE", "Sale verification requires an active database transaction");
+    }
+    this.verifySale(saleId);
   }
 
   insertVoid(record: VoidRecord): void {
     this.db.transaction(() => {
+      if (this.hasSaleObligation(record.saleId)) {
+        throw new DomainError(
+          "NOT_AVAILABLE",
+          "A sale with a receivable obligation cannot be voided before an audited reversal exists",
+        );
+      }
       this.db
         .prepare(
           `INSERT INTO voids (id, sale_id, cashier_id, cashier_name, reason, business_date, created_at)
@@ -144,8 +173,17 @@ export class SaleRepository {
     }).immediate();
   }
 
-  // The steps below are separate methods ONLY so the failure tests can subclass the repository and
-  // inject a fault between them. Production code calls them exclusively through commitSale().
+  /** True for any sale-sourced obligation, including one with partial settlements. */
+  hasSaleObligation(saleId: string): boolean {
+    return Boolean(
+      this.db
+        .prepare("SELECT 1 FROM obligations WHERE source_kind = 'sale' AND source_ref = ?")
+        .get(saleId),
+    );
+  }
+
+  // The steps below are separate methods so the failure tests can subclass the repository and
+  // inject a fault between them. Both transaction-owning entry points use these statements.
 
   protected nextReceiptNumber(): number {
     const row = this.db.prepare("SELECT coalesce(max(receipt_number), 0) + 1 AS n FROM sales").get() as {
@@ -158,10 +196,12 @@ export class SaleRepository {
     this.db
       .prepare(
         `INSERT INTO sales (id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+                            customer_id, customer_name_snapshot,
                             cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor,
                             paid_minor, balance_due_minor, payment_status, payment_method, line_count,
                             business_date, completed_at, created_at)
          VALUES (@id, @receiptNumber, @idempotencyKey, @requestFingerprint, @sourceType, @invoiceId,
+                 @customerId, @customerNameSnapshot,
                  @cashierId, @cashierName, @currency, @subtotalMinor, @taxMinor, @totalMinor,
                  @paidMinor, @balanceDueMinor, @paymentStatus, @paymentMethod, @lineCount,
                  @businessDate, @completedAt, @createdAt)`,
@@ -302,6 +342,8 @@ export class SaleRepository {
       currency: row.currency,
       sourceType: row.source_type,
       invoiceId: row.invoice_id,
+      customerId: row.customer_id,
+      customerNameSnapshot: row.customer_name_snapshot,
       subtotal: money(row.subtotal_minor, row.currency),
       tax: money(row.tax_minor, row.currency),
       total: money(row.total_minor, row.currency),

@@ -278,26 +278,64 @@ assert(
 await testid(page, "sheet-draft-row-remove").last().click();
 await page.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });
 
-const subtotalBefore = await textOf(page, "sheet-subtotal");
-const totalBefore = await textOf(page, "sheet-total");
-assert(subtotalBefore.includes("15.50"), `3 x 2.50 + 2 x 4.00 = 15.50 (got ${subtotalBefore})`);
 await page.screenshot({ path: SHOTS + "D1-draft-filled.png" });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// D · Save Draft — the sheet STAYS open and says it saved
+// D · Save Draft persists the LAST completed row without another Add Row action
 // ════════════════════════════════════════════════════════════════════════════════════════════════
+await testid(page, "add-row").click();
+await testid(page, "new-line-description").fill("صنف المسودّة الأخير");
+await testid(page, "new-line-quantity").fill("1");
+await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), "حبة");
+await testid(page, "new-line-price").fill("1.25");
 await testid(page, "save-draft").click();
-await page.waitForSelector('[data-testid="draft-saved"]');
+await until("the final completed row to persist from Save Draft", async () => (await testid(page, "sheet-line").count()) === 3);
 assert(await testid(page, "draft-saved").isVisible(), "Save draft reports that it saved");
 assert((await testid(page, "add-row").count()) > 0, "Save draft keeps the sheet OPEN — it is not an exit");
+assert(
+  (await lineValues(page)).includes("صنف المسودّة الأخير"),
+  "the last typed row is present without clicking Add Row again",
+);
+await testid(page, "save-draft").click();
+await until("repeat Save Draft to settle without duplication", async () => (await testid(page, "sheet-line").count()) === 3);
+assert((await testid(page, "sheet-line").count()) === 3, "repeating Save Draft does not duplicate a persisted row");
+const subtotalBefore = await textOf(page, "sheet-subtotal");
+assert(subtotalBefore.includes("16.75"), `3 x 2.50 + 2 x 4.00 + 1 x 1.25 = 16.75 (got ${subtotalBefore})`);
 await page.screenshot({ path: SHOTS + "D2-draft-saved.png" });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// E · Leave the invoice screen WITHOUT discarding
+// E · Incomplete rows are retained and named, never silently dropped on save or exit
 // ════════════════════════════════════════════════════════════════════════════════════════════════
+await testid(page, "add-row").click();
+await testid(page, "new-line-description").fill("سطر غير مكتمل");
+await testid(page, "save-draft").click();
+await testid(page, "sheet-error").waitFor({ state: "visible" });
+assert((await textOf(page, "sheet-error")).includes("غير مكتمل"), "Save Draft clearly identifies the incomplete row");
+assert((await testid(page, "draft-saved").count()) === 0, "an incomplete save is not presented as a successful save");
+assert((await testid(page, "sheet-draft-row").count()) === 1, "the incomplete row remains on screen");
+await testid(page, "finalize").click();
+await testid(page, "sheet-error").waitFor({ state: "visible" });
+assert((await testid(page, "finalize-confirm").count()) === 0, "Finalize also refuses to hide an incomplete row");
 await testid(page, "leave-draft").click();
+await testid(page, "exit-confirm").waitFor({ state: "visible" });
+await testid(page, "exit-save").click();
+await testid(page, "exit-error").waitFor({ state: "visible" });
+assert((await testid(page, "add-row").count()) === 1, "Save and leave refuses to discard the incomplete row");
+await testid(page, "exit-cancel").click();
+await testid(page, "sheet-draft-row-remove").click();
+await page.waitForSelector('[data-testid="sheet-draft-row"]', { state: "detached" });
+
+// A completed final row is flushed by Save and Leave before the sheet closes.
+await testid(page, "add-row").click();
+await testid(page, "new-line-description").fill("سطر حفظ وخروج");
+await testid(page, "new-line-quantity").fill("1");
+await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), "حبة");
+await testid(page, "new-line-price").fill("2.00");
+await testid(page, "leave-draft").click();
+await testid(page, "exit-confirm").waitFor({ state: "visible" });
+await testid(page, "exit-save").click();
 await page.waitForSelector('[data-testid="add-row"]', { state: "detached" });
-assert(true, "Save and leave closed the sheet");
+assert(true, "Save and leave persisted the completed unsaved row and closed the sheet");
 // 🔴 THE CLAIM UNDER TEST. Leaving must not be a disguised delete, and the tab bar coming back is
 // not evidence of that — the row is.
 await page.waitForSelector('[data-testid="inv-tab-drafts"]');
@@ -324,11 +362,13 @@ assert((await customerValue(page, "phone")) === PHONE, "the phone persisted");
 assert((await customerValue(page, "notes")) === NOTES, "the notes persisted");
 assert((await testid(page, "sheet-date").inputValue()) === DATE, "the invoice date persisted");
 
-assert((await testid(page, "sheet-line").count()) === 2, "both rows persisted");
+assert((await testid(page, "sheet-line").count()) === 4, "all four completed rows persisted");
 const values = await lineValues(page);
 assert(
-  values.some((v) => v === "صنف المسودّة الأول") && values.some((v) => v === "صنف المسودّة الثاني"),
-  "both row descriptions persisted, read from the inputs rather than innerText",
+  ["صنف المسودّة الأول", "صنف المسودّة الثاني", "صنف المسودّة الأخير", "سطر حفظ وخروج"].every((name) =>
+    values.includes(name),
+  ),
+  "all four row descriptions persisted, read from the inputs rather than innerText",
 );
 // 🔴 TRANSITION, NOT A WEAKENING. This asserted the strings «حبة» and «علبة» among the line
 // INPUTS, because the unit used to be a text input. It is a <select> now, so the displayed value is
@@ -339,7 +379,7 @@ assert(
 // quietly turns a real check into a passing one.
 {
   const units = await lineUnits(page);
-  assert(units.length === 2, `both unit cells reopened (${JSON.stringify(units)})`);
+  assert(units.length === 4, `all four unit cells reopened (${JSON.stringify(units)})`);
   assert(
     units.some((u) => u.base === "piece") && units.some((u) => u.base === "box"),
     `both units reopened as their own dropdown entry (${JSON.stringify(units)})`,
@@ -352,8 +392,8 @@ assert(
 
 const subtotalAfter = await textOf(page, "sheet-subtotal");
 const totalAfter = await textOf(page, "sheet-total");
-assert(subtotalAfter === subtotalBefore, `the subtotal recomputed to the same value (${subtotalAfter})`);
-assert(totalAfter === totalBefore, `the total recomputed to the same value (${totalAfter})`);
+assert(subtotalAfter.includes("18.75"), `the saved fourth row is included in the reopened subtotal (${subtotalAfter})`);
+assert(totalAfter === subtotalAfter, `with tax off, the reopened total equals the subtotal (${totalAfter})`);
 assert((await textOf(page, "sheet-mode")) === modeWhenCreated, "the reopened draft is still in the SAME mode");
 assert((await textOf(page, "sheet-number")).startsWith("—"), "and it is still unnumbered, so still a draft");
 await page.screenshot({ path: SHOTS + "D4-draft-reopened.png" });
@@ -368,20 +408,20 @@ await app.close();
 const draftsOnDisk = num("SELECT count(*) AS n FROM invoices WHERE status = 'draft'");
 const linesOnDisk = num("SELECT count(*) AS n FROM invoice_lines");
 assert(draftsOnDisk === 1, `the ledger holds the draft after the app closed (got ${draftsOnDisk})`);
-assert(linesOnDisk === 2, `and both of its lines (got ${linesOnDisk})`);
+assert(linesOnDisk === 4, `and all four of its lines (got ${linesOnDisk})`);
 // 🔴 THE VERBATIM UNIT CLAIM, read as bytes from the installed app's own ledger. This is where
 // "persisted verbatim" belongs: a control can display whatever it likes, but what the paper invoice
 // will print is this column.
 {
   const units = query("SELECT unit_label AS l, canonical_unit AS c FROM invoice_lines ORDER BY line_no");
   log("STORED UNITS:", JSON.stringify(units));
-  assert(units.length === 2, "two line units are on disk");
+  assert(units.length === 4, "all four line units are on disk");
   assert(
-    units.map((u) => u.l).join("|") === "حبة|علبة",
-    `🔴 both unit LABELS are stored byte for byte (${units.map((u) => u.l).join("|")})`,
+    units.map((u) => u.l).join("|") === "حبة|علبة|حبة|حبة",
+    `🔴 all unit LABELS are stored byte for byte (${units.map((u) => u.l).join("|")})`,
   );
   assert(
-    units.map((u) => u.c).join("|") === "piece|box",
+    units.map((u) => u.c).join("|") === "piece|box|piece|piece",
     `and each records the catalog unit it belongs to (${units.map((u) => u.c).join("|")})`,
   );
 }
@@ -419,5 +459,141 @@ await app.close();
 assert(num("SELECT count(*) AS n FROM invoices") === 0, "the discarded draft is gone from the ledger");
 assert(num("SELECT count(*) AS n FROM invoice_lines") === 0, "and so are its lines");
 assert(num("SELECT count(*) AS n FROM sales") === 0, "and still nothing was ever sold");
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// L · Finalize includes the final completed row exactly once
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+({ app, page } = await launch());
+await openDrafts(page);
+await testid(page, "new-invoice").click();
+await page.waitForSelector('[data-testid="invoice-mode-chooser"]');
+await testid(page, "mode-outgoing").click();
+await page.waitForSelector('[data-testid="add-row"]');
+
+await testid(page, "add-row").click();
+await testid(page, "new-line-description").fill("سطر الإصدار الأول");
+await testid(page, "new-line-quantity").fill("2");
+await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), "حبة");
+await testid(page, "new-line-price").fill("3.00");
+await testid(page, "add-row").click();
+await until("first finalization row to be persisted once", async () => (await testid(page, "sheet-line").count()) === 1);
+
+await testid(page, "new-line-description").fill("آخر سطر قبل الإصدار");
+await testid(page, "new-line-quantity").fill("1");
+await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), "علبة");
+await testid(page, "new-line-price").fill("4.00");
+assert((await testid(page, "sheet-line").count()) === 1, "the final completed row remains unsaved before finalization");
+await testid(page, "finalize").click();
+await testid(page, "finalize-confirm").waitFor({ state: "visible" });
+assert(
+  (await textOf(page, "finalize-confirm")).includes("10.00"),
+  "the confirmation includes the final row's exact server-calculated total",
+);
+assert((await testid(page, "sheet-line").count()) === 2, "both rows are persisted once before confirmation");
+await testid(page, "finalize-confirm-yes").click();
+await testid(page, "finalized-notice").waitFor({ state: "visible" });
+await app.close();
+assert(num("SELECT count(*) AS n FROM invoices WHERE status = 'final'") === 1, "one invoice was finalized");
+assert(num("SELECT count(*) AS n FROM invoice_lines") === 2, "the two completed rows were finalized exactly once");
+assert(num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice'") === 1, "finalization creates one invoice sale");
+assert(num("SELECT count(*) AS n FROM sale_lines") === 2, "the linked sale has exactly one line per invoice row");
+const finalDescriptions = query("SELECT description FROM invoice_lines ORDER BY line_no").map((row) => row.description);
+assert(
+  JSON.stringify(finalDescriptions) === JSON.stringify(["سطر الإصدار الأول", "آخر سطر قبل الإصدار"]),
+  `both distinct rows reached the final invoice exactly once (${JSON.stringify(finalDescriptions)})`,
+);
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// M · Migration 16 — link a draft to an exact customer account, then issue it ON that account
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const ACCOUNT_NAME = "عميل الحساب الاختباري";
+const invoiceSalesBefore = num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice'");
+({ app, page } = await launch());
+await openDrafts(page);
+await testid(page, "new-invoice").click();
+await page.waitForSelector('[data-testid="invoice-mode-chooser"]');
+await testid(page, "mode-outgoing").click();
+await page.waitForSelector('[data-testid="add-row"]');
+
+// Arabic labels, and the promise that choosing an account is not a debt.
+const accountArabic = await textOf(page, "sheet-account");
+assert(accountArabic.includes("حساب العميل"), "the Arabic customer-account label is shown");
+assert(accountArabic.includes("اختيار حساب العميل"), "the Arabic «choose account» action is shown");
+assert(accountArabic.includes("لا يُنشئ ديناً"), "the Arabic hint says choosing an account creates no debt");
+assert((await testid(page, "account-issue").count()) === 0, "issue-on-account is not offered before an account is chosen");
+const currentSession = await page.evaluate(async () => {
+  const result = await window.pos.currentCashier();
+  if (!result?.ok) throw new Error(`currentCashier failed: ${result?.error?.code ?? "unknown"}`);
+  return result.data;
+});
+assert(
+  currentSession?.role === "owner",
+  `the installed M16 session exposes the live owner role (got ${currentSession?.role ?? "missing"})`,
+);
+
+// Choose an account by creating one in the directory (the picker is the ordinary customer finder).
+await testid(page, "account-choose").click();
+await testid(page, "customer-finder").waitFor({ timeout: 30000 });
+await testid(page, "customer-new").click();
+await testid(page, "customer-field-name").fill(ACCOUNT_NAME);
+await testid(page, "customer-save").click();
+await testid(page, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
+await testid(page, "sheet-account-name").waitFor({ timeout: 30000 });
+assert((await textOf(page, "sheet-account-name")) === ACCOUNT_NAME, "the chosen account is shown by name");
+assert((await testid(page, "account-issue").count()) === 1, "the owner is offered «Issue on Customer Account»");
+assert(!(await testid(page, "account-issue").isChecked()), "…unchecked by default: issuing on account is never implicit");
+
+await testid(page, "add-row").click();
+await testid(page, "new-line-description").fill("صنف على الحساب");
+await testid(page, "new-line-quantity").fill("1");
+await chooseUnit(page.locator('[data-testid="sheet-draft-row"]').last(), "حبة");
+await testid(page, "new-line-price").fill("20.00");
+await testid(page, "save-draft").click();
+await until("the account draft to save", async () => (await testid(page, "draft-saved").count()) === 1);
+
+// English labels on the same sheet.
+await testid(page, "lang-toggle").click();
+await page.waitForFunction(() => document.documentElement.lang === "en", undefined, { timeout: 20000 });
+const accountEnglish = await textOf(page, "sheet-account");
+assert(accountEnglish.includes("Customer account"), "the English customer-account label is shown");
+assert(accountEnglish.includes("Issue on Customer Account"), "the English owner-only option is shown");
+assert(accountEnglish.includes("does not create a debt"), "the English hint says choosing an account creates no debt");
+await testid(page, "lang-toggle").click();
+await page.waitForFunction(() => document.documentElement.lang === "ar", undefined, { timeout: 20000 });
+
+await testid(page, "leave-draft").click();
+await page.waitForSelector('[data-testid="add-row"]', { state: "detached" });
+await app.close();
+assert(num("SELECT count(*) AS n FROM invoices WHERE status = 'draft' AND customer_party_id IS NOT NULL") === 1, "🔴 the draft is linked to the exact account id");
+assert(num("SELECT count(*) AS n FROM obligations") === 0, "🔴 choosing and saving an account created NO debt");
+assert(num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice'") === invoiceSalesBefore, "and no sale");
+
+// Reopen: the link survives, then issue it on the account.
+({ app, page } = await launch());
+await openDrafts(page);
+await testid(page, "draft-open").first().click();
+await page.waitForSelector('[data-testid="add-row"]');
+await testid(page, "sheet-account-name").waitFor({ timeout: 30000 });
+assert((await textOf(page, "sheet-account-name")) === ACCOUNT_NAME, "the account link survived reopening");
+await testid(page, "account-issue").check();
+await testid(page, "finalize").click();
+await testid(page, "finalize-confirm").waitFor({ state: "visible" });
+const confirmAccount = await textOf(page, "confirm-account");
+assert(confirmAccount.includes(ACCOUNT_NAME) && confirmAccount.includes("20.00"), "the confirmation names the account and the whole total");
+await testid(page, "finalize-confirm-yes").click();
+await testid(page, "finalized-notice").waitFor({ state: "visible", timeout: 60000 });
+assert((await textOf(page, "finalized-on-account")).includes(ACCOUNT_NAME), "the issued notice says whose account carries the debt");
+await page.screenshot({ path: SHOTS + "M16-issued-on-account.png" });
+await app.close();
+
+assert(num("SELECT count(*) AS n FROM obligations") === 1, "🔴 exactly one receivable was posted");
+const ob = one("SELECT o.amount_minor AS a, o.direction AS d, o.party_id AS p, p.display_name AS name FROM obligations o JOIN parties p ON p.id = o.party_id");
+assert(Number(ob.a) === 2000 && ob.d === "receivable" && ob.name === ACCOUNT_NAME, `the receivable is the whole total on the chosen account (${JSON.stringify(ob)})`);
+assert(
+  num("SELECT count(*) AS n FROM obligations o JOIN sales s ON s.id = o.sale_id JOIN invoices i ON i.id = s.invoice_id WHERE i.status = 'final' AND i.customer_party_id = o.party_id") === 1,
+  "🔴 receivable → invoice sale → final invoice → same account, all consistent",
+);
+assert(num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice'") === invoiceSalesBefore + 1, "exactly one invoice sale was added");
+assert(num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice' AND customer_id IS NOT NULL") === 0, "invoice sales still carry no customer_id (M14)");
 
 log(`\nOK — ${passed} assertions passed against the installed app`);

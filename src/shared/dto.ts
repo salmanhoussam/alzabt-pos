@@ -5,6 +5,8 @@ import { type Money, money } from "../domain/money";
 import type { TodaySalesReport } from "../domain/report";
 import type { SaleRecord, VoidRecord } from "../domain/sale";
 import type { AdminProductRow } from "../persistence/catalogRepository";
+import type { CategoryRow } from "../persistence/categoryRepository";
+import type { ProductImageMeta } from "../persistence/productImageRepository";
 import { formatDecimal } from "../domain/money";
 import { formatInvoiceQuantity } from "../domain/invoice";
 import type { CompanyProfileRow } from "../persistence/companyProfileRepository";
@@ -13,6 +15,7 @@ import type { ReconciliationRow } from "../persistence/reconciliationRepository"
 import type {
   AdminProductDto,
   CatalogDto,
+  CategoryDto,
   CompanyProfileDto,
   DifferenceDto,
   InvoiceDto,
@@ -22,6 +25,7 @@ import type {
   IssuerSnapshotDto,
   MoneyDto,
   ProductDto,
+  ProductImageMetaDto,
   ReconciliationCandidateDto,
   ReconciliationClassificationDto,
   ReconciliationDto,
@@ -134,7 +138,22 @@ export function toTodaySalesDto(r: TodaySalesReport): TodaySalesDto {
  * SQLite's 0/1 integers become booleans here, once, so no renderer code ever sees a `bigint` or
  * has to remember that `is_active` is a number.
  */
-export function toAdminProductDto(row: AdminProductRow): AdminProductDto {
+/**
+ * One product for the administration list and the Product Master form.
+ *
+ * 🔴 THE PHOTO ARRIVES AS A PARAMETER, NOT AS A COLUMN, and that is the point. There is no image
+ * field on `AdminProductRow` to read — the photo lives in a child table — so a caller that wants
+ * the list to show thumbnails must have asked the one cheap `primaryPhotoIndex()` question and
+ * pass the metadata in. The alternative shape, a row that carried its own image, is exactly what
+ * the child table exists to prevent.
+ *
+ * 🔴 AND IT TAKES METADATA, NEVER BYTES. `ProductImageMeta` has no `bytes` field to pass, so this
+ * signature cannot be handed a blob even by accident.
+ *
+ * `photo` defaults to null so every pre-Product-Master call site keeps compiling and keeps meaning
+ * what it meant: a product whose photo this caller did not ask about.
+ */
+export function toAdminProductDto(row: AdminProductRow, photo: ProductImageMeta | null = null): AdminProductDto {
   const price = money(row.selling_price_minor, row.currency);
   return {
     id: row.id,
@@ -149,6 +168,51 @@ export function toAdminProductDto(row: AdminProductRow): AdminProductDto {
     priceNeedsReview: row.price_needs_review === 1n,
     isActive: row.is_active === 1n,
     updatedAt: row.updated_at,
+    categoryId: row.category_id,
+    barcode: row.barcode,
+    brand: row.brand,
+    descriptionAr: row.description_ar,
+    descriptionEn: row.description_en,
+    isOnlineVisible: row.is_online_visible === 1n,
+    // 🔴 ALL FOUR DERIVE FROM THE SAME `photo`, so `hasImage` and `primaryImageId` cannot
+    // disagree — a list told "there is a photo" that then has no id to ask for would show a
+    // permanent loading state nobody could explain.
+    hasImage: photo !== null,
+    primaryImageId: photo === null ? null : photo.id,
+    imageMime: photo === null ? null : photo.mime,
+    imageVersion: photo === null ? null : photo.sha256_hex,
+  };
+}
+
+export function toCategoryDto(row: CategoryRow): CategoryDto {
+  return {
+    id: row.id,
+    nameAr: row.name_ar,
+    nameEn: row.name_en,
+    isActive: row.is_active === 1,
+    sortOrder: row.sort_order,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * A photo's metadata.
+ *
+ * 🔴 There is nothing to omit here, because `ProductImageMeta` has no `bytes` field to begin with.
+ * Stated rather than left implicit: a reader checking "does this mapper drop the blob?" should find
+ * the answer is that the blob was never in the shape being mapped.
+ */
+export function toProductImageMetaDto(meta: ProductImageMeta): ProductImageMetaDto {
+  return {
+    id: meta.id,
+    productId: meta.product_id,
+    mime: meta.mime,
+    sha256Hex: meta.sha256_hex,
+    byteSize: meta.byte_size,
+    widthPx: meta.width_px,
+    heightPx: meta.height_px,
+    origin: meta.origin,
+    updatedAt: meta.updated_at,
   };
 }
 
@@ -245,6 +309,7 @@ export function toInvoiceDto(row: InvoiceRow): InvoiceDto {
     customerName: row.customer_name,
     customerAddress: row.customer_address,
     customerPhone: row.customer_phone,
+    customerPartyId: row.customer_party_id,
     notes: row.notes,
     subtotal: toMoneyDto(money(row.subtotal_minor, c)),
     tax: toMoneyDto(money(row.tax_minor, c)),

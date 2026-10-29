@@ -46,9 +46,10 @@ merged with field-test observations **before any redesign code is written.**
 - Top nav kept as-is.
 - Login gets light Arabic branding and a **language toggle before login** — no heavy splash.
 - **Brand — decided (Salman, 2026-10-09): `Alzabt POS` is the product/brand name**, fixed in login,
-  footer, About, the installer and every identity surface. `صندوق الزبط` is the **Arabic
-  label/translation inside the interface**, not an alternative brand. There are not two competing
-  identities.
+  footer, About, the installer and every identity surface. **«عالضبط» is the official Arabic
+  product name** (owner decision, 2026-10-25) and is the Arabic label inside the interface — alone,
+  not «الضبط», «الزبط» or «صندوق الزبط» (the earlier label, now superseded). «الصندوق» may still
+  name the till/device in running text, never the product. There are not two competing identities.
 - **Deliverable form:** visual mockup + short spec, group by group.
 - **Foundation is its own spec, approved before the Sell screen is drawn.**
 

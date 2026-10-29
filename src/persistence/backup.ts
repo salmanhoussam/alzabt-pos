@@ -60,11 +60,48 @@ export const COUNTED_TABLES = [
   // database. A one-row table is the easiest kind to leave out of a list like this and the most
   // expensive kind to lose.
   "terminal_security_state",
+  // Migration 9 — Product Master. Both are durable, and the IMAGES table is the one that would
+  // hurt most if it were ever left out: a snapshot missing it restores a catalog whose every
+  // product photo is gone, silently, while the backup still verified as good. That is the
+  // frozen-logo gap this list exists to prevent, at the scale of a whole catalog.
+  "catalog_categories",
+  "catalog_product_images",
   "audit_events",
   "company_profile",
   "invoices",
   "invoice_lines",
   "invoice_reconciliation",
+  // Migration 12 — the party directory. 🔴 BOTH ARE DURABLE AND BOTH WOULD HAVE BEEN SILENTLY
+  // UNVERIFIED. A snapshot that lost `parties` restores a shop whose customers and suppliers are
+  // gone while the backup still verified as good — and once a later slice links obligations to
+  // these ids, the restored ledger would hold money owed by nobody. `party_contact_history` is the
+  // append-only record of every corrected phone number, so losing it loses the answer to "what
+  // number did we have in March" with no trace that anything was lost. The backup contract test is
+  // what caught this addition, exactly as it caught migration 8's and migration 9's.
+  "parties",
+  "party_contact_history",
+  // Migration 13 — the money itself. 🔴 THESE TWO ARE THE MOST EXPENSIVE OMISSION ON THIS LIST. A
+  // snapshot that lost `obligations` restores a shop that has forgotten who owes it money, and a
+  // snapshot that lost `settlements` is worse than that: every debt comes back at its FULL
+  // original amount, so a customer who has already paid is asked to pay again, with the shop's own
+  // books as the evidence against them. Neither loss would show anywhere — the balance is derived,
+  // so missing settlement rows read as "never paid" rather than as an error. That is precisely the
+  // silent-verification gap this list exists to close.
+  "obligations",
+  "settlements",
+  // Migration 15 — the durable identity of an invoice-line batch. Without it a snapshot would
+  // restore the lines but forget which batches produced them, so a replayed request after a
+  // restore would insert them a second time.
+  "invoice_line_batches",
+  // Migration 17 — the durable intent of a collection. A snapshot without it would restore the
+  // settlements but forget an attempt that never committed, losing the operator's record of it.
+  "collection_attempts",
+  // Migration 18 — a real external receipt, the durable intent of one, and that intent's lines. A
+  // snapshot without them would restore the allocation settlements but forget the money that paid
+  // them (or an attempt that never committed), and the verifier skips a table it does not know.
+  "receipts",
+  "receipt_attempts",
+  "receipt_attempt_lines",
   "schema_migrations",
 ] as const;
 const DAILY_RE = /^daily-(\d{4}-\d{2}-\d{2})\.sqlite$/;

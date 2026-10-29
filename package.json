@@ -21,7 +21,8 @@
     "pdf:samples": "tsx scripts/invoice-pdf-samples.ts invoice-pdf-samples"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3"
+    "better-sqlite3": "^13.0.3",
+    "zxing-wasm": "3.1.5"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
@@ -29,7 +30,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.1.1",
-    "electron": "^44.5.1",
+    "electron": "44.10.0",
     "electron-builder": "^26.15.3",
     "playwright-core": "^1.63.0",
     "react": "^19.3.0",

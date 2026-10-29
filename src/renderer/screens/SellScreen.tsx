@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CustomerFinder } from "./CustomerFinder";
+import type { CustomerDto } from "../../shared/ipcContract";
 import { type CartLine, type PricedCart, addProduct, decrement, priceCart, removeProduct } from "../../domain/cart";
 import type { Catalog } from "../../domain/catalog";
 import { formatDecimal } from "../../domain/money";
 import { formatQuantity, parseQuantity } from "../../domain/quantity";
 import { PAYMENT_METHODS, type PaymentMethod } from "../../domain/sale";
 import { fromCatalogDto } from "../../shared/dto";
-import type { SaleDto } from "../../shared/ipcContract";
+import type { AdminProductDto, SaleDto } from "../../shared/ipcContract";
 import { call, errorText, newIdempotencyKey, pos } from "../api";
+import { useThumbnails } from "../useThumbnails";
 import { LineMath } from "../components/LineMath";
 import { Receipt } from "./Receipt";
 import { useT } from "../i18n";
@@ -39,10 +42,37 @@ export function SellScreen() {
    */
   const [qtyDraft, setQtyDraft] = useState<Record<string, string>>({});
 
+  /**
+   * The photo METADATA for the catalogue — an id, a MIME and a content hash per photographed
+   * product. No bytes.
+   *
+   * 🔴 THE EXISTING CHANNEL, NOT A NEW ONE. `listProducts` is `requireCashier`, and its handler
+   * already reads photos through `primaryPhotoIndex` — one indexed query returning metadata,
+   * explicitly never a join that carries BLOBs. So the Sell screen learns WHICH products have a
+   * photo for one list read, and the pricing catalogue (`getCatalog`) is untouched: no image field
+   * entered the pricing DTO, and no image bytes travel on a product-list channel.
+   *
+   * 🔴 AND A FAILURE HERE COSTS THUMBNAILS, NEVER SELLING. The catch sets no error: a till whose
+   * photo index cannot be read must still sell, so the grid falls back to placeholders.
+   */
+  const [photoMeta, setPhotoMeta] = useState<readonly AdminProductDto[]>([]);
+
   useEffect(() => {
     call(pos().getCatalog())
       .then((dto) => setCatalog(fromCatalogDto(dto)))
       .catch((e) => setError(errorText(e)));
+  }, []);
+
+  useEffect(() => {
+    let live = true;
+    void call(pos().listProducts())
+      .then((rows) => {
+        if (live) setPhotoMeta(rows);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
   }, []);
 
   // Display total — the main process recomputes from its own catalog and refuses a mismatch.
@@ -58,6 +88,30 @@ export function SellScreen() {
     if (!q) return catalog.products;
     return catalog.products.filter((p) => p.name.toLowerCase().includes(q) || (p.sku ?? "").toLowerCase().includes(q));
   }, [catalog, query]);
+
+  /**
+   * The photo rows for the products ON SCREEN — the input the shared hook's six rules consume.
+   *
+   * 🔴 THE SEARCH RESULT, NOT THE CATALOGUE. 508 photographed products would be 508 reads on open
+   * if this passed everything; it passes what the grid renders, so typing narrows the set rather
+   * than multiplying it, and a keystroke that reveals nothing new fetches nothing.
+   */
+  const visibleIds = useMemo(() => new Set(visible.map((p) => p.id)), [visible]);
+  const visiblePhotos = useMemo(() => photoMeta.filter((row) => visibleIds.has(row.id)), [photoMeta, visibleIds]);
+  const thumbs = useThumbnails(visiblePhotos);
+
+  /** The product whose photo is open full size. Viewing only — it touches no cart and no data. */
+  const [preview, setPreview] = useState<{ readonly name: string; readonly url: string } | null>(null);
+  /**
+   * The customer the operator picked, for their own reference.
+   *
+   * 🔴 IT IS NOT ATTACHED TO THE SALE, AND THE SCREEN SAYS SO. `CreateSaleRequest` carries no
+   * customer id — the sales contract has no such field until the credit/receivable slice lands — so
+   * pretending otherwise here would be the one thing worse than not having the feature: a cashier
+   * believing a debt was recorded when nothing was. It is a label beside the cart and nothing else.
+   */
+  const [customer, setCustomer] = useState<CustomerDto | null>(null);
+  const [findingCustomer, setFindingCustomer] = useState(false);
 
   /**
    * Commits a typed quantity. Invalid text is REFUSED with the domain's own message and the box
@@ -79,6 +133,28 @@ export function SellScreen() {
       setError(errorText(e));
     }
   };
+
+  /**
+   * Esc closes the photo preview, the same way it leaves the payment pane.
+   *
+   * 🔴 AND FOCUS GOES BACK WHERE IT CAME FROM. The control that opened the preview is remembered
+   * and refocused on close, so a cashier working by keyboard is not dropped at the top of the grid.
+   */
+  useEffect(() => {
+    if (preview === null) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setPreview(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      opener?.focus();
+    };
+  }, [preview]);
 
   /** Cash takes the initial focus and Esc returns to the cart; Enter is the browser's own. */
   useEffect(() => {
@@ -164,17 +240,35 @@ export function SellScreen() {
           <kbd className="search-kbd" aria-hidden="true">/</kbd>
         </div>
         <div className="products">
-          {visible.map((p, i) => (
-            /* 🔴 TAB REACHES THE GRID, NOT EVERY CARD. One roving tab stop: Tab moves between work
-               regions — search, grid, cart, primary — and arrows move inside the grid. Tabbing
-               through fifty products to reach the cart is not a keyboard path, it is a punishment. */
+          {visible.map((p, i) => {
+            const thumb = thumbs.get(p.id);
+            const url = thumb?.kind === "ready" ? thumb.url : null;
+            return (
+            /* 🔴 A CELL, SO THE PHOTO IS NOT INSIDE THE CARD BUTTON. A button cannot contain a
+               button: nesting them is invalid markup and gives the inner one no reliable way to
+               keep a click away from the outer one. Siblings cannot propagate into each other at
+               all, so "the photo opens a preview and never adds to the cart" is structural here
+               rather than an event-handler promise. */
+            <div className="product-cell" key={p.id}>
             <button
-              key={p.id}
               className="product"
               tabIndex={i === 0 ? 0 : -1}
+              aria-keyshortcuts={url !== null ? "p" : undefined}
               onKeyDown={(e) => {
+                // 🔴 "p" PREVIEWS THE FOCUSED CARD. The grid keeps ONE tab stop by design, so the
+                // photo control is deliberately not a tab stop of its own — fifty cards would mean
+                // fifty more. This is how a keyboard reaches it, and `aria-keyshortcuts` above is
+                // how it is announced.
+                if (e.key === "p" || e.key === "P") {
+                  if (url === null) return;
+                  e.preventDefault();
+                  setPreview({ name: p.name, url });
+                  return;
+                }
                 const cards = Array.from(
-                  e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button.product") ?? [],
+                  // 🔴 THE GRID, NOT `parentElement`. Each card now sits in its own cell, so the
+                  // parent is that cell and this query would find one card and go nowhere.
+                  e.currentTarget.closest(".products")?.querySelectorAll<HTMLButtonElement>("button.product") ?? [],
                 );
                 const here = cards.indexOf(e.currentTarget);
                 const step = e.key === "ArrowLeft" ? 1 : e.key === "ArrowRight" ? -1 : 0;
@@ -203,10 +297,73 @@ export function SellScreen() {
                 )}
               </span>
             </button>
-          ))}
+            {/* 🔴 THE PHOTO IS A SIBLING OF THE CARD, AND ONLY A VIEWER. It opens a larger copy of
+                the bytes already in hand; it never adds to the cart, never touches a quantity, and
+                offers a cashier no way to replace or remove anything — viewing a photo is not
+                permission to edit one. */}
+            {url !== null ? (
+              <button
+                type="button"
+                className="product-thumb"
+                tabIndex={-1}
+                data-testid="sell-thumb"
+                data-product={p.id}
+                title={t("sell.photoOpen")}
+                aria-label={`${t("sell.photoOpen")}: ${p.name}`}
+                onClick={() => setPreview({ name: p.name, url })}
+              >
+                <img src={url} alt="" data-testid="sell-thumb-image" />
+              </button>
+            ) : (
+              /* A product with no photo, one whose photo failed its checksum, and one still
+                 loading all land here: the same quiet placeholder, never a broken frame, and
+                 never anything the cashier has to resolve before selling. */
+              <span
+                className="product-thumb product-thumb-empty"
+                data-testid="sell-thumb-empty"
+                data-product={p.id}
+                role="img"
+                aria-label={t("sell.photoNone")}
+                title={t("sell.photoNone")}
+              />
+            )}
+            </div>
+            );
+          })}
           {visible.length === 0 && <p className="muted">{t("sell.noMatch")}</p>}
         </div>
       </section>
+
+      {/* 🔴 RENDERED BESIDE THE CART, NEVER INSTEAD OF IT. Everything above stays mounted, so the
+          cart, the product search text, the quantity drafts and the checkout idempotency key all
+          survive a customer being created mid-sale. */}
+      {findingCustomer && (
+        <CustomerFinder
+          onClose={() => setFindingCustomer(false)}
+          onPick={(c) => {
+            setCustomer(c);
+            setFindingCustomer(false);
+          }}
+        />
+      )}
+
+      {preview !== null && (
+        /* The same overlay/dialog the clear-cart and payment panes use — no new modal system. */
+        <div className="overlay" data-testid="sell-photo-preview">
+          <div className="card dialog">
+            <h2 dir="auto">{preview.name}</h2>
+            <img className="sell-preview-image" src={preview.url} alt={preview.name} data-testid="sell-preview-image" />
+            <button
+              className="btn primary wide"
+              data-testid="sell-photo-close"
+              autoFocus
+              onClick={() => setPreview(null)}
+            >
+              {t("action.close")}
+            </button>
+          </div>
+        </div>
+      )}
 
       <aside className="cart" data-testid="cart">
         <div className="cart-head">
@@ -218,6 +375,34 @@ export function SellScreen() {
             <button className="btn danger ghost small" data-testid="clear-cart" onClick={() => setClearing(true)}>
               {t("sell.clearCart")}
             </button>
+          )}
+        </div>
+
+        {/* ── The customer, for reference only ──────────────────────────────────────────────────
+            🔴 THE SENTENCE UNDER IT IS LOAD-BEARING. Nothing here records a debt or links the
+            customer to the sale, and a cashier who assumed otherwise would stop chasing a real
+            receivable. The note says so in the shop's own language every time a customer is
+            chosen — not once in a tooltip. */}
+        <div className="cart-customer">
+          <button
+            className="btn ghost small"
+            onClick={() => setFindingCustomer(true)}
+            data-testid="sell-choose-customer"
+          >
+            {customer === null ? t("sell.chooseCustomer") : t("sell.changeCustomer")}
+          </button>
+          {customer !== null && (
+            <>
+              <span className="customer-chip" data-testid="sell-customer" data-customer={customer.id}>
+                <bdi>{customer.displayName}</bdi>
+              </span>
+              <button className="btn ghost small" onClick={() => setCustomer(null)} data-testid="sell-clear-customer">
+                {t("sell.clearCustomer")}
+              </button>
+              <p className="muted small" data-testid="sell-customer-not-attached">
+                {t("customers.notOnSaleYet")}
+              </p>
+            </>
           )}
         </div>
         {!priced && <p className="muted">{t("sell.empty")}</p>}

@@ -23,7 +23,7 @@
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 import { _electron as electron } from "playwright-core";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -155,6 +155,22 @@ assert(
   !/role|salt|hash|must_reset|isactive|pending/i.test(JSON.stringify(offered.data)),
   "and nothing in that payload hints at a role or a credential",
 );
+
+// 🔴 THE BUILD LINE, BEFORE ANYONE SIGNS IN. It read "Alzabt POS unknown · Build unknown" here:
+// getAppInfo was session-level and the login screen has no session. Now public — and the payload
+// must be exactly { version, build }, the same values as the build this E2E is installed from.
+{
+  const expected = JSON.parse(readFileSync(join(APP, "dist", "build-info.json"), "utf8"));
+  assert(/^[0-9a-f]{7}(-dirty)?$/.test(expected.build), `the build under test carries a real commit (${expected.build})`);
+  const info = await direct(page, "getAppInfo");
+  assert(info.ok === true, "getAppInfo answers with no session");
+  assert(JSON.stringify(Object.keys(info.data).sort()) === '["build","version"]', "and carries ONLY version and build");
+  assert(info.data.version === expected.version && info.data.build === expected.build,
+    `with the installed build's real values (${info.data.version} · ${info.data.build})`);
+  const line = (await page.getByTestId("build-line").innerText()).trim();
+  assert(line === `Alzabt POS ${expected.version} · Build ${expected.build}`, `the login screen shows them (${line})`);
+  assert(!line.includes("unknown"), "and no 'unknown' before sign-in");
+}
 
 // 🔴 Before any session exists, an owner channel must refuse — not because a button is hidden
 // (there is no button yet) but because the main process has nobody to authorize.
@@ -429,6 +445,18 @@ for (const [channel, payload] of [
   // at all, which threw inside the PRELOAD and never reached the main process to be refused.)
   ["listReconciliationQueue", { filter: "unresolved", limit: 10 }],
   ["createProduct", { draft: { nameAr: "صنف مزيّف", nameEn: null, sku: null, price: "1.00", baseUnit: "piece" } }],
+  // 🔴 SLICE H1/H2 — THE PHONE LAN BRIDGE. These are added to THIS loop rather than given their own
+  // because this is the one place the "a cashier cannot reach an owner channel" claim is made
+  // against the installed app, and a second copy elsewhere would drift.
+  //
+  // `startPhoneSession` is the one that matters most: without its guard a cashier could open an
+  // inbound network surface on the shop's till. The payload is a shape the handler ACCEPTS
+  // (`action` is enumerated and `NEW_PRODUCT` is valid, with no productId, which is the legal
+  // combination) so that deleting the guard makes this line go green for the right reason rather
+  // than tripping payload validation and looking refused either way.
+  ["startPhoneSession", { action: "NEW_PRODUCT" }],
+  ["cancelPhoneSession", null],
+  ["phoneSessionState", null],
 ]) {
   const r = await direct(page, channel, payload);
   assert(r.ok === false, `a cashier calling window.pos.${channel} directly is REFUSED`);

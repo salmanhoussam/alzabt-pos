@@ -22,6 +22,15 @@ const ROW: AdminProductRow = {
   is_active: 1n,
   created_at: "2026-10-07T09:00:00.000Z",
   updated_at: "2026-10-07T09:00:00.000Z",
+  // 🔴 TRANSITION — migration 9. A product with none of these is complete and sellable, which is
+  // exactly what this fixture represents: the shape the IPC boundary has always returned, now
+  // carrying the Product Master columns as the empty values a pre-enrichment product really has.
+  category_id: null,
+  barcode: null,
+  brand: null,
+  description_ar: null,
+  description_en: null,
+  is_online_visible: 0n,
 };
 
 const DRAFT = { nameAr: "مفتاح أحمر", nameEn: "Red Wrench", sku: "SKU-001", price: "4.00", baseUnit: "piece" };
@@ -29,6 +38,15 @@ const DRAFT = { nameAr: "مفتاح أحمر", nameEn: "Red Wrench", sku: "SKU-0
 function handlers(overrides: Partial<Record<string, unknown>> = {}) {
   const service = {
     listProducts: vi.fn(() => [ROW]),
+    // 🔴 TRANSITION — migration 9. `listProducts` now asks a SECOND question: the primary-photo
+    // METADATA of every photographed product. A fake missing it made the handler throw and
+    // surfaced as "Unexpected error", hiding the mapping these tests are about — the same way the
+    // missing role method did, and recorded here for the same reason.
+    //
+    // It returned ids (`productIdsWithPhoto`) until the products list had to show thumbnails: a
+    // set could answer "is there one?" but not "which image, and has it changed". Empty map: this
+    // fixture product has no photo, which is the truth.
+    primaryPhotoIndex: vi.fn(() => new Map()),
     createProduct: vi.fn(() => ROW),
     updateProduct: vi.fn(() => ROW),
     setProductActive: vi.fn(() => ({ ...ROW, is_active: 0n })),
@@ -43,6 +61,11 @@ function handlers(overrides: Partial<Record<string, unknown>> = {}) {
     // break the moment the guard picked the other.
     requireLiveRole: vi.fn(() => "owner"),
     currentRole: vi.fn(() => "owner"),
+    // 🔴 THE SAME LESSON AGAIN, FROM THE SAME COMMENT ABOVE. Migration 11 gave the guard a third
+    // question to ask — "may this operator create products?" — and a fake that did not answer it
+    // threw inside `authorize`, surfacing as "Unexpected error" and hiding the payload validation
+    // these tests exist to check. An owner always may, which is what this fake is.
+    canCreateProducts: vi.fn(() => true),
     ...overrides,
   } as unknown as PosService;
   return { h: syncHandlers(createIpcHandlers(service)), service };

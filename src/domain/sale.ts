@@ -87,6 +87,10 @@ export interface SaleRecord {
   readonly sourceType: SaleSourceType;
   /** The finalized invoice this sale came from, or null for a POS sale. */
   readonly invoiceId: string | null;
+  /** The durable customer linked at sale time, or null for ordinary and invoice-origin sales. */
+  readonly customerId: string | null;
+  /** Customer display name frozen at sale time; never follows later account edits. */
+  readonly customerNameSnapshot: string | null;
   readonly subtotal: Money;
   /** Copied from the invoice's FROZEN tax. Always zero for a POS sale and a taxless invoice. */
   readonly tax: Money;
@@ -95,8 +99,8 @@ export interface SaleRecord {
   readonly balanceDue: Money;
   readonly paymentStatus: PaymentStatus;
   /**
-   * 🔴 NULL MEANS "NOT RECORDED", which is the truth for a manual invoice that captured no method.
-   * Never a fabricated 'cash'. Required on every POS sale, by database CHECK.
+   * NULL means no tender was recorded: either an invoice with no captured method or a fully unpaid
+   * customer-credit POS sale. Never a fabricated 'cash'; ordinary paid POS sales require a method.
    */
   readonly paymentMethod: PaymentMethod | null;
   readonly businessDate: string;
