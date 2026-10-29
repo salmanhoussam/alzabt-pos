@@ -317,9 +317,10 @@ function dyingFs(k) {
  *
  * 🔴 WHY (Windows runs 40733299552, 40737989211, 40743546977). Every native worker death
  * (0xC0000409) landed on the FIRST fs.cpSync({ recursive: true }) of a path containing Arabic and
- * spaces, on Node 22.23.4; cpSync on ASCII temp paths passes there. That is a HYPOTHESIS backed by
- * those observations (a separate probe in the workflow measures it), not a proven cause. The
- * Arabic paths are deliberately KEPT — only the copying primitive changes.
+ * spaces, on Node 22.23.4. Run 40751431026 confirmed it with a standalone probe: in its own node
+ * process, cpSync on an ASCII folder exits 0 and the same copy under Arabic + spaces dies with
+ * 0xC0000409. The Arabic paths are deliberately KEPT — only the copying primitive changes. Do not
+ * bring fs.cpSync back into this script.
  *
  * Every file is copied, the SQLite companions (-wal, -shm, -journal) included. A symbolic link is
  * REFUSED rather than followed, so nothing outside the test folder can be reached through one.
