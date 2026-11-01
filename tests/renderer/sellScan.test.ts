@@ -13,8 +13,14 @@ import { DomainError } from "../../src/domain/errors";
 import { QUANTITY_SCALE } from "../../src/domain/quantity";
 import { FIXTURE_CATALOG } from "../../src/fixtures/catalog";
 import {
+  MODAL_SELECTOR,
+  PAY_SCAN_MESSAGE_KEY,
   SCAN_MESSAGE_KEY,
   enterAction,
+  isModalOpen,
+  isPhotoPreviewShortcut,
+  isQuantityPending,
+  leavesQuantityEditor,
   isSearchShortcut,
   isTypeToSearch,
   quantityEnterAction,
@@ -373,10 +379,15 @@ describe("🔴 the quantity box: a scan does not become a quantity", () => {
     const sell = readFileSync("src/renderer/screens/SellScreen.tsx", "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/.*$/gm, "");
-    const box = sell.slice(sell.indexOf("data-testid={`qty-${l.productId}`}"), sell.indexOf("onBlur={() => commitQuantity"));
+    // TRANSITION (SB-RISK-01 option A): this used to require that Enter COMMITS the quantity
+    // (`commitQuantity` inside the box). It now requires the opposite — see the option A tests.
+    const start = sell.indexOf("data-testid={`qty-${l.productId}`}");
+    const end = sell.indexOf('data-testid="line-inc"');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const box = sell.slice(start, end);
     expect(box).toContain("quantityEnterAction(text, catalog)");
     expect(box).toContain("enterAction(");
-    expect(box).toContain("commitQuantity(l.productId, l.saleUnit)");
     expect(box).toContain("focusSearchAfterRender(");
   });
 });
@@ -422,5 +433,230 @@ describe("Sell tab clicked while Sell is open", () => {
     const app = readFileSync("src/renderer/App.tsx", "utf8").replace(/^\s*\/\/.*$/gm, "");
     expect(app).toContain('if (name === "sell" && tab === "sell") setSellFocusRequest((n) => n + 1);');
     expect(app).toContain("<SellScreen key={catalogVersion} focusRequest={sellFocusRequest} />");
+  });
+});
+
+// ── Post-CI hardening: preview shortcut, payment warning, modal guard, keycap ────────────────────
+
+const sellSource = () =>
+  readFileSync("src/renderer/screens/SellScreen.tsx", "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+
+describe("SB-RISK-02: a code starting with p reaches the search, not the photo preview", () => {
+  const k = (over: Partial<Parameters<typeof isPhotoPreviewShortcut>[0]> = {}) => ({
+    code: "KeyP",
+    altKey: true,
+    ctrlKey: false,
+    metaKey: false,
+    ...over,
+  });
+
+  it("🔴 Alt+P (by physical key) is the preview shortcut — the Arabic layout's «ح» key included", () => {
+    expect(isPhotoPreviewShortcut(k())).toBe(true);
+  });
+
+  it("🔴 a bare p — what a scanner sends — is not", () => {
+    expect(isPhotoPreviewShortcut(k({ altKey: false }))).toBe(false);
+  });
+
+  it("other chords and keys are not", () => {
+    expect(isPhotoPreviewShortcut(k({ ctrlKey: true }))).toBe(false);
+    expect(isPhotoPreviewShortcut(k({ metaKey: true }))).toBe(false);
+    expect(isPhotoPreviewShortcut(k({ code: "KeyO" }))).toBe(false);
+  });
+
+  it("🔴 a bare p on a focused card is type-to-search, so the scan goes to the field", () => {
+    expect(isTypeToSearch({ key: "p", ctrlKey: false, metaKey: false, altKey: false, defaultPrevented: false }, { tagName: "BUTTON" })).toBe(true);
+    expect(isTypeToSearch({ key: "P", ctrlKey: false, metaKey: false, altKey: false, defaultPrevented: false }, { tagName: "BUTTON" })).toBe(true);
+  });
+
+  it("a code starting with p is matched exactly, like any alphanumeric code", () => {
+    const cat = loadCatalog({
+      currency: "USD",
+      products: [{ id: "pc", sku: null, name: "P code", price: "1.00", barcode: "pAlz-7" }],
+    });
+    expect(resolveScan("pAlz-7", cat)).toEqual({ kind: "add", productId: "pc" });
+    expect(resolveScan("PAlz-7", cat)).toEqual({ kind: "unknown" });
+  });
+
+  it("the card uses the chord and announces it", () => {
+    const sell = sellSource();
+    expect(sell).toContain("if (isPhotoPreviewShortcut(e)) {");
+    expect(sell).toContain('aria-keyshortcuts={url !== null ? "Alt+P" : undefined}');
+    expect(sell).not.toMatch(/e\.key === "p"/);
+  });
+});
+
+describe("SB-RISK-03: a scan while the payment pane is open says why it did nothing", () => {
+  it("🔴 the approved wording, its own key, both languages", () => {
+    expect(PAY_SCAN_MESSAGE_KEY).toBe("sell.scan.duringPayment");
+    expect(Object.values(SCAN_MESSAGE_KEY)).not.toContain(PAY_SCAN_MESSAGE_KEY);
+    expect(translate("ar", PAY_SCAN_MESSAGE_KEY)).toBe("أنهِ الدفع أو ارجع إلى السلّة قبل المسح.");
+    expect(translate("en", PAY_SCAN_MESSAGE_KEY)).toBe("Finish or cancel the payment before scanning.");
+  });
+
+  it("the pane raises it on a printable key and resolves nothing", () => {
+    const sell = sellSource();
+    const effect = sell.slice(sell.indexOf("cashRef.current?.focus();"), sell.indexOf("cashRef.current?.focus();") + 600);
+    expect(effect).toContain("setPayScanNote(true)");
+    expect(effect).not.toContain("resolveScan");
+    expect(effect).not.toContain("addProduct");
+    expect(effect).not.toContain("pay(");
+    expect(sell).toContain('data-testid="pay-scan-note"');
+    expect(sell).toContain("t(PAY_SCAN_MESSAGE_KEY)");
+  });
+
+  it("every method still refuses Enter (cash, card, external, other render from one map)", () => {
+    const sell = sellSource();
+    const methods = sell.slice(sell.indexOf("PAYMENT_METHODS.map("), sell.indexOf("onClick={() => pay(m)}") + 30);
+    expect(methods).toContain("onKeyDown={refuseEnterActivation}");
+  });
+});
+
+describe("no cart change behind a modal", () => {
+  it("🔴 any open .overlay — or any aria-modal dialog — counts as a modal; none means none", () => {
+    // TRANSITION: the selector was ".overlay" alone; aria-modal was added so the guard does not hang
+    // on one class name.
+    expect(MODAL_SELECTOR).toBe('.overlay, [aria-modal="true"]');
+    expect(isModalOpen({ querySelector: (sel) => (sel === MODAL_SELECTOR ? {} : null) })).toBe(true);
+    expect(isModalOpen({ querySelector: () => null })).toBe(false);
+  });
+
+  it("every aria-modal dialog in the renderer sits inside an .overlay (measured, not assumed)", () => {
+    const files = [
+      "src/renderer/screens/HistoryScreen.tsx",
+      "src/renderer/screens/CustomerFinder.tsx",
+      "src/renderer/screens/SellScreen.tsx",
+      "src/renderer/screens/invoices/InvoiceSheet.tsx",
+    ];
+    for (const f of files) {
+      const src = readFileSync(f, "utf8");
+      let at = src.indexOf('aria-modal="true"');
+      expect(at, `${f} has an aria-modal dialog`).toBeGreaterThan(-1);
+      while (at !== -1) {
+        // The nearest opening .overlay before it, within a few lines, is its container.
+        const before = src.slice(Math.max(0, at - 400), at);
+        expect(before, `${f}: aria-modal at ${at} is not inside an .overlay`).toContain('className="overlay"');
+        at = src.indexOf('aria-modal="true"', at + 1);
+      }
+    }
+  });
+
+  it("🔴 Enter in the search and in a quantity box, type-to-search and the tab's focus request all check it", () => {
+    const sell = sellSource();
+    const search = sell.slice(sell.indexOf('data-testid="product-search"'), sell.indexOf('className="search-kbd"'));
+    expect(search.indexOf("isModalOpen(document)")).toBeGreaterThan(-1);
+    expect(search.indexOf("isModalOpen(document)")).toBeLessThan(search.indexOf("resolveScan(query, catalog)"));
+    const boxStart = sell.indexOf("data-testid={`qty-${l.productId}`}");
+    const box = sell.slice(boxStart, sell.indexOf('data-testid="line-inc"', boxStart));
+    expect(box.indexOf("isModalOpen(document)")).toBeGreaterThan(-1);
+    expect(box.indexOf("isModalOpen(document)")).toBeLessThan(box.indexOf("quantityEnterAction("));
+    expect(sell).toContain("if (!field || isModalOpen(document)) return;");
+    expect(sell).toMatch(/clearing \|\| isModalOpen\(document\)\) return;/);
+  });
+
+  it("the grid's 'no match' line is not shown under a barcode refusal", () => {
+    expect(sellSource()).toContain('visible.length === 0 && scanNote === null && <p className="muted">{t("sell.noMatch")}</p>');
+  });
+});
+
+describe("the / keycap never covers the first character", () => {
+  const css = readFileSync("src/renderer/styles.css", "utf8");
+
+  it("🔴 the keycap's room is reserved on its PHYSICAL side, read from the page direction", () => {
+    expect(css).toContain(':root[dir="ltr"] .search-wrap .search { padding-right: 46px; }');
+    expect(css).toContain(':root[dir="rtl"] .search-wrap .search { padding-left: 46px; }');
+    expect(css).toMatch(/\.search-kbd \{\s*position: absolute; inset-inline-end: 10px;/);
+  });
+
+  it("and not on the field's own inline end, which flips with dir=auto", () => {
+    expect(css).not.toContain(".search-wrap .search { flex: 1; padding-inline-end: 46px; }");
+  });
+});
+
+// ── SB-RISK-01 option A: explicit quantity confirmation ───────────────────────────────────────────
+
+describe("🔴 SB-RISK-01 option A: a typed quantity is pending until it is confirmed", () => {
+  it("a draft that differs from the committed quantity is pending; none, or the same, is not", () => {
+    expect(isQuantityPending(undefined, "1")).toBe(false);
+    expect(isQuantityPending("1", "1")).toBe(false);
+    expect(isQuantityPending("3", "1")).toBe(true);
+    expect(isQuantityPending("1234", "1")).toBe(true);
+    expect(isQuantityPending("", "1")).toBe(true);
+    expect(isQuantityPending("1.5", "1")).toBe(true);
+  });
+
+  it("moving between the box, ✓ and cancel keeps it; going anywhere else discards it", () => {
+    const inEditor = { dataset: { qtyEditor: "p1" } };
+    expect(leavesQuantityEditor(inEditor, "p1")).toBe(false);
+    expect(leavesQuantityEditor({ dataset: { qtyEditor: "p2" } }, "p1")).toBe(true); // another line's editor
+    expect(leavesQuantityEditor({ dataset: {} }, "p1")).toBe(true); // any other control
+    expect(leavesQuantityEditor(null, "p1")).toBe(true); // the page, or the window losing focus
+  });
+
+  it("🔴 the approved wording, its own keys, both languages", () => {
+    expect(translate("ar", "sell.qty.pendingHint")).toBe("الكمية غير محفوظة. اضغط ✓ للتأكيد.");
+    expect(translate("en", "sell.qty.pendingHint")).toBe("Quantity not saved. Select ✓ to confirm.");
+    expect(translate("ar", "sell.qty.confirm")).toBe("تأكيد الكمية");
+    expect(translate("en", "sell.qty.confirm")).toBe("Confirm quantity");
+    expect(translate("ar", "sell.qty.cancel")).toBe("إلغاء التعديل");
+    expect(translate("en", "sell.qty.cancel")).toBe("Cancel edit");
+  });
+
+  const sell = sellSource();
+  const boxStart = sell.indexOf("data-testid={`qty-${l.productId}`}");
+  const box = sell.slice(boxStart, sell.indexOf('data-testid="line-inc"', boxStart));
+  const confirmAt = sell.indexOf('data-testid="line-qty-confirm"');
+  const confirm = sell.slice(confirmAt, sell.indexOf('data-testid="line-qty-cancel"'));
+  const cancelAt = sell.indexOf('data-testid="line-qty-cancel"');
+  const cancel = sell.slice(cancelAt, cancelAt + 700);
+
+  it("🔴 Enter in the box never commits: no commitQuantity anywhere in the box", () => {
+    expect(boxStart).toBeGreaterThan(-1);
+    expect(box.length).toBeGreaterThan(200);
+    expect(box).not.toContain("commitQuantity(");
+  });
+
+  it("🔴 leaving the box discards (no commit on blur); Esc discards", () => {
+    expect(box).toContain("leavesQuantityEditor(");
+    expect(box).toContain("discardQuantity(l.productId)");
+    expect(box).toMatch(/e\.key === "Escape"[\s\S]*discardQuantity\(l\.productId\)/);
+    expect(sell).not.toContain("onBlur={() => commitQuantity");
+  });
+
+  it("🔴 ✓ is the ONLY path from a typed quantity to the cart, refuses Enter, and is labelled in words", () => {
+    expect(confirmAt).toBeGreaterThan(-1);
+    // Exactly one call site in the whole screen — the ✓ handler. (The declaration reads
+    // `commitQuantity = (`, so it is not counted.)
+    expect(sell.split("commitQuantity(").length - 1).toBe(1);
+    expect(confirm).toContain("commitQuantity(l.productId, l.saleUnit)");
+    expect(confirm).toContain("refuseEnterActivation(e)");
+    expect(confirm).toContain('aria-label={t("sell.qty.confirm")}');
+    expect(confirm).toContain('{t("sell.qty.confirm")}');
+    expect(confirm).toContain("onMouseDown={(e) => e.preventDefault()}");
+    expect(cancel).toContain("discardQuantity(l.productId)");
+    expect(cancel).toContain('{t("sell.qty.cancel")}');
+  });
+
+  it("🔴 the keyboard reaches ✓: Tab from a pending box goes to it, Shift+Tab comes back", () => {
+    expect(box).toMatch(/e\.key === "Tab" && !e\.shiftKey && pendingQty[\s\S]*\.line-qty-confirm[\s\S]*confirm\.focus\(\)/);
+    expect(confirm).toMatch(/e\.key === "Tab" && e\.shiftKey[\s\S]*\.qty-input[\s\S]*box\.focus\(\)/);
+  });
+
+  it("the new controls never take the qty- testid prefix the suite selects inputs by", () => {
+    for (const id of ["line-qty-confirm", "line-qty-cancel", "line-qty-hint"]) expect(id.startsWith("qty-")).toBe(false);
+    expect(sell).not.toMatch(/data-testid="qty-(confirm|cancel|hint)/);
+  });
+
+  it("🔴 totals come from the committed cart only — a pending draft never reaches priceCart", () => {
+    expect(sell).toContain("priceCart(catalog, cart)");
+    expect(sell).not.toMatch(/priceCart\([^)]*qtyDraft/);
+  });
+
+  it("pending and committed look different (stylesheet)", () => {
+    const css = readFileSync("src/renderer/styles.css", "utf8");
+    expect(css).toMatch(/\.qty-input\.qty-pending \{[^}]*border-style: dashed;/);
+    expect(sell).toContain('className={pendingQty ? "qty-n qty-input qty-pending" : "qty-n qty-input"}');
   });
 });

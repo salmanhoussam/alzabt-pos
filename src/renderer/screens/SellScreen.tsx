@@ -14,9 +14,14 @@ import { LineMath } from "../components/LineMath";
 import { Receipt } from "./Receipt";
 import { useT } from "../i18n";
 import {
+  PAY_SCAN_MESSAGE_KEY,
   SCAN_MESSAGE_KEY,
   type ScanOutcome,
   enterAction,
+  isModalOpen,
+  isPhotoPreviewShortcut,
+  isQuantityPending,
+  leavesQuantityEditor,
   isSearchShortcut,
   isTypeToSearch,
   quantityEnterAction,
@@ -52,6 +57,8 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
   const [query, setQuery] = useState("");
   /** The refusal of the last scan (unknown / inactive / invalid code), until the field changes. */
   const [scanNote, setScanNote] = useState<keyof typeof SCAN_MESSAGE_KEY | null>(null);
+  /** Something was typed (a scan) while the payment pane was open; it did nothing, and says why. */
+  const [payScanNote, setPayScanNote] = useState(false);
   /**
    * What the operator is typing into a line's quantity box, per product. Held as TEXT until it is
    * committed, so a half-typed "2." is never a quantity; parseQuantity decides at that one moment.
@@ -150,6 +157,13 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
     }
   };
 
+  /** Drops a line's pending quantity; the committed one — the one in the cart — stays. */
+  const discardQuantity = (productId: string) =>
+    setQtyDraft((d) => {
+      const { [productId]: _dropped, ...rest } = d;
+      return rest;
+    });
+
   /**
    * Esc closes the photo preview, the same way it leaves the payment pane.
    *
@@ -172,7 +186,12 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
     };
   }, [preview]);
 
-  /** Cash takes the initial focus and Esc returns to the cart; Enter is the browser's own. */
+  /**
+   * Cash takes the initial focus and Esc returns to the cart. Enter does not pay (see the methods).
+   * A printable key typed on the pane's controls — a scan, in practice — has nowhere to go here, so
+   * it is not resolved: it only raises the "finish or cancel the payment" warning. Nothing is
+   * prevented or redirected, and a text field (none today) would keep its typing.
+   */
   useEffect(() => {
     if (!paying) return;
     cashRef.current?.focus();
@@ -180,10 +199,15 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
       if (e.key === "Escape") {
         e.preventDefault();
         setPaying(false);
+        return;
       }
+      if (isTypeToSearch(e, e.target instanceof HTMLElement ? e.target : null)) setPayScanNote(true);
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      setPayScanNote(false);
+    };
   }, [paying]);
 
   /**
@@ -207,7 +231,7 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
     if (paying || preview !== null || findingCustomer || clearing) return;
     const onKey = (e: KeyboardEvent) => {
       const field = searchRef.current;
-      if (!field) return;
+      if (!field || isModalOpen(document)) return;
       const target = e.target instanceof HTMLElement ? e.target : null;
       if (isSearchShortcut(e, target)) {
         e.preventDefault();
@@ -223,7 +247,7 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
   /** The tab bar's request: the Sell tab was clicked while Sell was already open. */
   useEffect(() => {
     if (focusRequest === 0) return;
-    if (paying || preview !== null || findingCustomer || clearing) return;
+    if (paying || preview !== null || findingCustomer || clearing || isModalOpen(document)) return;
     searchRef.current?.focus();
     // Only a NEW request may move focus; the dialog flags are read as they are at that moment.
   }, [focusRequest]);
@@ -320,6 +344,14 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
               if (action === "ignore") return;
               e.preventDefault();
               if (action === "swallow") return;
+              // Behind a modal (e.g. the import-result dialog) a scan changes nothing the cashier
+              // could not see. Its text — invisible there too — is cleared, so the first scan after
+              // the dialog closes starts from an empty field instead of being appended to it.
+              if (isModalOpen(document)) {
+                setQuery("");
+                setScanNote(null);
+                return;
+              }
               /* 🔴 ENTER IS THE SCANNER'S KEY: IT ADDS ONLY AN EXACT BARCODE MATCH. A scanner and a
                  person typing are indistinguishable here, so Enter no longer adds the single visible
                  result or a product whose SKU or name equals the text — a scan that misses must say
@@ -354,13 +386,14 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
             <button
               className="product"
               tabIndex={i === 0 ? 0 : -1}
-              aria-keyshortcuts={url !== null ? "p" : undefined}
+              aria-keyshortcuts={url !== null ? "Alt+P" : undefined}
               onKeyDown={(e) => {
-                // 🔴 "p" PREVIEWS THE FOCUSED CARD. The grid keeps ONE tab stop by design, so the
+                // 🔴 ALT+P PREVIEWS THE FOCUSED CARD. The grid keeps ONE tab stop by design, so the
                 // photo control is deliberately not a tab stop of its own — fifty cards would mean
                 // fifty more. This is how a keyboard reaches it, and `aria-keyshortcuts` above is
-                // how it is announced.
-                if (e.key === "p" || e.key === "P") {
+                // how it is announced. It was a bare "p" until a scanned code starting with p
+                // opened a photo instead of reaching the search field (`isPhotoPreviewShortcut`).
+                if (isPhotoPreviewShortcut(e)) {
                   if (url === null) return;
                   e.preventDefault();
                   setPreview({ name: p.name, url });
@@ -434,7 +467,9 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
             </div>
             );
           })}
-          {visible.length === 0 && <p className="muted">{t("sell.noMatch")}</p>}
+          {/* Not under a barcode refusal: the scanned text filters the grid to nothing, and the
+              refusal above already says what happened. */}
+          {visible.length === 0 && scanNote === null && <p className="muted">{t("sell.noMatch")}</p>}
         </div>
       </section>
 
@@ -512,7 +547,22 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
         {!priced && <p className="muted">{t("sell.empty")}</p>}
         {priced && (
           <ul className="lines">
-            {priced.lines.map((l) => (
+            {priced.lines.map((l) => {
+              const committedQty = formatQuantity(l.quantityMilli);
+              const pendingQty = isQuantityPending(qtyDraft[l.productId], committedQty);
+              /** Leaving the editor (box, confirm, cancel) discards; moving inside it does not. */
+              const blurEditor = (e: React.FocusEvent<HTMLElement>) => {
+                if (leavesQuantityEditor(e.relatedTarget instanceof HTMLElement ? e.relatedTarget : null, l.productId)) {
+                  discardQuantity(l.productId);
+                }
+              };
+              const editorKey = (e: React.KeyboardEvent<HTMLElement>) => {
+                if (e.key !== "Escape") return;
+                e.preventDefault();
+                discardQuantity(l.productId);
+                focusSearchAfterRender(false);
+              };
+              return (
               <li key={l.productId} className="line">
                 <div className="line-main">
                   <span dir="auto">{l.productName}</span>
@@ -542,39 +592,55 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
                     −
                   </button>
                   <input
-                    className="qty-n qty-input"
+                    className={pendingQty ? "qty-n qty-input qty-pending" : "qty-n qty-input"}
                     type="text"
                     inputMode="decimal"
                     aria-label={t("sell.quantityOf")}
+                    aria-describedby={pendingQty ? `line-qty-hint-${l.productId}` : undefined}
                     data-testid={`qty-${l.productId}`}
-                    value={qtyDraft[l.productId] ?? formatQuantity(l.quantityMilli)}
+                    data-qty-editor={l.productId}
+                    value={qtyDraft[l.productId] ?? committedQty}
                     onChange={(e) => setQtyDraft((d) => ({ ...d, [l.productId]: e.target.value }))}
                     onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        discardQuantity(l.productId);
+                        focusSearchAfterRender(false);
+                        return;
+                      }
+                      // The keyboard path to ✓: in the DOM the line's + and ✕ come first, and
+                      // tabbing onto them would leave the editor and discard the value.
+                      if (e.key === "Tab" && !e.shiftKey && pendingQty) {
+                        const confirm = e.currentTarget.closest("li")?.querySelector<HTMLButtonElement>(".line-qty-confirm");
+                        if (confirm) {
+                          e.preventDefault();
+                          confirm.focus();
+                        }
+                        return;
+                      }
                       const action = enterAction({ key: e.key, repeat: e.repeat, isComposing: e.nativeEvent.isComposing });
                       if (action === "ignore") return;
                       e.preventDefault();
                       if (action === "swallow") return;
-                      /* 🔴 A QUANTITY BOX ASKS WHAT ITS TEXT IS (sellScan.ts, quantityEnterAction). A
-                         barcode — a product's own code, or more digits than any quantity has —
-                         is resolved as the scan it is and the line keeps its quantity; anything
-                         shaped like a quantity is the quantity, exactly as before. Either way focus
-                         then returns to the search field, AFTER this render, so the blur that
-                         follows reads the cleared draft and commits nothing a second time. */
+                      if (isModalOpen(document)) return;
+                      /* 🔴 ENTER NEVER COMMITS A QUANTITY (SB-RISK-01, option A). It only asks what
+                         the text is (sellScan.ts, quantityEnterAction): a barcode — a product's own
+                         code, or more digits than any quantity has — is resolved as the scan it is,
+                         the pending text is dropped and the line keeps its quantity. Anything else
+                         stays PENDING and unsaved until the confirm control is used. */
                       const text = qtyDraft[l.productId];
                       const decision = text === undefined ? null : quantityEnterAction(text, catalog);
                       if (decision !== null && decision.kind === "scan") {
-                        setQtyDraft((d) => {
-                          const { [l.productId]: _dropped, ...rest } = d;
-                          return rest;
-                        });
+                        discardQuantity(l.productId);
                         const added = applyScan(text!, decision.outcome);
                         focusSearchAfterRender(!added);
-                        return;
                       }
-                      commitQuantity(l.productId, l.saleUnit);
-                      focusSearchAfterRender(false);
                     }}
-                    onBlur={() => commitQuantity(l.productId, l.saleUnit)}
+                    onBlur={(e) => {
+                      if (leavesQuantityEditor(e.relatedTarget instanceof HTMLElement ? e.relatedTarget : null, l.productId)) {
+                        discardQuantity(l.productId);
+                      }
+                    }}
                   />
                   <button
                     className="btn key"
@@ -604,8 +670,64 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
                 <span className="line-total">
                   <bdi dir="ltr">{`${formatDecimal(l.lineTotal)} ${catalog.currency}`}</bdi>
                 </span>
+                {pendingQty && (
+                  /* 🔴 THE ONLY WAY A TYPED QUANTITY REACHES THE CART. The line total and the cart
+                     total above still show the committed quantity; this row says the typed one is
+                     not saved and offers the two deliberate answers. Confirm refuses Enter (a scan
+                     ends in Enter) and takes a click, a tap or Space; a pointer press does not move
+                     focus out of the box first (`preventDefault` on mousedown), so the pending
+                     value is still there when the click lands. */
+                  <div className="line-qty-pending">
+                    <p className="line-qty-hint" id={`line-qty-hint-${l.productId}`} role="status" data-testid="line-qty-hint">
+                      {t("sell.qty.pendingHint")}
+                    </p>
+                    <button
+                      type="button"
+                      className="btn primary small line-qty-confirm"
+                      data-testid="line-qty-confirm"
+                      data-qty-editor={l.productId}
+                      aria-label={t("sell.qty.confirm")}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onKeyDown={(e) => {
+                        refuseEnterActivation(e);
+                        editorKey(e);
+                        // Shift+Tab goes back to the box it confirms, not to the line's ✕.
+                        if (e.key === "Tab" && e.shiftKey) {
+                          const box = e.currentTarget.closest("li")?.querySelector<HTMLInputElement>(".qty-input");
+                          if (box) {
+                            e.preventDefault();
+                            box.focus();
+                          }
+                        }
+                      }}
+                      onBlur={blurEditor}
+                      onClick={() => {
+                        commitQuantity(l.productId, l.saleUnit);
+                        focusSearchAfterRender(false);
+                      }}
+                    >
+                      ✓ {t("sell.qty.confirm")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ghost small"
+                      data-testid="line-qty-cancel"
+                      data-qty-editor={l.productId}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onKeyDown={editorKey}
+                      onBlur={blurEditor}
+                      onClick={() => {
+                        discardQuantity(l.productId);
+                        focusSearchAfterRender(false);
+                      }}
+                    >
+                      {t("sell.qty.cancel")}
+                    </button>
+                  </div>
+                )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
         <div className="cart-foot">
@@ -694,6 +816,11 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
                 </button>
               ))}
             </div>
+            {payScanNote && (
+              <p className="error" role="status" data-testid="pay-scan-note">
+                {t(PAY_SCAN_MESSAGE_KEY)}
+              </p>
+            )}
             {error && <p className="error">{error}</p>}
             <button className="btn ghost wide" disabled={busy} onClick={() => setPaying(false)}>
               {t("pay.back")}

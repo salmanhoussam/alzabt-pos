@@ -55,6 +55,12 @@ export const SCAN_MESSAGE_KEY = {
 } as const satisfies Record<Exclude<ScanOutcome["kind"], "none" | "add">, string>;
 
 /**
+ * A different moment, so a different key: typing (a scan) while the payment pane is open. Nothing
+ * is resolved there — the warning only says why the scan did nothing.
+ */
+export const PAY_SCAN_MESSAGE_KEY = "sell.scan.duringPayment";
+
+/**
  * What a keydown in the search field means.
  *
  * - `submit`  — one deliberate Enter: resolve the field once.
@@ -156,16 +162,17 @@ const QUANTITY_DIGITS = String(MAX_QUANTITY_UNITS).length;
  * quantity box used to have its code committed as a quantity. The contract, in order:
  *   1. Text SHAPED like a quantity (`parseQuantity`'s own pattern: digits, optionally `.` and
  *      decimals) with at most 4 integer digits is the quantity — always, even if some product's
- *      barcode happens to be "12". A deliberate quantity is never turned into a product.
+ *      barcode happens to be "12". A deliberate quantity is never turned into a product. Since
+ *      SB-RISK-01 option A, "the quantity" means a PENDING value: Enter never commits it
+ *      (`isQuantityPending` below) — only the explicit confirm control does.
  *   2. A digits-only string longer than 4 digits cannot be a quantity (the maximum is 9999), so it
  *      is resolved as a scan: the scanned product is added, or the barcode message is shown.
  *   3. Any other text (an alphanumeric code, digits with spaces) that is EXACTLY a product's
  *      canonical barcode — active or inactive — is resolved as a scan.
  *   4. Everything else goes to the existing quantity parser and its existing refusal.
  * In every scan case the line's quantity is left as it was. What stays ambiguous is rule 1: an
- * UNKNOWN code of 4 digits or fewer typed into a focused quantity box is read as a quantity. That
- * is not hidden; it is why focus leaves the box after Enter (SellScreen), so only a box the
- * operator deliberately clicked into can receive one.
+ * UNKNOWN code of 4 digits or fewer typed into a focused quantity box reads as a quantity — but only
+ * as a PENDING one, shown as unsaved, which changes nothing until the operator confirms it.
  */
 export function quantityEnterAction(
   text: string,
@@ -182,4 +189,64 @@ export function quantityEnterAction(
   if (digitsOnly) return { kind: "scan", outcome };
   if (outcome.kind === "add" || outcome.kind === "inactive") return { kind: "scan", outcome };
   return { kind: "quantity" };
+}
+
+/**
+ * The deliberate keyboard way to open a product card's photo: **Alt+P**, by physical key.
+ *
+ * 🔴 IT USED TO BE A BARE "p", AND A SCAN COULD TRIGGER IT. A card with keyboard focus took "p" as
+ * "preview" before type-to-search could send it to the search field, so a code beginning with p
+ * opened a photo and lost the scan. A scanner never sends Alt; a person can. `code`, not `key`, so
+ * the same physical key works on the Arabic layout (where it types «ح»). The window has no menu bar
+ * (`win.removeMenu()`), so Alt opens nothing else.
+ */
+export function isPhotoPreviewShortcut(e: {
+  readonly code: string;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+}): boolean {
+  return e.altKey && !e.ctrlKey && !e.metaKey && e.code === "KeyP";
+}
+
+/**
+ * True while any modal is open anywhere in the window.
+ *
+ * 🔴 A SCAN MUST NOT CHANGE A CART NOBODY CAN SEE. After a catalog import, the app opens Sell with
+ * its own import-result dialog on top, and Sell's search field had focus underneath it — a scan
+ * there added a product out of sight. Every modal in this renderer is drawn as `.overlay` (19 sites,
+ * measured 2026-11-02, the Customer finder included), and every `aria-modal="true"` dialog sits inside
+ * one; both markers are asked for, so the guard does not hang on a single class name. The main
+ * process's native message boxes are OS-modal — keystrokes never reach the page while one is open.
+ */
+export const MODAL_SELECTOR = '.overlay, [aria-modal="true"]';
+
+export function isModalOpen(doc: { querySelector(selector: string): unknown }): boolean {
+  return doc.querySelector(MODAL_SELECTOR) !== null;
+}
+
+/**
+ * SB-RISK-01, option A (owner decision 2026-11-02): EXPLICIT QUANTITY CONFIRMATION.
+ *
+ * 🔴 TYPED TEXT IN A QUANTITY BOX IS A PROPOSAL, NOT A CART CHANGE. A scanner and a person typing
+ * "1234" are the same keystrokes, so no rule about the text can make the box safe on its own. The
+ * box therefore never changes the cart by itself: what is typed is PENDING (shown as unsaved), the
+ * totals keep the committed quantity, and only the explicit confirm control — a click, a tap, or
+ * Space on it — commits. Enter does not; leaving the editor or Esc discards. The existing parser
+ * and its refusals still decide whether a confirmed value is a valid quantity.
+ */
+export function isQuantityPending(draft: string | undefined, committed: string): boolean {
+  return draft !== undefined && draft !== committed;
+}
+
+/**
+ * True when focus is moving OUT of a line's quantity editor (its box, its confirm and its cancel
+ * control all carry `data-qty-editor` = the product id). Moving between those three keeps the
+ * pending value; anything else — another control, the page, the window losing focus — discards it.
+ */
+export function leavesQuantityEditor(
+  next: { readonly dataset?: { readonly qtyEditor?: string } } | null,
+  productId: string,
+): boolean {
+  return next?.dataset?.qtyEditor !== productId;
 }

@@ -141,7 +141,8 @@ await page.waitForSelector(".products-pane");
 await page.locator("button.product", { hasText: "E2E-002" }).click();
 const qtyBox = page.locator('[data-testid^="qty-"]').first();
 await qtyBox.fill("2.5");
-await qtyBox.press("Enter");
+// SB-RISK-01 option A: a typed quantity is PENDING until ✓ is used — Enter no longer commits it.
+await page.locator('[data-testid="line-qty-confirm"]').click();
 await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("6.25"));
 assert(true, "2.5 kg at 2.50 totals 6.25 — a fraction priced exactly");
 await page.locator('[data-testid="complete-sale"]').click();
@@ -196,7 +197,8 @@ await page.waitForSelector(".products-pane");
 await page.locator("button.product", { hasText: "E2E-001" }).click();
 const wholeBox = page.locator('[data-testid^="qty-"]').first();
 await wholeBox.fill("1.5");
-await wholeBox.press("Enter");
+// SB-RISK-01 option A: a typed quantity is PENDING until ✓ is used — Enter no longer commits it.
+await page.locator('[data-testid="line-qty-confirm"]').click();
 await page.waitForSelector(".cart .error");
 const refusal = (await page.locator(".cart .error").innerText()).trim();
 // 🔴 This is the assertion that caught a real defect: errorText() only unwrapped an ApiError, so a
