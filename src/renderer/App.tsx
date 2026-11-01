@@ -54,6 +54,10 @@ export function App() {
   const [tab, setTab] = useState<Tab>("sell");
   // Bumped after a catalog import so the Sell screen reloads the catalog from the main process.
   const [catalogVersion, setCatalogVersion] = useState(0);
+  // Bumped when Sell's tab is clicked while Sell is already open: that click focuses the tab button
+  // and remounts nothing, so the Sell screen is asked to put focus back in its search field (a scan
+  // typed into a tab button would go nowhere).
+  const [sellFocusRequest, setSellFocusRequest] = useState(0);
   const [importResult, setImportResult] = useState<ImportCatalogResponse | ExportNotice | ErrorNotice | null>(null);
 
   useEffect(() => {
@@ -165,7 +169,10 @@ export function App() {
             <button
               key={name}
               className={tab === name ? "tab active" : "tab"}
-              onClick={() => setTab(name)}
+              onClick={() => {
+                if (name === "sell" && tab === "sell") setSellFocusRequest((n) => n + 1);
+                setTab(name);
+              }}
               data-testid={`tab-${name}`}
             >
               {t(`nav.${name}`)}
@@ -188,7 +195,7 @@ export function App() {
         </button>
       </header>
       <main className="content">
-        {tab === "sell" && <SellScreen key={catalogVersion} />}
+        {tab === "sell" && <SellScreen key={catalogVersion} focusRequest={sellFocusRequest} />}
         {tab === "today" && <TodayScreen />}
         {tab === "history" && <HistoryScreen />}
         {tab === "products" && <ProductsScreen operator={cashier} />}

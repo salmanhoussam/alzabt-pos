@@ -1562,6 +1562,269 @@ log("J — the same table as a cashier: no owner controls, prices and units inta
   log("R3/C — a cashier sees the readable photo, the broken one degrades quietly, and both still sell");
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 9 · SELL-BARCODE — a scanner at the till: exact canonical match, three refusals, no look-alike
+//
+// 🔴 LAST, ON PURPOSE. Every section above counts products, rows and thumbnails exactly; the three
+// products this section adds would change those counts, so they are created only after the last
+// of them. A USB scanner is a keyboard that types its code and presses Enter, so `keyboard.type`
+// into the focused field IS the scanner here — nothing is filled into the input behind its back.
+//
+// The products are made by the owner through the real `createProduct` / `setProductActive`
+// channels (the same IPC the Products screen uses), then a CASHIER scans — the realistic operator,
+// and proof that the inactive codes reach a cashier's catalog without the products themselves.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  await page.locator('[data-testid="logout"]').click();
+  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+  await signIn(page, "Cashier One", "1111");
+  const made = await page.evaluate(async () => {
+    const create = async (nameAr, sku, barcode) => {
+      const r = await window.pos.createProduct({
+        draft: { nameAr, nameEn: null, sku, price: "0.50", baseUnit: "piece", master: { barcode } },
+      });
+      if (!r.ok) throw new Error(`createProduct ${sku}: ${JSON.stringify(r.error)}`);
+      return r.data;
+    };
+    const water = await create("مياه معدنية", "SB-WATER", "123456789012");
+    const small = await create("علبة صغيرة", "SB-EAN8", "96385074");
+    const retired = await create("صنف موقوف", "SB-RETIRED", "4006381333931");
+    const off = await window.pos.setProductActive({ id: retired.id, isActive: false });
+    if (!off.ok) throw new Error(`setProductActive: ${JSON.stringify(off.error)}`);
+    return { water: water.id, waterCode: water.barcode, small: small.id, retired: retired.id };
+  });
+  assert(made.waterCode === "0123456789012", `the UPC-A was stored in its EAN-13 form (${made.waterCode})`);
+
+  await page.locator('[data-testid="logout"]').click();
+  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+  await signIn(page, "Cashier Two", "2222");
+  // 🔴 NO CLICK ON THE SELL TAB: Sell is the screen a sign-in lands on, and it is already mounted.
+  // Clicking its (already active) tab would move focus onto that tab button — the field's
+  // `autoFocus` fires on mount, not on a click — which is exactly what a till does too; `/` (J
+  // below) is the way back. Measured in the first local run of this section.
+  const search = page.locator('[data-testid="product-search"]');
+  await search.waitFor();
+
+  const focusedTestId = () => page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? null);
+  const qtyOf = async (id) => {
+    const box = page.locator(`[data-testid="qty-${id}"]`);
+    return (await box.count()) === 0 ? null : await box.inputValue();
+  };
+  const lines = () => page.locator('[data-testid="cart"] .line').count();
+  const note = async () => {
+    const el = page.locator('[data-testid="scan-note"]');
+    return (await el.count()) === 0 ? null : { kind: await el.getAttribute("data-kind"), text: (await el.innerText()).trim() };
+  };
+  /** One scan: the code typed into whatever has focus, then Enter — exactly what a USB scanner does. */
+  const scan = async (code) => {
+    await page.keyboard.type(code);
+    await page.keyboard.press("Enter");
+  };
+
+  // A · THE FIELD HAS FOCUS THE MOMENT THE TILL OPENS — a scanner needs no click first.
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-testid") === "product-search");
+  assert((await focusedTestId()) === "product-search", "the search field has focus when Sell opens");
+  assert((await lines()) === 0, "the cashier's sale starts empty");
+
+  // B · UPC-A → the product stored as EAN-13; the field clears and keeps focus.
+  await scan("123456789012");
+  await page.waitForFunction((id) => document.querySelector(`[data-testid="qty-${id}"]`) !== null, made.water);
+  assert((await qtyOf(made.water)) === "1", "🔴 scanning the 12-digit UPC-A adds the product stored as 0123456789012");
+  assert((await search.inputValue()) === "", "the field is cleared after a match");
+  assert((await focusedTestId()) === "product-search", "and focus stays in it for the next scan");
+  assert((await note()) === null, "a match shows no refusal");
+
+  // C · THE CANONICAL FORM finds the same product: a second, intentional scan makes quantity 2.
+  await scan("0123456789012");
+  await page.waitForFunction((id) => document.querySelector(`[data-testid="qty-${id}"]`)?.value === "2", made.water);
+  assert((await qtyOf(made.water)) === "2", "🔴 scanning the EAN-13 form adds the SAME product: quantity 2, one line");
+  assert((await lines()) === 1, "still one line");
+
+  // D · UNKNOWN: a valid EAN-13 nothing carries. Nothing added; the text stays, selected.
+  await scan("5901234123457");
+  await page.locator('[data-testid="scan-note"]').waitFor();
+  let n = await note();
+  assert(n.kind === "unknown", `an unknown code says unknown (${JSON.stringify(n)})`);
+  assert(
+    ["لم يتم العثور على منتج بهذا الباركود.", "No product found for this barcode."].includes(n.text),
+    `with the approved wording ("${n.text}")`,
+  );
+  assert((await lines()) === 1 && (await qtyOf(made.water)) === "2", "an unknown code adds nothing");
+  const selected = await search.evaluate((el) => [el.selectionStart, el.selectionEnd, el.value.length]);
+  assert(selected[0] === 0 && selected[1] === selected[2], `the scanned text stays SELECTED, so the next scan replaces it (${selected})`);
+  await page.screenshot({ path: SHOTS + "SB-1-unknown.png" });
+
+  // E · INACTIVE — typed straight over the selected text, as the next scan would be.
+  await scan("4006381333931");
+  await page.waitForFunction(() => document.querySelector('[data-testid="scan-note"]')?.getAttribute("data-kind") === "inactive");
+  n = await note();
+  assert(
+    ["هذا المنتج غير نشط ولا يمكن بيعه.", "This product is inactive and cannot be sold."].includes(n.text),
+    `🔴 an inactive product's code gets its own message ("${n.text}")`,
+  );
+  assert((await search.inputValue()) === "4006381333931", "the next scan replaced the previous text instead of appending to it");
+  assert((await lines()) === 1, "🔴 an inactive product is never added");
+  const inactiveOnScreen = await page.locator(`[data-product="${made.retired}"]`).count();
+  assert(inactiveOnScreen === 0, "and it is not offered on the till at all");
+  await page.screenshot({ path: SHOTS + "SB-2-inactive.png" });
+
+  // F · INVALID: an EAN-13 whose check digit is wrong.
+  await scan("0123456789013");
+  await page.waitForFunction(() => document.querySelector('[data-testid="scan-note"]')?.getAttribute("data-kind") === "invalid");
+  n = await note();
+  assert(
+    ["الباركود غير صالح. تأكد من الرمز وحاول مجدداً.", "Invalid barcode. Check the code and try again."].includes(n.text),
+    `a wrong check digit says invalid ("${n.text}")`,
+  );
+  assert((await lines()) === 1, "an invalid code adds nothing");
+
+  // G · 🔴 NO LOOK-ALIKE: an existing product's SKU + Enter does not add it — but the search still
+  // narrows to it, and choosing the card is how a product is sold by name or SKU.
+  await search.fill("");
+  await page.keyboard.type("SKU-200");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelector('[data-testid="scan-note"]')?.getAttribute("data-kind") === "unknown");
+  assert((await lines()) === 1, "🔴 Enter on a product's exact SKU adds nothing — Enter is the barcode action only");
+  assert((await page.locator("button.product").count()) === 1, "the search still narrows the grid to that product");
+  await page.locator("button.product").first().click();
+  assert((await lines()) === 2, "choosing the card sells it — the manual path is intact");
+  assert((await focusedTestId()) === "product-search", "🔴 after a mouse click on a card, focus is back in the field for the next scan");
+  await page.screenshot({ path: SHOTS + "SB-3-sku-not-sold-by-enter.png" });
+
+  // H · RAPID SCANS, back to back with no pause: each Enter resolves exactly once.
+  await search.fill("");
+  await page.keyboard.type("96385074\n0123456789012\n96385074\n");
+  await page.waitForFunction((id) => document.querySelector(`[data-testid="qty-${id}"]`)?.value === "2", made.small);
+  assert((await qtyOf(made.small)) === "2", "🔴 rapid scans: the EAN-8 product scanned twice is quantity 2");
+  assert((await qtyOf(made.water)) === "3", "and the water scanned once more is quantity 3 — three adds, no more, no less");
+
+  // I · ENTER HELD DOWN: the auto-repeat adds nothing more. ENTER ON AN EMPTY FIELD adds nothing.
+  // 🔴 SAY WHAT THIS PROVES. Playwright delivers the 2nd and 3rd keydown with `repeat: true`
+  // (measured locally: [false, true, true]), so the swallow path runs — but a held Enter is guarded
+  // twice: repeats are swallowed AND the field is already empty after the add. This step proves the
+  // OUTCOME (one add); `tests/renderer/sellScan.test.ts` proves the swallow on its own.
+  await page.keyboard.type("96385074");
+  await page.keyboard.down("Enter");
+  await page.keyboard.down("Enter"); // a second keydown without keyup is a repeat (`repeat: true`)
+  await page.keyboard.down("Enter");
+  await page.keyboard.up("Enter");
+  await page.waitForFunction((id) => document.querySelector(`[data-testid="qty-${id}"]`)?.value === "3", made.small);
+  await page.waitForTimeout(300);
+  assert((await qtyOf(made.small)) === "3", `🔴 a held Enter adds once (quantity ${await qtyOf(made.small)})`);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  assert((await qtyOf(made.small)) === "3" && (await qtyOf(made.water)) === "3", "Enter on the empty field adds nothing");
+
+  // J · "/" brings focus back to the field from anywhere on the page.
+  await page.locator('[data-testid="cart"] h2').click();
+  assert((await focusedTestId()) !== "product-search", "focus has really left the field before / is pressed");
+  await page.keyboard.press("/");
+  assert((await focusedTestId()) === "product-search", "🔴 / focuses the search field");
+  assert((await search.inputValue()) === "", "and the / itself is not typed into it");
+
+  const waitFocusOnSearch = () =>
+    page.waitForFunction(() => document.activeElement?.getAttribute("data-testid") === "product-search");
+  const receiptShown = () => page.locator('[data-testid="new-sale"]').count();
+
+  // K · 🔴 A SCAN NEVER PAYS. The payment pane gives Cash the focus; a scan's Enter used to record a
+  // cash sale without the scanned item. Now: the pane stays open, nothing is recorded, nothing in
+  // the cart moves — and Esc, a click or Space are still the deliberate ways out.
+  const linesBeforePay = await lines();
+  const smallBeforePay = await qtyOf(made.small);
+  await page.locator('[data-testid="complete-sale"]').click();
+  await page.locator('[data-testid="pay-cash"]').waitFor();
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-testid") === "pay-cash");
+  await scan("96385074");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(400);
+  assert((await receiptShown()) === 0, "🔴 a scan while the payment pane is open records NO sale");
+  assert(await page.locator('[data-testid="pay-cash"]').isVisible(), "the payment pane is still open, waiting for a deliberate choice");
+  assert((await lines()) === linesBeforePay && (await qtyOf(made.small)) === smallBeforePay, "and the cart did not change");
+  await page.screenshot({ path: SHOTS + "SB-5-scan-in-payment-pane.png" });
+  await page.keyboard.press("Escape");
+  await page.locator('[data-testid="pay-cash"]').waitFor({ state: "detached" });
+  await waitFocusOnSearch();
+  assert((await focusedTestId()) === "product-search", "leaving the payment pane returns focus to the search field");
+
+  // The deliberate keyboard path still pays: Space on the focused Cash button.
+  await page.locator('[data-testid="complete-sale"]').click();
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-testid") === "pay-cash");
+  await page.keyboard.press("Space");
+  await page.locator('[data-testid="new-sale"]').waitFor();
+  assert((await receiptShown()) === 1, "🔴 Space on the focused Cash button records the sale — the keyboard path is intact");
+
+  // NEW SALE: the next sale opens with the field focused.
+  await page.locator('[data-testid="new-sale"]').click();
+  await search.waitFor();
+  await waitFocusOnSearch();
+  assert((await focusedTestId()) === "product-search", "🔴 New sale returns focus to the search field");
+  assert((await lines()) === 0, "and the new sale is empty");
+  await page.screenshot({ path: SHOTS + "SB-4-new-sale-focus.png" });
+
+  // L · 🔴 THE QUANTITY BOX: a barcode typed into it is the scan it is; a quantity is a quantity.
+  await scan("123456789012");
+  await page.waitForFunction((id) => document.querySelector(`[data-testid="qty-${id}"]`)?.value === "1", made.water);
+  const box = page.locator(`[data-testid="qty-${made.water}"]`);
+  const typeIntoBox = async (text) => {
+    await box.click();
+    await page.keyboard.press("Control+A");
+    await page.keyboard.type(text);
+    await page.keyboard.press("Enter");
+  };
+  await typeIntoBox("96385074");
+  await page.waitForFunction((id) => document.querySelector(`[data-testid="qty-${id}"]`) !== null, made.small);
+  assert((await qtyOf(made.small)) === "1", "🔴 an active product's barcode typed into a quantity box adds THAT product");
+  assert((await qtyOf(made.water)) === "1", "🔴 and the focused line's quantity is unchanged (not 96385074)");
+  await waitFocusOnSearch();
+  assert((await focusedTestId()) === "product-search", "focus leaves the quantity box for the next scan");
+
+  await typeIntoBox("12345");
+  await page.waitForFunction(() => document.querySelector('[data-testid="scan-note"]')?.getAttribute("data-kind") === "unknown");
+  assert((await qtyOf(made.water)) === "1", "🔴 five digits (no quantity has five) are a scan: unknown, quantity unchanged");
+  await waitFocusOnSearch();
+  assert((await search.inputValue()) === "12345", "and the scanned text is shown in the search field with its message");
+
+  await typeIntoBox("3");
+  await page.waitForFunction((id) => document.querySelector(`[data-testid="qty-${id}"]`)?.value === "3", made.water);
+  assert((await qtyOf(made.water)) === "3", "normal quantity editing still works: 3 + Enter sets 3");
+  await waitFocusOnSearch();
+
+  await typeIntoBox("abc");
+  await page.waitForTimeout(300);
+  assert((await qtyOf(made.water)) === "3", "invalid quantity text is refused and the quantity stays 3");
+  assert((await lines()) === 2, "and nothing was added by it");
+
+  // M · 🔴 A FOCUSED CARD DOES NOT CATCH A SCAN. The first character moves focus to the field, so
+  // the Enter lands there — not on the card, which would have sold the card's product.
+  const sku200 = await page.evaluate(async () => {
+    const r = await window.pos.listProducts();
+    return r.data.find((p) => p.sku === "SKU-200").id;
+  });
+  await search.fill("");
+  await page.locator(`.product-cell:has([data-product="${sku200}"]) button.product`).focus();
+  assert((await focusedTestId()) !== "product-search", "a product card really has the focus before the scan");
+  await scan("96385074");
+  await page.waitForFunction((id) => document.querySelector(`[data-testid="qty-${id}"]`)?.value === "2", made.small);
+  assert((await qtyOf(made.small)) === "2", "🔴 a scan with a card focused adds the SCANNED product");
+  assert((await qtyOf(sku200)) === null, "🔴 and not the focused card's product");
+
+  // N · 🔴 THE SELL TAB, CLICKED WHILE SELL IS OPEN, gives the field its focus back.
+  await page.locator('[data-testid="tab-sell"]').click();
+  await waitFocusOnSearch();
+  assert((await focusedTestId()) === "product-search", "🔴 clicking the active Sell tab returns focus to the search field");
+  await scan("96385074");
+  await page.waitForFunction((id) => document.querySelector(`[data-testid="qty-${id}"]`)?.value === "3", made.small);
+  assert((await qtyOf(made.small)) === "3", "and the next scan is resolved there");
+
+  // O · Returning from another screen opens Sell with the field focused.
+  await page.locator('[data-testid="tab-today"]').click();
+  await page.locator('[data-testid="tab-sell"]').click();
+  await search.waitFor();
+  await waitFocusOnSearch();
+  assert((await focusedTestId()) === "product-search", "returning to Sell from another screen focuses the search field");
+  log("SB — scanner: UPC-A/EAN-13/EAN-8 exact, unknown/inactive/invalid refused, no look-alike, focus kept, never pays");
+}
+
 await app.close();
 log("screenshots in", SHOTS);
 console.log("\nPRODUCT MASTER E2E PASSED");

@@ -59,11 +59,12 @@ export function toProductDto(p: Product): ProductDto {
     price: toMoneyDto(p.price),
     baseUnit: p.baseUnit,
     priceNeedsReview: p.priceNeedsReview,
+    barcode: p.barcode,
   };
 }
 
 export function toCatalogDto(c: Catalog): CatalogDto {
-  return { currency: c.currency, products: c.products.map(toProductDto) };
+  return { currency: c.currency, products: c.products.map(toProductDto), inactiveBarcodes: [...c.inactiveBarcodes] };
 }
 
 /** Rebuilds a usable Catalog in the renderer (for display totals only — main always reprices). */
@@ -75,8 +76,14 @@ export function fromCatalogDto(dto: CatalogDto): Catalog {
     price: fromMoneyDto(p.price),
     baseUnit: p.baseUnit,
     priceNeedsReview: p.priceNeedsReview,
+    barcode: p.barcode,
   }));
-  return { currency: dto.currency, products, byId: new Map(products.map((p) => [p.id, p])) };
+  return {
+    currency: dto.currency,
+    products,
+    byId: new Map(products.map((p) => [p.id, p])),
+    inactiveBarcodes: new Set(dto.inactiveBarcodes),
+  };
 }
 
 /**

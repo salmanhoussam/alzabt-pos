@@ -207,11 +207,15 @@ export interface ProductDto {
   readonly price: MoneyDto;
   readonly baseUnit: string;
   readonly priceNeedsReview: boolean;
+  /** Canonical form, or null. Matched exactly by a scan at Sell. */
+  readonly barcode: string | null;
 }
 
 export interface CatalogDto {
   readonly currency: string;
   readonly products: ReadonlyArray<ProductDto>;
+  /** Canonical barcodes of inactive products — the strings only, never the products. */
+  readonly inactiveBarcodes: ReadonlyArray<string>;
 }
 
 export interface SaleLineDto {

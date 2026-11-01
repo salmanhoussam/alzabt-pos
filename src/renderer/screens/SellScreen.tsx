@@ -13,6 +13,16 @@ import { useThumbnails } from "../useThumbnails";
 import { LineMath } from "../components/LineMath";
 import { Receipt } from "./Receipt";
 import { useT } from "../i18n";
+import {
+  SCAN_MESSAGE_KEY,
+  type ScanOutcome,
+  enterAction,
+  isSearchShortcut,
+  isTypeToSearch,
+  quantityEnterAction,
+  refuseEnterActivation,
+  resolveScan,
+} from "../sellScan";
 
 /** The four real methods, in the order the till uses them. Cash first: it is most of the volume. */
 const METHOD_KEY: Record<PaymentMethod, string> = {
@@ -22,7 +32,11 @@ const METHOD_KEY: Record<PaymentMethod, string> = {
   other: "pay.other",
 };
 
-export function SellScreen() {
+/**
+ * `focusRequest` is bumped by the tab bar when the operator clicks Sell while Sell is already open:
+ * that click focuses the tab button and does not remount this screen, so `autoFocus` cannot help.
+ */
+export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: number } = {}) {
   const { t, unit } = useT();
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [clearing, setClearing] = useState(false);
@@ -36,6 +50,8 @@ export function SellScreen() {
   const [error, setError] = useState<string | null>(null);
   const [completed, setCompleted] = useState<SaleDto | null>(null);
   const [query, setQuery] = useState("");
+  /** The refusal of the last scan (unknown / inactive / invalid code), until the field changes. */
+  const [scanNote, setScanNote] = useState<keyof typeof SCAN_MESSAGE_KEY | null>(null);
   /**
    * What the operator is typing into a line's quantity box, per product. Held as TEXT until it is
    * committed, so a half-typed "2." is never a quantity; parseQuantity decides at that one moment.
@@ -170,10 +186,89 @@ export function SellScreen() {
     return () => window.removeEventListener("keydown", onKey);
   }, [paying]);
 
+  /**
+   * 🔴 FOCUS COMES BACK TO THE SEARCH FIELD, BECAUSE A SCAN GOES WHEREVER FOCUS IS. A scanner types
+   * its code and presses Enter into the focused element: left on a product card or a "+" button,
+   * that Enter clicks it and sells the wrong thing. So the field takes focus when the screen opens
+   * (`autoFocus`, which also covers "New sale" after a receipt), when the payment pane closes, after
+   * a mouse click that changed the cart, and on `/`.
+   */
+  useEffect(() => {
+    if (!paying) return;
+    return () => searchRef.current?.focus();
+  }, [paying]);
+
+  /**
+   * `/` focuses the field; any other printable key typed on something that is not a text field
+   * (a card, a cart button, a tab) moves focus to the field FIRST, so it — and the rest of a scan,
+   * Enter included — lands there (`isTypeToSearch`). Off while a dialog or the payment pane is open.
+   */
+  useEffect(() => {
+    if (paying || preview !== null || findingCustomer || clearing) return;
+    const onKey = (e: KeyboardEvent) => {
+      const field = searchRef.current;
+      if (!field) return;
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      if (isSearchShortcut(e, target)) {
+        e.preventDefault();
+        field.focus();
+        return;
+      }
+      if (target !== field && isTypeToSearch(e, target)) field.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paying, preview, findingCustomer, clearing]);
+
+  /** The tab bar's request: the Sell tab was clicked while Sell was already open. */
+  useEffect(() => {
+    if (focusRequest === 0) return;
+    if (paying || preview !== null || findingCustomer || clearing) return;
+    searchRef.current?.focus();
+    // Only a NEW request may move focus; the dialog flags are read as they are at that moment.
+  }, [focusRequest]);
+
+  /** Focus (and optionally select) the field after React has rendered what the handler set. */
+  const focusSearchAfterRender = (select: boolean) => {
+    requestAnimationFrame(() => {
+      const field = searchRef.current;
+      if (!field) return;
+      field.focus();
+      if (select) field.select();
+    });
+  };
+
+  /** A mouse click (detail > 0) returns focus to the field; a keyboard press keeps the operator where they are. */
+  const refocusAfterClick = (e: { readonly detail: number }) => {
+    if (e.detail > 0) searchRef.current?.focus();
+  };
+
   const edit = (next: CartLine[]) => {
     setCart(next);
     setAttemptKey(newIdempotencyKey());
     setError(null);
+  };
+
+  /**
+   * Applies one resolved scan — from the search field, or from a quantity box that was handed a
+   * barcode. Adds the product, or puts the scanned text in the search field with its message, so
+   * a refused scan is never silent and the next scan replaces it.
+   */
+  const applyScan = (text: string, outcome: Exclude<ScanOutcome, { kind: "none" }>): boolean => {
+    if (outcome.kind === "add") {
+      try {
+        edit(addProduct(cart, outcome.productId));
+      } catch (err) {
+        setError(errorText(err));
+        return false;
+      }
+      setQuery("");
+      setScanNote(null);
+      return true;
+    }
+    setQuery(text);
+    setScanNote(outcome.kind);
+    return false;
   };
 
   const pay = async (method: PaymentMethod) => {
@@ -215,30 +310,36 @@ export function SellScreen() {
             placeholder={t("sell.search")}
             value={query}
             data-testid="product-search"
-            onChange={(e) => setQuery(e.target.value)}
+            autoFocus
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setScanNote(null);
+            }}
             onKeyDown={(e) => {
-              if (e.key !== "Enter") return;
+              const action = enterAction({ key: e.key, repeat: e.repeat, isComposing: e.nativeEvent.isComposing });
+              if (action === "ignore") return;
               e.preventDefault();
-              /* 🔴 ENTER NEVER GUESSES. It adds a product only when the search leaves exactly ONE
-                 candidate, or when the typed text IS a product's SKU or full name. With several
-                 matches the operator must choose — a till that silently rings up "the first fuzzy
-                 result" sells the wrong thing and nobody notices until the count is short. */
-              const q = query.trim().toLowerCase();
-              if (!q) return;
-              const exact = visible.find(
-                (p) => (p.sku ?? "").toLowerCase() === q || p.name.toLowerCase() === q,
-              );
-              const unique = visible.length === 1 ? visible[0] : undefined;
-              const chosen = exact ?? unique;
-              if (chosen) {
-                edit(addProduct(cart, chosen.id));
-                setQuery("");
-              }
+              if (action === "swallow") return;
+              /* 🔴 ENTER IS THE SCANNER'S KEY: IT ADDS ONLY AN EXACT BARCODE MATCH. A scanner and a
+                 person typing are indistinguishable here, so Enter no longer adds the single visible
+                 result or a product whose SKU or name equals the text — a scan that misses must say
+                 so, never sell a look-alike. Searching by name or SKU still narrows the grid, and the
+                 operator chooses the card. (src/renderer/sellScan.ts holds the whole decision.) */
+              const outcome = resolveScan(query, catalog);
+              if (outcome.kind === "none") return;
+              // A refused scan's text stays, SELECTED: the operator can read what was scanned, and
+              // the next scan replaces it instead of being appended to it.
+              if (!applyScan(query, outcome)) e.currentTarget.select();
             }}
           />
           {/* A shortcut is a key, not placeholder prose. */}
           <kbd className="search-kbd" aria-hidden="true">/</kbd>
         </div>
+        {scanNote !== null && (
+          <p className="error" role="status" data-testid="scan-note" data-kind={scanNote}>
+            {t(SCAN_MESSAGE_KEY[scanNote])}
+          </p>
+        )}
         <div className="products">
           {visible.map((p, i) => {
             const thumb = thumbs.get(p.id);
@@ -279,7 +380,10 @@ export function SellScreen() {
                 const next = cards[Math.min(cards.length - 1, Math.max(0, here + delta))];
                 next?.focus();
               }}
-              onClick={() => edit(addProduct(cart, p.id))}
+              onClick={(e) => {
+                edit(addProduct(cart, p.id));
+                refocusAfterClick(e);
+              }}
             >
               <span className="product-name" dir="auto">
                 {p.name}
@@ -430,7 +534,10 @@ export function SellScreen() {
                     className="btn key"
                     aria-label={t("sell.decrease")}
                     data-testid="line-dec"
-                    onClick={() => edit(decrement(cart, l.productId))}
+                    onClick={(e) => {
+                      edit(decrement(cart, l.productId));
+                      refocusAfterClick(e);
+                    }}
                   >
                     −
                   </button>
@@ -443,7 +550,29 @@ export function SellScreen() {
                     value={qtyDraft[l.productId] ?? formatQuantity(l.quantityMilli)}
                     onChange={(e) => setQtyDraft((d) => ({ ...d, [l.productId]: e.target.value }))}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") commitQuantity(l.productId, l.saleUnit);
+                      const action = enterAction({ key: e.key, repeat: e.repeat, isComposing: e.nativeEvent.isComposing });
+                      if (action === "ignore") return;
+                      e.preventDefault();
+                      if (action === "swallow") return;
+                      /* 🔴 A QUANTITY BOX ASKS WHAT ITS TEXT IS (sellScan.ts, quantityEnterAction). A
+                         barcode — a product's own code, or more digits than any quantity has —
+                         is resolved as the scan it is and the line keeps its quantity; anything
+                         shaped like a quantity is the quantity, exactly as before. Either way focus
+                         then returns to the search field, AFTER this render, so the blur that
+                         follows reads the cleared draft and commits nothing a second time. */
+                      const text = qtyDraft[l.productId];
+                      const decision = text === undefined ? null : quantityEnterAction(text, catalog);
+                      if (decision !== null && decision.kind === "scan") {
+                        setQtyDraft((d) => {
+                          const { [l.productId]: _dropped, ...rest } = d;
+                          return rest;
+                        });
+                        const added = applyScan(text!, decision.outcome);
+                        focusSearchAfterRender(!added);
+                        return;
+                      }
+                      commitQuantity(l.productId, l.saleUnit);
+                      focusSearchAfterRender(false);
                     }}
                     onBlur={() => commitQuantity(l.productId, l.saleUnit)}
                   />
@@ -451,7 +580,10 @@ export function SellScreen() {
                     className="btn key"
                     aria-label={t("sell.increase")}
                     data-testid="line-inc"
-                    onClick={() => edit(addProduct(cart, l.productId))}
+                    onClick={(e) => {
+                      edit(addProduct(cart, l.productId));
+                      refocusAfterClick(e);
+                    }}
                   >
                     +
                   </button>
@@ -461,7 +593,10 @@ export function SellScreen() {
                     aria-label={t("sell.remove")}
                     data-testid="line-remove-btn"
                     title={t("sell.remove")}
-                    onClick={() => edit(removeProduct(cart, l.productId))}
+                    onClick={(e) => {
+                      edit(removeProduct(cart, l.productId));
+                      refocusAfterClick(e);
+                    }}
                   >
                     ✕
                   </button>
@@ -519,6 +654,7 @@ export function SellScreen() {
               <button
                 className="btn danger"
                 data-testid="clear-confirm"
+                onKeyDown={refuseEnterActivation}
                 onClick={() => {
                   edit([]);
                   setClearing(false);
@@ -540,16 +676,18 @@ export function SellScreen() {
             <p className="muted small">{t("pay.note")}</p>
             <div className="methods">
               {PAYMENT_METHODS.map((m) => (
-                /* 🔴 CASH IS THE INITIAL FOCUS, NOT A FORCED CHOICE. Enter activates whatever the
-                   operator has focused; moving to Card and pressing Enter records a card sale.
-                   Cash leads because it is most of a shop's volume — a prototype to confirm in the
-                   field test, not a decided default. */
+                /* 🔴 CASH IS THE INITIAL FOCUS, NOT A FORCED CHOICE — AND ENTER DOES NOT PAY. A
+                   click, a tap, or Space on the focused method records the sale; Enter is refused
+                   (`refuseEnterActivation`), because a barcode scan ends in Enter and used to
+                   record a cash sale here without the scanned item. Cash leads because it is most
+                   of a shop's volume — a prototype to confirm in the field test. */
                 <button
                   key={m}
                   ref={m === "cash" ? cashRef : undefined}
                   className={m === "cash" ? "btn primary big" : "btn big"}
                   disabled={busy}
                   data-testid={`pay-${m}`}
+                  onKeyDown={refuseEnterActivation}
                   onClick={() => pay(m)}
                 >
                   {t(METHOD_KEY[m])}
