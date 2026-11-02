@@ -559,8 +559,15 @@ const AR: Dict = {
   "collect.invalidAmount": "أدخل مبلغاً أكبر من صفر.",
   "collect.tooMuch": "المبلغ أكبر من المتبقّي على هذا الدين.",
 
-  // 🔴 THE SENTENCE THAT KEEPS S1B HONEST. Selecting a customer at the till records nothing yet.
-  "customers.notOnSaleYet": "اختيار الزبون للتذكير فقط — لا يُسجّل ديناً ولا يُربط بالفاتورة بعد.",
+  // 🔴 ACC-2 (owner wording, 2026-11-02). Replaces `customers.notOnSaleYet` ("not linked to the sale
+  // yet"), which became false when the paid sale started carrying the customer: NEW KEY, new moment.
+  "sell.customerPaidLink": "المبيعات المدفوعة المرتبطة بهذا العميل تظهر في سجل حركاته، ولا تزيد الرصيد المستحق.",
+  "pay.forCustomer": "العميل:",
+  "statement.paidSales": "مبيعات مدفوعة مرتبطة بالعميل",
+  "statement.paidSalesNote": "مدفوعة بالكامل عند البيع — ليست ديناً ولا تدخل في المتبقّي.",
+  "statement.paidSalesNone": "لا مبيعات مدفوعة مرتبطة.",
+  "statement.receiptNo": "إيصال رقم",
+  "statement.voided": "ملغاة",
   "sell.customer": "الزبون",
   "sell.chooseCustomer": "اختر زبوناً",
   // 🔴 ITS OWN KEY, NOT `customers.edit`. This button reopens the PICKER; it edits no record, and
@@ -1252,7 +1259,13 @@ const EN: Dict = {
   "collect.invalidAmount": "Enter an amount greater than zero.",
   "collect.tooMuch": "That is more than is outstanding on this debt.",
 
-  "customers.notOnSaleYet": "Choosing a customer is a reminder only \u2014 it records no debt and is not linked to the sale yet.",
+  "sell.customerPaidLink": "Paid sales linked to this customer appear in the activity history without increasing the outstanding balance.",
+  "pay.forCustomer": "Customer:",
+  "statement.paidSales": "Paid sales linked to the customer",
+  "statement.paidSalesNote": "Paid in full at the till — not a debt and not part of the outstanding amount.",
+  "statement.paidSalesNone": "No linked paid sales.",
+  "statement.receiptNo": "Receipt no.",
+  "statement.voided": "Voided",
   "sell.customer": "Customer",
   "sell.chooseCustomer": "Choose a customer",
   "sell.changeCustomer": "Change customer",

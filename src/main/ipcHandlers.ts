@@ -17,7 +17,7 @@ import { MAX_PRODUCT_ID_LENGTH } from "../domain/catalog";
 import { DomainError } from "../domain/errors";
 import type { OnlineCatalogSnapshot } from "../application/posService";
 import { MAX_QUANTITY_MILLI } from "../domain/quantity";
-import { assertPaymentMethod } from "../domain/sale";
+import { type PaymentMethod, assertPaymentMethod } from "../domain/sale";
 import { formatDecimal, money } from "../domain/money";
 import { channelStorage, isCollectionChannel } from "../domain/ledger";
 import type { SaleRecord } from "../domain/sale";
@@ -797,7 +797,9 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       return toCatalogDto(service.getCatalog());
     }),
     createSale: wrap("createSale", (p) => {
-      const o = exactObject(p, ["idempotencyKey", "lines", "paymentMethod", "expectedTotalMinor"]);
+      // ACC-2: `customerId` is the ONE optional key — an account id, never a name or a snapshot. Every
+      // other unexpected key is still refused, so the renderer cannot choose a customer's name.
+      const o = objectWithOptional(p, ["idempotencyKey", "lines", "paymentMethod", "expectedTotalMinor"], ["customerId"]);
       if (!Array.isArray(o.lines) || o.lines.length === 0 || o.lines.length > 200) invalid("'lines' must be a non-empty array");
       const lines = o.lines.map((raw) => {
         const l = exactObject(raw, ["productId", "quantityMilli"]);
@@ -822,6 +824,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         lines,
         paymentMethod: o.paymentMethod,
         expectedTotalMinor: parseMinor(o.expectedTotalMinor),
+        ...("customerId" in o ? { customerId: str(o.customerId, "customerId", 100) } : {}),
       });
       if (!result.duplicate) {
         try {
@@ -1668,6 +1671,17 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     const shares = ledger().receiptsOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)));
     return {
       customer: toCustomerDto(customer),
+      // ACC-2: built HERE, so every channel that returns a statement (read, and the refreshed one
+      // after a payment) carries the same paid-sale history. Owner-only, like the statement.
+      paidSales: service.customerPaidSales(customer.id).map(({ sale, voided }) => ({
+        saleId: sale.id,
+        receiptNumber: sale.receiptNumber,
+        total: { minor: sale.total.minor.toString(), currency: sale.total.currency },
+        // A paid POS sale always carries its real method (migration 14's CHECK); never fabricated.
+        paymentMethod: sale.paymentMethod as PaymentMethod,
+        completedAt: sale.completedAt,
+        voided,
+      })),
       obligations: s.obligations.map((row) => ({
         id: row.obligation.id,
         amount: { minor: row.obligation.amountMinor.toString(), currency: row.obligation.currency },

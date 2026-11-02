@@ -291,6 +291,15 @@ export interface CreateSaleRequest {
   readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
   readonly paymentMethod: PaymentMethod;
   readonly expectedTotalMinor: string;
+  /**
+   * SELL-CUSTOMER-LINK (ACC-2). The exact customer ACCOUNT this PAID sale is for, by id — never a
+   * name. Absent means an ordinary sale, recorded exactly as before. Present, main checks it is an
+   * active customer inside the sale transaction and stores it with a name snapshot taken there.
+   *
+   * 🔴 IT CREATES NO DEBT. The sale is still paid in full by `paymentMethod`; no obligation is posted.
+   * The renderer cannot send the snapshot: main reads the name from the account itself.
+   */
+  readonly customerId?: string;
 }
 
 export interface CreateSaleResponse {
@@ -788,10 +797,29 @@ export interface CustomerStatementDto {
   readonly customer: CustomerDto;
   readonly obligations: readonly StatementObligationDto[];
   readonly balances: readonly MoneyDto[];
+  /**
+   * SELL-CUSTOMER-LINK (ACC-2). PAID till sales linked to this customer — activity, NOT debt.
+   *
+   * 🔴 NEVER PART OF `balances` OR `obligations`. A paid sale owes nothing, so it is listed apart and
+   * no total anywhere adds it. Credit (unpaid) sales are NOT here: they already appear once, as the
+   * obligation they posted. Invoice-origin sales carry no customer id (M14) and are not here either.
+   */
+  readonly paidSales: readonly StatementPaidSaleDto[];
   /** Collections started and not yet closed, each with the ledger's answer. Usually empty. */
   readonly pendingCollections: readonly PendingCollectionDto[];
   /** Migration 18. Receipts started and not yet closed, each with the ledger's answer. Usually empty. */
   readonly pendingReceipts: readonly PendingReceiptDto[];
+}
+
+/** One paid till sale linked to the customer (ACC-2). Read-only history; no amount here is owed. */
+export interface StatementPaidSaleDto {
+  readonly saleId: string;
+  readonly receiptNumber: number;
+  readonly total: MoneyDto;
+  readonly paymentMethod: PaymentMethod;
+  readonly completedAt: string;
+  /** A voided sale stays in the history, marked; it was never a debt either way. */
+  readonly voided: boolean;
 }
 
 /**

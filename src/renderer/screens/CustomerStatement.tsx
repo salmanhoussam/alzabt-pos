@@ -40,6 +40,7 @@
  */
 import { useEffect, useState } from "react";
 import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../api";
+import type { PaymentMethod } from "../../domain/sale";
 import { parseDecimal } from "../../domain/money";
 import { useT } from "../i18n";
 import { AllocatedReceiptForm } from "./AllocatedReceiptForm";
@@ -67,6 +68,14 @@ import type {
 const UNSAFE_TO_RETRY: ReadonlySet<string> = new Set(["PAYMENT_RECORDED", "PAYMENT_STATUS_UNKNOWN"]);
 
 const COLLECTION_METHODS: ReadonlyArray<CollectionMethodDto> = ["cash", "card", "whish", "bank_transfer", "other"];
+
+/** How a linked PAID sale was paid at the till — the Sell screen's own method labels (ACC-2). */
+const METHOD_LABEL: Record<PaymentMethod, string> = {
+  cash: "pay.cash",
+  card: "pay.card",
+  external: "pay.external",
+  other: "pay.other",
+};
 
 interface Props {
   readonly customerId: string;
@@ -697,6 +706,46 @@ export function CustomerStatement({ customerId }: Props) {
           </ul>
         </>
       )}
+
+      {/* 🔴 ACC-2 · PAID SALES ARE ACTIVITY, NOT DEBT. A separate list, after the debts and outside
+          their totals: nothing here is added to «المتبقّي», and a credit sale is never repeated
+          here (it already appears once, as its obligation). Amounts are printed as main sent them. */}
+      <section className="statement-paid-sales" data-testid="statement-paid-sales">
+        <h3>{t("statement.paidSales")}</h3>
+        <p className="muted small" data-testid="statement-paid-sales-note">
+          {t("statement.paidSalesNote")}
+        </p>
+        {statement.paidSales.length === 0 ? (
+          <p className="muted small" data-testid="statement-paid-sales-none">
+            {t("statement.paidSalesNone")}
+          </p>
+        ) : (
+          <ul className="statement-paid-sale-list">
+            {statement.paidSales.map((ps) => (
+              <li key={ps.saleId} data-testid="statement-paid-sale" data-sale={ps.saleId} data-voided={ps.voided ? "1" : "0"}>
+                <span className="muted small">
+                  {t("statement.receiptNo")} <bdi dir="ltr">{ps.receiptNumber}</bdi>
+                </span>{" "}
+                <bdi dir="ltr" data-testid="statement-paid-sale-total">
+                  {fmt(ps.total)}
+                </bdi>{" "}
+                <span className="muted small">{t(METHOD_LABEL[ps.paymentMethod])}</span>{" "}
+                <span className="muted small">
+                  <bdi dir="ltr">{ps.completedAt.slice(0, 10)}</bdi>
+                </span>
+                {ps.voided && (
+                  <>
+                    {" "}
+                    <span className="badge" data-testid="statement-paid-sale-voided">
+                      {t("statement.voided")}
+                    </span>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </section>
   );
 }

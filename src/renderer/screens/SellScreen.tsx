@@ -103,12 +103,13 @@ export function SellScreen() {
   /** The product whose photo is open full size. Viewing only — it touches no cart and no data. */
   const [preview, setPreview] = useState<{ readonly name: string; readonly url: string } | null>(null);
   /**
-   * The customer the operator picked, for their own reference.
+   * The customer the operator picked for THIS sale (SELL-CUSTOMER-LINK, ACC-2).
    *
-   * 🔴 IT IS NOT ATTACHED TO THE SALE, AND THE SCREEN SAYS SO. `CreateSaleRequest` carries no
-   * customer id — the sales contract has no such field until the credit/receivable slice lands — so
-   * pretending otherwise here would be the one thing worse than not having the feature: a cashier
-   * believing a debt was recorded when nothing was. It is a label beside the cart and nothing else.
+   * 🔴 SENT BY ID WITH THE PAID SALE, AND IT IS STILL NOT A DEBT. `createSale` carries `customerId`;
+   * main re-checks it is an active customer inside the sale transaction and records the sale as
+   * paid, with no obligation. The note under the chip says exactly that. Changing or clearing the
+   * customer replaces the checkout key, like a cart edit, so a retry can never land on the previous
+   * customer; a completed sale clears it, so the next sale never inherits it.
    */
   const [customer, setCustomer] = useState<CustomerDto | null>(null);
   const [findingCustomer, setFindingCustomer] = useState(false);
@@ -187,10 +188,12 @@ export function SellScreen() {
           lines: cart.map((l) => ({ productId: l.productId, quantityMilli: l.quantityMilli })),
           paymentMethod: method,
           expectedTotalMinor: priced.total.minor.toString(),
+          ...(customer === null ? {} : { customerId: customer.id }),
         }),
       );
       setCompleted(result.sale);
       setCart([]);
+      setCustomer(null);
       setPaying(false);
       setAttemptKey(newIdempotencyKey());
     } catch (e) {
@@ -342,6 +345,7 @@ export function SellScreen() {
           onClose={() => setFindingCustomer(false)}
           onPick={(c) => {
             setCustomer(c);
+            setAttemptKey(newIdempotencyKey());
             setFindingCustomer(false);
           }}
         />
@@ -378,11 +382,10 @@ export function SellScreen() {
           )}
         </div>
 
-        {/* ── The customer, for reference only ──────────────────────────────────────────────────
-            🔴 THE SENTENCE UNDER IT IS LOAD-BEARING. Nothing here records a debt or links the
-            customer to the sale, and a cashier who assumed otherwise would stop chasing a real
-            receivable. The note says so in the shop's own language every time a customer is
-            chosen — not once in a tooltip. */}
+        {/* ── The customer of this PAID sale (ACC-2) ────────────────────────────────────────────
+            🔴 THE SENTENCE UNDER IT IS LOAD-BEARING. The sale is linked to the customer and shows in
+            their activity, but it records NO debt and adds nothing to what they owe — a cashier must
+            never read a linked sale as a receivable. Said every time a customer is chosen. */}
         <div className="cart-customer">
           <button
             className="btn ghost small"
@@ -396,11 +399,18 @@ export function SellScreen() {
               <span className="customer-chip" data-testid="sell-customer" data-customer={customer.id}>
                 <bdi>{customer.displayName}</bdi>
               </span>
-              <button className="btn ghost small" onClick={() => setCustomer(null)} data-testid="sell-clear-customer">
+              <button
+                className="btn ghost small"
+                onClick={() => {
+                  setCustomer(null);
+                  setAttemptKey(newIdempotencyKey());
+                }}
+                data-testid="sell-clear-customer"
+              >
                 {t("sell.clearCustomer")}
               </button>
-              <p className="muted small" data-testid="sell-customer-not-attached">
-                {t("customers.notOnSaleYet")}
+              <p className="muted small" data-testid="sell-customer-paid-link">
+                {t("sell.customerPaidLink")}
               </p>
             </>
           )}
@@ -538,6 +548,12 @@ export function SellScreen() {
               {t("pay.title")} — <bdi dir="ltr">{`${formatDecimal(priced.total)} ${priced.currency}`}</bdi>
             </h2>
             <p className="muted small">{t("pay.note")}</p>
+            {customer !== null && (
+              /* Visible BEFORE the method is chosen: whose sale this is, and that it is paid now. */
+              <p className="small" data-testid="pay-customer" data-customer={customer.id}>
+                {t("pay.forCustomer")} <bdi>{customer.displayName}</bdi>
+              </p>
+            )}
             <div className="methods">
               {PAYMENT_METHODS.map((m) => (
                 /* 🔴 CASH IS THE INITIAL FOCUS, NOT A FORCED CHOICE. Enter activates whatever the

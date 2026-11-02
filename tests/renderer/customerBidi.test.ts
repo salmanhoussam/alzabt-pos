@@ -96,9 +96,10 @@ describe("3 · the cart is untouched by choosing a customer", () => {
   });
 
   it("🔴 and the honest sentence is still rendered every time", () => {
-    expect(SELL).toContain('t("customers.notOnSaleYet")');
-    expect(translate("ar", "customers.notOnSaleYet")).toContain("لا يُسجّل ديناً");
-    expect(translate("en", "customers.notOnSaleYet")).toContain("records no debt");
+    // Was `customers.notOnSaleYet` ("records no debt … not linked yet") until ACC-2 linked paid sales.
+    expect(SELL).toContain('t("sell.customerPaidLink")');
+    expect(translate("ar", "sell.customerPaidLink")).toContain("لا تزيد الرصيد المستحق");
+    expect(translate("en", "sell.customerPaidLink")).toContain("without increasing the outstanding balance");
   });
 });
 

@@ -245,6 +245,11 @@ export interface CreateSaleInput {
   readonly paymentMethod: PaymentMethod;
   /** The total the cashier saw, in minor units. A mismatch means the screen was stale: refuse. */
   readonly expectedTotalMinor: bigint;
+  /**
+   * SELL-CUSTOMER-LINK (ACC-2): the customer account this PAID sale is for, or absent. Never a debt.
+   * Checked active inside the sale transaction; the name snapshot is read from the account there.
+   */
+  readonly customerId?: string | null;
 }
 
 export interface CreateSaleResult {
@@ -2077,7 +2082,14 @@ export class PosService {
     if (typeof input.idempotencyKey !== "string" || !/^[A-Za-z0-9-]{8,100}$/.test(input.idempotencyKey)) {
       throw new DomainError("INVALID_INPUT", "A valid idempotency key is required");
     }
+    const customerId = input.customerId ?? null;
+    if (customerId !== null && (typeof customerId !== "string" || customerId.length === 0 || customerId.length > 100)) {
+      throw new DomainError("INVALID_INPUT", "A customer account must be given by its id");
+    }
 
+    // 🔴 THE CUSTOMER-FREE FINGERPRINT IS BYTE-IDENTICAL TO BEFORE ACC-2. `customerId` is appended only
+    // when a customer is linked, so an existing key replays exactly as it always did, and the same
+    // key reused for another customer (or for none) is a different request: IDEMPOTENCY_CONFLICT.
     const fingerprint = createHash("sha256")
       .update(
         JSON.stringify({
@@ -2087,6 +2099,7 @@ export class PosService {
           // and 2 kg vs 2.001 kg cannot hash the same.
           lines: input.lines.map((l) => [l.productId, l.quantityMilli]),
           expectedTotalMinor: input.expectedTotalMinor.toString(),
+          ...(customerId === null ? {} : { customerId }),
         }),
       )
       .digest("hex");
@@ -2111,48 +2124,89 @@ export class PosService {
     const instant = this.now();
     const timestamp = instant.toISOString();
     const saleId = this.newId();
-    this.repository.commitSale(
-      {
-        id: saleId,
-        idempotencyKey: input.idempotencyKey,
-        requestFingerprint: fingerprint,
-        // A till checkout, stated rather than defaulted (migration 7). A POS sale is settled in
-        // full at completion by one real method — unchanged behaviour, now written down.
-        sourceType: "pos",
-        invoiceId: null,
-        customerId: null,
-        customerNameSnapshot: null,
-        cashierId: cashier.id,
-        cashierName: cashier.name,
-        currency: priced.currency,
-        subtotalMinor: priced.subtotal.minor,
-        taxMinor: 0n,
-        totalMinor: priced.total.minor,
-        paidMinor: priced.total.minor,
-        balanceDueMinor: 0n,
-        paymentStatus: "paid",
-        paymentMethod: input.paymentMethod,
-        businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
-        completedAt: timestamp,
-        createdAt: timestamp,
-      },
-      priced.lines.map((l) => ({
-        id: this.newId(),
-        lineNo: l.lineNo,
-        invoiceLineId: null,
-        productId: l.productId,
-        sku: l.sku,
-        productName: l.productName,
-        saleUnit: l.saleUnit,
-        unitLabel: null,
-        quantityMilli: l.quantityMilli,
-        unitPriceMinor: l.unitPrice.minor,
-        lineTotalMinor: l.lineTotal.minor,
-      })),
-    );
+    const header: NewSaleHeader = {
+      id: saleId,
+      idempotencyKey: input.idempotencyKey,
+      requestFingerprint: fingerprint,
+      // A till checkout, stated rather than defaulted (migration 7). A POS sale is settled in
+      // full at completion by one real method — unchanged behaviour, now written down.
+      sourceType: "pos",
+      invoiceId: null,
+      customerId: null,
+      customerNameSnapshot: null,
+      cashierId: cashier.id,
+      cashierName: cashier.name,
+      currency: priced.currency,
+      subtotalMinor: priced.subtotal.minor,
+      taxMinor: 0n,
+      totalMinor: priced.total.minor,
+      paidMinor: priced.total.minor,
+      balanceDueMinor: 0n,
+      paymentStatus: "paid",
+      paymentMethod: input.paymentMethod,
+      businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
+      completedAt: timestamp,
+      createdAt: timestamp,
+    };
+    const lines: NewSaleLine[] = priced.lines.map((l) => ({
+      id: this.newId(),
+      lineNo: l.lineNo,
+      invoiceLineId: null,
+      productId: l.productId,
+      sku: l.sku,
+      productName: l.productName,
+      saleUnit: l.saleUnit,
+      unitLabel: null,
+      quantityMilli: l.quantityMilli,
+      unitPriceMinor: l.unitPrice.minor,
+      lineTotalMinor: l.lineTotal.minor,
+    }));
+
+    if (customerId === null) {
+      this.repository.commitSale(header, lines);
+    } else {
+      // 🔴 SELL-CUSTOMER-LINK (ACC-2): ONE TRANSACTION FOR THE CHECK AND THE WRITE. The account is
+      // re-read as an ACTIVE customer by id inside the same BEGIN IMMEDIATE that writes the sale, so
+      // an account archived a moment earlier cannot receive it, and the name snapshot is the one
+      // the account carries at that instant. It is still a PAID sale: no obligation is posted.
+      const services = this.deps.creditSaleServices?.();
+      const transact = this.deps.transact;
+      if (!services || !transact) {
+        throw new DomainError("NOT_AVAILABLE", "Customer accounts are not available on this terminal");
+      }
+      let raced: CreateSaleResult | null = null;
+      transact(() => {
+        const again = this.repository.findByIdempotencyKey(input.idempotencyKey);
+        if (again) {
+          if (again.fingerprint !== fingerprint) {
+            throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
+          }
+          raced = { sale: again.sale, duplicate: true };
+          return;
+        }
+        const customer = services.parties.activeCustomerForSale(customerId);
+        this.repository.commitSaleWithinTransaction(
+          { ...header, customerId: customer.id, customerNameSnapshot: customer.display_name },
+          lines,
+        );
+      });
+      if (raced !== null) return raced;
+    }
     const sale = this.repository.getSale(saleId);
     if (!sale) throw new DomainError("LEDGER_INTEGRITY", "Committed sale could not be read back");
     return { sale, duplicate: false };
+  }
+
+  /**
+   * SELL-CUSTOMER-LINK (ACC-2): the PAID till sales linked to one customer, each with its void
+   * flag — the activity half of the owner's statement. OWNER ONLY, like the statement it extends.
+   * Nothing here is owed and nothing here is summed into a balance.
+   */
+  customerPaidSales(customerId: string): ReadonlyArray<{ readonly sale: SaleRecord; readonly voided: boolean }> {
+    this.requireOwner();
+    const sales = this.repository.listPaidSalesForCustomer(customerId);
+    const voids = this.repository.listVoidsForSales(sales.map((s) => s.id));
+    return sales.map((sale) => ({ sale, voided: voids.has(sale.id) }));
   }
 
   /**

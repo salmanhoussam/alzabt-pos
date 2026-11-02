@@ -362,9 +362,10 @@ try {
     (await testid(page, "sell-customer").innerText()).includes("زبون من الكاشير"),
     "the chosen customer is shown beside the cart",
   );
+  // Was `sell-customer-not-attached` ("not attached to the sale") until ACC-2 linked paid sales.
   assert(
-    (await testid(page, "sell-customer-not-attached").count()) === 1,
-    "🔴 and the screen SAYS it is not attached to the sale and records no debt",
+    (await testid(page, "sell-customer-paid-link").count()) === 1,
+    "🔴 and the screen SAYS a linked paid sale records no debt and does not raise the balance",
   );
   // 🔴 THE BUTTON SAYS WHAT IT DOES. It used to borrow «تعديل» from the record-editing action,
   // which a cashier may never perform — so the one control a cashier DOES have was labelled with
@@ -1602,6 +1603,150 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
   }
 
   log("M17B-S1 shared-receipt E2E complete");
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // ACC-2 · SELL-CUSTOMER-LINK — a PAID sale names its customer, by id; the owner's statement lists
+  // it as activity, apart from the debts, and no balance moves. Change / clear before paying, a
+  // fresh sale starts with no customer, an archived customer is refused, and it all survives a
+  // restart. Synthetic data only.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const acc2App = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    const q = await acc2App.firstWindow();
+    try {
+      await signIn(q, "Cashier One", "1111");
+      await q.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      // The language persists across launches and S1-3 leaves it English: select Arabic explicitly.
+      if ((await q.evaluate(() => document.documentElement.lang)) !== "ar") await testid(q, "lang-toggle").click();
+      await q.waitForFunction(() => document.documentElement.lang === "ar" && document.documentElement.dir === "rtl", undefined, { timeout: 10000 });
+      const mk = async (displayName) => {
+        const r = await direct(q, "createCustomer", { displayName, phone: null, address: null, note: null });
+        if (!r.ok) throw new Error(`createCustomer: ${JSON.stringify(r.error)}`);
+        return r.data.customer.id;
+      };
+      const PAID = "زبون البيع المدفوع";
+      const paidId = await mk(PAID);
+      const otherId = await mk("زبون آخر للتبديل");
+      const goneId = await mk("زبون سيُؤرشف");
+      const pick = async (name) => {
+        await testid(q, "sell-choose-customer").click();
+        await testid(q, "customer-finder").waitFor({ timeout: 30000 });
+        await testid(q, "customer-search").fill(name);
+        await q.locator('[data-testid="customer-row"]').filter({ hasText: name }).first().click();
+        await testid(q, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
+        await testid(q, "sell-customer").waitFor({ timeout: 30000 });
+      };
+      const base = { sales: num("SELECT count(*) AS n FROM sales"), obligations: num("SELECT count(*) AS n FROM obligations") };
+
+      // 1 · Choose, CHANGE, then CLEAR before paying: the sale carries no customer at all.
+      await q.locator("button.product").first().click();
+      await pick(PAID);
+      await pick("زبون آخر للتبديل");
+      assert((await testid(q, "sell-customer").getAttribute("data-customer")) === otherId, "ACC-2: changing the customer replaces it");
+      await testid(q, "sell-clear-customer").click();
+      assert((await testid(q, "sell-customer").count()) === 0, "ACC-2: clearing removes the customer before payment");
+      await testid(q, "complete-sale").click();
+      assert((await testid(q, "pay-customer").count()) === 0, "ACC-2: the payment pane names no customer when none is chosen");
+      await testid(q, "pay-cash").click();
+      await testid(q, "new-sale").waitFor({ timeout: 30000 });
+      const cleared = readDb((d) => d.prepare("SELECT customer_id AS c FROM sales ORDER BY receipt_number DESC LIMIT 1").get());
+      assert(cleared.c === null, "🔴 ACC-2: a cleared customer is NOT sent — the sale carries no customer");
+      await testid(q, "new-sale").click();
+
+      // 2 · A linked PAID sale: the customer is shown before paying, recorded by id, and owes nothing.
+      await q.locator("button.product").first().click();
+      await pick(PAID);
+      const note = (await testid(q, "sell-customer-paid-link").innerText()).trim();
+      assert(
+        note === "المبيعات المدفوعة المرتبطة بهذا العميل تظهر في سجل حركاته، ولا تزيد الرصيد المستحق.",
+        `ACC-2: the Sell note says the linked paid sale is not a debt ("${note}")`,
+      );
+      await testid(q, "complete-sale").click();
+      await testid(q, "pay-customer").waitFor({ timeout: 30000 });
+      assert((await testid(q, "pay-customer").innerText()).includes(PAID), "🔴 ACC-2: the customer is visible BEFORE the payment is confirmed");
+      await q.screenshot({ path: SHOTS + "ACC2-1-pay-with-customer.png" });
+      await testid(q, "pay-cash").click();
+      await testid(q, "new-sale").waitFor({ timeout: 30000 });
+      const linked = readDb((d) =>
+        d.prepare(
+          "SELECT id, customer_id AS c, customer_name_snapshot AS snap, payment_status AS st, balance_due_minor AS due FROM sales ORDER BY receipt_number DESC LIMIT 1",
+        ).get(),
+      );
+      assert(linked.c === paidId && linked.snap === PAID, `🔴 ACC-2: the sale is stored with the customer's id and name snapshot (${JSON.stringify(linked)})`);
+      assert(linked.st === "paid" && Number(linked.due) === 0, "🔴 ACC-2: it is PAID in full — balance due 0");
+      assert(num("SELECT count(*) AS n FROM obligations") === base.obligations, "🔴 ACC-2: and NO obligation was posted");
+      assert(num("SELECT count(*) AS n FROM sales") === base.sales + 2, "exactly two sales so far in this section — no duplicate");
+      await testid(q, "new-sale").click();
+      assert((await testid(q, "sell-customer").count()) === 0, "🔴 ACC-2: the next sale does NOT inherit the previous customer");
+
+      // 3 · An ARCHIVED customer is refused at payment: nothing is recorded and the cart stays.
+      await q.locator("button.product").first().click();
+      await pick("زبون سيُؤرشف");
+      const off = await direct(q, "setCustomerActive", { customerId: goneId, isActive: false });
+      assert(off.ok, "the owner archives that customer while the sale is open");
+      const salesBeforeRefusal = num("SELECT count(*) AS n FROM sales");
+      await testid(q, "complete-sale").click();
+      await testid(q, "pay-cash").click();
+      await q.locator(".overlay .error").waitFor({ timeout: 30000 });
+      assert(num("SELECT count(*) AS n FROM sales") === salesBeforeRefusal, "🔴 ACC-2: an archived customer is refused — no sale recorded");
+      await q.keyboard.press("Escape");
+      assert((await q.locator('[data-testid="cart"] li.line').count()) === 1, "and the cart is still there to fix");
+      await testid(q, "sell-clear-customer").click();
+      await testid(q, "clear-cart").click();
+      await testid(q, "clear-confirm").click();
+
+      // 4 · The owner's statement lists the paid sale ONCE, apart from the debts — and survives a restart.
+      const openStatement = async (page, id, name) => {
+        await page.locator('[data-testid="tab-customers"]').click();
+        await testid(page, "customers-search").fill(name);
+        await page.locator(`[data-customer="${id}"]`).first().click();
+        await testid(page, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+        await testid(page, "statement-paid-sales").waitFor({ timeout: 30000 });
+      };
+      await openStatement(q, paidId, PAID);
+      const rows = await q.locator('[data-testid="statement-paid-sale"]').evaluateAll((els) => els.map((e) => e.getAttribute("data-sale")));
+      assert(JSON.stringify(rows) === JSON.stringify([linked.id]), `🔴 ACC-2: the statement lists the linked paid sale exactly once (${rows})`);
+      assert((await testid(q, "statement-empty").count()) === 1, "🔴 ACC-2: and still says NO posted debts — the paid sale is not a debt");
+      assert((await testid(q, "statement-balance").count()) === 0, "and shows no outstanding balance for it");
+      await q.screenshot({ path: SHOTS + "ACC2-2-statement-paid-sales.png" });
+    } finally {
+      await acc2App.close().catch(() => undefined);
+    }
+
+    // Restart, then English.
+    const acc2b = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    const r = await acc2b.firstWindow();
+    try {
+      await signIn(r, "Cashier One", "1111");
+      await r.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      const paidId = readDb((d) => d.prepare("SELECT id FROM parties WHERE display_name = 'زبون البيع المدفوع'").get().id);
+      if ((await r.evaluate(() => document.documentElement.lang)) !== "en") await testid(r, "lang-toggle").click();
+      await r.waitForFunction(() => document.documentElement.lang === "en" && document.documentElement.dir === "ltr", undefined, { timeout: 20000 });
+      await r.locator('[data-testid="tab-customers"]').click();
+      await testid(r, "customers-search").fill("زبون البيع المدفوع");
+      await r.locator(`[data-customer="${paidId}"]`).first().click();
+      await testid(r, "statement-paid-sales").waitFor({ timeout: 30000 });
+      assert((await r.locator('[data-testid="statement-paid-sale"]').count()) === 1, "🔴 ACC-2: after a restart the paid sale is still listed once");
+      const title = await testid(r, "statement-paid-sales").innerText();
+      assert(title.includes("Paid sales linked to the customer") && title.includes("not a debt"), "ACC-2: the English history says paid sales are not a debt");
+      await r.locator('[data-testid="tab-sell"]').click();
+      await r.locator("button.product").first().click();
+      await testid(r, "sell-choose-customer").click();
+      await testid(r, "customer-finder").waitFor({ timeout: 30000 });
+      await testid(r, "customer-search").fill("زبون البيع المدفوع");
+      await r.locator('[data-testid="customer-row"]').filter({ hasText: "زبون البيع المدفوع" }).first().click();
+      const en = (await testid(r, "sell-customer-paid-link").innerText()).trim();
+      assert(
+        en === "Paid sales linked to this customer appear in the activity history without increasing the outstanding balance.",
+        `ACC-2: the English Sell note ("${en}")`,
+      );
+      if ((await r.evaluate(() => document.documentElement.lang)) !== "ar") await testid(r, "lang-toggle").click();
+      await r.waitForFunction(() => document.documentElement.lang === "ar" && document.documentElement.dir === "rtl", undefined, { timeout: 10000 });
+    } finally {
+      await acc2b.close().catch(() => undefined);
+    }
+    log("ACC-2 sell-customer-link E2E complete");
+  }
 
   log("customer collection E2E complete");
   log("customer statement E2E complete");
