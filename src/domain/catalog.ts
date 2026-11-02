@@ -13,6 +13,11 @@ export interface Product {
   readonly baseUnit: string;
   /** True when the price is a placeholder the merchant still has to set. Still sellable. */
   readonly priceNeedsReview: boolean;
+  /**
+   * The barcode in its stored, canonical form (`normalizeBarcode` in ./barcode decides that), or
+   * null. The Sell screen matches a scan against this EXACTLY — never against the name or SKU.
+   */
+  readonly barcode: string | null;
 }
 
 /** The shape a catalog is written in (fixture or local catalog table): prices as text. */
@@ -25,7 +30,18 @@ export interface CatalogSource {
     readonly price: string;
     readonly baseUnit?: string;
     readonly priceNeedsReview?: boolean;
+    /** Canonical barcode. Absent means none: a fixture or an older source simply has no barcodes. */
+    readonly barcode?: string | null;
   }>;
+  /**
+   * Canonical barcodes of the shop's INACTIVE products, and nothing else about them.
+   *
+   * 🔴 STRINGS, NOT PRODUCTS. A scanned inactive product must get its own message rather than "no
+   * product found", but an inactive product must never become sellable — so it never enters
+   * `products`, and the Sell screen learns only that this code belongs to something not for sale:
+   * no id, no name, no price.
+   */
+  readonly inactiveBarcodes?: ReadonlyArray<string>;
 }
 
 /**
@@ -72,15 +88,19 @@ export interface Catalog {
   readonly currency: string;
   readonly products: ReadonlyArray<Product>;
   readonly byId: ReadonlyMap<string, Product>;
+  /** See `CatalogSource.inactiveBarcodes`. Never overlaps an active product's barcode. */
+  readonly inactiveBarcodes: ReadonlySet<string>;
 }
 
 /**
  * Validates and freezes a catalog. Every product is priced in the catalog's single currency;
- * ids must be unique and non-empty, SKUs unique when present. A catalog that fails here is never used.
+ * ids must be unique and non-empty, SKUs and barcodes unique when present. A catalog that fails here
+ * is never used.
  */
 export function loadCatalog(source: CatalogSource): Catalog {
   const byId = new Map<string, Product>();
   const skus = new Set<string>();
+  const barcodes = new Set<string>();
   const products: Product[] = [];
   for (const raw of source.products) {
     if (!raw.id || raw.sku === "" || !raw.name.trim()) {
@@ -91,6 +111,12 @@ export function loadCatalog(source: CatalogSource): Catalog {
     }
     if (byId.has(raw.id)) throw new DomainError("INVALID_CATALOG", `Duplicate product id '${raw.id}'`);
     if (raw.sku !== null && skus.has(raw.sku)) throw new DomainError("INVALID_CATALOG", `Duplicate SKU '${raw.sku}'`);
+    // 🔴 ONE CODE, ONE PRODUCT. Migration 9's unique index already guarantees this for the local
+    // table; a catalog that broke it would let one scan mean two products, so it is refused here too.
+    const barcode = raw.barcode ?? null;
+    if (barcode !== null && barcodes.has(barcode)) {
+      throw new DomainError("INVALID_CATALOG", `Duplicate barcode '${barcode}'`);
+    }
     const baseUnit = raw.baseUnit ?? "piece";
     if (!BASE_UNITS.includes(baseUnit)) {
       throw new DomainError("INVALID_CATALOG", `Product '${raw.id}' has unsupported unit '${baseUnit}'`);
@@ -102,10 +128,19 @@ export function loadCatalog(source: CatalogSource): Catalog {
       price: parseDecimal(raw.price, source.currency),
       baseUnit,
       priceNeedsReview: raw.priceNeedsReview ?? false,
+      barcode,
     });
     byId.set(product.id, product);
     if (product.sku !== null) skus.add(product.sku);
+    if (barcode !== null) barcodes.add(barcode);
     products.push(product);
   }
-  return Object.freeze({ currency: source.currency, products: Object.freeze(products), byId });
+  const inactiveBarcodes = new Set<string>();
+  for (const code of source.inactiveBarcodes ?? []) {
+    if (barcodes.has(code)) {
+      throw new DomainError("INVALID_CATALOG", `Barcode '${code}' is listed as both active and inactive`);
+    }
+    inactiveBarcodes.add(code);
+  }
+  return Object.freeze({ currency: source.currency, products: Object.freeze(products), byId, inactiveBarcodes });
 }

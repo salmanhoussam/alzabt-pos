@@ -185,6 +185,7 @@ describe("atomic, owner-only POS customer credit sale", () => {
       },
       products: initial.products,
       byId: mutableProducts,
+      inactiveBarcodes: initial.inactiveBarcodes,
     } as Catalog;
     resetHarness({ catalog: mutableCatalog });
     const customerId = addParty();
@@ -221,6 +222,7 @@ describe("atomic, owner-only POS customer credit sale", () => {
       currency: initial.currency,
       products: initial.products,
       byId: mutableProducts,
+      inactiveBarcodes: initial.inactiveBarcodes,
     } as Catalog;
     resetHarness({ catalog: mutableCatalog });
     const customerId = addParty();
@@ -246,6 +248,7 @@ describe("atomic, owner-only POS customer credit sale", () => {
       currency: initial.currency,
       products: initial.products,
       byId: mutableProducts,
+      inactiveBarcodes: initial.inactiveBarcodes,
     } as Catalog;
     resetHarness({
       catalog: mutableCatalog,
@@ -465,6 +468,7 @@ describe("atomic, owner-only POS customer credit sale", () => {
       currency: initial.currency,
       products: initial.products,
       byId: mutableProducts,
+      inactiveBarcodes: initial.inactiveBarcodes,
     } as Catalog;
     resetHarness({ catalog: mutableCatalog });
     const customerId = addParty();

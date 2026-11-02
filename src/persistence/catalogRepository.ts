@@ -240,17 +240,29 @@ export class CatalogRepository {
   /**
    * The active local catalog in `currency`, ordered as imported (by source row id when numeric),
    * or null when the terminal has no active local products yet.
+   *
+   * It also carries the canonical barcodes of the INACTIVE products in the same currency — the
+   * code alone, so a scan of a product taken off sale can say so without that product ever being
+   * sellable or described to the till (see `CatalogSource.inactiveBarcodes`).
    */
   loadActiveSource(currency: string): CatalogSource | null {
     const rows = this.db
       .prepare(
-        `SELECT id, sku, name_ar, name_en, selling_price_minor, currency, base_unit, price_needs_review, is_active
+        `SELECT id, sku, name_ar, name_en, selling_price_minor, currency, base_unit, price_needs_review, is_active,
+                barcode
            FROM catalog_products
           WHERE is_active = 1 AND currency = ?
           ORDER BY CAST(source_key AS INTEGER), source_key`,
       )
-      .all(currency) as ProductRow[];
+      .all(currency) as Array<ProductRow & { barcode: string | null }>;
     if (rows.length === 0) return null;
+    const inactive = this.db
+      .prepare(
+        `SELECT barcode FROM catalog_products
+          WHERE is_active = 0 AND currency = ? AND barcode IS NOT NULL
+          ORDER BY barcode`,
+      )
+      .all(currency) as Array<{ barcode: string }>;
     return {
       currency,
       products: rows.map((r) => ({
@@ -260,7 +272,9 @@ export class CatalogRepository {
         price: formatDecimal(money(r.selling_price_minor, r.currency)),
         baseUnit: r.base_unit,
         priceNeedsReview: r.price_needs_review === 1n,
+        barcode: r.barcode,
       })),
+      inactiveBarcodes: inactive.map((r) => r.barcode),
     };
   }
 

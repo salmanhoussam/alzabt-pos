@@ -542,7 +542,17 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 
 /* SELL — the search shortcut is a key, not placeholder prose. */
 .search-wrap { position: relative; display: flex; }
-.search-wrap .search { flex: 1; padding-inline-end: 46px; }
+/* The `/` keycap sits at the PAGE's inline end (inset-inline-end on the wrapper), but a search field
+   with dir="auto" takes its own direction from its text: a barcode in the Arabic UI is LTR, and its
+   inline end is the other side. So the room for the keycap is reserved on the keycap's PHYSICAL
+   side, read from the page direction — never from the field's. */
+.search-wrap .search { flex: 1; }
+:root[dir="ltr"] .search-wrap .search { padding-right: 46px; }
+:root[dir="rtl"] .search-wrap .search { padding-left: 46px; }
+/* SB-RISK-01 option A: a typed quantity that is NOT saved yet must not look like a saved one. */
+.qty-input.qty-pending { background: var(--status-warning); border-color: var(--status-warning-text); border-style: dashed; }
+.line-qty-pending { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
+.line-qty-hint { margin: 0; flex-basis: 100%; font-size: 13px; color: var(--status-warning-text); }
 .search-kbd {
   position: absolute; inset-inline-end: 10px; top: 50%; transform: translateY(-50%);
   background: var(--surface-sunken); border: 1px solid var(--border); border-bottom-width: 2px;

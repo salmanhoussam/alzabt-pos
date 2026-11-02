@@ -907,7 +907,9 @@ if (PHASE === "seed-v2") {
   await product(page, "SYN-ROPE").click();
   const qty = page.locator('[data-testid^="qty-"]').first();
   await qty.fill("2.5");
-  await qty.press("Enter");
+  // THIS build (verify phase): a typed quantity is PENDING until ✓ (SB-RISK-01 option A). The
+  // seed phases below drive OLD releases, where Enter still commits — they are left as they are.
+  await page.locator('[data-testid="line-qty-confirm"]').click();
   await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("10.00"));
   assert((await totalText(page)).startsWith("10.00"), `2.5 kg at 4.00 totals 10.00 (got ${await totalText(page)})`);
   await page.locator('[data-testid="complete-sale"]').click();
