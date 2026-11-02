@@ -428,6 +428,26 @@ export class LedgerService {
     return ledgerAmount(amountMinor, currency);
   }
 
+  /**
+   * HIST-CURRENT-BALANCE (ACC-3): what is CURRENTLY owed on the debt each of these sales posted, keyed
+   * by sale id. OWNER ONLY — it reveals payments, which only the owner's statement shows.
+   *
+   * 🔴 READ FROM THE LEDGER, NEVER FROM THE SALE. The sale's own `payment_status` / `balance_due_minor`
+   * is the snapshot of the moment of sale and is never rewritten; this is `amount − settlements` by
+   * the same `outstanding()` the statement uses, so History and the statement cannot disagree. A sale
+   * that posted no debt (every paid sale) is absent from the map — it is never shown as owing 0.
+   */
+  currentSaleDebts(
+    saleIds: ReadonlyArray<string>,
+  ): Map<string, { readonly obligation: ObligationRecord; readonly outstandingMinor: bigint }> {
+    this.requireOwner();
+    const out = new Map<string, { readonly obligation: ObligationRecord; readonly outstandingMinor: bigint }>();
+    for (const o of this.deps.ledger.findSaleObligations(saleIds)) {
+      out.set(o.sourceRef, { obligation: o, outstandingMinor: outstanding(o, this.deps.ledger.listSettlements(o.id)).minor });
+    }
+    return out;
+  }
+
   /** Owner-authorized read used to reconcile an atomic POS credit-sale pair. */
   findSaleObligation(saleId: string): ObligationRecord | null {
     this.requireOwner();

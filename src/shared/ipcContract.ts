@@ -269,6 +269,22 @@ export interface VoidDto {
 export interface SaleWithVoidDto {
   readonly sale: SaleDto;
   readonly void: VoidDto | null;
+  /**
+   * HIST-CURRENT-BALANCE (ACC-3). ONLY in `getSaleHistory`, ONLY for the owner: the key is ABSENT
+   * from a cashier's response (main decides from the durable session; nothing is hidden on screen).
+   * `null` = this sale posted no debt. `sale.paymentStatus` / `sale.balanceDue` stay the snapshot of
+   * the moment of sale and are never rewritten.
+   */
+  readonly currentDebt?: SaleCurrentDebtDto | null;
+}
+
+/** The debt one sale posted, as the ledger holds it NOW (ACC-3). Read-only; nothing here is stored. */
+export interface SaleCurrentDebtDto {
+  /** What the debt was posted for. */
+  readonly amount: MoneyDto;
+  /** `amount − settlements`, computed in main by the statement's own `outstanding()`. */
+  readonly outstanding: MoneyDto;
+  readonly fullyPaid: boolean;
 }
 
 export interface TodaySalesDto {

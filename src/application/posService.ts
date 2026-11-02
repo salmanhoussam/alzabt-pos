@@ -2585,6 +2585,24 @@ export class PosService {
   }
 
   /**
+   * HIST-CURRENT-BALANCE (ACC-3): the current debt of each listed sale, for the OWNER's history.
+   *
+   * 🔴 NULL FOR ANYONE ELSE, AND THE CALLER THEN SENDS NOTHING. `getSaleHistory` is a session channel a
+   * cashier uses; what a debt has been paid is owner-only (like the statement). The role is re-read
+   * from the durable session here, in main — never inferred from what the screen asked for — so a
+   * cashier's response carries no current-debt field at all, not a hidden one. Null as well when the
+   * terminal has no ledger wired: "unknown" is never presented as "no debt".
+   */
+  currentDebtsForHistory(
+    saleIds: ReadonlyArray<string>,
+  ): ReadonlyMap<string, { readonly obligation: ObligationRecord; readonly outstandingMinor: bigint }> | null {
+    if (this.liveSession().role !== "owner") return null;
+    const services = this.deps.creditSaleServices?.();
+    if (!services) return null;
+    return services.ledger.currentSaleDebts(saleIds);
+  }
+
+  /**
    * Voids a completed sale by writing a NEW void record. The sale itself is never touched.
    * Gate 1 rule: only a sale from the current business day can be voided; correcting an older
    * sale is a refund, which is out of scope.

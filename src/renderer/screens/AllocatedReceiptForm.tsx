@@ -16,12 +16,22 @@
  *
  * 🔴 THE REFERENCE IS THE PROVIDER'S OWN, ONCE. This form has a single reference field; there is no
  * way to type a per-debt reference, and nothing here derives one.
+ *
+ * 🔴 M17B-ALLOC-DEFAULT (ACC-3): OLDEST DEBT FIRST UNTIL THE OWNER TAKES OVER. While the shares are
+ * automatic they are re-proposed from the total every time it changes (`oldestFirstShares`). The
+ * first share the owner edits switches the form to MANUAL, and from then on nothing here rewrites a
+ * share; only the explicit «re-distribute» action returns to automatic. Either way it is a proposal:
+ * Confirm still needs exact completion, and main re-validates everything.
+ *
+ * 🔴 A TOTAL THAT LANDS ON ONE DEBT IS NOT A SHARED RECEIPT. Main refuses fewer than two debts, so the
+ * form never sends one: it says so and offers the existing single-debt payment for that debt, with
+ * the amount, method and reference carried over and the funds confirmation NOT carried (asked again).
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 import { useMemo, useState } from "react";
 import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../api";
 import { formatDecimal, money } from "../../domain/money";
-import { type ReceiptReconciliation, allocationState, sharableCurrencies } from "./receiptAllocation";
+import { type ReceiptReconciliation, allocationState, leftText, minorOf, oldestFirstShares, openDebtsOf, sharableCurrencies } from "./receiptAllocation";
 import { useT } from "../i18n";
 import type { AllocatedReceiptRequest, CustomerStatementDto, StatementObligationDto } from "../../shared/ipcContract";
 
@@ -39,6 +49,16 @@ interface Props {
   readonly onRecorded: (statement: CustomerStatementDto, duplicate: boolean) => void;
   readonly onClose: () => void;
   /**
+   * ACC-3: the whole total lands on ONE debt, which a shared receipt cannot record. The parent closes
+   * this form and opens the single-debt payment for that debt with these details. Nothing is sent here.
+   */
+  readonly onUseSingleDebt: (prefill: {
+    readonly obligationId: string;
+    readonly amountText: string;
+    readonly method: Provider;
+    readonly reference: string;
+  }) => void;
+  /**
    * Asks the ledger (through a fresh statement) what became of an attempt. READ-ONLY: it never sends a
    * receipt. `recorded` carries the statement that proves it, so the form can leave safely.
    */
@@ -48,7 +68,7 @@ interface Props {
   ) => Promise<{ readonly status: ReceiptReconciliation; readonly statement: CustomerStatementDto | null }>;
 }
 
-export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClose, onAskLedger }: Props) {
+export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClose, onUseSingleDebt, onAskLedger }: Props) {
   const { t } = useT();
   const currencies = useMemo(() => sharableCurrencies(statement), [statement]);
   const [currency, setCurrency] = useState<string>(currencies[0] ?? "");
@@ -57,23 +77,43 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
   const [confirmed, setConfirmed] = useState(false);
   const [totalText, setTotalText] = useState("");
   const [shares, setShares] = useState<Record<string, string>>({});
+  /** False while the shares are the oldest-first proposal; true once the owner edits any share. */
+  const [manual, setManual] = useState(false);
   const [attemptKey, setAttemptKey] = useState(newIdempotencyKey);
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const debts: StatementObligationDto[] = statement.obligations.filter((o) => !o.fullyPaid && o.outstanding.currency === currency);
+  // Oldest first (`posted_at`, then id), the order the shares are proposed AND shown in.
+  const open = openDebtsOf(statement, currency);
+  const byId = new Map(statement.obligations.map((o) => [o.id, o]));
+  const debts: StatementObligationDto[] = open.map((d) => byId.get(d.id) as StatementObligationDto);
+  const owed = new Map(open.map((d) => [d.id, d.outstandingMinor]));
+  const owedTotal = open.reduce((acc, d) => acc + d.outstandingMinor, 0n);
   const edited = () => {
     setError(null);
     setAttemptKey(newIdempotencyKey());
   };
 
+  const typedTotal = minorOf(totalText, currency);
+  const proposal = manual || typedTotal === null ? null : oldestFirstShares(typedTotal, open);
+  /** What each share field shows: the owner's own figures, or the oldest-first proposal. */
+  const shown: Record<string, string> =
+    proposal === null
+      ? manual
+        ? shares
+        : {}
+      : Object.fromEntries(proposal.shares.map((p) => [p.id, formatDecimal(money(p.minor, currency))]));
+
   const state = allocationState(
     currency,
     totalText,
-    debts.map((d) => ({ id: d.id, text: shares[d.id] ?? "" })),
+    debts.map((d) => ({ id: d.id, text: shown[d.id] ?? "" })),
+    owed,
   );
-  const { total, typed: typedShares, left, complete } = state;
+  const { total, typed: typedShares, left, complete, overDebt, singleDebt } = state;
+  const totalInvalid = totalText.trim() !== "" && (total === null || total <= 0n);
+  const overOwed = total !== null && total > owedTotal;
 
   const errorFor = (err: unknown): string => {
     if (err instanceof ApiError && OWN_CODES.has(err.code)) return t(`allocReceipt.err.${err.code}`);
@@ -167,6 +207,7 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
           onChange={(e) => {
             setCurrency(e.target.value);
             setShares({});
+            setManual(false);
             setTotalText("");
             edited();
           }}
@@ -225,6 +266,34 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
           }}
         />
       </label>
+      {totalInvalid && (
+        <p className="error" data-testid="receipt-invalid-total">
+          {t("collect.invalidAmount")}
+        </p>
+      )}
+      {overOwed && (
+        <p className="error" data-testid="receipt-over-outstanding">
+          {t("allocReceipt.overOutstanding")}
+        </p>
+      )}
+      <div className="receipt-mode" data-testid="receipt-mode" data-mode={manual ? "manual" : "auto"}>
+        <span className="muted small">{manual ? t("allocReceipt.manualNote") : t("allocReceipt.autoNote")}</span>
+        {manual && (
+          <button
+            className="btn ghost small"
+            type="button"
+            disabled={blocked || busy}
+            onClick={() => {
+              setManual(false);
+              setShares({});
+              edited();
+            }}
+            data-testid="receipt-auto-reset"
+          >
+            {t("allocReceipt.autoReset")}
+          </button>
+        )}
+      </div>
       <ul className="statement-obligations" data-testid="receipt-debts">
         {debts.map((d) => (
           <li key={d.id} data-testid="receipt-debt" data-obligation={d.id}>
@@ -241,23 +310,50 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
                 type="text"
                 inputMode="decimal"
                 dir="ltr"
-                value={shares[d.id] ?? ""}
+                value={shown[d.id] ?? ""}
                 disabled={blocked || busy}
+                aria-invalid={overDebt.includes(d.id)}
                 onChange={(e) => {
-                  setShares({ ...shares, [d.id]: e.target.value });
+                  // The first edit takes over from the proposal: what was shown becomes the owner's own.
+                  setShares({ ...shown, [d.id]: e.target.value });
+                  setManual(true);
                   edited();
                 }}
               />
             </label>
+            {overDebt.includes(d.id) && (
+              <p className="error small" data-testid="receipt-share-over">
+                {t("allocReceipt.shareOverDebt")}
+              </p>
+            )}
           </li>
         ))}
       </ul>
       <p data-testid="receipt-left" data-complete={complete ? "yes" : "no"}>
         <span className="muted">{t("allocReceipt.left")}</span>:{" "}
         <strong>
-          <bdi dir="ltr">{left === null ? "—" : `${formatDecimal(money(left, currency))} ${currency}`}</bdi>
+          <bdi dir="ltr">{leftText(left, currency)}</bdi>
         </strong>
       </p>
+      {left !== null && left < 0n && (
+        <p className="error" data-testid="receipt-over-total">
+          {t("allocReceipt.err.RECEIPT_ALLOCATION_MISMATCH")}
+        </p>
+      )}
+      {singleDebt !== null && (
+        <div className="receipt-single" data-testid="receipt-single-debt" data-obligation={singleDebt}>
+          <p className="muted">{t("allocReceipt.singleDebt")}</p>
+          <button
+            className="btn ghost"
+            type="button"
+            disabled={blocked || busy}
+            onClick={() => onUseSingleDebt({ obligationId: singleDebt, amountText: totalText.trim(), method: provider, reference })}
+            data-testid="receipt-use-single"
+          >
+            {t("allocReceipt.useSingle")}
+          </button>
+        </div>
+      )}
       <label className="collect-confirm-funds">
         <input
           data-testid="receipt-funds-confirmed"

@@ -848,10 +848,29 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       if (typeof o.limit !== "number" || !Number.isSafeInteger(o.limit) || o.limit < 1 || o.limit > 200) {
         invalid("'limit' must be an integer between 1 and 200");
       }
-      return service.getSaleHistory(o.limit).map((h) => ({
-        sale: toSaleDto(h.sale, invoiceNumberFor(h.sale)),
-        void: h.void ? toVoidDto(h.void) : null,
-      }));
+      const history = service.getSaleHistory(o.limit);
+      // ACC-3: null for a cashier (decided in the service from the durable session) → the key is
+      // left OUT of every entry, so the response carries no current-debt data at all.
+      const debts = service.currentDebtsForHistory(history.map((h) => h.sale.id));
+      return history.map((h) => {
+        const d = debts?.get(h.sale.id);
+        return {
+          sale: toSaleDto(h.sale, invoiceNumberFor(h.sale)),
+          void: h.void ? toVoidDto(h.void) : null,
+          ...(debts === null
+            ? {}
+            : {
+                currentDebt:
+                  d === undefined
+                    ? null
+                    : {
+                        amount: { minor: d.obligation.amountMinor.toString(), currency: d.obligation.currency },
+                        outstanding: { minor: d.outstandingMinor.toString(), currency: d.obligation.currency },
+                        fullyPaid: d.outstandingMinor === 0n,
+                      },
+              }),
+        };
+      });
     }),
     importCatalog: wrap("importCatalog", (p) => {
       noPayload(p);

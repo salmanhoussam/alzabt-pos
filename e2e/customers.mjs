@@ -53,6 +53,16 @@ const assert = (cond, msg) => {
 
 const testid = (page, id) => page.locator(`[data-testid="${id}"]`);
 const tab = (page, name) => page.locator(`[data-testid="tab-${name}"]`).click();
+/**
+ * ACC-3 (M17B-ALLOC-DEFAULT): a shared receipt now PROPOSES its shares oldest debt first as soon as a total is
+ * typed. Sections written before it type their own shares from EMPTY fields; this empties the proposal first —
+ * exactly what an owner overwriting it does, which switches the form to manual. TRANSITION: the old start state
+ * (every share empty) is what this restores; no assertion of those sections changes.
+ */
+const clearProposal = async (page) => {
+  const fields = page.locator('[data-testid="receipt-share"]');
+  for (let i = 0; i < (await fields.count()); i++) await fields.nth(i).fill("");
+};
 
 /** Calls a channel straight through the bridge, exactly as an untrusted renderer could. */
 const direct = (page, method, payload) =>
@@ -1306,6 +1316,31 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
     await testid(pq, "receipt-currency").selectOption("USD");
     await testid(pq, "receipt-reference").fill("WH-S1-DUP");
     await testid(pq, "receipt-total").fill("100.00");
+    // ACC-3: before the owner types anything, 100.00 is PROPOSED oldest debt first (posted_at, then id), each
+    // debt up to what it still owes — computed here from the ledger itself, not from the screen.
+    {
+      const open = readDb((d) =>
+        d
+          .prepare(
+            `SELECT o.id, o.amount_minor - coalesce((SELECT sum(s.amount_minor) FROM settlements s WHERE s.obligation_id = o.id), 0) AS owed
+               FROM obligations o WHERE o.party_id = ? AND o.currency = 'USD' ORDER BY o.posted_at, o.id`,
+          )
+          .all(statementCustomerId),
+      ).filter((r) => Number(r.owed) > 0);
+      let rest = 10000;
+      const expected = open.map((r) => {
+        const take = Math.min(rest, Number(r.owed));
+        rest -= take;
+        return [r.id, take > 0 ? (take / 100).toFixed(2) : ""];
+      });
+      const shown = await pq.locator('[data-testid="receipt-debt"]').evaluateAll((els) =>
+        els.map((e) => [e.getAttribute("data-obligation"), e.querySelector('[data-testid="receipt-share"]').value]),
+      );
+      assert(JSON.stringify(shown) === JSON.stringify(expected), `🔴 ACC-3: 100.00 is proposed oldest debt first (${JSON.stringify(shown)})`);
+      assert((await testid(pq, "receipt-mode").getAttribute("data-mode")) === "auto", "ACC-3: the proposal is automatic until a share is edited");
+    }
+    await clearProposal(pq);
+    assert((await testid(pq, "receipt-mode").getAttribute("data-mode")) === "manual", "ACC-3: overwriting the proposal switches to manual");
     await shareFor("s1-A").fill("60.00");
     await shareFor("s1-B").fill("39.00");
     assert((await testid(pq, "receipt-left").getAttribute("data-complete")) === "no", "🔴 99.00 of 100.00 is NOT complete");
@@ -1533,6 +1568,7 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       assert((await testid(p, "receipt-currency").inputValue()) === "USD", "R1: USD selected");
       await testid(p, "receipt-reference").fill("WH-S1-R1-UI");
       await testid(p, "receipt-total").fill("10.00");
+      await clearProposal(p); // ACC-3 TRANSITION: this section types its own 6+4 from empty shares
       const share = (id) => p.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
       await share("s1-R1-A").fill("6.00");
       await share("s1-R1-B").fill("4.00");
@@ -1746,6 +1782,169 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       await acc2b.close().catch(() => undefined);
     }
     log("ACC-2 sell-customer-link E2E complete");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // ACC-3 · M17B-ALLOC-DEFAULT — a shared receipt proposes its shares OLDEST DEBT FIRST until the owner
+  // edits one; a total that lands on ONE debt points to the single-debt payment and is never sent as a
+  // shared receipt; shares above the total no longer blank the window. HIST-CURRENT-BALANCE — the
+  // owner's History carries the current-debt column; a cashier's response carries no such key at all.
+  // The debts are seeded into this run's disposable ledger, like S3B and S1. Synthetic data only.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const ACC3_NAME = "زبون التوزيع الأقدم";
+    let acc3Id;
+    {
+      const a = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+      try {
+        const q = await a.firstWindow();
+        await signIn(q, "Cashier One", "1111");
+        await q.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+        const r = await direct(q, "createCustomer", { displayName: ACC3_NAME, phone: null, address: null, note: null });
+        if (!r.ok) throw new Error(`createCustomer: ${JSON.stringify(r.error)}`);
+        acc3Id = r.data.customer.id;
+      } finally {
+        await a.close().catch(() => undefined);
+      }
+    }
+    {
+      const dbw = new Database(LEDGER);
+      try {
+        const op = dbw.prepare("SELECT id FROM operators WHERE role = 'owner' LIMIT 1").get().id;
+        const ins = dbw.prepare(
+          `INSERT INTO obligations (id, party_id, party_kind, direction, source_kind, source_ref, sale_id, currency, amount_minor, posted_by, posted_at, business_date)
+           VALUES (?, ?, 'customer', 'receivable', 'manual', ?, NULL, 'USD', ?, ?, ?, ?)`,
+        );
+        // Ids deliberately NOT in age order (a-mid < m-old < z-new), and inserted newest first: only posted_at
+        // can put them in the order the proposal must follow — the field case 0.60 (oldest) + 1.50.
+        ins.run("acc3-z-new", acc3Id, "ACC3-NEW", 500, op, "2026-10-28T08:00:00.000Z", "2026-10-28");
+        ins.run("acc3-a-mid", acc3Id, "ACC3-MID", 150, op, "2026-10-27T08:00:00.000Z", "2026-10-27");
+        ins.run("acc3-m-old", acc3Id, "ACC3-OLD", 60, op, "2026-10-26T08:00:00.000Z", "2026-10-26");
+      } finally {
+        dbw.close();
+      }
+    }
+    const app3 = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    const q = await app3.firstWindow();
+    try {
+      await signIn(q, "Cashier One", "1111");
+      await q.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      if ((await q.evaluate(() => document.documentElement.lang)) !== "ar") await testid(q, "lang-toggle").click();
+      await q.waitForFunction(() => document.documentElement.lang === "ar" && document.documentElement.dir === "rtl", undefined, { timeout: 10000 });
+      await q.locator('[data-testid="tab-customers"]').click();
+      await testid(q, "customers-search").fill(ACC3_NAME);
+      await q.locator(`[data-customer="${acc3Id}"]`).first().click();
+      await testid(q, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+      await testid(q, "receipt-open").click();
+      await testid(q, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
+      const shares = () =>
+        q.locator('[data-testid="receipt-debt"]').evaluateAll((els) =>
+          els.map((e) => [e.getAttribute("data-obligation"), e.querySelector('[data-testid="receipt-share"]').value]),
+        );
+      const shareOf = (id) => q.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
+      const mode = () => testid(q, "receipt-mode").getAttribute("data-mode");
+      const same = async (want) => JSON.stringify(await shares()) === JSON.stringify(want);
+
+      assert(
+        JSON.stringify((await shares()).map((x) => x[0])) === JSON.stringify(["acc3-m-old", "acc3-a-mid", "acc3-z-new"]),
+        "🔴 ACC-3: the debts are listed oldest first by posting time — not by id, not by insertion",
+      );
+      await testid(q, "receipt-reference").fill("WH-ACC3-1");
+      await testid(q, "receipt-total").fill("2.00");
+      assert(await same([["acc3-m-old", "0.60"], ["acc3-a-mid", "1.40"], ["acc3-z-new", ""]]), `🔴 ACC-3: 2.00 is proposed 0.60 to the oldest debt, then 1.40 (${JSON.stringify(await shares())})`);
+      assert((await mode()) === "auto", "ACC-3: the proposal is automatic");
+      await testid(q, "receipt-total").fill("7.00");
+      assert(await same([["acc3-m-old", "0.60"], ["acc3-a-mid", "1.50"], ["acc3-z-new", "4.90"]]), "🔴 ACC-3: a new total is re-proposed, oldest first, no debt above what it owes");
+
+      await shareOf("acc3-z-new").fill("4.00");
+      assert((await mode()) === "manual", "🔴 ACC-3: editing a share switches to manual");
+      assert((await testid(q, "receipt-auto-reset").count()) === 1, "and offers the explicit re-distribute action");
+      await testid(q, "receipt-total").fill("8.00");
+      assert(await same([["acc3-m-old", "0.60"], ["acc3-a-mid", "1.50"], ["acc3-z-new", "4.00"]]), "🔴 ACC-3: in manual, a new total does NOT rewrite the owner's shares");
+
+      await shareOf("acc3-z-new").fill("9.00");
+      await testid(q, "receipt-share-over").waitFor({ timeout: 10000 });
+      assert((await testid(q, "receipt-over-total").count()) === 1, "ACC-3: shares above the total are said to be above it");
+      assert((await testid(q, "receipt-left").innerText()).includes("−3.10 USD"), `🔴 ACC-3: 'left' shows the over-allocation signed — the window is still there (${await testid(q, "receipt-left").innerText()})`);
+      assert(await testid(q, "receipt-confirm").isDisabled(), "and Confirm stays disabled");
+
+      await testid(q, "receipt-auto-reset").click();
+      assert((await mode()) === "auto", "🔴 ACC-3: re-distribute returns to the automatic proposal");
+      assert(await same([["acc3-m-old", "0.60"], ["acc3-a-mid", "1.50"], ["acc3-z-new", "5.00"]]), "and fills every debt up to exactly what it owes");
+      assert((await testid(q, "receipt-over-outstanding").count()) === 1, "🔴 ACC-3: 8.00 is more than the 7.10 owed — said, never spread");
+      assert(await testid(q, "receipt-confirm").isDisabled(), "and Confirm stays disabled");
+
+      await testid(q, "receipt-total").fill("0.50");
+      await testid(q, "receipt-single-debt").waitFor({ timeout: 10000 });
+      assert((await testid(q, "receipt-single-debt").getAttribute("data-obligation")) === "acc3-m-old", "the one debt is the oldest");
+      assert(
+        (await testid(q, "receipt-single-debt").innerText()).includes("هذا المبلغ يغطّي ديناً واحداً فقط. استخدم تسديد الدين الواحد لإتمام التحصيل."),
+        "🔴 ACC-3: the owner's exact single-debt sentence",
+      );
+      assert(await testid(q, "receipt-confirm").isDisabled(), "🔴 ACC-3: a one-debt total is never offered as a shared receipt");
+      const before3 = { receipts: num("SELECT count(*) AS n FROM receipts"), settlements: num("SELECT count(*) AS n FROM settlements") };
+      await q.screenshot({ path: SHOTS + "ACC3-1-single-debt.png" });
+      await testid(q, "receipt-use-single").click();
+      await testid(q, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+      assert((await testid(q, "receipt-form").count()) === 0, "the shared-receipt form closes");
+      assert((await testid(q, "collect-form").getAttribute("data-obligation")) === "acc3-m-old", "🔴 ACC-3: the single-debt payment opens on THAT debt");
+      assert((await testid(q, "collect-amount").inputValue()) === "0.50", "with the amount carried over");
+      assert((await testid(q, "collect-method").inputValue()) === "whish", "and the same method — never silently switched");
+      assert((await testid(q, "collect-payment-reference").inputValue()) === "WH-ACC3-1", "and the same reference");
+      assert(!(await testid(q, "collect-funds-confirmed").isChecked()), "🔴 ACC-3: the funds confirmation is NOT carried — it is asked again");
+      assert(
+        num("SELECT count(*) AS n FROM receipts") === before3.receipts && num("SELECT count(*) AS n FROM settlements") === before3.settlements,
+        "🔴 ACC-3: pointing to the single-debt payment recorded NOTHING",
+      );
+      await testid(q, "collect-cancel").click();
+
+      // A real shared receipt left on the automatic proposal: the ledger records exactly oldest first.
+      await testid(q, "receipt-open").click();
+      await testid(q, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
+      await testid(q, "receipt-reference").fill("WH-ACC3-2");
+      await testid(q, "receipt-total").fill("2.00");
+      await testid(q, "receipt-funds-confirmed").check();
+      assert((await testid(q, "receipt-left").getAttribute("data-complete")) === "yes", "the automatic 0.60 + 1.40 is complete");
+      await q.screenshot({ path: SHOTS + "ACC3-2-auto-proposal.png" });
+      await testid(q, "receipt-confirm").click();
+      await testid(q, "receipt-done").waitFor({ state: "visible", timeout: 30000 });
+      const got = readDb((d) =>
+        d.prepare("SELECT obligation_id AS o, amount_minor AS m FROM settlements WHERE obligation_id LIKE 'acc3-%' ORDER BY obligation_id").all(),
+      ).map((r) => [r.o, Number(r.m)]);
+      assert(JSON.stringify(got) === JSON.stringify([["acc3-a-mid", 140], ["acc3-m-old", 60]]), `🔴 ACC-3: the ledger holds 0.60 on the oldest and 1.40 on the next (${JSON.stringify(got)})`);
+      assert(num("SELECT count(*) AS n FROM receipts") === before3.receipts + 1, "one receipt, recorded once");
+
+      // The owner's History carries the current-debt column; these till sales posted no debt.
+      await tab(q, "history");
+      await q.waitForSelector(".history-table", { timeout: 30000 });
+      assert((await testid(q, "history-due-note").count()) === 1, "🔴 ACC-3: the owner's History explains the two figures");
+      const rowsN = await testid(q, "history-row").count();
+      assert(rowsN > 0 && (await testid(q, "history-current").count()) === rowsN, "and every row has a current-debt cell");
+      const states = await q.locator('[data-testid="history-current"] > [data-state]').evaluateAll((els) => els.map((e) => e.getAttribute("data-state")));
+      assert(states.length === rowsN && states.every((x) => x === "none"), "paid till sales posted no debt — shown as none, never as owing 0");
+    } finally {
+      await app3.close().catch(() => undefined);
+    }
+
+    // 🔴 A cashier: no column on screen, and — what matters — no key in the bridge's own answer.
+    const app4 = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    const c = await app4.firstWindow();
+    try {
+      await signIn(c, "Cashier Two", "2222");
+      await c.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      await tab(c, "history");
+      await c.waitForSelector(".history-table", { timeout: 30000 });
+      assert((await testid(c, "history-current").count()) === 0 && (await testid(c, "history-due-note").count()) === 0, "ACC-3: the cashier's History shows no current-debt column");
+      const raw = await direct(c, "getSaleHistory", { limit: 50 });
+      assert(raw.ok && raw.data.length > 0, "the cashier still reads the sale history");
+      assert(raw.data.every((e) => !("currentDebt" in e)), "🔴 ACC-3: a cashier's history response carries NO current-debt key — through the bridge itself");
+      const st = await direct(c, "getCustomerStatement", { customerId: acc3Id });
+      assert(!st.ok && st.error?.code === "NOT_AUTHORIZED", "and the statement stays owner-only");
+      await c.screenshot({ path: SHOTS + "ACC3-3-history-cashier.png" });
+    } finally {
+      await app4.close().catch(() => undefined);
+    }
+    log("ACC-3 allocation and history E2E complete");
   }
 
   log("customer collection E2E complete");

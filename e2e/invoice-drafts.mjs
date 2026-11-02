@@ -682,4 +682,48 @@ assert(
   "the invoice issued in M still has exactly the contact it was issued with",
 );
 
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// O · HIST-CURRENT-BALANCE (slice ACC-3) — the OWNER's History shows the debt the invoice sale of M
+//     posted AS IT STANDS NOW, next to the sale's own snapshot; a payment moves only the current figure.
+//
+// 🔴 THE SALE ROW IS THE CONTROL. It is read before and after the payment and must be identical: the
+// current figure comes from the debt and its payments, never from rewriting the sale.
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const debtSale = one("SELECT s.id AS id, o.party_id AS party FROM obligations o JOIN sales s ON s.id = o.sale_id");
+  const saleBefore = JSON.stringify(one("SELECT * FROM sales WHERE id = ?", debtSale.id));
+  const cellState = async (row) => row.locator('[data-testid="history-current"] > [data-state]').getAttribute("data-state");
+  ({ app, page } = await launch());
+  if ((await page.evaluate(() => document.documentElement.lang)) !== "ar") await testid(page, "lang-toggle").click();
+  await page.waitForFunction(() => document.documentElement.lang === "ar", undefined, { timeout: 20000 });
+  await tab(page, "history");
+  await page.waitForSelector(".history-table", { timeout: 30000 });
+  let row = page.locator(`[data-testid="history-row"][data-sale="${debtSale.id}"]`);
+  assert((await row.count()) === 1, "the invoice sale of M is in the owner's History");
+  const head = await page.locator(".history-table thead").innerText();
+  assert(head.includes("المستحق عند البيع") && head.includes("المتبقّي الآن"), "🔴 ACC-3: two columns, two moments — due at sale, and outstanding now");
+  assert((await cellState(row)) === "open" && (await row.locator('[data-testid="history-current"]').innerText()).includes("20.00"), "🔴 ACC-3: the owner sees 20.00 still owed on it");
+  assert((await row.getAttribute("data-payment-status")) === "unpaid" && (await row.locator('[data-testid="history-balance"]').innerText()).includes("20.00"), "the snapshot: unpaid, 20.00 due at sale");
+
+  // Pay 5.00 of it through the statement's ordinary single-debt payment (cash).
+  await tab(page, "customers");
+  await testid(page, "customers-search").fill(ACCOUNT_NAME);
+  await page.locator(`[data-customer="${debtSale.party}"]`).first().click();
+  await testid(page, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+  await testid(page, "collect-open").first().click();
+  await testid(page, "collect-amount").fill("5.00");
+  await testid(page, "collect-confirm").click();
+  await testid(page, "collect-done").waitFor({ state: "visible", timeout: 30000 });
+
+  await tab(page, "history");
+  await page.waitForSelector(".history-table", { timeout: 30000 });
+  row = page.locator(`[data-testid="history-row"][data-sale="${debtSale.id}"]`);
+  assert((await cellState(row)) === "open" && (await row.locator('[data-testid="history-current"]').innerText()).includes("15.00"), "🔴 ACC-3: after a 5.00 payment the owner sees 15.00 outstanding now");
+  assert((await row.getAttribute("data-payment-status")) === "unpaid" && (await row.locator('[data-testid="history-balance"]').innerText()).includes("20.00"), "🔴 ACC-3: and the snapshot is unchanged — unpaid, 20.00 due at sale");
+  await page.screenshot({ path: SHOTS + "ACC3-4-history-owner.png" });
+  await app.close();
+  assert(JSON.stringify(one("SELECT * FROM sales WHERE id = ?", debtSale.id)) === saleBefore, "🔴 ACC-3: the sale row is identical before and after the payment");
+  assert(num("SELECT count(*) AS n FROM settlements") === 1, "exactly one payment was recorded");
+}
+
 log(`\nOK — ${passed} assertions passed against the installed app`);

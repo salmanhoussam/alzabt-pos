@@ -24,6 +24,36 @@ function paymentText(sale: SaleDto, t: T): string {
 /** 🔴 unpaid and partial are WARNING, not danger: an outstanding balance is a commercial state. */
 const paymentTone = (sale: SaleDto) => (sale.paymentStatus === "paid" ? "ok" : "warn");
 
+/**
+ * HIST-CURRENT-BALANCE (ACC-3): the debt this sale posted, as the ledger holds it NOW.
+ *
+ * 🔴 SHOWN ONLY WHEN MAIN SENT IT. `currentDebt` is present on every row of the OWNER's history and
+ * absent from a cashier's — main decides; this screen hides nothing, it only renders what arrived.
+ * The sale's own status and "due at sale" stay exactly the snapshot of the moment of sale.
+ */
+function currentDebtCell(r: SaleWithVoidDto, t: T) {
+  const d = r.currentDebt;
+  if (d === null || d === undefined) {
+    return (
+      <span className="muted" data-state="none" aria-label={t("history.noDebt")} title={t("history.noDebt")}>
+        —
+      </span>
+    );
+  }
+  if (d.fullyPaid) {
+    return (
+      <span className="badge ok" data-state="settled">
+        {t("history.debtSettled")}
+      </span>
+    );
+  }
+  return (
+    <bdi dir="ltr" data-state="open">
+      {fmt(d.outstanding)}
+    </bdi>
+  );
+}
+
 export function HistoryScreen() {
   const { t } = useT();
   const [rows, setRows] = useState<SaleWithVoidDto[] | null>(null);
@@ -120,6 +150,8 @@ export function HistoryScreen() {
     );
   }
 
+  const ownerView = rows !== null && rows.some((r) => r.currentDebt !== undefined);
+
   return (
     <div className="history">
       <div className="screen-head">
@@ -131,6 +163,11 @@ export function HistoryScreen() {
         )}
       </div>
       {error && <p className="error">{error}</p>}
+      {ownerView && (
+        <p className="muted small" data-testid="history-due-note">
+          {t("history.dueNote")}
+        </p>
+      )}
       {!rows && <p className="muted">{t("common.loading")}</p>}
       {rows && rows.length === 0 && <p className="muted center">{t("history.empty")}</p>}
       {rows && rows.length > 0 && (
@@ -142,7 +179,8 @@ export function HistoryScreen() {
               <th>{t("history.colCashier")}</th>
               <th>{t("history.colPayment")}</th>
               <th className="num">{t("history.colTotal")}</th>
-              <th className="num">{t("history.colBalance")}</th>
+              <th className="num">{ownerView ? t("history.colDueAtSale") : t("history.colBalance")}</th>
+              {ownerView && <th className="num">{t("history.colDueNow")}</th>}
               <th>{t("history.colStatus")}</th>
               <th />
             </tr>
@@ -153,6 +191,7 @@ export function HistoryScreen() {
                 key={r.sale.id}
                 className={r.void ? "voided" : ""}
                 data-testid="history-row"
+                data-sale={r.sale.id}
                 data-source={r.sale.sourceType}
                 data-payment-status={r.sale.paymentStatus}
                 data-payment-method={r.sale.paymentMethod ?? "none"}
@@ -176,6 +215,11 @@ export function HistoryScreen() {
                 <td className="num" data-testid="history-balance">
                   {r.sale.balanceDue.minor === "0" ? "—" : <bdi dir="ltr">{fmt(r.sale.balanceDue)}</bdi>}
                 </td>
+                {ownerView && (
+                  <td className="num" data-testid="history-current">
+                    {currentDebtCell(r, t)}
+                  </td>
+                )}
                 <td>
                   <span className={`badge ${r.void ? "bad" : "state"}`}>
                     {r.void ? t("history.statusVoided") : t("history.statusCompleted")}

@@ -147,6 +147,22 @@ export function CustomerStatement({ customerId }: Props) {
     setAttemptKey(newIdempotencyKey());
   };
 
+  /**
+   * ACC-3: a shared receipt whose whole total lands on ONE debt opens that debt's own payment form with
+   * the amount, method and reference the owner already typed. The funds confirmation is NOT carried —
+   * `openForm` clears it — so the owner confirms again here before anything is sent.
+   */
+  const openFormWithPrefill = (
+    obligationId: string,
+    prefill: { readonly amountText: string; readonly method: CollectionMethodDto; readonly reference: string },
+  ) => {
+    if (blocked || busy) return;
+    openForm(obligationId);
+    setAmountText(prefill.amountText);
+    setMethod(prefill.method);
+    setReference(prefill.reference);
+  };
+
   const submit = async (o: StatementObligationDto) => {
     // 🔴 THE DOUBLE-SUBMIT GUARD. `busy` is set before the await and cleared only in `finally`, so
     // a second click, an Enter key or an impatient double-tap while the first post is in flight
@@ -469,6 +485,10 @@ export function CustomerStatement({ customerId }: Props) {
                 customerId={customerId}
                 statement={statement}
                 onClose={() => setReceiptOpen(false)}
+                onUseSingleDebt={({ obligationId, ...prefill }) => {
+                  setReceiptOpen(false);
+                  openFormWithPrefill(obligationId, prefill);
+                }}
                 onAskLedger={askLedgerAboutReceipt}
                 onRecorded={(next, duplicate) => {
                   setStatement(next);
