@@ -15,6 +15,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { matchesSearch } from "../../../domain/arabic";
 import type {
   AdminProductDto,
+  CustomerDto,
   InvoiceHeaderPatch,
   InvoiceHeaderPatchKey,
   InvoiceLineRequest,
@@ -29,6 +30,7 @@ import { DEFAULT_UNIT, UnitCell } from "../../components/UnitCell";
 import { DraftRowStore } from "./draftRowStore";
 import { isTypedTaxRateUnsaved } from "./taxRateDirty";
 import { classifyFlushFailure } from "./flushOutcome";
+import { accountPrefill } from "./accountPrefill";
 
 const EMPTY_LINE: InvoiceLineRequest = {
   description: null,
@@ -532,21 +534,35 @@ export function InvoiceSheet({
   };
 
   /** Links (or unlinks) an exact account through the ordinary header write, then adopts the answer. */
-  const chooseAccount = async (customerId: string | null, displayName: string | null) => {
+  const chooseAccount = async (account: CustomerDto | null) => {
     setBusy(true);
     setError(null);
     try {
       const previousCustomerId = viewRef.current?.invoice.customerPartyId ?? null;
-      const next = await call(pos().updateInvoiceHeader({ invoiceId, patch: { customerPartyId: customerId } }));
+      // INV-CUSTOMER-PREFILL: the EMPTY printed name, phone and address are filled from the account
+      // in the SAME write as the link (`accountPrefill`), so they are stored with it rather than on
+      // a later blur. Typed values are never replaced; unlinking fills nothing.
+      const fill =
+        account === null
+          ? {}
+          : accountPrefill(account, {
+              customerName: fieldRefs.current.customerName?.value,
+              customerPhone: fieldRefs.current.customerPhone?.value,
+              customerAddress: fieldRefs.current.customerAddress?.value,
+            });
+      const next = await call(
+        pos().updateInvoiceHeader({ invoiceId, patch: { customerPartyId: account?.id ?? null, ...fill } }),
+      );
       setView(next);
-      setLinkedName(displayName);
+      setLinkedName(account?.displayName ?? null);
       // A checked credit instruction belongs to the PREVIOUS customer's identity. Changing the
       // account (including unlinking) must require an explicit fresh tick for the new customer.
       if (next.invoice.customerPartyId !== previousCustomerId) setIssueOnAccount(false);
-      // Convenience: an EMPTY printed name is prefilled with the account's name. The printed name
-      // stays its own field — it is a snapshot the operator may edit, and never drives the link.
-      const nameInput = fieldRefs.current.customerName;
-      if (displayName && nameInput && nameInput.value.trim() === "") nameInput.value = displayName;
+      // The inputs are uncontrolled: show in each filled field what the row now holds.
+      for (const key of Object.keys(fill) as (keyof typeof fill)[]) {
+        const input = fieldRefs.current[key];
+        if (input) input.value = next.invoice[key] ?? "";
+      }
     } catch (e) {
       setError(accountErrorText(e));
     } finally {
@@ -810,7 +826,7 @@ export function InvoiceSheet({
                   <button className="btn ghost small" disabled={busy} onClick={() => setFindingCustomer(true)} data-testid="account-change">
                     {t("inv.account.change")}
                   </button>
-                  <button className="btn ghost small" disabled={busy} onClick={() => void chooseAccount(null, null)} data-testid="account-unlink">
+                  <button className="btn ghost small" disabled={busy} onClick={() => void chooseAccount(null)} data-testid="account-unlink">
                     {t("inv.account.unlink")}
                   </button>
                 </>
@@ -1348,7 +1364,7 @@ export function InvoiceSheet({
           onClose={() => setFindingCustomer(false)}
           onPick={(c) => {
             setFindingCustomer(false);
-            void chooseAccount(c.id, c.displayName);
+            void chooseAccount(c);
           }}
         />
       )}

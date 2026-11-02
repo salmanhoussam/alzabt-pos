@@ -596,4 +596,90 @@ assert(
 assert(num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice'") === invoiceSalesBefore + 1, "exactly one invoice sale was added");
 assert(num("SELECT count(*) AS n FROM sales WHERE source_type = 'invoice' AND customer_id IS NOT NULL") === 0, "invoice sales still carry no customer_id (M14)");
 
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// N · INV-CUSTOMER-PREFILL (slice ACC-1) — linking an account fills the EMPTY printed name, phone
+//     and address, STORED with the link: the app is closed with no blur and no save, and the ledger
+//     already holds them. A typed field is never replaced. Linking is not a debt.
+//
+// 🔴 THE CLOSE IS THE POINT. Before this slice the name went into the input only and reached the row
+// on a later blur or save; phone and address never did (field request 2026-11-01). Asserting on the
+// ledger after `app.close()` — not on the screen — is what proves the write happened with the link.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+const PREFILL = { name: "زبون التعبئة", phone: "96170123456", address: "صيدا، الشارع العام" };
+const obligationsBeforeN = num("SELECT count(*) AS n FROM obligations");
+const salesBeforeN = num("SELECT count(*) AS n FROM sales");
+({ app, page } = await launch());
+const prefillAccount = await page.evaluate(async (a) => {
+  const r = await window.pos.createCustomer({ displayName: a.name, phone: a.phone, address: a.address, note: null });
+  if (!r.ok) throw new Error(`createCustomer: ${JSON.stringify(r.error)}`);
+  return r.data.customer.id;
+}, PREFILL);
+
+/** A new outgoing draft, then the account picked from the directory by searching its name. */
+async function newDraftLinkedTo(name, beforeLink) {
+  await openDrafts(page);
+  await testid(page, "new-invoice").click();
+  await page.waitForSelector('[data-testid="invoice-mode-chooser"]');
+  await testid(page, "mode-outgoing").click();
+  await page.waitForSelector('[data-testid="add-row"]');
+  if (beforeLink) await beforeLink();
+  await testid(page, "account-choose").click();
+  await testid(page, "customer-finder").waitFor({ timeout: 30000 });
+  await testid(page, "customer-search").fill(name);
+  await page.locator('[data-testid="customer-row"]').filter({ hasText: name }).first().click();
+  await testid(page, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
+  await testid(page, "sheet-account-name").waitFor({ timeout: 30000 });
+}
+const newestDraft = () =>
+  one("SELECT id, customer_party_id AS p, customer_name AS n, customer_phone AS ph, customer_address AS ad FROM invoices WHERE status = 'draft' ORDER BY created_at DESC, rowid DESC LIMIT 1");
+
+// N1 · all three empty → all three filled, on screen at once.
+await newDraftLinkedTo(PREFILL.name);
+await until("the prefilled phone to show", async () => (await customerValue(page, "phone")) === PREFILL.phone, 15000);
+assert((await customerValue(page, "name")) === PREFILL.name, "🔴 the empty printed name is filled from the account");
+assert((await customerValue(page, "phone")) === PREFILL.phone, "🔴 the empty phone is filled from the account");
+assert((await customerValue(page, "address")) === PREFILL.address, "🔴 the empty address is filled from the account");
+await page.screenshot({ path: SHOTS + "ACC1-prefilled.png" });
+// Closed with NO blur and NO save.
+await app.close();
+const n1 = newestDraft();
+assert(n1.p === prefillAccount, "the draft is linked to the exact account");
+assert(
+  n1.n === PREFILL.name && n1.ph === PREFILL.phone && n1.ad === PREFILL.address,
+  `🔴 name, phone and address are STORED with the link — no blur, no save (${JSON.stringify(n1)})`,
+);
+
+// N2 · a phone the operator already entered is kept; the empty name and address are filled.
+// (Committed first, and focus cleared: clicking «choose account» while ANY header field has focus
+// starts that field's blur-save, which disables the button mid-click and loses the click. Seen here,
+// not caused by this slice — recorded as a side finding. The not-yet-blurred case is covered in
+// tests/renderer/accountPrefill.test.ts, which reads the TYPED value.)
+({ app, page } = await launch());
+await newDraftLinkedTo(PREFILL.name, async () => {
+  await commitCustomer(page, "phone", "03111222");
+  // Leave no header field focused, and let its blur-save finish, before clicking «choose account».
+  await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+  await until("«choose account» to be enabled again", async () => !(await testid(page, "account-choose").isDisabled()), 15000);
+});
+await until("the prefilled address to show", async () => (await customerValue(page, "address")) === PREFILL.address, 15000);
+assert((await customerValue(page, "phone")) === "03111222", "🔴 a phone the operator typed is NOT replaced by the account's");
+await testid(page, "save-draft").click();
+await until("the draft to save", async () => (await testid(page, "draft-saved").count()) === 1);
+await app.close();
+const n2 = newestDraft();
+assert(
+  n2.ph === "03111222" && n2.ad === PREFILL.address && n2.n === PREFILL.name,
+  `the typed phone and the filled name/address are what the ledger holds (${JSON.stringify(n2)})`,
+);
+
+// 🔴 Linking and filling posted nothing.
+assert(num("SELECT count(*) AS n FROM obligations") === obligationsBeforeN, "🔴 linking an account and filling its contact created NO debt");
+assert(num("SELECT count(*) AS n FROM sales") === salesBeforeN, "and no sale");
+// 🔴 The invoice issued in M is untouched: it was issued before its account had a phone or address.
+assert(
+  num("SELECT count(*) AS n FROM invoices WHERE status = 'final' AND customer_phone IS NULL AND customer_address IS NULL") >= 1,
+  "the invoice issued in M still has exactly the contact it was issued with",
+);
+
 log(`\nOK — ${passed} assertions passed against the installed app`);
