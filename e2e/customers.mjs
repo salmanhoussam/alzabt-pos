@@ -1947,6 +1947,122 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
     log("ACC-3 allocation and history E2E complete");
   }
 
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // QW-COLLECT-TITLE — the payment form names the method actually chosen (a Whish payment is never
+  // titled "cash"), and Confirm without the "money received" box explains, focuses and highlights the
+  // box, sends nothing and keeps every typed value. Uses the ACC-3 customer's still-open debts.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const qwId = readDb((d) => d.prepare("SELECT id FROM parties WHERE display_name = ?").get("زبون التوزيع الأقدم").id);
+    const qwApp = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    const q = await qwApp.firstWindow();
+    try {
+      await signIn(q, "Cashier One", "1111");
+      await q.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      const setLang = async (lang) => {
+        if ((await q.evaluate(() => document.documentElement.lang)) !== lang) await testid(q, "lang-toggle").click();
+        await q.waitForFunction((l) => document.documentElement.lang === l, lang, { timeout: 10000 });
+      };
+      await setLang("ar");
+      const openStatement = async (name) => {
+        await q.locator('[data-testid="tab-customers"]').click();
+        await testid(q, "customers-search").fill(name);
+        await q.locator(`[data-customer="${qwId}"]`).first().click();
+        await testid(q, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+      };
+      await openStatement("زبون التوزيع الأقدم");
+      await q.locator('[data-testid="statement-obligation"][data-obligation="acc3-z-new"] [data-testid="collect-open"]').click();
+      await testid(q, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+      const title = async () => [(await testid(q, "collect-title").innerText()).trim(), await testid(q, "collect-title").getAttribute("data-method")];
+      assert(JSON.stringify(await title()) === JSON.stringify(["تسجيل دفعة نقديّة", "cash"]), "QW: cash (the default) is titled cash");
+      for (const [m, want] of [
+        ["card", "تسجيل دفعة بالبطاقة"],
+        ["bank_transfer", "تسجيل تحويل مصرفي"],
+        ["other", "تسجيل دفعة خارجية أخرى"],
+        ["whish", "تسجيل دفعة ويش"],
+      ]) {
+        await testid(q, "collect-method").selectOption(m);
+        assert(JSON.stringify(await title()) === JSON.stringify([want, m]), `🔴 QW: ${m} is titled «${want}» — never cash (${JSON.stringify(await title())})`);
+      }
+
+      // Confirm WITHOUT the box: explained at the box, focused, highlighted — nothing recorded, nothing lost.
+      await testid(q, "collect-amount").fill("1.00");
+      await testid(q, "collect-payment-reference").fill("WH-QW-1");
+      const settledBefore = num("SELECT count(*) AS n FROM settlements");
+      await testid(q, "collect-confirm").click();
+      await testid(q, "collect-confirm-missing").waitFor({ state: "visible", timeout: 10000 });
+      assert(
+        (await testid(q, "collect-confirm-missing").innerText()).trim() ===
+          "لم يُسجَّل شيء بعد. إذا وصل المبلغ فعلاً، ضع إشارة على «أؤكّد أنّ المبلغ وصلني فعلاً» ثم اضغط «تأكيد الدفعة».",
+        "🔴 QW: the missing confirmation is explained in the shop's language, at the box",
+      );
+      assert((await q.evaluate(() => document.activeElement?.getAttribute("data-testid"))) === "collect-funds-confirmed", "🔴 QW: focus moved to the box itself");
+      assert((await testid(q, "collect-funds-confirmed").getAttribute("aria-invalid")) === "true", "the box is marked invalid for assistive technology");
+      assert((await q.locator('[data-testid="collect-form"] label.collect-confirm-funds').getAttribute("data-missing")) === "1", "and highlighted");
+      assert(!(await testid(q, "collect-funds-confirmed").isChecked()), "🔴 QW: the box is still UNTICKED — never ticked by the screen");
+      assert(
+        (await testid(q, "collect-amount").inputValue()) === "1.00" &&
+          (await testid(q, "collect-method").inputValue()) === "whish" &&
+          (await testid(q, "collect-payment-reference").inputValue()) === "WH-QW-1",
+        "QW: the amount, method and reference are kept",
+      );
+      assert(num("SELECT count(*) AS n FROM settlements") === settledBefore, "🔴 QW: validation recorded NOTHING");
+      await q.screenshot({ path: SHOTS + "QW-1-confirm-missing.png" });
+
+      await testid(q, "collect-funds-confirmed").check();
+      assert((await testid(q, "collect-confirm-missing").count()) === 0, "ticking the box clears the explanation");
+      assert((await q.locator('[data-testid="collect-form"] label.collect-confirm-funds').getAttribute("data-missing")) === "0", "and the highlight");
+      await testid(q, "collect-confirm").click();
+      await testid(q, "collect-done").waitFor({ state: "visible", timeout: 30000 });
+      const st = readDb((d) =>
+        d
+          .prepare("SELECT amount_minor AS a, method AS m, provider AS p, funds_confirmed AS f, reference AS r FROM settlements WHERE obligation_id = 'acc3-z-new'")
+          .all(),
+      ).map((r) => [Number(r.a), r.m, r.p, Number(r.f), r.r]);
+      assert(JSON.stringify(st) === JSON.stringify([[100, "external", "whish", 1, "WH-QW-1"]]), `🔴 QW: the confirmed Whish payment is recorded once, exactly as before (${JSON.stringify(st)})`);
+      assert(num("SELECT count(*) AS n FROM settlements") === settledBefore + 1, "one settlement, no duplicate");
+
+      // The shared receipt: the same guidance, nothing sent.
+      await testid(q, "receipt-open").click();
+      await testid(q, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
+      await testid(q, "receipt-reference").fill("WH-QW-2");
+      await testid(q, "receipt-total").fill("1.00");
+      assert((await testid(q, "receipt-left").getAttribute("data-complete")) === "yes", "the proposal is complete — only the box is missing");
+      const receiptsBefore = num("SELECT count(*) AS n FROM receipts");
+      await testid(q, "receipt-confirm").click();
+      await testid(q, "receipt-confirm-missing").waitFor({ state: "visible", timeout: 10000 });
+      assert((await q.evaluate(() => document.activeElement?.getAttribute("data-testid"))) === "receipt-funds-confirmed", "🔴 QW: the shared receipt focuses its box too");
+      assert(!(await testid(q, "receipt-funds-confirmed").isChecked()), "still unticked");
+      assert((await testid(q, "receipt-total").inputValue()) === "1.00" && (await testid(q, "receipt-reference").inputValue()) === "WH-QW-2", "the total and reference are kept");
+      assert(num("SELECT count(*) AS n FROM receipts") === receiptsBefore, "🔴 QW: no receipt recorded by the validation");
+      await testid(q, "receipt-cancel").click();
+
+      // English.
+      await setLang("en");
+      await openStatement("زبون التوزيع الأقدم");
+      await q.locator('[data-testid="statement-obligation"][data-obligation="acc3-z-new"] [data-testid="collect-open"]').click();
+      await testid(q, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+      assert((await testid(q, "collect-title").innerText()).trim() === "Record a cash payment", "QW: English cash title");
+      await testid(q, "collect-method").selectOption("whish");
+      assert((await testid(q, "collect-title").innerText()).trim() === "Record a Whish payment", "🔴 QW: English Whish title — not cash");
+      await testid(q, "collect-amount").fill("1.00");
+      await testid(q, "collect-payment-reference").fill("WH-QW-3");
+      await testid(q, "collect-confirm").click();
+      await testid(q, "collect-confirm-missing").waitFor({ state: "visible", timeout: 10000 });
+      assert(
+        (await testid(q, "collect-confirm-missing").innerText()).trim() ===
+          "Nothing has been recorded yet. If the money really arrived, tick “I confirm the money was actually received”, then press “Confirm payment”.",
+        "QW: the English explanation",
+      );
+      assert(num("SELECT count(*) AS n FROM settlements") === settledBefore + 1, "and nothing more was recorded");
+      await testid(q, "collect-cancel").click();
+      await setLang("ar");
+    } finally {
+      await qwApp.close().catch(() => undefined);
+    }
+    log("QW-COLLECT-TITLE E2E complete");
+  }
+
   log("customer collection E2E complete");
   log("customer statement E2E complete");
 } finally {

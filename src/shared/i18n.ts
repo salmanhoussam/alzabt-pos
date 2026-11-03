@@ -502,6 +502,9 @@ const AR: Dict = {
   "collect.fundsConfirmed": "أؤكّد أنّ المبلغ وصلني فعلاً.",
   "collect.fundsHint": "لا يتّصل هذا الجهاز بويش ولا بالمصرف؛ التأكيد منك.",
   "collect.confirmRequired": "أكِّد أنّ المبلغ وصل قبل التسجيل.",
+  // QW-COLLECT-TITLE: shown AT the box after a confirm attempt without it. Says nothing was recorded —
+  // true, nothing was sent — and never says the money did not arrive. Names the box and the button as shown.
+  "collect.confirmMissing": "لم يُسجَّل شيء بعد. إذا وصل المبلغ فعلاً، ضع إشارة على «أؤكّد أنّ المبلغ وصلني فعلاً» ثم اضغط «تأكيد الدفعة».",
   "collect.pending.recorded": "وُجدت هذه الدفعة مسجَّلة في السجلّ. لم تُحصَّل مرّتين.",
   "collect.pending.not_recorded": "ما في عملية قبض مسجّلة في برنامج «عالضبط» لهالمحاولة. هيدا ما بيعني بالضرورة إن المبلغ ما وصل. تأكّد من استلام المبلغ فعلياً قبل إعادة محاولة تسجيل القبض.",
   "collect.pending.unknown": "تعذّر التأكّد من هذه الدفعة. لا تحصِّل المبلغ مرّة أخرى. أعد فتح الكشف أو أعد تشغيل التطبيق، وسيُسأل السجلّ من جديد.",
@@ -550,7 +553,13 @@ const AR: Dict = {
   // the old wording would have made the screen lie about what its own button does.
   "statement.readOnly": "لا يمكن تسجيل دين من هنا — يمكن تسجيل دفعة على دين قائم فقط.",
   "collect.action": "تسجيل دفعة",
-  "collect.title": "تسجيل دفعة نقديّة",
+  // QW-COLLECT-TITLE: one title per method. `collect.title` said «نقديّة» for EVERY method (field finding
+  // 2026-11-01: a Whish payment titled cash); the cash title keeps that exact wording, the others are new.
+  "collect.title.cash": "تسجيل دفعة نقديّة",
+  "collect.title.card": "تسجيل دفعة بالبطاقة",
+  "collect.title.whish": "تسجيل دفعة ويش",
+  "collect.title.bank_transfer": "تسجيل تحويل مصرفي",
+  "collect.title.other": "تسجيل دفعة خارجية أخرى",
   "collect.customer": "الزبون",
   "collect.reference": "الدين",
   "collect.outstanding": "المتبقّي على هذا الدين",
@@ -1224,6 +1233,7 @@ const EN: Dict = {
   "collect.fundsConfirmed": "I confirm the money was actually received.",
   "collect.fundsHint": "This till does not contact Whish or the bank; the confirmation is yours.",
   "collect.confirmRequired": "Confirm the money arrived before recording it.",
+  "collect.confirmMissing": "Nothing has been recorded yet. If the money really arrived, tick “I confirm the money was actually received”, then press “Confirm payment”.",
   "collect.pending.recorded": "This payment was found recorded in the ledger. It was not collected twice.",
   "collect.pending.not_recorded": "No collection was recorded in ALZABT POS for this attempt. This does not confirm whether the money was received. Check the actual payment before retrying the recording.",
   "collect.pending.unknown": "This payment could not be confirmed. Do not collect the money again. Reopen the statement or restart the app and the ledger will be asked again.",
@@ -1267,7 +1277,11 @@ const EN: Dict = {
   // true in S3B. An owner can now record a payment, but still cannot create a debt.
   "statement.readOnly": "No debt can be recorded here \u2014 only a payment against an existing debt.",
   "collect.action": "Record payment",
-  "collect.title": "Record a cash payment",
+  "collect.title.cash": "Record a cash payment",
+  "collect.title.card": "Record a card payment",
+  "collect.title.whish": "Record a Whish payment",
+  "collect.title.bank_transfer": "Record a bank transfer",
+  "collect.title.other": "Record another external payment",
   "collect.customer": "Customer",
   "collect.reference": "Debt",
   "collect.outstanding": "Outstanding on this debt",

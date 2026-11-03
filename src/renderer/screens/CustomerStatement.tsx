@@ -38,7 +38,7 @@
  * merely avoids offering something that would be refused.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../api";
 import type { PaymentMethod } from "../../domain/sale";
 import { parseDecimal } from "../../domain/money";
@@ -118,10 +118,18 @@ export function CustomerStatement({ customerId }: Props) {
   const [receiptOpen, setReceiptOpen] = useState(false);
   const [receiptBusy, setReceiptBusy] = useState(false);
 
+  /**
+   * QW-COLLECT-TITLE: true only after a confirm attempt found the "money received" box unticked. It
+   * highlights the box and explains; it is cleared as soon as the box, the method or the form changes.
+   */
+  const [confirmMissing, setConfirmMissing] = useState(false);
+  const confirmBoxRef = useRef<HTMLInputElement | null>(null);
+
   const resetPaymentDetails = () => {
     setMethod("cash");
     setReference("");
     setConfirmed(false);
+    setConfirmMissing(false);
   };
 
   const closeForm = () => {
@@ -192,7 +200,12 @@ export function CustomerStatement({ customerId }: Props) {
       return;
     }
     if (needsConfirmation && !confirmed) {
+      // 🔴 QW-COLLECT-TITLE: SHOW WHERE, NEVER TICK. Nothing was sent; the box is focused, highlighted
+      // and explained, and every typed value stays as it was. Only the owner can tick it.
       setPayError(t("collect.confirmRequired"));
+      setConfirmMissing(true);
+      confirmBoxRef.current?.focus();
+      confirmBoxRef.current?.scrollIntoView({ block: "nearest" });
       return;
     }
     await post({
@@ -594,7 +607,11 @@ export function CustomerStatement({ customerId }: Props) {
                         void submit(o);
                       }}
                     >
-                      <h4>{t("collect.title")}</h4>
+                      {/* QW-COLLECT-TITLE: the title names the method actually chosen — a Whish, bank
+                          transfer, card or other payment is never called "cash". */}
+                      <h4 data-testid="collect-title" data-method={method}>
+                        {t(`collect.title.${method}`)}
+                      </h4>
                       <div className="statement-row">
                         <span className="muted">{t("collect.customer")}</span>
                         <bdi data-testid="collect-customer">{statement.customer.displayName}</bdi>
@@ -644,6 +661,7 @@ export function CustomerStatement({ customerId }: Props) {
                             setMethod(e.target.value as CollectionMethodDto);
                             setReference("");
                             setConfirmed(false);
+                            setConfirmMissing(false);
                             setPayError(null);
                             setAttemptKey(newIdempotencyKey());
                           }}
@@ -678,21 +696,32 @@ export function CustomerStatement({ customerId }: Props) {
                         </label>
                       )}
                       {(method === "whish" || method === "bank_transfer" || method === "other") && (
-                        <label className="collect-confirm-funds">
-                          <input
-                            data-testid="collect-funds-confirmed"
-                            type="checkbox"
-                            checked={confirmed}
-                            disabled={blocked || busy}
-                            onChange={(e) => {
-                              setConfirmed(e.target.checked);
-                              setPayError(null);
-                              setAttemptKey(newIdempotencyKey());
-                            }}
-                          />{" "}
-                          <span>{t("collect.fundsConfirmed")}</span>
-                          <span className="muted small"> {t("collect.fundsHint")}</span>
-                        </label>
+                        <>
+                          <label className={`collect-confirm-funds${confirmMissing ? " missing" : ""}`} data-missing={confirmMissing ? "1" : "0"}>
+                            <input
+                              ref={confirmBoxRef}
+                              data-testid="collect-funds-confirmed"
+                              type="checkbox"
+                              checked={confirmed}
+                              disabled={blocked || busy}
+                              aria-invalid={confirmMissing}
+                              aria-describedby={confirmMissing ? `collect-confirm-missing-${o.id}` : undefined}
+                              onChange={(e) => {
+                                setConfirmed(e.target.checked);
+                                setConfirmMissing(false);
+                                setPayError(null);
+                                setAttemptKey(newIdempotencyKey());
+                              }}
+                            />{" "}
+                            <span>{t("collect.fundsConfirmed")}</span>
+                            <span className="muted small"> {t("collect.fundsHint")}</span>
+                          </label>
+                          {confirmMissing && (
+                            <p className="error small" id={`collect-confirm-missing-${o.id}`} role="alert" data-testid="collect-confirm-missing">
+                              {t("collect.confirmMissing")}
+                            </p>
+                          )}
+                        </>
                       )}
                       {payError !== null && (
                         <p className="error" data-testid="collect-error">

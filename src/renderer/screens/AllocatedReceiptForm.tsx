@@ -28,7 +28,7 @@
  * the amount, method and reference carried over and the funds confirmation NOT carried (asked again).
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../api";
 import { formatDecimal, money } from "../../domain/money";
 import { type ReceiptReconciliation, allocationState, leftText, minorOf, oldestFirstShares, openDebtsOf, sharableCurrencies } from "./receiptAllocation";
@@ -75,6 +75,9 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
   const [provider, setProvider] = useState<Provider>("whish");
   const [reference, setReference] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  /** QW-COLLECT-TITLE: set only when Confirm found the "money received" box unticked; cleared by the box. */
+  const [confirmMissing, setConfirmMissing] = useState(false);
+  const confirmBoxRef = useRef<HTMLInputElement | null>(null);
   const [totalText, setTotalText] = useState("");
   const [shares, setShares] = useState<Record<string, string>>({});
   /** False while the shares are the oldest-first proposal; true once the owner edits any share. */
@@ -128,7 +131,12 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
       return;
     }
     if (!confirmed) {
+      // 🔴 QW-COLLECT-TITLE: SHOW WHERE, NEVER TICK. Nothing was sent; the box is focused, highlighted
+      // and explained, and the total, shares, method and reference stay exactly as typed.
       setError(t("collect.confirmRequired"));
+      setConfirmMissing(true);
+      confirmBoxRef.current?.focus();
+      confirmBoxRef.current?.scrollIntoView({ block: "nearest" });
       return;
     }
     if (!complete || total === null) {
@@ -228,6 +236,7 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
           onChange={(e) => {
             setProvider(e.target.value as Provider);
             setConfirmed(false);
+            setConfirmMissing(false);
             edited();
           }}
         >
@@ -354,20 +363,29 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
           </button>
         </div>
       )}
-      <label className="collect-confirm-funds">
+      <label className={`collect-confirm-funds${confirmMissing ? " missing" : ""}`} data-missing={confirmMissing ? "1" : "0"}>
         <input
+          ref={confirmBoxRef}
           data-testid="receipt-funds-confirmed"
           type="checkbox"
           checked={confirmed}
           disabled={blocked || busy}
+          aria-invalid={confirmMissing}
+          aria-describedby={confirmMissing ? "receipt-confirm-missing" : undefined}
           onChange={(e) => {
             setConfirmed(e.target.checked);
+            setConfirmMissing(false);
             edited();
           }}
         />{" "}
         <span>{t("collect.fundsConfirmed")}</span>
         <span className="muted small"> {t("collect.fundsHint")}</span>
       </label>
+      {confirmMissing && (
+        <p className="error small" id="receipt-confirm-missing" role="alert" data-testid="receipt-confirm-missing">
+          {t("collect.confirmMissing")}
+        </p>
+      )}
       {error !== null && (
         <p className="error" data-testid="receipt-error">
           {error}
