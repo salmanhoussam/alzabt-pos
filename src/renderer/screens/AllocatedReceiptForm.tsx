@@ -133,7 +133,8 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
     if (!confirmed) {
       // 🔴 QW-COLLECT-TITLE: SHOW WHERE, NEVER TICK. Nothing was sent; the box is focused, highlighted
       // and explained, and the total, shares, method and reference stay exactly as typed.
-      setError(t("collect.confirmRequired"));
+      // QW-COLLECT-LAYOUT: ONE explanation, at the box — the generic error line is cleared, not doubled.
+      setError(null);
       setConfirmMissing(true);
       confirmBoxRef.current?.focus();
       confirmBoxRef.current?.scrollIntoView({ block: "nearest" });
@@ -377,9 +378,12 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
             setConfirmMissing(false);
             edited();
           }}
-        />{" "}
-        <span>{t("collect.fundsConfirmed")}</span>
-        <span className="muted small"> {t("collect.fundsHint")}</span>
+        />
+        {/* QW-COLLECT-LAYOUT: the box and its sentence share ONE row; the hint sits under the sentence. */}
+        <span className="collect-confirm-text">
+          <span>{t("collect.fundsConfirmed")}</span>
+          <span className="muted small">{t("collect.fundsHint")}</span>
+        </span>
       </label>
       {confirmMissing && (
         <p className="error small" id="receipt-confirm-missing" role="alert" data-testid="receipt-confirm-missing">

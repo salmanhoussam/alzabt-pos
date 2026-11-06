@@ -202,7 +202,8 @@ export function CustomerStatement({ customerId }: Props) {
     if (needsConfirmation && !confirmed) {
       // 🔴 QW-COLLECT-TITLE: SHOW WHERE, NEVER TICK. Nothing was sent; the box is focused, highlighted
       // and explained, and every typed value stays as it was. Only the owner can tick it.
-      setPayError(t("collect.confirmRequired"));
+      // QW-COLLECT-LAYOUT: ONE explanation, at the box — the generic error line is cleared, not doubled.
+      setPayError(null);
       setConfirmMissing(true);
       confirmBoxRef.current?.focus();
       confirmBoxRef.current?.scrollIntoView({ block: "nearest" });
@@ -712,9 +713,12 @@ export function CustomerStatement({ customerId }: Props) {
                                 setPayError(null);
                                 setAttemptKey(newIdempotencyKey());
                               }}
-                            />{" "}
-                            <span>{t("collect.fundsConfirmed")}</span>
-                            <span className="muted small"> {t("collect.fundsHint")}</span>
+                            />
+                            {/* QW-COLLECT-LAYOUT: the box and its sentence share ONE row; the hint sits under the sentence. */}
+                            <span className="collect-confirm-text">
+                              <span>{t("collect.fundsConfirmed")}</span>
+                              <span className="muted small">{t("collect.fundsHint")}</span>
+                            </span>
                           </label>
                           {confirmMissing && (
                             <p className="error small" id={`collect-confirm-missing-${o.id}`} role="alert" data-testid="collect-confirm-missing">

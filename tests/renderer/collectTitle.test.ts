@@ -62,7 +62,9 @@ describe("🔴 a missing 'money received' confirmation is shown where it is miss
 
   it("single debt: explained, focused, highlighted — and nothing is sent", () => {
     const b = branch(STATEMENT, "if (needsConfirmation && !confirmed) {");
-    expect(b).toContain('setPayError(t("collect.confirmRequired"));');
+    // TRANSITION (QW-COLLECT-LAYOUT): was setPayError(t("collect.confirmRequired")) — a second red line.
+    expect(b).toContain("setPayError(null);");
+    expect(b).not.toContain("collect.confirmRequired");
     expect(b).toContain("setConfirmMissing(true);");
     expect(b).toContain("confirmBoxRef.current?.focus();");
     expect(b).not.toMatch(/setConfirmed|post\(|setAmountText|setMethod|setReference|setAttemptKey/);
@@ -73,7 +75,9 @@ describe("🔴 a missing 'money received' confirmation is shown where it is miss
 
   it("shared receipt: the same, before the one receipt send", () => {
     const b = branch(FORM, "if (!confirmed) {");
-    expect(b).toContain('setError(t("collect.confirmRequired"));');
+    // TRANSITION (QW-COLLECT-LAYOUT): was setError(t("collect.confirmRequired")) — a second red line.
+    expect(b).toContain("setError(null);");
+    expect(b).not.toContain("collect.confirmRequired");
     expect(b).toContain("setConfirmMissing(true);");
     expect(b).toContain("confirmBoxRef.current?.focus();");
     expect(b).not.toMatch(/setConfirmed|recordAllocatedReceipt|setShares|setTotalText|setReference|setAttemptKey/);
