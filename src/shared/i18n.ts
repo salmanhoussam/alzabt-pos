@@ -501,7 +501,6 @@ const AR: Dict = {
   "collect.referenceRequired": "اكتب مرجع الدفعة.",
   "collect.fundsConfirmed": "أؤكّد أنّ المبلغ وصلني فعلاً.",
   "collect.fundsHint": "لا يتّصل هذا الجهاز بويش ولا بالمصرف؛ التأكيد منك.",
-  "collect.confirmRequired": "أكِّد أنّ المبلغ وصل قبل التسجيل.",
   // QW-COLLECT-TITLE: shown AT the box after a confirm attempt without it. Says nothing was recorded —
   // true, nothing was sent — and never says the money did not arrive. Names the box and the button as shown.
   "collect.confirmMissing": "لم يُسجَّل شيء بعد. إذا وصل المبلغ فعلاً، ضع إشارة على «أؤكّد أنّ المبلغ وصلني فعلاً» ثم اضغط «تأكيد الدفعة».",
@@ -1232,7 +1231,6 @@ const EN: Dict = {
   "collect.referenceRequired": "Enter the payment reference.",
   "collect.fundsConfirmed": "I confirm the money was actually received.",
   "collect.fundsHint": "This till does not contact Whish or the bank; the confirmation is yours.",
-  "collect.confirmRequired": "Confirm the money arrived before recording it.",
   "collect.confirmMissing": "Nothing has been recorded yet. If the money really arrived, tick “I confirm the money was actually received”, then press “Confirm payment”.",
   "collect.pending.recorded": "This payment was found recorded in the ledger. It was not collected twice.",
   "collect.pending.not_recorded": "No collection was recorded in ALZABT POS for this attempt. This does not confirm whether the money was received. Check the actual payment before retrying the recording.",

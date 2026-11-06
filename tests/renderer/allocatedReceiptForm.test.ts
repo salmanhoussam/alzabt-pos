@@ -153,7 +153,8 @@ describe("the form — source-level guarantees", () => {
   });
   it("early refusals are in the owner's language and need the reference and the funds confirmation", () => {
     expect(FORM_CODE).toContain('t("collect.referenceRequired")');
-    expect(FORM_CODE).toContain('t("collect.confirmRequired")');
+    // TRANSITION (QW-COLLECT-LAYOUT): was t("collect.confirmRequired"); the one explanation is collect.confirmMissing.
+    expect(FORM_CODE).toContain('t("collect.confirmMissing")');
     expect(FORM_CODE).toContain('type="checkbox"');
     expect(FORM_CODE).toContain("checked={confirmed}"); // starts unchecked: useState(false)
     expect(FORM_CODE).toContain("useState(false)");

@@ -929,7 +929,9 @@ try {
   await testid(p6, "collect-error").waitFor({ state: "visible", timeout: 30000 });
   await testid(p6, "collect-payment-reference").fill("WH-E2E-001");
   await testid(p6, "collect-confirm").click();
-  await testid(p6, "collect-error").waitFor({ state: "visible", timeout: 30000 });
+  // TRANSITION (QW-COLLECT-LAYOUT): was collect-error; a missing confirmation now has ONE explanation, at the box.
+  await testid(p6, "collect-confirm-missing").waitFor({ state: "visible", timeout: 30000 });
+  assert((await testid(p6, "collect-error").count()) === 0, "🔴 QW-LAYOUT: one red line only — no generic error beside the explanation");
   assert(dbCount() === settlementsBefore + 1, "🔴 neither refusal wrote a settlement (only the recovered one exists)");
   await testid(p6, "collect-funds-confirmed").check();
   await testid(p6, "collect-confirm").click();
@@ -1378,7 +1380,9 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
 
     // refusal 1: the confirmation was not given → refused on screen, nothing written
     await testid(pq, "receipt-confirm").click();
-    await testid(pq, "receipt-error").waitFor({ state: "visible", timeout: 30000 });
+    // TRANSITION (QW-COLLECT-LAYOUT): was receipt-error; the missing confirmation now has ONE explanation, at the box.
+    await testid(pq, "receipt-confirm-missing").waitFor({ state: "visible", timeout: 30000 });
+    assert((await testid(pq, "receipt-error").count()) === 0, "🔴 QW-LAYOUT: one red line only on the shared receipt");
     assert(num("SELECT count(*) AS n FROM receipts") === 0 && num("SELECT count(*) AS n FROM receipt_attempts") === 0, "🔴 an unconfirmed receipt wrote NOTHING");
     // refusal 2: the reference already belongs to a direct collection → the ledger refuses, nothing is shared
     await testid(pq, "receipt-funds-confirmed").check();
@@ -1999,6 +2003,18 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       assert((await q.evaluate(() => document.activeElement?.getAttribute("data-testid"))) === "collect-funds-confirmed", "🔴 QW: focus moved to the box itself");
       assert((await testid(q, "collect-funds-confirmed").getAttribute("aria-invalid")) === "true", "the box is marked invalid for assistive technology");
       assert((await q.locator('[data-testid="collect-form"] label.collect-confirm-funds').getAttribute("data-missing")) === "1", "and highlighted");
+      // QW-COLLECT-LAYOUT: MEASURED, not styled-by-assumption — the box sits on the same row as its sentence
+      // (its top within the sentence's first line), and there is exactly ONE red line under it.
+      {
+        const g = await q.evaluate(() => {
+          const box = document.querySelector('[data-testid="collect-funds-confirmed"]').getBoundingClientRect();
+          const txt = document.querySelector('[data-testid="collect-form"] .collect-confirm-text').getBoundingClientRect();
+          return { boxTop: box.top, boxBottom: box.bottom, boxLeft: box.left, boxRight: box.right, txtTop: txt.top, txtLeft: txt.left, txtRight: txt.right };
+        });
+        assert(Math.abs(g.boxTop - g.txtTop) <= 8 && g.boxBottom > g.txtTop, `🔴 QW-LAYOUT: the box shares the sentence's row (${JSON.stringify(g)})`);
+        assert(g.boxRight <= g.txtLeft + 1 || g.boxLeft >= g.txtRight - 1, `🔴 QW-LAYOUT: the box is beside the sentence, not over it (${JSON.stringify(g)})`);
+        assert((await testid(q, "collect-error").count()) === 0, "🔴 QW-LAYOUT: one red line only");
+      }
       assert(!(await testid(q, "collect-funds-confirmed").isChecked()), "🔴 QW: the box is still UNTICKED — never ticked by the screen");
       assert(
         (await testid(q, "collect-amount").inputValue()) === "1.00" &&
@@ -2033,6 +2049,15 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       await testid(q, "receipt-confirm-missing").waitFor({ state: "visible", timeout: 10000 });
       assert((await q.evaluate(() => document.activeElement?.getAttribute("data-testid"))) === "receipt-funds-confirmed", "🔴 QW: the shared receipt focuses its box too");
       assert(!(await testid(q, "receipt-funds-confirmed").isChecked()), "still unticked");
+      {
+        const g = await q.evaluate(() => {
+          const box = document.querySelector('[data-testid="receipt-funds-confirmed"]').getBoundingClientRect();
+          const txt = document.querySelector('[data-testid="receipt-form"] .collect-confirm-text').getBoundingClientRect();
+          return { boxTop: box.top, boxBottom: box.bottom, txtTop: txt.top };
+        });
+        assert(Math.abs(g.boxTop - g.txtTop) <= 8 && g.boxBottom > g.txtTop, `🔴 QW-LAYOUT: shared receipt box shares the sentence's row (${JSON.stringify(g)})`);
+        assert((await testid(q, "receipt-error").count()) === 0, "🔴 QW-LAYOUT: one red line only on the shared receipt");
+      }
       assert((await testid(q, "receipt-total").inputValue()) === "1.00" && (await testid(q, "receipt-reference").inputValue()) === "WH-QW-2", "the total and reference are kept");
       assert(num("SELECT count(*) AS n FROM receipts") === receiptsBefore, "🔴 QW: no receipt recorded by the validation");
       await testid(q, "receipt-cancel").click();

@@ -173,7 +173,8 @@ describe("payment methods on the collection form (source-level)", () => {
   it("🔴 the confirmation is sent as the owner's choice, and is required for whish, bank transfer and other", () => {
     expect(STATEMENT).toMatch(/method === "whish" \|\| method === "bank_transfer" \|\| method === "other"/);
     expect(STATEMENT).toContain("fundsConfirmed: needsConfirmation ? confirmed : false");
-    expect(STATEMENT).toContain('t("collect.confirmRequired")');
+    // TRANSITION (QW-COLLECT-LAYOUT): was t("collect.confirmRequired"); the one explanation is collect.confirmMissing.
+    expect(STATEMENT).toContain('t("collect.confirmMissing")');
     expect(STATEMENT).toContain('t("collect.referenceRequired")');
   });
   it("🔴 a different method, reference or confirmation is a different payment and takes a new key — except while an outcome is UNKNOWN, when the fields are frozen", () => {

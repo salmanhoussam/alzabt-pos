@@ -888,5 +888,10 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
   display: flex; flex-direction: column; gap: 6px; }
 .collect-form h4 { margin: 0 0 2px; font-size: 14px; }
 .collect-form label { display: flex; flex-direction: column; gap: 4px; }
+/* QW-COLLECT-LAYOUT: the "money received" box sits on the SAME row as its sentence (RTL and LTR), at the
+   start of the text; the hint stays under the sentence. Overrides the column layout above for this label only. */
+.collect-form label.collect-confirm-funds { flex-direction: row; align-items: flex-start; gap: 8px; }
+.collect-form label.collect-confirm-funds > input { flex: none; margin: 3px 0 0; }
+.collect-confirm-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 /* Digits read left-to-right in both languages, and tabular figures keep columns from jittering. */
 .collect-amount { direction: ltr; text-align: start; padding: 6px 8px; font-variant-numeric: tabular-nums; }
