@@ -290,6 +290,25 @@ export class SaleRepository {
     return rows.map((r) => this.hydrate(r));
   }
 
+  /**
+   * SELL-CUSTOMER-LINK (ACC-2): the PAID till sales linked to one customer, oldest first.
+   *
+   * 🔴 ONLY `source_type = 'pos' AND payment_status = 'paid'`. A credit sale is shown once, as its
+   * obligation, so it is excluded here — listing it twice would make one sale look like two
+   * activities. Invoice sales carry no customer id (M14). No index on `customer_id` exists; at a
+   * shop's volume this is a scan of one table (measured cost recorded with the slice, not guessed).
+   */
+  listPaidSalesForCustomer(customerId: string): SaleRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM sales
+          WHERE customer_id = ? AND source_type = 'pos' AND payment_status = 'paid'
+          ORDER BY completed_at, receipt_number`,
+      )
+      .all(customerId) as SaleRow[];
+    return rows.map((r) => this.hydrate(r));
+  }
+
   listVoidsForSales(saleIds: ReadonlyArray<string>): Map<string, VoidRecord> {
     const out = new Map<string, VoidRecord>();
     const stmt = this.db.prepare("SELECT * FROM voids WHERE sale_id = ?");

@@ -675,6 +675,9 @@ describe("posted history cannot be rewritten", () => {
       "findAttempt",
       "findObligationById",
       "findObligationBySource",
+      // TRANSITION (ACC-3, HIST-CURRENT-BALANCE): one more READ — the debts posted by a page of sales,
+      // in one SELECT. It mutates nothing; the UPDATE/DELETE checks below still hold for the whole file.
+      "findSaleObligations",
       "findSettlementByIdempotencyKey",
       "findSettlementByProviderReference",
       "insertAttempt",

@@ -132,6 +132,8 @@ const statementOf = (customerId: string): CustomerStatementDto => {
       .map(([currency, minor]) => ({ minor: minor.toString(), currency })),
     // TRANSITION with migration 17: the statement carries the collections still open (none here).
     pendingCollections: [],
+    // ACC-2: the handler also lists paid sales; none exist in this ledger-only fixture.
+    paidSales: [],
     // TRANSITION with migration 18: receipts still open (none here).
     pendingReceipts: [],
   };

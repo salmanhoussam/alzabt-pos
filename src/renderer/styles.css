@@ -83,6 +83,8 @@ input { user-select: text; }
 h1, h2 { margin: 0 0 12px; }
 .muted { color: var(--muted); }
 .error { color: var(--danger); font-weight: 600; }
+/* QW-COLLECT-TITLE: the "money received" box a confirm attempt found unticked. Highlighted, never ticked. */
+.collect-confirm-funds.missing { outline: 2px solid var(--danger); outline-offset: 4px; border-radius: 6px; }
 .center { display: grid; place-items: center; min-height: 100%; padding: 24px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; }
 

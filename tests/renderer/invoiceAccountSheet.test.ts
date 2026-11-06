@@ -48,8 +48,10 @@ describe("labels exist in both languages", () => {
 describe("the sheet's wiring (source-level)", () => {
   it("🔴 the account is chosen by id through the existing customer finder — never by name", () => {
     expect(SHEET).toContain("<CustomerFinder");
-    expect(SHEET).toContain("chooseAccount(c.id, c.displayName)");
-    expect(SHEET).toContain("customerPartyId: customerId");
+    // Were `chooseAccount(c.id, c.displayName)` and `customerPartyId: customerId` until INV-CUSTOMER-PREFILL
+    // passed the whole picked CustomerDto (for its phone and address). The link is still its id.
+    expect(SHEET).toContain("chooseAccount(c)");
+    expect(SHEET).toContain("customerPartyId: account?.id ?? null");
     // the printed-name input never feeds the link
     expect(SHEET).not.toMatch(/customerPartyId:[^,}]*customerName/);
   });

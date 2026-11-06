@@ -219,6 +219,20 @@ export class LedgerRepository {
     );
   }
 
+  /**
+   * HIST-CURRENT-BALANCE (ACC-3): the debts posted by any of these sales, in ONE query on the
+   * `UNIQUE (source_kind, source_ref)` index — a history page never costs one lookup per row. A sale
+   * that posted no debt is simply absent. Read-only.
+   */
+  findSaleObligations(saleIds: ReadonlyArray<string>): ObligationRecord[] {
+    if (saleIds.length === 0) return [];
+    const marks = saleIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT ${O_COLS} FROM obligations WHERE source_kind = 'sale' AND source_ref IN (${marks}) ORDER BY posted_at, id`)
+      .all(...saleIds) as ObligationRow[];
+    return rows.map((r) => obligation(r) as ObligationRecord);
+  }
+
   /** Every obligation of one party, scoped by direction IN THE QUERY so the two can never mix. */
   listObligations(partyId: string, direction: ObligationDirection): ObligationRecord[] {
     const rows = this.db
