@@ -41,7 +41,14 @@ function killTree(pid) {
 function windowTitle(pid) {
   if (process.platform !== "win32") return null;
   try {
-    return execFileSync("powershell", ["-NoProfile", "-Command", `(Get-Process -Id ${pid}).MainWindowTitle`], { encoding: "utf8" }).trim();
+    // 🔴 UTF-8 OUTPUT, FORCED. Without it PowerShell writes in the console's OEM code page; on a code
+    // page 437 machine the title's em dash arrives as "-" and the exact comparison below fails on a
+    // title that is correct. The comparison itself stays exact.
+    return execFileSync(
+      "powershell",
+      ["-NoProfile", "-Command", `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; (Get-Process -Id ${pid}).MainWindowTitle`],
+      { encoding: "utf8" },
+    ).trim();
   } catch {
     return "";
   }
