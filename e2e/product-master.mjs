@@ -50,6 +50,17 @@ const assert = (cond, msg) => {
 async function launch() {
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
   const page = await app.firstWindow();
+  // 🔴 THE VIEWPORT IS PINNED, NOT INHERITED FROM THE SCREEN. Every R1 measurement below was written
+  // against the Windows CI runner, whose 1024x768 display clamps the 1280x800 window to ~1024 wide
+  // (run 41619120624: strip 32-976, scrollWidth 981 > clientWidth 944). On a wider developer screen the
+  // window opens at 1280, the table fits, and "the strip has something to scroll" fails for a reason
+  // that has nothing to do with the app. Pinning 1024x768 reproduces the runner exactly (a no-op there)
+  // and keeps every assertion; section I still narrows to the minimum 1024x640 on its own.
+  await app.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows()[0];
+    w.setSize(1024, 768);
+  });
+  await page.waitForFunction(() => window.innerWidth <= 1024, undefined, { timeout: 10000 });
   await signIn(page, "Cashier One", "1111");
   await page.locator('[data-testid="tab-products"]').click();
   return { app, page };
