@@ -12,6 +12,7 @@ import { MAX_CART_LINES, type CartLine, priceCart } from "../domain/cart";
 import { BASE_UNITS, type Catalog, loadCatalog } from "../domain/catalog";
 import { decodeUtf8Strict, toImportCsv, validateImport, type ImportRejection } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
+import { cleanPaymentReference } from "../domain/ledger";
 import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
 import { categoryNameAr, categoryNameEn } from "../domain/category";
@@ -260,7 +261,17 @@ export interface CreateSaleInput {
    * Checked active inside the sale transaction; the name snapshot is read from the account there.
    */
   readonly customerId?: string | null;
+  /**
+   * P2 · SELL-WHISH-REFERENCE-AND-CONFIRMATION (owner, 2026-11-07). REQUIRED for a NEW `external` sale
+   * and refused with any other method: the Whish Money reference the operator typed and their explicit
+   * confirmation that the money actually arrived. This till never contacts Whish; both are the
+   * operator's own record. Bank transfer is out of scope (owner decision), so the provider is fixed.
+   */
+  readonly whish?: { readonly reference: unknown; readonly fundsConfirmed: unknown } | null;
 }
+
+/** The exact SQLite refusal of a reference already in `external_references` (migration 19 triggers). */
+const REFERENCE_TAKEN = /payment reference is already recorded/;
 
 export interface CreateSaleResult {
   readonly sale: SaleRecord;
@@ -2105,6 +2116,23 @@ export class PosService {
     if (customerId !== null && (typeof customerId !== "string" || customerId.length === 0 || customerId.length > 100)) {
       throw new DomainError("INVALID_INPUT", "A customer account must be given by its id");
     }
+    // P2: Whish evidence belongs to an `external` sale only, and its shape is checked before anything
+    // is read. The reference is cleaned by the SAME rule the collection form uses (1–64 characters,
+    // never a card number); "the money arrived" must be an explicit true, never a default.
+    const whishGiven = input.whish ?? null;
+    if (whishGiven !== null && input.paymentMethod !== "external") {
+      throw new DomainError("INVALID_INPUT", "A Whish reference belongs to a Whish Money payment only");
+    }
+    let whish: { readonly provider: "whish"; readonly reference: string; readonly fundsConfirmed: true } | null = null;
+    if (whishGiven !== null) {
+      if (typeof whishGiven !== "object") throw new DomainError("INVALID_INPUT", "Whish payment details are malformed");
+      const reference = cleanPaymentReference(whishGiven.reference, "whish");
+      if (reference === null) throw new DomainError("INVALID_INPUT", "This payment method needs a reference");
+      if (whishGiven.fundsConfirmed !== true) {
+        throw new DomainError("FUNDS_NOT_CONFIRMED", "Confirm that the money was actually received");
+      }
+      whish = { provider: "whish", reference, fundsConfirmed: true };
+    }
 
     // 🔴 THE CUSTOMER-FREE FINGERPRINT IS BYTE-IDENTICAL TO BEFORE ACC-2. `customerId` is appended only
     // when a customer is linked, so an existing key replays exactly as it always did, and the same
@@ -2119,6 +2147,9 @@ export class PosService {
           lines: input.lines.map((l) => [l.productId, l.quantityMilli]),
           expectedTotalMinor: input.expectedTotalMinor.toString(),
           ...(customerId === null ? {} : { customerId }),
+          // P2: appended only when present, so every pre-P2 request keeps its exact fingerprint. The
+          // reference is part of WHAT the payment is: the same key with another reference is a conflict.
+          ...(whish === null ? {} : { whish: whish.reference }),
         }),
       )
       .digest("hex");
@@ -2130,6 +2161,13 @@ export class PosService {
         throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
       }
       return { sale: existing.sale, duplicate: true };
+    }
+
+    // 🔴 P2: A NEW `external` SALE NEEDS ITS EVIDENCE. Checked AFTER the replay above on purpose: a sale
+    // already recorded before P2 (with no reference) still answers its own retry, and nothing new is
+    // ever written as "external" without a reference and an explicit confirmation.
+    if (input.paymentMethod === "external" && whish === null) {
+      throw new DomainError("INVALID_INPUT", "A Whish Money payment needs its reference and the confirmation that the money arrived");
     }
 
     const priced = priceCart(this.catalog, input.lines);
@@ -2163,6 +2201,7 @@ export class PosService {
       balanceDueMinor: 0n,
       paymentStatus: "paid",
       paymentMethod: input.paymentMethod,
+      externalPayment: whish,
       businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
       completedAt: timestamp,
       createdAt: timestamp,
@@ -2181,8 +2220,22 @@ export class PosService {
       lineTotalMinor: l.lineTotal.minor,
     }));
 
+    // P2: the ledger itself refuses a Whish reference already used anywhere (the tender's registration
+    // trigger aborts the WHOLE sale transaction — nothing is written). The operator reads the same
+    // sentence the collection form gives, never the internal SQLite text.
+    const refusingTakenReference = <T>(write: () => T): T => {
+      try {
+        return write();
+      } catch (err) {
+        if (whish !== null && err instanceof Error && !(err instanceof DomainError) && REFERENCE_TAKEN.test(err.message)) {
+          throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
+        }
+        throw err;
+      }
+    };
+
     if (customerId === null) {
-      this.repository.commitSale(header, lines);
+      refusingTakenReference(() => this.repository.commitSale(header, lines));
     } else {
       // 🔴 SELL-CUSTOMER-LINK (ACC-2): ONE TRANSACTION FOR THE CHECK AND THE WRITE. The account is
       // re-read as an ACTIVE customer by id inside the same BEGIN IMMEDIATE that writes the sale, so
@@ -2194,7 +2247,7 @@ export class PosService {
         throw new DomainError("NOT_AVAILABLE", "Customer accounts are not available on this terminal");
       }
       let raced: CreateSaleResult | null = null;
-      transact(() => {
+      refusingTakenReference(() => transact(() => {
         const again = this.repository.findByIdempotencyKey(input.idempotencyKey);
         if (again) {
           if (again.fingerprint !== fingerprint) {
@@ -2208,7 +2261,7 @@ export class PosService {
           { ...header, customerId: customer.id, customerNameSnapshot: customer.display_name },
           lines,
         );
-      });
+      }));
       if (raced !== null) return raced;
     }
     const sale = this.repository.getSale(saleId);

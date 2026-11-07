@@ -26,7 +26,11 @@ export interface Migration {
  * decision D-REF-1 = B (2026-11-07), because merchants type references such as «WH-2026/10 #55» and
  * «مرجع 77» today. The only rule on a live key is that it is not empty (CHECK on the table).
  */
-function M19_REF_KEY(expr: string): string {
+/**
+ * Exported (P2) ONLY so a read can ask the registry with the IDENTICAL normalisation the triggers use;
+ * exporting changes no migration's SQL and therefore no checksum.
+ */
+export function M19_REF_KEY(expr: string): string {
   let e = expr;
   const arabicIndic = "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669";
   const extended = "\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9";

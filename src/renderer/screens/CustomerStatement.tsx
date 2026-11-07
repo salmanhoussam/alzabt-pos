@@ -783,7 +783,11 @@ export function CustomerStatement({ customerId }: Props) {
                 <bdi dir="ltr" data-testid="statement-paid-sale-total">
                   {fmt(ps.total)}
                 </bdi>{" "}
-                <span className="muted small">{t(METHOD_LABEL[ps.paymentMethod])}</span>{" "}
+                <span className="muted small" data-testid="statement-paid-sale-method" data-provider={ps.externalPayment?.provider ?? "none"}>
+                  {ps.externalPayment?.provider === "whish"
+                    ? `${t("method.whish")} · ${ps.externalPayment.reference}`
+                    : t(METHOD_LABEL[ps.paymentMethod])}
+                </span>{" "}
                 <span className="muted small">
                   <bdi dir="ltr">{ps.completedAt.slice(0, 10)}</bdi>
                 </span>

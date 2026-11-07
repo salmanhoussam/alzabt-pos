@@ -52,9 +52,11 @@ describe("cashier session", () => {
 describe("completing a sale", () => {
   it("records cashier, payment method, currency, snapshots and exact totals", () => {
     const { db, service } = makeHarness(t.dbPath);
+    // TRANSITION (P2): a new `external` sale now needs its Whish evidence; old request had no `whish`.
     const { sale, duplicate } = service.createSale({
       idempotencyKey: newKey(),
       paymentMethod: "external",
+      whish: { reference: "WH-POS-1083", fundsConfirmed: true },
       lines: [
         { productId: "prod-0002", quantityMilli: 2000 },
         { productId: "prod-0008", quantityMilli: 1000 },

@@ -108,6 +108,7 @@ export function toSaleDto(s: SaleRecord, invoiceNumber: number | null = null): S
     balanceDue: toMoneyDto(s.balanceDue),
     paymentStatus: s.paymentStatus,
     paymentMethod: s.paymentMethod,
+    ...(s.externalPayment ? { externalPayment: { provider: s.externalPayment.provider, reference: s.externalPayment.reference } } : {}),
     businessDate: s.businessDate,
     completedAt: s.completedAt,
     lines: s.lines.map((l) => ({

@@ -307,9 +307,16 @@ describe("🔴 a scan never confirms a payment or clears the cart", () => {
     .replace(/^\s*\/\/.*$/gm, "");
 
   it("every payment method button refuses Enter", () => {
-    const payButton = sell.slice(sell.indexOf("PAYMENT_METHODS.map("), sell.indexOf("onClick={() => pay(m)}") + 30);
+    // TRANSITION (P2): the buttons render from `TILL_BUTTONS` (Whish Money replaced the plain external
+    // button) and a click calls `void pay(m)`. Old anchors: "PAYMENT_METHODS.map(" … "onClick={() => pay(m)}".
+    const payButton = sell.slice(sell.indexOf("TILL_BUTTONS.map("), sell.indexOf("void pay(m);") + 30);
     expect(payButton).toContain("onKeyDown={refuseEnterActivation}");
     expect(payButton).toContain("data-testid={`pay-${m}`}");
+    // P2: the Whish step's own record button refuses Enter too, and its reference box swallows Enter.
+    const whish = sell.slice(sell.indexOf('data-testid="whish-submit"'), sell.indexOf('data-testid="whish-submit"') + 120);
+    expect(whish).toContain("onKeyDown={refuseEnterActivation}");
+    const ref = sell.slice(sell.indexOf('data-testid="whish-reference"'), sell.indexOf('data-testid="whish-reference"') + 400);
+    expect(ref).toContain('if (e.key === "Enter") e.preventDefault();');
   });
 
   it("the clear-cart confirmation refuses Enter", () => {
@@ -512,9 +519,10 @@ describe("SB-RISK-03: a scan while the payment pane is open says why it did noth
     expect(sell).toContain("t(PAY_SCAN_MESSAGE_KEY)");
   });
 
-  it("every method still refuses Enter (cash, card, external, other render from one map)", () => {
+  it("every method still refuses Enter (cash, whish, card, other render from one map)", () => {
+    // TRANSITION (P2): one map, `TILL_BUTTONS`; old: PAYMENT_METHODS (cash, card, external, other).
     const sell = sellSource();
-    const methods = sell.slice(sell.indexOf("PAYMENT_METHODS.map("), sell.indexOf("onClick={() => pay(m)}") + 30);
+    const methods = sell.slice(sell.indexOf("TILL_BUTTONS.map("), sell.indexOf("void pay(m);") + 30);
     expect(methods).toContain("onKeyDown={refuseEnterActivation}");
   });
 });

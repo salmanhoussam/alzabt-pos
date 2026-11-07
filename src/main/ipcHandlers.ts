@@ -285,6 +285,18 @@ function str(value: unknown, field: string, max = 200): string {
   return value;
 }
 
+/**
+ * P2: the Whish Money evidence of a till sale — exactly { reference, fundsConfirmed }. Only the TYPES are
+ * checked here; the service applies the reference rule (the collection form's) and refuses an
+ * unconfirmed payment with its own code, so the operator reads the right sentence.
+ */
+function whishPayment(value: unknown): { reference: string; fundsConfirmed: boolean } {
+  const w = exactObject(value, ["reference", "fundsConfirmed"]);
+  if (typeof w.reference !== "string" || w.reference.length > 200) invalid("'whish.reference' must be text");
+  if (typeof w.fundsConfirmed !== "boolean") invalid("'whish.fundsConfirmed' must be true or false");
+  return { reference: w.reference, fundsConfirmed: w.fundsConfirmed };
+}
+
 /** An optional text field: null, undefined and "" all mean "not given". */
 function optionalStr(value: unknown, field: string, max: number): string | null {
   if (value === null || value === undefined) return null;
@@ -831,7 +843,8 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     createSale: wrap("createSale", (p) => {
       // ACC-2: `customerId` is the ONE optional key — an account id, never a name or a snapshot. Every
       // other unexpected key is still refused, so the renderer cannot choose a customer's name.
-      const o = objectWithOptional(p, ["idempotencyKey", "lines", "paymentMethod", "expectedTotalMinor"], ["customerId"]);
+      // P2: `whish` is the second optional key — exactly { reference, fundsConfirmed }, nothing else.
+      const o = objectWithOptional(p, ["idempotencyKey", "lines", "paymentMethod", "expectedTotalMinor"], ["customerId", "whish"]);
       if (!Array.isArray(o.lines) || o.lines.length === 0 || o.lines.length > 200) invalid("'lines' must be a non-empty array");
       const lines = o.lines.map((raw) => {
         const l = exactObject(raw, ["productId", "quantityMilli"]);
@@ -857,6 +870,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         paymentMethod: o.paymentMethod,
         expectedTotalMinor: parseMinor(o.expectedTotalMinor),
         ...("customerId" in o ? { customerId: str(o.customerId, "customerId", 100) } : {}),
+        ...("whish" in o ? { whish: whishPayment(o.whish) } : {}),
       });
       if (!result.duplicate) {
         try {
@@ -1748,6 +1762,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         total: { minor: sale.total.minor.toString(), currency: sale.total.currency },
         // A paid POS sale always carries its real method (migration 14's CHECK); never fabricated.
         paymentMethod: sale.paymentMethod as PaymentMethod,
+        ...(sale.externalPayment ? { externalPayment: { provider: sale.externalPayment.provider, reference: sale.externalPayment.reference } } : {}),
         completedAt: sale.completedAt,
         voided,
       })),

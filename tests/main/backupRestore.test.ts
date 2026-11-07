@@ -390,6 +390,50 @@ describe("🔴 restore — preview, consent, stage, restart, open", () => {
     expect(old).toEqual({ integrity: "ok", sales: 1 });
   });
 
+  it("🔴 P2: a Whish sale's payment record and its reference survive backup + restore — and the reference stays TAKEN", () => {
+    const a = open("محل ويش أ");
+    a.h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: 199n });
+    a.h.service.createSale({
+      idempotencyKey: newKey(),
+      paymentMethod: "external",
+      whish: { reference: "WH-BACKUP-1", fundsConfirmed: true },
+      lines: [{ productId: "prod-0003", quantityMilli: 1000 }],
+      expectedTotalMinor: 199n,
+    });
+    const m19 = (db: { prepare: (s: string) => { all: () => unknown[] } }) => ({
+      tenders: db.prepare("SELECT * FROM sale_tenders ORDER BY sale_id, seq").all(),
+      refs: db.prepare("SELECT provider, ref_key, ref_display, owner_kind, owner_id, legacy FROM external_references ORDER BY owner_id").all(),
+    });
+    const fromA = m19(a.h.db);
+    expect(fromA.tenders).toHaveLength(2);
+    expect(fromA.refs).toHaveLength(1);
+    const pkg = exportPackage(a);
+
+    const b = open("محل ويش ب");
+    b.picked["restore-backup"] = pkg;
+    const inspected = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    expect(inspected.status).toBe("ready");
+    if (inspected.status !== "ready") return;
+    expect(data<ApplyRestoreResponse>(b.ipc.applyRestore({ manifestSha256: inspected.preview.manifestSha256, acceptMissingAssets: false }))).toEqual({ status: "staged" });
+    b.h.db.close();
+    expect(runPendingRestore({ userDataDir: b.userData, now: NOW, log: nullLogger }).kind).toBe("restored");
+    const plan = planLedgerOpen(b.userData, realLedgerFs);
+    b.h = makeHarness(plan.ledgerPath);
+    expect(m19(b.h.db)).toEqual(fromA);
+    expect(b.h.service.getSaleHistory(5).find((r) => r.sale.paymentMethod === "external")?.sale.externalPayment).toEqual({ provider: "whish", reference: "WH-BACKUP-1" });
+    // the restored registry still refuses the same Whish payment twice
+    expect(() =>
+      b.h.service.createSale({
+        idempotencyKey: newKey(),
+        paymentMethod: "external",
+        whish: { reference: "wh backup 1", fundsConfirmed: true },
+        lines: [{ productId: "prod-0003", quantityMilli: 1000 }],
+        expectedTotalMinor: 199n,
+      }),
+    ).toThrow(expect.objectContaining({ code: "DUPLICATE_PAYMENT_REFERENCE" }));
+    expect(b.h.db.pragma("integrity_check", { simple: true })).toBe("ok");
+  });
+
   it("refusals: no preview, a different hash, a package REPLACED after preview — nothing staged, no restart", () => {
     const a = open("shop a");
     seed(a);

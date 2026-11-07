@@ -683,6 +683,9 @@ describe("posted history cannot be rewritten", () => {
       "insertAttempt",
       "insertObligation",
       "insertSettlement",
+      // TRANSITION (P2): one more READ — is a provider reference already in migration 19's registry,
+      // by the triggers' own key. It mutates nothing. Old inventory: without `isReferenceRegistered`.
+      "isReferenceRegistered",
       "listObligations",
       "listOpenAttempts",
       "listSettlements",

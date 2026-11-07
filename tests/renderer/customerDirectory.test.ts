@@ -177,9 +177,12 @@ describe("the Sell screen keeps its cart", () => {
     expect(en).not.toBe("sell.customerPaidLink");
   });
 
-  it("🔴 Sell offers no Credit or Whish control — the posting slice has not landed", () => {
+  it("🔴 Sell offers no Credit control — the posting slice has not landed", () => {
+    // TRANSITION (P2, owner 2026-11-07): Whish Money landed on Sell as a PAID method with a reference and
+    // a confirmation, so "whish" / "Whish" left this list. Credit (on account) from Sell is still a later
+    // slice and stays forbidden. Old list: credit, whish, Credit, Whish, على الحساب.
     const body = code(sell);
-    for (const forbidden of ["credit", "whish", "Credit", "Whish", "على الحساب"]) {
+    for (const forbidden of ["credit", "Credit", "على الحساب"]) {
       expect(body, forbidden).not.toContain(forbidden);
     }
     // Positive control: the customer row really IS there, so the test above is not passing by

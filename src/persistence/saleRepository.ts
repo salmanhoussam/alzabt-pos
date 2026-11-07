@@ -12,6 +12,7 @@
 import { DomainError } from "../domain/errors";
 import { money } from "../domain/money";
 import type {
+  ExternalPaymentEvidence,
   PaymentMethod,
   PaymentStatus,
   SaleLineRecord,
@@ -33,18 +34,31 @@ import type { Db } from "./db";
  * Deliberately NO tender (legacy shape, `tender_count = 0`) for:
  *  - nothing paid (a customer-credit sale, an unpaid invoice) — there is no payment to record;
  *  - an invoice sale — it captures no method today (`payment_method` NULL), and none is invented;
- *  - an `external` (Whish / bank) till sale — the till does not yet capture its provider, reference or
- *    funds confirmation, migration 19 requires all three on an external tender, and inventing them is
- *    forbidden. P2 adds that capture and writes the tender then.
+ *  - an `external` till sale WITHOUT evidence — migration 19 requires provider, reference and funds
+ *    confirmation on an external tender, and inventing them is forbidden.
  * Historic sales are never touched (migration 19 already kept them at `tender_count = 0`).
+ *
+ * P2 (owner, 2026-11-07): an `external` till sale WITH evidence — today only Whish Money, its reference
+ * and the operator's explicit "the money arrived" — gets ONE `external` tender carrying the provider,
+ * the reference and `funds_confirmed = 1`, written in the same transaction. The tender's own trigger
+ * registers the reference in `external_references`, whose unique key refuses the same Whish reference
+ * a second time anywhere in the ledger (collection, receipt, sale or advance) — the whole sale rolls back.
  */
-export function singleTenderFor(header: Pick<NewSaleHeader, "paymentMethod" | "paidMinor" | "sourceType">): {
-  readonly method: "cash" | "card" | "other";
-  readonly amountMinor: bigint;
-} | null {
+export type SingleTender =
+  | { readonly method: "cash" | "card" | "other"; readonly amountMinor: bigint }
+  | { readonly method: "external"; readonly amountMinor: bigint; readonly provider: "whish"; readonly reference: string };
+
+export function singleTenderFor(
+  header: Pick<NewSaleHeader, "paymentMethod" | "paidMinor" | "sourceType"> & Partial<Pick<NewSaleHeader, "externalPayment">>,
+): SingleTender | null {
   if (header.sourceType !== "pos" || header.paidMinor <= 0n) return null;
   const m = header.paymentMethod;
-  return m === "cash" || m === "card" || m === "other" ? { method: m, amountMinor: header.paidMinor } : null;
+  if (m === "cash" || m === "card" || m === "other") return { method: m, amountMinor: header.paidMinor };
+  const e = header.externalPayment;
+  if (m === "external" && e && e.provider === "whish" && e.fundsConfirmed === true && e.reference.length > 0) {
+    return { method: "external", amountMinor: header.paidMinor, provider: "whish", reference: e.reference };
+  }
+  return null;
 }
 
 export interface NewSaleHeader {
@@ -69,6 +83,11 @@ export interface NewSaleHeader {
   readonly paymentStatus: PaymentStatus;
   /** Null for an invoice with no captured method or a fully unpaid customer-credit POS sale. */
   readonly paymentMethod: PaymentMethod | null;
+  /**
+   * P2: the evidence of an `external` till payment (Whish Money only). The service sets it only after
+   * the operator typed a reference and explicitly confirmed the money arrived; absent otherwise.
+   */
+  readonly externalPayment?: { readonly provider: "whish"; readonly reference: string; readonly fundsConfirmed: true } | null;
   readonly businessDate: string;
   readonly completedAt: string;
   readonly createdAt: string;
@@ -170,7 +189,7 @@ export class SaleRepository {
     const receiptNumber = this.nextReceiptNumber();
     // P1: the tender goes in FIRST (its sale_id is a deferred foreign key); the sale row then seals it.
     const tender = singleTenderFor(header);
-    if (tender) this.insertTender(header.id, 1, tender.method, tender.amountMinor);
+    if (tender) this.insertTender(header.id, 1, tender);
     this.insertSaleHeader(header, receiptNumber, lines.length, tender ? 1 : 0);
     for (const line of lines) this.insertSaleLine(header.id, line);
     this.verifySale(header.id);
@@ -221,13 +240,22 @@ export class SaleRepository {
     return toSafeNumber(row.n, "receipt number");
   }
 
-  protected insertTender(saleId: string, seq: number, method: "cash" | "card" | "other", amountMinor: bigint): void {
+  protected insertTender(saleId: string, seq: number, tender: SingleTender): void {
+    const external = tender.method === "external";
     this.db
       .prepare(
         `INSERT INTO sale_tenders (sale_id, seq, method, provider, reference, funds_confirmed, amount_minor)
-         VALUES (?, ?, ?, NULL, NULL, NULL, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(saleId, seq, method, amountMinor);
+      .run(
+        saleId,
+        seq,
+        tender.method,
+        external ? tender.provider : null,
+        external ? tender.reference : null,
+        external ? 1 : null,
+        tender.amountMinor,
+      );
   }
 
   protected insertSaleHeader(header: NewSaleHeader, receiptNumber: number, lineCount: number, tenderCount = 0): void {
@@ -380,6 +408,15 @@ export class SaleRepository {
     return rows.map((r) => ({ currency: r.currency, totalMinor: r.total_minor, voided: r.voided === 1n }));
   }
 
+  /** P2: the provider + reference on an external sale's ONE tender; null for any other sale. */
+  private externalPaymentOf(row: SaleRow): ExternalPaymentEvidence | null {
+    if (row.payment_method !== "external") return null;
+    const t = this.db
+      .prepare("SELECT provider, reference FROM sale_tenders WHERE sale_id = ? AND seq = 1 AND method = 'external'")
+      .get(row.id) as { provider: "whish" | "bank_transfer" | null; reference: string | null } | undefined;
+    return t && t.provider && t.reference ? { provider: t.provider, reference: t.reference } : null;
+  }
+
   private hydrate(row: SaleRow): SaleRecord {
     const lines = (
       this.db.prepare("SELECT * FROM sale_lines WHERE sale_id = ? ORDER BY line_no").all(row.id) as LineRow[]
@@ -419,6 +456,7 @@ export class SaleRepository {
       balanceDue: money(row.balance_due_minor, row.currency),
       paymentStatus: row.payment_status,
       paymentMethod: row.payment_method,
+      externalPayment: this.externalPaymentOf(row),
       businessDate: row.business_date,
       completedAt: row.completed_at,
       createdAt: row.created_at,

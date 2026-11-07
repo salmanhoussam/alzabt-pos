@@ -38,10 +38,13 @@ describe("which sales get a payment record", () => {
     expect((h.db.prepare("SELECT payment_method AS m FROM sales WHERE id = ?").get(sale.id) as { m: string }).m).toBe(method);
   });
 
-  it("an external (Whish / bank) till sale: NO record yet — no reference is invented (P2 adds the capture)", () => {
-    const { sale } = h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "external", ...espresso });
-    expect(tenders(h.db, sale.id)).toEqual([]);
-    expect(tenderCount(h.db, sale.id)).toBe(0);
+  it("an external till sale WITHOUT evidence is refused — no reference is invented, nothing is written", () => {
+    // TRANSITION (P2): this was "an external sale gets NO record yet" (recorded with tender_count 0).
+    // P2 captures the Whish evidence, so a new external sale without it is refused instead.
+    const before = countRows(h.db);
+    expect(() => h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "external", ...espresso })).toThrow(/reference/);
+    expect(countRows(h.db)).toEqual(before);
+    expect(all(h.db)).toBe(0);
   });
 
   it("an unpaid customer-credit sale: NO record — nothing was paid", () => {
@@ -112,13 +115,16 @@ describe("no duplicate, no partial write, no balance moved", () => {
   });
 
   it("totals: Σ records = paid on every sale that has records; History reads exactly as before", () => {
-    for (const m of ["cash", "card", "other", "external", "cash"] as const) h.service.createSale({ idempotencyKey: newKey(), paymentMethod: m, ...espresso });
+    // TRANSITION (P2): the external sale carries its Whish evidence and now HAS a record (old: 4 records).
+    for (const m of ["cash", "card", "other", "external", "cash"] as const) {
+      h.service.createSale({ idempotencyKey: newKey(), paymentMethod: m, ...(m === "external" ? { whish: { reference: "WH-TOTALS-1", fundsConfirmed: true } } : {}), ...espresso });
+    }
     const bad = h.db.prepare(
       `SELECT count(*) AS n FROM sales s WHERE s.tender_count > 0 AND (s.tender_count <> (SELECT count(*) FROM sale_tenders t WHERE t.sale_id = s.id)
          OR s.paid_minor <> (SELECT coalesce(sum(amount_minor),0) FROM sale_tenders t WHERE t.sale_id = s.id))`,
     ).get() as { n: bigint };
     expect(Number(bad.n)).toBe(0);
-    expect(all(h.db)).toBe(4);
+    expect(all(h.db)).toBe(5);
     const history = h.service.getSaleHistory(10).map((r) => r.sale.paymentMethod);
     expect([...history].sort()).toEqual(["card", "cash", "cash", "external", "other"]);
   });
