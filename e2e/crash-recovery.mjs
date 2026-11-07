@@ -125,6 +125,9 @@ function newProfile(name) {
     ALZABT_POS_USER_DATA: join(profile, "userData"),
     ALZABT_POS_DIAG_LOG: diagFile,
     ALZABT_POS_DISABLE_AUTOSTART: "1",
+    // TRANSITION (DEMO-FALLBACK, D-DF1): sells the bundled sample on a fresh profile, which the merchant
+    // default no longer serves; the explicit demo switch keeps that coverage. Old value: no switch.
+    ALZABT_POS_DEMO_CATALOG: "1",
   };
   return { env, diagFile };
 }

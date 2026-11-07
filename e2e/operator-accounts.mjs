@@ -39,7 +39,9 @@ const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["
 
 // A fresh profile: this script creates operators and sells, and must never touch a real ledger.
 const home = mkdtempSync(join(tmpdir(), "pos-e2e-operators-"));
-const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
+// TRANSITION (DEMO-FALLBACK, D-DF1): this script sells the bundled sample catalog on a fresh profile, which the
+// merchant default no longer serves; the explicit demo switch keeps that coverage. Old value: no switch.
+const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData"), ALZABT_POS_DEMO_CATALOG: "1" };
 const Database = createRequire(import.meta.url)("better-sqlite3");
 const LEDGER = join(home, "userData", "alzabt-pos-ledger.sqlite");
 

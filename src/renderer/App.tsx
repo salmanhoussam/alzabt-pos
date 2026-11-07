@@ -68,6 +68,19 @@ export function App() {
 
   const screen = screenFor(cashier, setup);
 
+  // 🔴 DEMO-FALLBACK: ONE app-wide, permanent warning while the sample catalog is live — on EVERY tab
+  // (Sell and its sale confirmation, Today, History, …), because demo sales appear in all of them.
+  // Re-read from the main process on every tab change and after an import, so it disappears the
+  // moment a real product exists. A read failure hides nothing it knows about: it only ever shows
+  // the banner on `demo === true`, which the main process sets under the explicit switch alone.
+  const [demoCatalog, setDemoCatalog] = useState(false);
+  useEffect(() => {
+    if (screen !== "app") return;
+    call(pos().getCatalog())
+      .then((c) => setDemoCatalog(c.demo === true))
+      .catch(() => setDemoCatalog(false));
+  }, [screen, tab, catalogVersion]);
+
   // These three stay keyed on `cashier` itself so TypeScript narrows it for the till below, while
   // `screen` is the authority for the one decision that was wrong.
   //
@@ -194,8 +207,13 @@ export function App() {
           {t("action.logout")}
         </button>
       </header>
+      {demoCatalog && (
+        <p className="demo-banner" role="alert" data-testid="demo-banner">
+          {t("sell.demoBanner")}
+        </p>
+      )}
       <main className="content">
-        {tab === "sell" && <SellScreen key={catalogVersion} focusRequest={sellFocusRequest} />}
+        {tab === "sell" && <SellScreen key={catalogVersion} focusRequest={sellFocusRequest} role={cashier?.role} />}
         {tab === "today" && <TodayScreen />}
         {tab === "history" && <HistoryScreen />}
         {tab === "products" && <ProductsScreen operator={cashier} />}

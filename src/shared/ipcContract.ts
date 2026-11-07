@@ -216,6 +216,8 @@ export interface CatalogDto {
   readonly products: ReadonlyArray<ProductDto>;
   /** Canonical barcodes of inactive products — the strings only, never the products. */
   readonly inactiveBarcodes: ReadonlyArray<string>;
+  /** DEMO-FALLBACK: true only for the sample catalog under the explicit demo switch. Additive. */
+  readonly demo: boolean;
 }
 
 export interface SaleLineDto {

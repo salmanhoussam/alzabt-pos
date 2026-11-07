@@ -166,6 +166,16 @@ export interface PosServiceDeps {
   readonly repository: SaleRepository;
   readonly pinStates: PinStateRepository;
   readonly catalog: Catalog;
+  /**
+   * DEMO-FALLBACK: what the till serves when the local catalog has no active product. Merchant mode:
+   * an EMPTY catalog; demo mode: the sample marked `demo`. OPTIONAL for older callers and tests,
+   * which keep the previous fallback (`catalog`).
+   *
+   * 🔴 WHY A SEPARATE DEPENDENCY. The fallback used to be `catalog` — the catalog the terminal
+   * STARTED with. On a terminal that started with real products, deactivating the last one fell back
+   * to that stale startup list (deactivated products included), not to the sample its comment named.
+   */
+  readonly fallbackCatalog?: Catalog;
   /** The local catalog table. Without it (tests, older callers) catalog import is unavailable. */
   readonly catalogStore?: CatalogRepository;
   /**
@@ -876,12 +886,13 @@ export class PosService {
   /**
    * Reloads the live catalog from the local table after an administrative write. When the last
    * active product has just been deactivated the local catalog is empty; the till then falls back
-   * to the bundled demo fixture exactly as a fresh install does, rather than holding a stale list.
+   * to `fallbackCatalog` exactly as a fresh install does — EMPTY in merchant mode, the marked sample
+   * only under the demo switch (DEMO-FALLBACK) — rather than holding a stale list.
    */
   private refreshCatalogFromStore(store: CatalogRepository): void {
     const currency = this.deps.terminal.currency;
     const local = store.loadActiveSource(currency);
-    const next = local ? loadCatalog(local) : this.deps.catalog;
+    const next = local ? loadCatalog(local) : (this.deps.fallbackCatalog ?? this.deps.catalog);
     this.assertTerminalCurrency(next);
     this.catalog = next;
   }

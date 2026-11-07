@@ -27,7 +27,9 @@ mkdirSync(SHOTS, { recursive: true });
 const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["--no-sandbox"] : [];
 const home = mkdtempSync(join(tmpdir(), "pos-e2e-home-"));
 // Isolate the ledger in a throw-away profile on every OS (honoured by src/main/main.ts).
-const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
+// TRANSITION (DEMO-FALLBACK, D-DF1): this script sells the bundled sample catalog on a fresh profile, which the
+// merchant default no longer serves; the explicit demo switch keeps that coverage. Old value: no switch.
+const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData"), ALZABT_POS_DEMO_CATALOG: "1" };
 // 🔴 Tabs are selected by data-testid, NOT by their visible text. The terminal's default language
 // is Arabic, so "Sell" / "History" / "Today's Sales" / "Tools" are no longer the rendered labels —
 // an E2E that clicks by English name passes only while the UI happens to be English, which is

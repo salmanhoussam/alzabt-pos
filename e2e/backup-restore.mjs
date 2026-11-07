@@ -151,7 +151,9 @@ const FROZEN_TWO = `${shaFile(LOGO_TWO).slice(0, 32)}.png`;
 
 // ── The app ──────────────────────────────────────────────────────────────────────────────────────
 const envFor = (userData) => {
-  const env = { ...process.env, ALZABT_POS_USER_DATA: userData, ALZABT_POS_DISABLE_AUTOSTART: "1", ALZABT_POS_DIAG_LOG: DIAG };
+  // TRANSITION (DEMO-FALLBACK, D-DF1): this script sells the bundled sample catalog on a fresh profile, which the
+  // merchant default no longer serves; the explicit demo switch keeps that coverage. Old value: no switch.
+  const env = { ...process.env, ALZABT_POS_USER_DATA: userData, ALZABT_POS_DISABLE_AUTOSTART: "1", ALZABT_POS_DIAG_LOG: DIAG, ALZABT_POS_DEMO_CATALOG: "1" };
   delete env.ELECTRON_RUN_AS_NODE;
   return env;
 };
