@@ -92,7 +92,8 @@ jobs:
           name: invoice-pdf-samples
           path: invoice-pdf-samples/
           if-no-files-found: error
-          retention-days: 14
+          # Private-repo storage is 500 MB on GitHub Free (shared, per the billing docs); samples are cheap to remake.
+          retention-days: 3
 
       - name: Package NSIS installer
         run: |
@@ -136,6 +137,19 @@ jobs:
         run: |
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
           node e2e/smoke.mjs
+
+      # DEMO-FALLBACK (RISK-24, owner D-DF1 = A): a shop with no active product gets an EMPTY till, never the
+      # sample café catalog; the sample only under ALZABT_POS_DEMO_CATALOG=1 on a ledger with no merchant data.
+      - name: Demo fallback against the INSTALLED app (empty till, explicit demo only, switch ignored for a shop)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/demo-fallback.mjs
+
+      # UX-REF-NUMBERS (DEC-33 #2): a debt reads by its invoice / sale-receipt number, never its id.
+      - name: Statement references against the INSTALLED app (invoice number, not the sale receipt, not an id)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/ux-ref-numbers.mjs
 
       # Operator accounts (migration 8). Placed immediately after the smoke test because it is about
       # the DOOR: mandatory setup, the two roles, and a cashier reaching window.pos directly.
@@ -484,7 +498,8 @@ jobs:
           name: alzabt-pos-windows-e2e-screenshots
           path: e2e-output/
           if-no-files-found: ignore
-          retention-days: 14
+          # Uploaded on failure too (if: always()) — the evidence of a red run is kept for a week.
+          retention-days: 7
 
       - name: Upload installer (only after every check passed)
         uses: actions/upload-artifact@v4
@@ -492,4 +507,5 @@ jobs:
           name: alzabt-pos-windows-installer
           path: release/*Setup*.exe
           if-no-files-found: error
-          retention-days: 14
+          # ~122 MB each against a 500 MB allowance: kept 5 days, long enough to download for the owner's test.
+          retention-days: 5
