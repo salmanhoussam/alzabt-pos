@@ -769,6 +769,13 @@ try {
   // rather than below the fold — the S3B review could only verify that one by assertion.
   await settledBadge.scrollIntoViewIfNeeded();
   await p5.screenshot({ path: SHOTS + "S3C-A3-settled-badge-arabic.png" });
+  // UX-REF-NUMBERS (DEC-33 #2): the debt's origin reads as words and the owner's own reference — never an id.
+  {
+    const src = (await card("o-unpaid").locator('[data-testid="statement-source"]').innerText()).trim();
+    assert(src === "مستند خارجي FIX-001", `🔴 UX-REF: Arabic statement shows the manual document by its reference («${src}»)`);
+    const all = await p5.locator('[data-testid="statement-source"]').allInnerTexts();
+    assert(all.length > 0 && all.every((x) => !/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(x)), `🔴 UX-REF: no statement line shows an internal id (${JSON.stringify(all)})`);
+  }
 
   // ── D · the Arabic overpayment refusal preserves the authoritative balance ──────────────────
   await card("o-part").locator('[data-testid="collect-open"]').click();
@@ -790,6 +797,10 @@ try {
   await card("o-part").locator('[data-testid="collect-open"]').click();
   await testid(p5, "collect-form").waitFor({ state: "visible", timeout: 30000 });
   await p5.screenshot({ path: SHOTS + "S3C-A4-collect-form-english.png" });
+  {
+    const ref = (await testid(p5, "collect-reference").innerText()).trim();
+    assert(ref === "External document FIX-002", `🔴 UX-REF: the English payment form names the document, not an id («${ref}»)`);
+  }
 
   // ── F · an overpayment is refused in English, on screen, and writes nothing ─────────────────
   await testid(p5, "collect-amount").fill("999.00");

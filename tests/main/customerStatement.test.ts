@@ -113,6 +113,9 @@ const statementOf = (customerId: string): CustomerStatementDto => {
       sourceKind: r.obligation.sourceKind,
       sourceRef: r.obligation.sourceRef,
       saleId: r.obligation.saleId,
+      // TRANSITION (UX-REF-NUMBERS): the DTO gained `document`; this hand-built statement feeds only the
+      // renderer helpers under test, and these debts are manual, so their document is their reference.
+      document: { kind: "manual" as const, reference: r.obligation.sourceRef },
       postedAt: r.obligation.postedAt,
       settlements: r.settlements.map((st) => ({
         id: st.id,
