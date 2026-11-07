@@ -47,7 +47,10 @@ describe("the section's source", () => {
   });
 
   it("is rendered for an owner only (a courtesy; the channels refuse anyone else)", () => {
-    expect(strip(TOOLS)).toContain('props.operator.role === "owner" && <BackupRestoreSection />');
+    // TRANSITION (QW-CASHIER-TOOLS): was `props.operator.role === "owner" && <BackupRestoreSection />`; the
+    // role test is now named once (`isOwner`) because three cards share it. Same condition.
+    expect(strip(TOOLS)).toContain('const isOwner = props.operator.role === "owner";');
+    expect(strip(TOOLS)).toContain("{isOwner && <BackupRestoreSection />}");
   });
 
   it("the invoice sheet words an UNVERIFIED logo with its own sentence, not the missing-archive one", () => {
