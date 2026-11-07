@@ -53,10 +53,27 @@ export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => 
             so an Arabic till showed "cash" — the same leak as PENDING in the review queue. */}
         <div className="receipt-paid">
           <span className="muted small">{t("receipt.paidBy")}</span>
-          <strong data-testid="receipt-method" data-method={sale.paymentMethod ?? "none"}>
-            {sale.paymentMethod ? t(`method.${sale.paymentMethod}`) : t("history.payNoMethod")}
+          <strong
+            data-testid="receipt-method"
+            data-method={sale.paymentMethod ?? "none"}
+            data-provider={sale.externalPayment?.provider ?? "none"}
+          >
+            {sale.externalPayment?.provider === "whish"
+              ? t("method.whish")
+              : sale.paymentMethod
+                ? t(`method.${sale.paymentMethod}`)
+                : t("history.payNoMethod")}
           </strong>
         </div>
+        {/* P2: the Whish reference the operator recorded — the receipt is the customer's proof of it. */}
+        {sale.externalPayment && (
+          <div className="receipt-paid">
+            <span className="muted small">{t("receipt.reference")}</span>
+            <bdi dir="auto" data-testid="receipt-reference">
+              {sale.externalPayment.reference}
+            </bdi>
+          </div>
+        )}
         {onNewSale && (
           <button className="btn primary big wide" data-testid="new-sale" onClick={onNewSale}>
             {t("receipt.newSale")}

@@ -1940,7 +1940,9 @@ log("J — the same table as a cashier: no owner controls, prices and units inta
   await page.locator('[data-testid="sell-photo-preview"]').waitFor({ state: "detached" });
 
   // Q · 🔴 A SCAN IN THE PAYMENT PANE, ON EVERY METHOD: no sale, no change, and it says why.
-  for (const m of ["cash", "card", "external", "other"]) {
+  // TRANSITION (P2): the till's buttons are cash / whish / card / other — Whish Money replaced the plain
+  // «تحويل خارجي» button. Old list: cash, card, external, other.
+  for (const m of ["cash", "whish", "card", "other"]) {
     const linesBefore = await lines();
     const smallBefore = await qtyOf(made.small);
     await page.locator('[data-testid="complete-sale"]').click();
@@ -1955,7 +1957,7 @@ log("J — the same table as a cashier: no owner controls, prices and units inta
     );
     assert((await receiptShown()) === 0, `🔴 ${m}: and records NO sale`);
     assert((await lines()) === linesBefore && (await qtyOf(made.small)) === smallBefore, `${m}: and the cart did not change`);
-    if (m === "external") await page.screenshot({ path: SHOTS + "SB-8-payment-scan-warning.png" });
+    if (m === "whish") await page.screenshot({ path: SHOTS + "SB-8-payment-scan-warning.png" });
     await page.keyboard.press("Escape");
     await page.locator('[data-testid="pay-cash"]').waitFor({ state: "detached" });
     assert((await page.locator('[data-testid="pay-scan-note"]').count()) === 0, `${m}: the warning leaves with the pane`);

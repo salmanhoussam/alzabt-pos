@@ -5,10 +5,10 @@ import { type CartLine, type PricedCart, addProduct, decrement, priceCart, remov
 import type { Catalog } from "../../domain/catalog";
 import { formatDecimal } from "../../domain/money";
 import { formatQuantity, parseQuantity } from "../../domain/quantity";
-import { PAYMENT_METHODS, type PaymentMethod } from "../../domain/sale";
+import type { PaymentMethod } from "../../domain/sale";
 import { fromCatalogDto } from "../../shared/dto";
 import type { AdminProductDto, SaleDto } from "../../shared/ipcContract";
-import { call, errorText, newIdempotencyKey, pos } from "../api";
+import { ApiError, call, errorText, newIdempotencyKey, pos } from "../api";
 import { useThumbnails } from "../useThumbnails";
 import { LineMath } from "../components/LineMath";
 import { Receipt } from "./Receipt";
@@ -29,12 +29,27 @@ import {
   resolveScan,
 } from "../sellScan";
 
-/** The four real methods, in the order the till uses them. Cash first: it is most of the volume. */
-const METHOD_KEY: Record<PaymentMethod, string> = {
+/**
+ * The till's buttons, in the order the till uses them. Cash first: it is most of the volume.
+ *
+ * P2 (owner, 2026-11-07): the plain «تحويل خارجي» button is GONE. An `external` sale is now Whish Money
+ * only, and it is recorded only with its reference and the operator's explicit "the money arrived"
+ * (`whish` below opens that step; it never records on one click). Card and Other stay exactly as they
+ * were until the owner's separate decision on narrowing the till to Cash / Whish / On account.
+ */
+type TillButton = "cash" | "whish" | "card" | "other";
+const TILL_BUTTONS: ReadonlyArray<TillButton> = ["cash", "whish", "card", "other"];
+const METHOD_KEY: Record<TillButton, string> = {
   cash: "pay.cash",
+  whish: "pay.whish",
   card: "pay.card",
-  external: "pay.external",
   other: "pay.other",
+};
+/** The Whish step's own sentences for the refusals it can meet (text follows the operation). */
+const WHISH_ERROR_KEY: Readonly<Record<string, string>> = {
+  DUPLICATE_PAYMENT_REFERENCE: "pay.whishErr.duplicate",
+  FUNDS_NOT_CONFIRMED: "pay.whishErr.notConfirmed",
+  INVALID_INPUT: "pay.whishErr.reference",
 };
 
 /**
@@ -59,6 +74,10 @@ export function SellScreen({
   // One idempotency key per checkout attempt: kept across retries, replaced when the cart changes.
   const [attemptKey, setAttemptKey] = useState(newIdempotencyKey);
   const [busy, setBusy] = useState(false);
+  /** P2: the Whish Money step — open, the typed reference, and the explicit "the money arrived". */
+  const [whishOpen, setWhishOpen] = useState(false);
+  const [whishReference, setWhishReference] = useState("");
+  const [whishConfirmed, setWhishConfirmed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [completed, setCompleted] = useState<SaleDto | null>(null);
   const [query, setQuery] = useState("");
@@ -303,7 +322,15 @@ export function SellScreen({
     return false;
   };
 
-  const pay = async (method: PaymentMethod) => {
+  /** P2: every opening of the payment pane starts the Whish step empty and UNconfirmed. */
+  useEffect(() => {
+    if (paying) return;
+    setWhishOpen(false);
+    setWhishReference("");
+    setWhishConfirmed(false);
+  }, [paying]);
+
+  const pay = async (method: PaymentMethod, whish?: { readonly reference: string; readonly fundsConfirmed: boolean }) => {
     if (!priced || busy) return;
     setBusy(true);
     setError(null);
@@ -315,6 +342,7 @@ export function SellScreen({
           paymentMethod: method,
           expectedTotalMinor: priced.total.minor.toString(),
           ...(customer === null ? {} : { customerId: customer.id }),
+          ...(whish === undefined ? {} : { whish }),
         }),
       );
       setCompleted(result.sale);
@@ -323,11 +351,14 @@ export function SellScreen({
       setPaying(false);
       setAttemptKey(newIdempotencyKey());
     } catch (e) {
-      setError(errorText(e));
+      const own = whish !== undefined && e instanceof ApiError ? WHISH_ERROR_KEY[e.code] : undefined;
+      setError(own ? t(own) : errorText(e));
     } finally {
       setBusy(false);
     }
   };
+
+  const whishReady = whishReference.trim() !== "" && whishConfirmed && !busy;
 
   if (completed) return <Receipt sale={completed} onNewSale={() => setCompleted(null)} />;
   if (!catalog) return <div className="center muted">{error ?? t("common.loading")}</div>;
@@ -826,13 +857,15 @@ export function SellScreen({
                 {t("pay.forCustomer")} <bdi>{customer.displayName}</bdi>
               </p>
             )}
+            {!whishOpen && (
             <div className="methods">
-              {PAYMENT_METHODS.map((m) => (
+              {TILL_BUTTONS.map((m) => (
                 /* 🔴 CASH IS THE INITIAL FOCUS, NOT A FORCED CHOICE — AND ENTER DOES NOT PAY. A
                    click, a tap, or Space on the focused method records the sale; Enter is refused
                    (`refuseEnterActivation`), because a barcode scan ends in Enter and used to
                    record a cash sale here without the scanned item. Cash leads because it is most
-                   of a shop's volume — a prototype to confirm in the field test. */
+                   of a shop's volume — a prototype to confirm in the field test.
+                   P2: Whish Money does NOT record on this click — it opens its own step below. */
                 <button
                   key={m}
                   ref={m === "cash" ? cashRef : undefined}
@@ -840,12 +873,84 @@ export function SellScreen({
                   disabled={busy}
                   data-testid={`pay-${m}`}
                   onKeyDown={refuseEnterActivation}
-                  onClick={() => pay(m)}
+                  onClick={() => {
+                    if (m === "whish") {
+                      setError(null);
+                      setWhishOpen(true);
+                      return;
+                    }
+                    void pay(m);
+                  }}
                 >
                   {t(METHOD_KEY[m])}
                 </button>
               ))}
             </div>
+            )}
+            {whishOpen && (
+              /* P2 · SELL-WHISH-REFERENCE-AND-CONFIRMATION. Nothing is recorded until the operator has
+                 typed the Whish reference AND ticked that the money really arrived (never pre-ticked).
+                 The till does not contact Whish; the main process refuses a reused reference, and the
+                 whole sale is rolled back, so a refusal here leaves nothing behind. */
+              <div className="whish-step" data-testid="whish-step">
+                <h3>{t("pay.whish")}</h3>
+                <label className="field">
+                  <span>{t("pay.whishReference")}</span>
+                  <input
+                    type="text"
+                    dir="auto"
+                    autoFocus
+                    maxLength={64}
+                    value={whishReference}
+                    disabled={busy}
+                    data-testid="whish-reference"
+                    onChange={(e) => {
+                      setWhishReference(e.target.value);
+                      setError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      // A scanner or a habit ends in Enter: it never records the sale from here.
+                      if (e.key === "Enter") e.preventDefault();
+                    }}
+                  />
+                </label>
+                <p className="muted small">{t("pay.whishReferenceHint")}</p>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={whishConfirmed}
+                    disabled={busy}
+                    data-testid="whish-confirm"
+                    onChange={(e) => setWhishConfirmed(e.target.checked)}
+                  />
+                  <span>{t("pay.whishConfirm")}</span>
+                </label>
+                <p className="muted small">{t("pay.whishConfirmHint")}</p>
+                <button
+                  className="btn primary big wide"
+                  disabled={!whishReady}
+                  data-testid="whish-submit"
+                  onKeyDown={refuseEnterActivation}
+                  onClick={() => {
+                    if (!whishReady) return;
+                    void pay("external", { reference: whishReference, fundsConfirmed: true });
+                  }}
+                >
+                  {t("pay.whishSubmit")}
+                </button>
+                <button
+                  className="btn ghost wide"
+                  disabled={busy}
+                  data-testid="whish-back"
+                  onClick={() => {
+                    setWhishOpen(false);
+                    setError(null);
+                  }}
+                >
+                  {t("pay.whishBack")}
+                </button>
+              </div>
+            )}
             {payScanNote && (
               <p className="error" role="status" data-testid="pay-scan-note">
                 {t(PAY_SCAN_MESSAGE_KEY)}

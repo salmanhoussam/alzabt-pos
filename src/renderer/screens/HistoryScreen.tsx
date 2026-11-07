@@ -16,7 +16,13 @@ type T = (key: string) => string;
  */
 function paymentText(sale: SaleDto, t: T): string {
   if (sale.paymentStatus === "unpaid") return t("history.payUnpaid");
-  const method = sale.paymentMethod ? t(`method.${sale.paymentMethod}`) : t("history.payNoMethod");
+  // P2: a Whish Money sale names Whish and its reference; a historic `external` sale keeps its old words.
+  const method =
+    sale.externalPayment?.provider === "whish"
+      ? `${t("method.whish")} · ${sale.externalPayment.reference}`
+      : sale.paymentMethod
+        ? t(`method.${sale.paymentMethod}`)
+        : t("history.payNoMethod");
   const head = sale.paymentStatus === "partial" ? t("history.payPartial") : t("history.payPaid");
   return `${head} — ${method}`;
 }

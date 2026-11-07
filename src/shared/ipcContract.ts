@@ -257,6 +257,11 @@ export interface SaleDto {
   readonly paymentStatus: PaymentStatus;
   /** 🔴 Null means NOT RECORDED. The UI must say so, never substitute a method. */
   readonly paymentMethod: PaymentMethod | null;
+  /**
+   * P2: the provider and reference recorded with an `external` sale (Whish Money at the till). Null for
+   * every other sale, and for a historic `external` sale that was recorded without one.
+   */
+  readonly externalPayment?: { readonly provider: "whish" | "bank_transfer"; readonly reference: string } | null;
   readonly businessDate: string;
   readonly completedAt: string;
   readonly lines: ReadonlyArray<SaleLineDto>;
@@ -322,6 +327,12 @@ export interface CreateSaleRequest {
    * The renderer cannot send the snapshot: main reads the name from the account itself.
    */
   readonly customerId?: string;
+  /**
+   * P2 · SELL-WHISH-REFERENCE-AND-CONFIRMATION. Required with `paymentMethod: "external"` (Whish Money)
+   * and refused with any other method: the reference the operator typed, and `fundsConfirmed: true`
+   * only after they ticked "the money arrived". The till never contacts Whish.
+   */
+  readonly whish?: { readonly reference: string; readonly fundsConfirmed: boolean };
 }
 
 export interface CreateSaleResponse {
@@ -852,6 +863,8 @@ export interface StatementPaidSaleDto {
   readonly receiptNumber: number;
   readonly total: MoneyDto;
   readonly paymentMethod: PaymentMethod;
+  /** P2: present on a Whish Money sale — its provider and recorded reference. */
+  readonly externalPayment?: { readonly provider: "whish" | "bank_transfer"; readonly reference: string };
   readonly completedAt: string;
   /** A voided sale stays in the history, marked; it was never a debt either way. */
   readonly voided: boolean;

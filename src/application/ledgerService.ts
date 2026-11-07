@@ -736,7 +736,9 @@ export class LedgerService {
         provider !== null &&
         reference !== null &&
         (this.deps.ledger.findSettlementByProviderReference(provider, reference) ||
-          this.deps.receipts?.findByProviderReference(provider, reference))
+          this.deps.receipts?.findByProviderReference(provider, reference) ||
+          // P2: a Whish SALE's reference, or the same reference written differently, is just as taken.
+          this.deps.ledger.isReferenceRegistered(provider, reference))
       ) {
         throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
       }
@@ -1063,7 +1065,12 @@ export class LedgerService {
       this.assertNoUnresolvedCollections(p.customerId);
 
       // 🔴 ONE REAL PROVIDER TRANSACTION, ONE RECORD — as a receipt AND as a direct collection.
-      if (repo.findByProviderReference(p.provider, p.reference) || this.deps.ledger.findSettlementByProviderReference(p.provider, p.reference)) {
+      if (
+        repo.findByProviderReference(p.provider, p.reference) ||
+        this.deps.ledger.findSettlementByProviderReference(p.provider, p.reference) ||
+        // P2: a Whish SALE's reference, or the same reference written differently, is just as taken.
+        this.deps.ledger.isReferenceRegistered(p.provider, p.reference)
+      ) {
         throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
       }
       // The customer may have been archived since validation.

@@ -15,6 +15,7 @@
  * in a future slice, never a rewrite of a posted one.
  */
 import type { Db } from "./db";
+import { M19_REF_KEY } from "./migrations";
 import type {
   ObligationDirection,
   ObligationRecord,
@@ -292,6 +293,18 @@ export class LedgerRepository {
   }
 
   /** Migration 17. The settlement already carrying this provider transaction reference, if any. */
+  /**
+   * P2: is this provider reference already in migration 19's registry — a collection, a receipt, a sale's
+   * Whish payment or an advance, live or legacy — compared by the SAME key the triggers compute
+   * (D-REF-1 = B: digits, case, spaces and separators normalised). The unique index stays the backstop;
+   * this read only lets the owner see the right sentence instead of the database's.
+   */
+  isReferenceRegistered(provider: string, reference: string): boolean {
+    return Boolean(
+      this.db.prepare(`SELECT 1 FROM external_references WHERE provider = ? AND ref_key = ${M19_REF_KEY("?")} LIMIT 1`).get(provider, reference),
+    );
+  }
+
   findSettlementByProviderReference(provider: string, reference: string): SettlementRecord | null {
     const row = this.db
       .prepare(`SELECT ${S_COLS} FROM settlements WHERE provider = ? AND reference = ?`)

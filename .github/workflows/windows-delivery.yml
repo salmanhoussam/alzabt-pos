@@ -151,6 +151,11 @@ jobs:
           $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
           node e2e/ux-ref-numbers.mjs
 
+      - name: Whish Money at the till against the INSTALLED app (reference + confirmation, duplicate refused, cash intact)
+        run: |
+          $env:E2E_EXECUTABLE = $env:INSTALLED_EXE
+          node e2e/whish-sale.mjs
+
       # Operator accounts (migration 8). Placed immediately after the smoke test because it is about
       # the DOOR: mandatory setup, the two roles, and a cashier reaching window.pos directly.
       - name: Operator accounts against the INSTALLED app (setup, two roles, direct-bridge refusals)
