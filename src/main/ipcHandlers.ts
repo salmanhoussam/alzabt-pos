@@ -67,6 +67,7 @@ import {
   CHANNELS,
   type ChannelName,
   type CustomerPaymentOverpaymentErrorContext,
+  type LoginRefusalErrorContext,
   INVOICE_HEADER_LINK_KEYS,
   INVOICE_HEADER_PATCH_KEYS,
   type InvoiceHeaderPatchKey,
@@ -515,6 +516,29 @@ export function invoiceFinalizeTruth(invoices: InvoiceService, payload: unknown,
   }
 }
 
+/**
+ * I18N-LOGIN-PIN (DEC-33 #3): the PIN refusal's numbers as an IPC context, or null.
+ * Only `INVALID_CREDENTIALS` / `CASHIER_LOCKED` with the matching reason, and only small non-negative
+ * integers — anything else returns null and the refusal crosses exactly as before.
+ */
+export function loginRefusalContext(error: DomainError): LoginRefusalErrorContext | null {
+  const c = error.context;
+  if (c === undefined || !("reason" in c)) return null;
+  const small = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 10_000;
+  if (error.code === "INVALID_CREDENTIALS" && c.reason === "LOGIN_PIN_WRONG" && error.reason === c.reason) {
+    return small(c.attemptsLeft) && small(c.lockMinutes)
+      ? { reason: "LOGIN_PIN_WRONG", attemptsLeft: c.attemptsLeft, lockMinutes: c.lockMinutes }
+      : null;
+  }
+  if (error.code === "INVALID_CREDENTIALS" && c.reason === "LOGIN_UNKNOWN_OPERATOR" && error.reason === c.reason) {
+    return { reason: "LOGIN_UNKNOWN_OPERATOR" };
+  }
+  if (error.code === "CASHIER_LOCKED" && c.reason === "LOGIN_PIN_LOCKED" && error.reason === c.reason) {
+    return small(c.minutesRemaining) ? { reason: "LOGIN_PIN_LOCKED", minutesRemaining: c.minutesRemaining } : null;
+  }
+  return null;
+}
+
 export function createIpcHandlers(service: PosService, options: IpcHandlerOptions = {}): Record<ChannelName, Handler> {
   const log = options.logger ?? nullLogger;
   const now = options.now ?? (() => new Date());
@@ -571,11 +595,18 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
 
   function toIpcError(error: DomainError, channel: ChannelName): IpcError {
     const result: IpcError = { code: error.code, message: error.message };
+    // I18N-LOGIN-PIN: the login channel only, its two codes only, small integers only — anything else
+    // is sent exactly as before (code + English message).
+    if (channel === "login") {
+      const context = loginRefusalContext(error);
+      return context ? { ...result, context } : result;
+    }
     if (
       channel !== "recordCustomerPayment" ||
       error.code !== "INVALID_AMOUNT" ||
       error.reason !== "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING" ||
       error.context === undefined ||
+      !("outstandingMinor" in error.context) ||
       typeof error.context.outstandingMinor !== "bigint" ||
       typeof error.context.currency !== "string"
     ) {

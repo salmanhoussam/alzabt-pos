@@ -1029,8 +1029,14 @@ export interface SetCustomerActiveRequest {
 export interface IpcError {
   readonly code: string;
   readonly message: string;
-  readonly context?: CustomerPaymentOverpaymentErrorContext;
+  readonly context?: CustomerPaymentOverpaymentErrorContext | LoginRefusalErrorContext;
 }
+
+/** I18N-LOGIN-PIN: the numbers of a PIN refusal, sent on the `login` channel only. Plain integers. */
+export type LoginRefusalErrorContext =
+  | { readonly reason: "LOGIN_PIN_WRONG"; readonly attemptsLeft: number; readonly lockMinutes: number }
+  | { readonly reason: "LOGIN_PIN_LOCKED"; readonly minutesRemaining: number }
+  | { readonly reason: "LOGIN_UNKNOWN_OPERATOR" };
 
 export interface CustomerPaymentOverpaymentErrorContext {
   readonly reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING";

@@ -161,8 +161,19 @@ await page.screenshot({ path: SHOTS + "01-login.png" });
 await page.getByRole("button", { name: "Cashier One" }).click();
 for (const d of "9999") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
 await page.locator('[data-testid="login-submit"]').click();
-await page.waitForSelector("text=Cashier or PIN is incorrect");
-log("PASS wrong PIN refused");
+// TRANSITION (I18N-LOGIN-PIN, DEC-33 #3): was `text=Cashier or PIN is incorrect` — English on the Arabic
+// login. The refusal now reads in the shop's language, with the real numbers (5 tries, 5-minute lock).
+await page.waitForSelector(".login .error", { timeout: 30000 });
+{
+  const lang = await page.evaluate(() => document.documentElement.lang);
+  const shown = (await page.locator(".login .error").innerText()).trim();
+  const expected =
+    lang === "ar"
+      ? "الرمز غير صحيح. المحاولات المتبقّية قبل إيقاف الدخول مؤقّتاً: \u20684\u2069. مدّة الإيقاف بالدقائق: \u20685\u2069."
+      : "Cashier or PIN is incorrect. 4 attempts left before a 5-minute lock.";
+  if (shown !== expected) throw new Error(`ASSERTION FAILED: wrong-PIN refusal in ${lang} — got «${shown}»`);
+  log(`PASS wrong PIN refused, in ${lang}, with 4 attempts left and a 5-minute lock`);
+}
 for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
 await page.locator('[data-testid="login-submit"]').click();
 // 🔴 The operator is deliberately NOT re-clicked here: staying on the same selection is what proves

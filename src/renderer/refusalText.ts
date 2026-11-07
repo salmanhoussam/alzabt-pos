@@ -169,3 +169,30 @@ export function customerPaymentOverpaymentRefusal(
   }
   return null;
 }
+
+/**
+ * I18N-LOGIN-PIN (DEC-33 #3): the Arabic for a PIN refusal, composed from the NUMBERS the main process
+ * sends as context — never parsed out of the English sentence. English returns null, so the English a
+ * merchant reads stays byte-identical to what the main process sent. A context that is not exactly
+ * one of the three known shapes returns null (the English message is shown, as before).
+ */
+export function loginRefusal(lang: Language, code: string, context: unknown): string | null {
+  if (lang !== "ar") return null;
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return null;
+  const r = context as Record<string, unknown>;
+  const keys = Object.keys(r).sort().join(",");
+  const small = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 10_000;
+  const num = (n: number) => `\u2068${n}\u2069`;
+  if (code === "INVALID_CREDENTIALS" && r.reason === "LOGIN_PIN_WRONG" && keys === "attemptsLeft,lockMinutes,reason") {
+    if (!small(r.attemptsLeft) || !small(r.lockMinutes)) return null;
+    return `الرمز غير صحيح. المحاولات المتبقّية قبل إيقاف الدخول مؤقّتاً: ${num(r.attemptsLeft)}. مدّة الإيقاف بالدقائق: ${num(r.lockMinutes)}.`;
+  }
+  if (code === "INVALID_CREDENTIALS" && r.reason === "LOGIN_UNKNOWN_OPERATOR" && keys === "reason") {
+    return "الكاشير أو الرمز غير صحيح.";
+  }
+  if (code === "CASHIER_LOCKED" && r.reason === "LOGIN_PIN_LOCKED" && keys === "minutesRemaining,reason") {
+    if (!small(r.minutesRemaining)) return null;
+    return `أُوقف الدخول مؤقّتاً بعد عدّة محاولات خاطئة. حاول مجدّداً بعد عدد الدقائق: ${num(r.minutesRemaining)}.`;
+  }
+  return null;
+}
