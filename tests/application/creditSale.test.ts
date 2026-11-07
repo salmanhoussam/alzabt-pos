@@ -524,9 +524,11 @@ class FailingSaleRepository extends SaleRepository {
     super(db);
   }
 
-  protected override insertSaleHeader(header: NewSaleHeader, receipt: number, lineCount: number): void {
+  // TRANSITION (P1): the base gained `tenderCount`; forwarded so a paid sale through this repository keeps
+  // its payment record sealed. Old signature: (header, receipt, lineCount).
+  protected override insertSaleHeader(header: NewSaleHeader, receipt: number, lineCount: number, tenderCount = 0): void {
     if (this.fault === "before-header") throw new Error("injected before sale header");
-    super.insertSaleHeader(header, receipt, lineCount);
+    super.insertSaleHeader(header, receipt, lineCount, tenderCount);
   }
 
   protected override insertSaleLine(saleId: string, line: NewSaleLine): void {

@@ -567,6 +567,10 @@ describe("🔴 privacy — the canary test", () => {
       idempotency_key: "k-canary",
       receipt_number: 999_999,
       cashier_name: canaries.sale,
+      // TRANSITION (P1): the template is now a sealed cash sale (tender_count 1, one payment record). A row
+      // cloned WITHOUT its record must declare the legacy shape, or the ledger refuses it — correctly. The
+      // canary's purpose (a private string in a sale row) is unchanged. Old value: no override needed.
+      tender_count: 0,
     });
     cloneWith("invoices", { id: "i-canary", invoice_number: 999_999, customer_name: canaries.invoice });
     // 🔴 WRITTEN THROUGH THE REAL STORE, because `company_profile` is EMPTY on a fresh harness and
