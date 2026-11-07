@@ -784,6 +784,17 @@ export interface StatementReceiptDto {
 }
 
 /** One posted debt, its payments, and what is left on it. */
+/**
+ * UX-REF-NUMBERS: where a debt came from, in the merchant's terms. Resolved in main from real rows —
+ * an invoice's number, a till sale's receipt number, a manual debt's own reference — or `unresolved`.
+ * Never an invented number. Additive: `sourceRef` / `saleId` stay for the accounting links.
+ */
+export type StatementDocumentDto =
+  | { readonly kind: "invoice"; readonly number: number }
+  | { readonly kind: "sale"; readonly receiptNumber: number }
+  | { readonly kind: "manual"; readonly reference: string }
+  | { readonly kind: "unresolved" };
+
 export interface StatementObligationDto {
   readonly id: string;
   /** What was originally owed. Immutable, straight from the posted row. */
@@ -799,6 +810,8 @@ export interface StatementObligationDto {
   readonly sourceRef: string;
   /** The sale this debt came from, when it came from one. Null for a manual entry. */
   readonly saleId: string | null;
+  /** UX-REF-NUMBERS: the readable document behind this debt (see StatementDocumentDto). */
+  readonly document: StatementDocumentDto;
   readonly postedAt: string;
   readonly settlements: readonly StatementSettlementDto[];
 }

@@ -33,6 +33,7 @@ import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../api";
 import { formatDecimal, money } from "../../domain/money";
 import { type ReceiptReconciliation, allocationState, leftText, minorOf, oldestFirstShares, openDebtsOf, sharableCurrencies } from "./receiptAllocation";
 import { useT } from "../i18n";
+import { statementDocumentText } from "../statementDocument";
 import type { AllocatedReceiptRequest, CustomerStatementDto, StatementObligationDto } from "../../shared/ipcContract";
 
 /** The two outcomes after which a second recording must NOT be offered (same as a collection). */
@@ -308,7 +309,9 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
         {debts.map((d) => (
           <li key={d.id} data-testid="receipt-debt" data-obligation={d.id}>
             <div className="statement-row">
-              <bdi dir="ltr">{d.sourceRef}</bdi>
+              <bdi data-testid="receipt-debt-document" data-document={d.document.kind}>
+                {statementDocumentText(d.document, t)}
+              </bdi>
               <span className="muted small">
                 {t("statement.outstanding")} <bdi dir="ltr">{fmt(d.outstanding)}</bdi>
               </span>

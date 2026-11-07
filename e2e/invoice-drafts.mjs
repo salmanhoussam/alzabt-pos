@@ -710,6 +710,15 @@ assert(
   await testid(page, "customers-search").fill(ACCOUNT_NAME);
   await page.locator(`[data-customer="${debtSale.party}"]`).first().click();
   await testid(page, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+  // UX-REF-NUMBERS (DEC-33 #2): an invoice debt reads «فاتورة #N» with the invoice's OWN number — not the
+  // sale's receipt number and never the sale id.
+  {
+    const inv = one("SELECT i.invoice_number AS n, s.receipt_number AS r FROM sales s JOIN invoices i ON i.id = s.invoice_id WHERE s.id = ?", debtSale.id);
+    const src = (await page.locator('[data-testid="statement-source"]').first().innerText()).trim();
+    assert(src === `فاتورة #${Number(inv.n)}`, `🔴 UX-REF: the invoice debt shows its invoice number («${src}», invoice ${inv.n}, receipt ${inv.r})`);
+    assert(!/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(src) && !src.includes(debtSale.id), "🔴 UX-REF: and not the sale id");
+    await page.screenshot({ path: SHOTS + "UXREF-invoice-debt-arabic.png" });
+  }
   await testid(page, "collect-open").first().click();
   await testid(page, "collect-amount").fill("5.00");
   await testid(page, "collect-confirm").click();

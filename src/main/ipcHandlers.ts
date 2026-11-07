@@ -68,6 +68,7 @@ import {
   type ChannelName,
   type CustomerPaymentOverpaymentErrorContext,
   type LoginRefusalErrorContext,
+  type StatementDocumentDto,
   INVOICE_HEADER_LINK_KEYS,
   INVOICE_HEADER_PATCH_KEYS,
   type InvoiceHeaderPatchKey,
@@ -1677,6 +1678,24 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
    * lives on the invoice, which is immutable once final — so there is nothing to keep in sync. On a
    * terminal with no invoice service configured this is simply null; the sale is still correct.
    */
+  /**
+   * UX-REF-NUMBERS: the readable document behind a debt, from REAL rows only. A sale-sourced debt shows
+   * its invoice's number when the sale came from a finalized invoice, otherwise the sale's own receipt
+   * number; a manual debt shows its typed reference. A sale that cannot be read is `unresolved` —
+   * never an id, never an invented number.
+   */
+  function statementDocument(o: { readonly sourceKind: string; readonly sourceRef: string; readonly saleId: string | null }): StatementDocumentDto {
+    if (o.sourceKind !== "sale" || o.saleId === null) return { kind: "manual", reference: o.sourceRef };
+    let sale: SaleRecord;
+    try {
+      sale = service.getSale(o.saleId).sale;
+    } catch {
+      return { kind: "unresolved" };
+    }
+    const invoiceNumber = invoiceNumberFor(sale);
+    return invoiceNumber !== null ? { kind: "invoice", number: invoiceNumber } : { kind: "sale", receiptNumber: sale.receiptNumber };
+  }
+
   function invoiceNumberFor(sale: SaleRecord): number | null {
     if (sale.sourceType !== "invoice" || !sale.invoiceId || !options.invoices) return null;
     const number = options.invoices.invoiceNumberOf(sale.invoiceId);
@@ -1740,6 +1759,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         sourceKind: row.obligation.sourceKind,
         sourceRef: row.obligation.sourceRef,
         saleId: row.obligation.saleId,
+        document: statementDocument(row.obligation),
         postedAt: row.obligation.postedAt,
         settlements: row.settlements.map((st) => ({
           id: st.id,

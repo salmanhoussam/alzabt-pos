@@ -43,6 +43,7 @@ import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../api";
 import type { PaymentMethod } from "../../domain/sale";
 import { parseDecimal } from "../../domain/money";
 import { useT } from "../i18n";
+import { statementDocumentText } from "../statementDocument";
 import { AllocatedReceiptForm } from "./AllocatedReceiptForm";
 import { type ReceiptReconciliation, reconcileReceiptOutcome, sharableCurrencies } from "./receiptAllocation";
 import type {
@@ -548,9 +549,9 @@ export function CustomerStatement({ customerId }: Props) {
                 </div>
                 <div className="statement-row">
                   <span className="muted">{t("statement.source")}</span>
-                  <span data-testid="statement-source">
-                    {o.sourceKind === "sale" ? t("statement.sourceSale") : t("statement.sourceManual")}{" "}
-                    <bdi dir="ltr">{o.sourceRef}</bdi>
+                  {/* UX-REF-NUMBERS: the invoice / sale-receipt number or the typed reference — never the id. */}
+                  <span data-testid="statement-source" data-document={o.document.kind}>
+                    <bdi>{statementDocumentText(o.document, t)}</bdi>
                   </span>
                 </div>
                 <div className="statement-row">
@@ -619,8 +620,8 @@ export function CustomerStatement({ customerId }: Props) {
                       </div>
                       <div className="statement-row">
                         <span className="muted">{t("collect.reference")}</span>
-                        <bdi dir="ltr" data-testid="collect-reference">
-                          {o.sourceRef}
+                        <bdi data-testid="collect-reference" data-document={o.document.kind}>
+                          {statementDocumentText(o.document, t)}
                         </bdi>
                       </div>
                       <div className="statement-row">
