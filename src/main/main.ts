@@ -29,7 +29,8 @@ import { ReceiptRepository } from "../persistence/receiptRepository";
 import { businessDateOf } from "../domain/businessDay";
 import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
-import { loadCatalog } from "../domain/catalog";
+import { asDemoCatalog, emptyCatalog, loadCatalog } from "../domain/catalog";
+import { decideDemoCatalog, demoCatalogRequested, probeMerchantData } from "./demoCatalog";
 import { FIXTURE_CASHIERS } from "../fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../fixtures/catalog";
 import { FIXTURE_TERMINAL } from "../fixtures/terminal";
@@ -740,10 +741,21 @@ function startTill(): void {
   // everything else, because a second connection would not be atomic with the product write.
   const categoryStore = new CategoryRepository(db);
   const productImageStore = new ProductImageRepository(db);
-  const start = startupCatalog(catalogStore, loadCatalog(FIXTURE_CATALOG), FIXTURE_TERMINAL.currency);
-  console.info(`[pos] catalog: ${start.origin}, ${start.catalog.products.length} products`);
-  diag("catalog", { origin: start.origin, products: start.catalog.products.length });
-  log.info("catalog", { origin: start.origin, products: start.catalog.products.length });
+  // 🔴 DEMO-FALLBACK (RISK-24). The sample café catalog is served ONLY under the explicit switch AND
+  // only on a ledger with no merchant data (src/main/demoCatalog.ts). Otherwise a shop with no active
+  // product gets an EMPTY till — never the sample, whose sales used to be recorded as genuine.
+  const demoDecision = decideDemoCatalog(
+    demoCatalogRequested(process.env),
+    probeMerchantData(db, FIXTURE_CATALOG.products.map((p) => p.id)),
+  );
+  const fallbackCatalog =
+    demoDecision.mode === "demo" ? asDemoCatalog(loadCatalog(FIXTURE_CATALOG)) : emptyCatalog(FIXTURE_TERMINAL.currency);
+  const start = startupCatalog(catalogStore, fallbackCatalog, FIXTURE_TERMINAL.currency);
+  const catalogOrigin = start.origin === "local" ? "local" : demoDecision.mode === "demo" ? "demo" : "empty";
+  const demoRefused = demoDecision.mode === "merchant" && demoDecision.demoRefused;
+  console.info(`[pos] catalog: ${catalogOrigin}, ${start.catalog.products.length} products${demoRefused ? " (demo switch IGNORED: merchant data present)" : ""}`);
+  diag("catalog", { origin: catalogOrigin, products: start.catalog.products.length, demoRefused });
+  log.info("catalog", { origin: catalogOrigin, products: start.catalog.products.length, demoRefused });
   // Operator settings (language) live in a small JSON file beside the ledger, not in it.
   const settings = new SettingsStore(userData);
   log.info("settings", { ...settings.get() });
@@ -764,6 +776,7 @@ function startTill(): void {
     repository: saleStore,
     pinStates: new PinStateRepository(db),
     catalog: start.catalog,
+    fallbackCatalog,
     catalogStore,
     categories: categoryStore,
     productImages: productImageStore,

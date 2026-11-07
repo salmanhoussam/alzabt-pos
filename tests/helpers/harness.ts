@@ -78,6 +78,8 @@ export function makeHarness(
   opts: {
     catalog?: Catalog;
     catalogSource?: CatalogSource;
+    /** DEMO-FALLBACK: what the till serves once no local product is active. Absent = legacy behaviour. */
+    fallbackCatalog?: Catalog;
     clock?: TestClock;
     repository?: (db: Db) => SaleRepository;
     ledgerRepository?: (db: Db) => LedgerRepository;
@@ -158,6 +160,7 @@ export function makeHarness(
       repository,
       pinStates: new PinStateRepository(db),
       catalog: opts.catalog ?? loadCatalog(opts.catalogSource ?? FIXTURE_CATALOG),
+      ...(opts.fallbackCatalog ? { fallbackCatalog: opts.fallbackCatalog } : {}),
       catalogStore: new CatalogRepository(db),
       // Wired by DEFAULT, matching main.ts. A test that wants the fail-closed shape asks for it.
       ...(opts.productMaster === null

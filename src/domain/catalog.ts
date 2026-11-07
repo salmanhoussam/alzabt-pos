@@ -90,6 +90,22 @@ export interface Catalog {
   readonly byId: ReadonlyMap<string, Product>;
   /** See `CatalogSource.inactiveBarcodes`. Never overlaps an active product's barcode. */
   readonly inactiveBarcodes: ReadonlySet<string>;
+  /**
+   * DEMO-FALLBACK: true ONLY on the bundled sample catalog served under the explicit demo switch
+   * (src/main/demoCatalog.ts). Absent / false on every real catalog. The till shows a permanent
+   * warning while it is true.
+   */
+  readonly demo?: boolean;
+}
+
+/** The merchant-mode catalog when the shop has no active product: nothing to sell, never the sample. */
+export function emptyCatalog(currency: string): Catalog {
+  return Object.freeze({ currency, products: Object.freeze([]), byId: new Map(), inactiveBarcodes: new Set<string>() });
+}
+
+/** Marks a validated catalog as the demo sample. Used only under the explicit demo switch. */
+export function asDemoCatalog(catalog: Catalog): Catalog {
+  return Object.freeze({ ...catalog, demo: true });
 }
 
 /**

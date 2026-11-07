@@ -223,7 +223,10 @@ describe("the catalog carries barcodes, and inactive ones as strings only", () =
     expect(dto.inactiveBarcodes).toEqual(["4006381333931"]);
     expect(dto.inactiveBarcodes.every((c) => typeof c === "string")).toBe(true);
     expect(dto.products.map((p) => p.id)).not.toContain("inactive");
-    expect(Object.keys(dto).sort()).toEqual(["currency", "inactiveBarcodes", "products"]);
+    // TRANSITION (DEMO-FALLBACK): was ["currency", "inactiveBarcodes", "products"]; `demo` is the one
+    // additive flag, a boolean — still no id, name or price of an inactive product.
+    expect(Object.keys(dto).sort()).toEqual(["currency", "demo", "inactiveBarcodes", "products"]);
+    expect(dto.demo).toBe(false);
   });
 
   it("the DTO round trip keeps barcodes and the inactive set, and the decision still holds", () => {
@@ -432,7 +435,9 @@ describe("Sell tab clicked while Sell is open", () => {
   it("🔴 the tab bar asks the Sell screen to take focus back, only for that click", () => {
     const app = readFileSync("src/renderer/App.tsx", "utf8").replace(/^\s*\/\/.*$/gm, "");
     expect(app).toContain('if (name === "sell" && tab === "sell") setSellFocusRequest((n) => n + 1);');
-    expect(app).toContain("<SellScreen key={catalogVersion} focusRequest={sellFocusRequest} />");
+    // TRANSITION (DEMO-FALLBACK): was `<SellScreen key={catalogVersion} focusRequest={sellFocusRequest} />`;
+    // the role is passed for the empty-state guidance only.
+    expect(app).toContain("<SellScreen key={catalogVersion} focusRequest={sellFocusRequest} role={cashier?.role} />");
   });
 });
 
@@ -557,7 +562,11 @@ describe("no cart change behind a modal", () => {
   });
 
   it("the grid's 'no match' line is not shown under a barcode refusal", () => {
-    expect(sellSource()).toContain('visible.length === 0 && scanNote === null && <p className="muted">{t("sell.noMatch")}</p>');
+    // TRANSITION (DEMO-FALLBACK): was `visible.length === 0 && scanNote === null && <p …noMatch…>`; an EMPTY
+    // catalog shows its own empty state instead, so the line now also requires products to exist.
+    expect(sellSource()).toContain(
+      'visible.length === 0 && scanNote === null && catalog.products.length > 0 && <p className="muted">{t("sell.noMatch")}</p>',
+    );
   });
 });
 

@@ -41,7 +41,14 @@ const METHOD_KEY: Record<PaymentMethod, string> = {
  * `focusRequest` is bumped by the tab bar when the operator clicks Sell while Sell is already open:
  * that click focuses the tab button and does not remount this screen, so `autoFocus` cannot help.
  */
-export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: number } = {}) {
+export function SellScreen({
+  focusRequest = 0,
+  role,
+}: {
+  readonly focusRequest?: number;
+  /** DEMO-FALLBACK: chooses the empty-state guidance only (owner: add / import; cashier: ask the owner). */
+  readonly role?: string;
+} = {}) {
   const { t, unit } = useT();
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [clearing, setClearing] = useState(false);
@@ -375,6 +382,13 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
             {t(SCAN_MESSAGE_KEY[scanNote])}
           </p>
         )}
+        {/* 🔴 DEMO-FALLBACK: a shop with no active product sees THIS — never the sample café catalog. */}
+        {catalog.products.length === 0 && (
+          <div className="card empty-catalog" data-testid="sell-empty-catalog" data-role={role === "owner" ? "owner" : "cashier"}>
+            <h3>{t("sell.emptyCatalog.title")}</h3>
+            <p>{t(role === "owner" ? "sell.emptyCatalog.owner" : "sell.emptyCatalog.cashier")}</p>
+          </div>
+        )}
         <div className="products">
           {visible.map((p, i) => {
             const thumb = thumbs.get(p.id);
@@ -472,7 +486,7 @@ export function SellScreen({ focusRequest = 0 }: { readonly focusRequest?: numbe
           })}
           {/* Not under a barcode refusal: the scanned text filters the grid to nothing, and the
               refusal above already says what happened. */}
-          {visible.length === 0 && scanNote === null && <p className="muted">{t("sell.noMatch")}</p>}
+          {visible.length === 0 && scanNote === null && catalog.products.length > 0 && <p className="muted">{t("sell.noMatch")}</p>}
         </div>
       </section>
 

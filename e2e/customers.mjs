@@ -41,7 +41,9 @@ const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["
 
 // A fresh profile per run: this script creates records and must never touch a real ledger.
 const home = mkdtempSync(join(tmpdir(), "pos-e2e-customers-"));
-const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
+// TRANSITION (DEMO-FALLBACK, D-DF1): this script sells the bundled sample catalog on a fresh profile, which the
+// merchant default no longer serves; the explicit demo switch keeps that coverage. Old value: no switch.
+const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData"), ALZABT_POS_DEMO_CATALOG: "1" };
 const Database = createRequire(import.meta.url)("better-sqlite3");
 const LEDGER = join(home, "userData", "alzabt-pos-ledger.sqlite");
 
@@ -1664,6 +1666,19 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
         if (!r.ok) throw new Error(`createCustomer: ${JSON.stringify(r.error)}`);
         return r.data.customer.id;
       };
+      // TRANSITION (DEMO-FALLBACK, D-DF1): this profile already holds customers and debts — merchant data —
+      // so the demo switch is (correctly) ignored from here on and the sample catalog is gone. The sections
+      // below sell "the first card", never a sample-specific product or price, so the shop gets one REAL
+      // product of its own. Old value: the bundled sample, served whatever the ledger held.
+      if ((await q.locator("button.product").count()) === 0) {
+        const made = await direct(q, "createProduct", {
+          draft: { nameAr: "صنف حساب تجريبي", nameEn: "ACC test item", sku: "ACC2-REAL-1", price: "2.50", baseUnit: "piece" },
+        });
+        if (!made.ok) throw new Error(`createProduct: ${JSON.stringify(made.error)}`);
+        await testid(q, "tab-today").click();
+        await testid(q, "tab-sell").click();
+        await q.locator("button.product").first().waitFor({ state: "visible", timeout: 30000 });
+      }
       const PAID = "زبون البيع المدفوع";
       const paidId = await mk(PAID);
       const otherId = await mk("زبون آخر للتبديل");

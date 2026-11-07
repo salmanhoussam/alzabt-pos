@@ -72,7 +72,11 @@ const DEFAULT_PROFILE =
     ? join(process.env.APPDATA ?? "", "Alzabt POS")
     : join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "Alzabt POS");
 const LEDGER = join(DEFAULT_PROFILE, "alzabt-pos-ledger.sqlite");
-const env = { ...process.env };
+// TRANSITION (DEMO-FALLBACK, D-DF1): this script sells the bundled sample catalog on a fresh profile, which the
+// merchant default no longer serves; the explicit demo switch keeps that coverage. Old value: no switch.
+// Older builds ignore the variable; the NEW build needs it only in verify-from-v2, where the upgraded
+// demo-era profile (sample sales only, no merchant data) is still sold from the sample.
+const env = { ...process.env, ALZABT_POS_DEMO_CATALOG: "1" };
 delete env.ALZABT_POS_USER_DATA;
 
 /** Must match E2E_PIN in e2e/_signin.mjs — six digits, so it satisfies the real PIN rule. */

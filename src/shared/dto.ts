@@ -64,7 +64,7 @@ export function toProductDto(p: Product): ProductDto {
 }
 
 export function toCatalogDto(c: Catalog): CatalogDto {
-  return { currency: c.currency, products: c.products.map(toProductDto), inactiveBarcodes: [...c.inactiveBarcodes] };
+  return { currency: c.currency, products: c.products.map(toProductDto), inactiveBarcodes: [...c.inactiveBarcodes], demo: c.demo === true };
 }
 
 /** Rebuilds a usable Catalog in the renderer (for display totals only — main always reprices). */
@@ -83,6 +83,7 @@ export function fromCatalogDto(dto: CatalogDto): Catalog {
     products,
     byId: new Map(products.map((p) => [p.id, p])),
     inactiveBarcodes: new Set(dto.inactiveBarcodes),
+    demo: dto.demo === true,
   };
 }
 
