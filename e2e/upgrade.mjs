@@ -45,7 +45,8 @@
 // This file's own header explains why it is a literal rather than MIGRATIONS.length: these scripts
 // assert what the INSTALLED app did, so deriving it from the build under test would make the check
 // circular.
-const SCHEMA = 18;
+// 🔴 TRANSITION 18 -> 19 with migration 19 (payment_model_tenders_references_advances). The old value was 18.
+const SCHEMA = 19;
 
 import { _electron as electron } from "playwright-core";
 import { spawn, execFileSync } from "node:child_process";

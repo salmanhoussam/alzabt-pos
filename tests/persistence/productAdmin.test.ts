@@ -88,6 +88,7 @@ describe("schema is unchanged by this feature", () => {
       [17, "settlement_collection_details"],
       // Migration 18 adds only external-receipt tables and one nullable settlement link.
       [18, "external_receipt_allocation"],
+      [19, "payment_model_tenders_references_advances"], // TRANSITION: the registry ended at 18 before migration 19
     ]);
   });
 

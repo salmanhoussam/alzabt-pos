@@ -176,9 +176,9 @@ function v6Ledger(): Array<Record<string, unknown>> {
 describe("migration 7 — v6 to v7", () => {
   it("is the seventh migration, and 1-6 are byte-identical after it", () => {
     // 7 -> 8 operator accounts -> 9 product master -> 10 product master audit
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] /* TRANSITION: was 1..18 before migration 19 (payment_model_tenders_references_advances) */);
     expect(MIGRATIONS[6]!.name).toBe("invoice_sales_integration");
-    expect(MIGRATIONS).toHaveLength(18); // was 17 before migration 18 (external_receipt_allocation)
+    expect(MIGRATIONS).toHaveLength(19); // TRANSITION: was 18 before migration 19 (payment_model_tenders_references_advances); 17 before 18
 
     // The released fingerprints of 1-6. A ledger upgraded by this build must still recognise every
     // one of them, or openDatabase refuses the file — which is what the next test proves.
@@ -346,11 +346,16 @@ describe("migration 7 — v6 to v7", () => {
       expect(db.pragma("integrity_check", { simple: true })).toBe("ok");
       expect(db.pragma("foreign_key_check")).toEqual([]);
 
+      // TRANSITION (migration 19): the four before, plus the tender seal, the legacy-shape guard and the
+      // balance-needs-a-customer rule (D-P1a / D-P2a).
       expect(objects(db, "trigger", "sales")).toEqual([
         "sales_credit_requires_active_customer",
         "sales_immutable_delete",
         "sales_immutable_update",
+        "sales_legacy_shape_has_no_tender",
+        "sales_pos_balance_requires_customer",
         "sales_pos_unpaid_requires_no_tender",
+        "sales_tender_seal",
       ]);
       expect(objects(db, "trigger", "sale_lines")).toEqual([
         "sale_lines_closed_sale",

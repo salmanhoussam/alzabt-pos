@@ -57,7 +57,7 @@ describe("migration 4 — v3 to v4", () => {
   it("is the fourth migration, and 1-3 are not touched by it", () => {
     // Was [1, 2, 3, 4], then [1..5], then [1..6]. Migration 4's own position and content are what
     // this file is about, and neither has moved through any later addition.
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] /* 4 -> 14 as later migrations landed */);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] /* TRANSITION: was 1..18 before migration 19 (payment_model_tenders_references_advances) */ /* 4 -> 14 as later migrations landed */);
     expect(MIGRATIONS[3]!.name).toBe("exact_sale_quantity");
     // Migration 5 is additive and must not reach into this one's table either.
     expect(MIGRATIONS[4]!.name).toBe("durable_local_audit");
@@ -143,7 +143,11 @@ describe("migration 4 — v3 to v4", () => {
     expect(cols).not.toContain("quantity");
     // one table, not two, and no compatibility view
     expect(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name = 'sale_lines_v4'").get()).toEqual({ n: 0n });
-    expect(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type = 'view'").get()).toEqual({ n: 0n });
+    // TRANSITION (migration 19): was "no view at all"; migration 19 adds exactly one, the D-REF-2 report of
+    // historic references that collide after normalization. Migration 4 itself still creates none.
+    expect(db.prepare("SELECT group_concat(name) AS n FROM sqlite_master WHERE type = 'view'").get()).toEqual({
+      n: "external_reference_legacy_collisions",
+    });
     db.close();
   });
 
