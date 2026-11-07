@@ -1,6 +1,6 @@
 import { DomainError } from "../domain/errors";
 import { DEFAULT_TERMINAL_LANGUAGE, type Language, isLanguage } from "../shared/i18n";
-import { arabicRefusal, customerPaymentOverpaymentRefusal } from "./refusalText";
+import { arabicRefusal, customerPaymentOverpaymentRefusal, loginRefusal } from "./refusalText";
 import type { IpcResult, PosApi } from "../shared/ipcContract";
 import { formatDecimal, money } from "../domain/money";
 import { fromMoneyDto } from "../shared/dto";
@@ -78,6 +78,7 @@ export function errorText(err: unknown, lang: Language = currentLanguage()): str
   if (err instanceof ApiError) {
     return (
       customerPaymentOverpaymentRefusal(lang, err.code, err.context) ??
+      loginRefusal(lang, err.code, err.context) ??
       arabicRefusal(lang, err.code) ??
       err.message
     );

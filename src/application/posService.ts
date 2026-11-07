@@ -469,7 +469,11 @@ export class PosService {
    */
   login(cashierId: string, pin: string): LoginResult {
     const account = this.credentialFor(cashierId);
-    if (!account) throw new DomainError("INVALID_CREDENTIALS", "Cashier or PIN is incorrect");
+    if (!account) {
+      throw new DomainError("INVALID_CREDENTIALS", "Cashier or PIN is incorrect", "LOGIN_UNKNOWN_OPERATOR", {
+        reason: "LOGIN_UNKNOWN_OPERATOR",
+      });
+    }
     const fixture = account;
     const now = this.now();
     const lockMinutes = PIN_LOCKOUT_POLICY.lockDurationMs / 60000;
@@ -490,12 +494,16 @@ export class PosService {
       throw new DomainError(
         "CASHIER_LOCKED",
         `Too many incorrect PIN attempts. ${fixture.name} is locked — try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+        "LOGIN_PIN_LOCKED",
+        { reason: "LOGIN_PIN_LOCKED", minutesRemaining: minutes },
       );
     }
     if (outcome.kind === "wrong") {
       throw new DomainError(
         "INVALID_CREDENTIALS",
         `Cashier or PIN is incorrect. ${outcome.left} attempt${outcome.left === 1 ? "" : "s"} left before a ${lockMinutes}-minute lock.`,
+        "LOGIN_PIN_WRONG",
+        { reason: "LOGIN_PIN_WRONG", attemptsLeft: outcome.left, lockMinutes },
       );
     }
     // The PIN was correct. Whether that opens a session is the operator service's decision.

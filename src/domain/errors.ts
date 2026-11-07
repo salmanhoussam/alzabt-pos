@@ -104,6 +104,16 @@ export interface CustomerPaymentOverpaymentContext {
   readonly currency: string;
 }
 
+/**
+ * I18N-LOGIN-PIN (DEC-33 #3): the numbers a PIN refusal carries, as DATA — so the Arabic screen can say
+ * them without parsing the English sentence (refusalText.ts rule (b)). Attached by `PosService.login`
+ * only; the English message is unchanged.
+ */
+export type LoginRefusalContext =
+  | { readonly reason: "LOGIN_PIN_WRONG"; readonly attemptsLeft: number; readonly lockMinutes: number }
+  | { readonly reason: "LOGIN_PIN_LOCKED"; readonly minutesRemaining: number }
+  | { readonly reason: "LOGIN_UNKNOWN_OPERATOR" };
+
 export class DomainError extends Error {
   /**
    * An OPTIONAL machine tag naming WHICH refusal this is, for presentation layers that must say
@@ -121,7 +131,7 @@ export class DomainError extends Error {
    */
   readonly code: DomainErrorCode;
   readonly reason?: string;
-  readonly context?: CustomerPaymentOverpaymentContext;
+  readonly context?: CustomerPaymentOverpaymentContext | LoginRefusalContext;
 
   constructor(code: DomainErrorCode, message: string);
   constructor(code: DomainErrorCode, message: string, reason: string);
@@ -131,11 +141,12 @@ export class DomainError extends Error {
     reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING",
     context: CustomerPaymentOverpaymentContext,
   );
+  constructor(code: DomainErrorCode, message: string, reason: LoginRefusalContext["reason"], context: LoginRefusalContext);
   constructor(
     code: DomainErrorCode,
     message: string,
     reason?: string,
-    context?: CustomerPaymentOverpaymentContext,
+    context?: CustomerPaymentOverpaymentContext | LoginRefusalContext,
   ) {
     super(message);
     this.code = code;
