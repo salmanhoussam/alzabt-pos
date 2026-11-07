@@ -557,11 +557,14 @@ describe("the till contract is not one byte looser", () => {
         )
         .run({ id: `s-${status}-${paid}`, receipt: 600 + paid, key: `bad-${status}-${paid}-0001`, paid, balance, status });
     // "paid" with money still owed, "unpaid" with money received, "partial" with nothing received.
-    expect(bad("paid", 40, 60)).toThrow(/CHECK constraint failed/);
+    // TRANSITION (migration 19): was /CHECK constraint failed/ for all three. A till row that leaves a
+    // balance without a customer is now refused one step EARLIER, by `sales_pos_balance_requires_customer`
+    // (D-P2a). Still refused, nothing written — only the message differs for the two balance rows.
+    expect(bad("paid", 40, 60)).toThrow(/CHECK constraint failed|must name its customer/);
     expect(bad("unpaid", 100, 0)).toThrow(/CHECK constraint failed/);
-    expect(bad("partial", 0, 100)).toThrow(/CHECK constraint failed/);
+    expect(bad("partial", 0, 100)).toThrow(/CHECK constraint failed|must name its customer/);
     // And paid + balance must equal the total.
-    expect(bad("partial", 40, 50)).toThrow(/CHECK constraint failed/);
+    expect(bad("partial", 40, 50)).toThrow(/CHECK constraint failed|must name its customer/); // TRANSITION (migration 19), same reason
   });
 });
 

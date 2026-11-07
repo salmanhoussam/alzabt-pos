@@ -123,7 +123,9 @@ describe("🔴 stage → restart → restore → a correct ledger", () => {
     expect(restore.kind).toBe("restored");
     expect(schemaVersion(db)).toBe(MIGRATIONS.length);
     db.close();
-    expect(readdirSync(join(u, "backups")).some((n) => n.startsWith("pre-migration-v17-to-v18-"))).toBe(true);
+    // TRANSITION (migration 19): was "pre-migration-v17-to-v18-"; the startup path upgrades to the LATEST
+    // schema, so the safety copy is named for it.
+    expect(readdirSync(join(u, "backups")).some((n) => n.startsWith(`pre-migration-v17-to-v${MIGRATIONS.length}-`))).toBe(true);
   });
 
   it("a power cut during the restore: the next start finishes it and opens the restored ledger", () => {

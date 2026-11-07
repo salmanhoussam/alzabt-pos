@@ -106,7 +106,9 @@ describe("migration 18 on a populated v17 ledger", () => {
     pre.close();
 
     const backup = `${t.dir}/pre-m18.sqlite`;
-    const db = openDatabase(t.dbPath, MIGRATIONS, {
+    // TRANSITION (migration 19): was MIGRATIONS (which then ended at 18). This test is about migration 18,
+    // so it is pinned to the registry as it stood when 18 was the last one.
+    const db = openDatabase(t.dbPath, MIGRATIONS.slice(0, V18), {
       beforeMigrations: (conn, pending) => {
         expect(pending).toEqual({ fromVersion: V17, toVersion: V18 });
         snapshotDatabase(conn, backup);
