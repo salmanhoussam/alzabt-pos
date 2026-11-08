@@ -151,6 +151,12 @@ export function HistoryScreen() {
             {t("history.voidedBy")} {open.void.cashierName}: {open.void.reason}
           </p>
         )}
+        {/* DEC-35a: a voided Whish sale never reads as "refunded" — the void is this ledger's record only. */}
+        {open.void && open.sale.paymentMethod === "external" && (
+          <p className="notice small" role="note" data-testid="voided-not-refund">
+            {t("void.notRefund")}
+          </p>
+        )}
         <Receipt sale={open.sale} />
       </div>
     );
@@ -278,6 +284,13 @@ export function HistoryScreen() {
               <bdi dir="ltr">{fmt(voiding.sale.total)}</bdi>
             </h2>
             <p className="muted small">{t("void.body")}</p>
+            {/* DEC-35a: voiding a Whish sale is the owner's, and it is NOT a refund. Said before the
+                confirm button, in the shop's language, so nobody takes the void for money returned. */}
+            {voiding.sale.paymentMethod === "external" && (
+              <p className="notice small" role="note" data-testid="void-not-refund">
+                {t("void.notRefund")}
+              </p>
+            )}
             {/* Which receipt this is, so one can be told from another before it is destroyed. */}
             <p className="small">
               <bdi dir="ltr">{stamp(voiding.sale.completedAt)}</bdi> · {voiding.sale.cashierName} ·{" "}

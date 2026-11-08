@@ -255,6 +255,8 @@ await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
 await page.locator('tr[data-payment-method="external"]').locator('[data-testid="history-void"]').click(); // P3: was data-payment-method="card"
 await page.locator('[data-testid="void-reason"]').fill("customer cancelled");
+// DEC-35a: voiding a Whish sale says, before the confirm button, that it is NOT a refund.
+assert((await page.locator('[data-testid="void-not-refund"]').count()) === 1, "🔴 the Whish void dialog says a void is not a refund");
 await page.screenshot({ path: SHOTS + "06-void-dialog.png" });
 await page.locator('[data-testid="void-confirm"]').click();
 await page.waitForSelector("tr.voided");

@@ -2709,6 +2709,16 @@ export class PosService {
         "This sale comes from a finalized invoice. Invoice cancellation / credit-note workflow is not implemented yet.",
       );
     }
+    // 🔴 VOIDING A WHISH SALE IS THE OWNER'S ALONE (DEC-35a / option A, owner 2026-11-08) — and it is
+    // decided HERE, in the service, from the LIVE operator row, not by the channel table or a hidden
+    // button. Any `external` sale qualifies: since P2 that is Whish with its evidence, and a
+    // provider-less external sale from an earlier build is outside money just the same.
+    // The void row written below IS the audit record (who, when, why, which sale; immutable by
+    // trigger; UNIQUE per sale). It cancels the sale in this ledger only: it does NOT say the money
+    // went back to the customer — any Whish refund happens outside the program and is checked on its
+    // own. The sale, its tender and its registered reference are untouched, so the reference stays
+    // taken for ever.
+    const voider: Cashier = sale.paymentMethod === "external" ? this.requireOwner() : cashier;
     if (this.repository.getVoid(saleId)) throw new DomainError("ALREADY_VOIDED", "This sale is already voided");
     const instant = this.now();
     const today = businessDateOf(instant, this.deps.terminal.timeZone);
@@ -2718,8 +2728,8 @@ export class PosService {
     const record: VoidRecord = {
       id: this.newId(),
       saleId,
-      cashierId: cashier.id,
-      cashierName: cashier.name,
+      cashierId: voider.id,
+      cashierName: voider.name,
       reason: cleanReason,
       businessDate: today,
       createdAt: instant.toISOString(),
