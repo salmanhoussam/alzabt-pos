@@ -96,6 +96,9 @@ describe("IPC surface", () => {
         // TRANSITION with M17B-S1: one more name in the closed list — owner-only, shares ONE real external receipt.
         "recordAllocatedReceipt",
         "recordCustomerPayment",
+        // TRANSITION (SELL-CREDIT, owner 2026-11-08): one more name — owner-only, the till's ONE way to
+        // create a customer debt (a whole sale on account). Old list: without it.
+        "createCustomerCreditSale",
         "createCategory",
         "createSale",
         "currentCashier",
@@ -205,7 +208,9 @@ describe("IPC surface", () => {
     // 🔴 TRANSITION — SEVENTY-SIX to SEVENTY-NINE with Track 2 phase 3 (full backup and restore).
     // The three added: exportFullBackup, inspectRestoreBackup, applyRestore — owner-only, and
     // refused again by PosService.assertOwner. The old value was 76.
-    expect(CHANNEL_NAMES).toHaveLength(79);
+    // 🔴 TRANSITION (SELL-CREDIT): 79 -> 80 — createCustomerCreditSale, owner-only, the till's ONE way to
+    // create a customer debt. The old value was 79.
+    expect(CHANNEL_NAMES).toHaveLength(80);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

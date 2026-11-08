@@ -6,7 +6,16 @@ import { useT } from "../i18n";
 import { stamp } from "../format";
 
 /** On-screen receipt summary (no printing in this gate). */
-export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => void }) {
+export function Receipt({
+  sale,
+  onNewSale,
+  onAccountFor = null,
+}: {
+  sale: SaleDto;
+  onNewSale?: () => void;
+  /** SELL-CREDIT: the customer an on-account sale was just recorded for (the sale DTO carries no name). */
+  onAccountFor?: string | null;
+}) {
   const { t, unit } = useT();
   return (
     <div className="center">
@@ -51,6 +60,15 @@ export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => 
         </table>
         {/* 🔴 THE METHOD IS TRANSLATED, NOT PRINTED RAW. This cell used to render the enum itself,
             so an Arabic till showed "cash" — the same leak as PENDING in the review queue. */}
+        {/* SELL-CREDIT: an unpaid till sale is a debt on a customer's account — never "paid by …". */}
+        {sale.sourceType === "pos" && sale.paymentStatus === "unpaid" ? (
+          <div className="receipt-paid" data-testid="receipt-on-account">
+            <span className="muted small">{t("receipt.onAccount")}</span>
+            {onAccountFor !== null && onAccountFor !== undefined && <bdi data-testid="receipt-on-account-customer">{onAccountFor}</bdi>}
+            <span className="muted small">{t("receipt.balanceDue")}</span>
+            <strong data-testid="receipt-balance-due"><bdi dir="ltr">{fmt(sale.balanceDue)}</bdi></strong>
+          </div>
+        ) : (
         <div className="receipt-paid">
           <span className="muted small">{t("receipt.paidBy")}</span>
           <strong
@@ -65,6 +83,7 @@ export function Receipt({ sale, onNewSale }: { sale: SaleDto; onNewSale?: () => 
                 : t("history.payNoMethod")}
           </strong>
         </div>
+        )}
         {/* P2: the Whish reference the operator recorded — the receipt is the customer's proof of it. */}
         {sale.externalPayment && (
           <div className="receipt-paid">

@@ -24,6 +24,7 @@ export const CHANNELS = {
   currentCashier: "pos:currentCashier",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
+  createCustomerCreditSale: "pos:createCustomerCreditSale",
   voidSale: "pos:voidSale",
   getTodaySales: "pos:getTodaySales",
   getSaleHistory: "pos:getSaleHistory",
@@ -337,6 +338,24 @@ export interface CreateSaleRequest {
 
 export interface CreateSaleResponse {
   readonly sale: SaleDto;
+  readonly duplicate: boolean;
+}
+
+/**
+ * SELL-CREDIT (owner, 2026-11-08): the whole sale on the chosen customer's account. No payment method —
+ * nothing was received; the full total becomes one receivable on that customer. Owner only.
+ */
+export interface CreateCustomerCreditSaleRequest {
+  readonly idempotencyKey: string;
+  readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
+  readonly expectedTotalMinor: string;
+  readonly customerId: string;
+}
+
+export interface CreateCustomerCreditSaleResponse {
+  readonly sale: SaleDto;
+  /** The receivable posted with the sale, in the same transaction. */
+  readonly obligationId: string;
   readonly duplicate: boolean;
 }
 
@@ -1495,6 +1514,7 @@ export interface PosApi {
   currentCashier(): Promise<IpcResult<CashierDto | null>>;
   getCatalog(): Promise<IpcResult<CatalogDto>>;
   createSale(req: CreateSaleRequest): Promise<IpcResult<CreateSaleResponse>>;
+  createCustomerCreditSale(req: CreateCustomerCreditSaleRequest): Promise<IpcResult<CreateCustomerCreditSaleResponse>>;
   voidSale(req: VoidSaleRequest): Promise<IpcResult<VoidDto>>;
   getTodaySales(): Promise<IpcResult<TodaySalesDto>>;
   getSaleHistory(req: HistoryRequest): Promise<IpcResult<SaleWithVoidDto[]>>;

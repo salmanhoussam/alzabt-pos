@@ -85,10 +85,16 @@ describe("the customer channels", () => {
     // 🔴 TRANSITION — SEVENTY-SIX to SEVENTY-NINE with Track 2 phase 3: exportFullBackup,
     // inspectRestoreBackup, applyRestore. None of them is a money write; the closed list of
     // money writers below is unchanged. The old value was 76.
-    expect(Object.keys(CHANNELS)).toHaveLength(79);
+    // 🔴 TRANSITION (SELL-CREDIT): 79 -> 80 with createCustomerCreditSale, the owner's sale on a customer's
+    // account (named in the debt-creator list below). The old value was 79.
+    expect(Object.keys(CHANNELS)).toHaveLength(80);
   });
 
-  it("🔴 S3C adds ONE money write — a SETTLEMENT — and still no way to CREATE a debt", () => {
+  // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".
+  // The owner decided every new debt is the OWNER's and opened exactly ONE way to create one from the
+  // till: `createCustomerCreditSale` (a whole sale on a customer's account). It is named below, owner-only,
+  // and still nothing can post a bare obligation, edit a balance, or reach the supplier side.
+  it("🔴 S3C adds ONE money write — a SETTLEMENT — and the ONLY way to CREATE a debt is the owner's credit sale", () => {
     // 🔴 TRANSITION, AND THE OLD ASSERTION IS NAMED. Through S3B this test was called "S3B added a
     // READ and nothing else — no channel on this bridge writes money", and that was true then.
     // S3C deliberately ends it: `recordCustomerPayment` writes a settlement. What has NOT changed,
@@ -121,6 +127,10 @@ describe("the customer channels", () => {
     const moneyWriters = names.filter((n) => /payment|receipt/i.test(n)).sort();
     expect(moneyWriters).toEqual(["recordAllocatedReceipt", "recordCustomerPayment"]);
     expect(accessFor("recordAllocatedReceipt")).toBe("owner");
+    // SELL-CREDIT: the closed, NAMED list of debt creators. Old value: none.
+    const debtCreators = names.filter((n) => /credit|debt|obligation|onAccount/i.test(n)).sort();
+    expect(debtCreators).toEqual(["createCustomerCreditSale"]);
+    expect(accessFor("createCustomerCreditSale")).toBe("owner");
   });
 
   it("🔴 every channel is classified, and the customer ones carry the intended level", () => {

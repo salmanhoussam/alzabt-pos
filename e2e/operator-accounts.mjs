@@ -453,6 +453,8 @@ for (const [channel, payload] of [
   // at all, which threw inside the PRELOAD and never reached the main process to be refused.)
   ["listReconciliationQueue", { filter: "unresolved", limit: 10 }],
   ["createProduct", { draft: { nameAr: "صنف مزيّف", nameEn: null, sku: null, price: "1.00", baseUnit: "piece" } }],
+  // SELL-CREDIT: a cashier can never create a customer debt — a well-formed request, refused by role.
+  ["createCustomerCreditSale", { idempotencyKey: "cashier-credit-0001", lines: [{ productId: "x", quantityMilli: 1000 }], expectedTotalMinor: "100", customerId: "c-1" }],
   // 🔴 SLICE H1/H2 — THE PHONE LAN BRIDGE. These are added to THIS loop rather than given their own
   // because this is the one place the "a cashier cannot reach an owner channel" claim is made
   // against the installed app, and a second copy elsewhere would drift.

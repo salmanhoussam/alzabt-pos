@@ -168,6 +168,9 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // ── Owner only ────────────────────────────────────────────────────────────────────────────────
   // Reversing money.
   voidSale: "owner",
+  // SELL-CREDIT: a new customer debt from the till. Every NEW debt is the owner's (DEC-35a); the service
+  // re-checks the live role inside its own transaction.
+  createCustomerCreditSale: "owner",
   // 🔴 CREATE IS NO LONGER OWNER-ONLY, AND THE CHANNEL SAYS SO HONESTLY. An owner may always;
   // a cashier may only with the explicit durable grant. The service decides — `createProduct`
   // calls `requireProductCreator()` itself — so a forged call that reaches the service still

@@ -370,6 +370,50 @@ export function SellScreen({
     setWhishConfirmed(false);
   }, [paying]);
 
+  /** SELL-CREDIT: the customer an on-account sale was recorded for, shown on its receipt (the DTO carries no name). */
+  const [completedOnAccountFor, setCompletedOnAccountFor] = useState<string | null>(null);
+
+  /** One end for every recorded sale: the receipt, an empty till, a fresh key — also straight to App. */
+  const finishSale = (sale: SaleDto, onAccountFor: string | null) => {
+    setCompleted(sale);
+    setCompletedOnAccountFor(onAccountFor);
+    setCart([]);
+    setCustomer(null);
+    setPaying(false);
+    setAttemptKey(newIdempotencyKey());
+    // Also straight to App: if the operator switched tab while this sale was in flight, this screen
+    // is gone and the state updates above land nowhere — the recorded sale must not come back as a cart.
+    draftSink.current?.({ cart: [], customer: null, attemptKey: newIdempotencyKey() });
+    setDroppedOnReturn(0);
+  };
+
+  /**
+   * SELL-CREDIT (owner, 2026-11-08): the whole sale on the chosen customer's account. A DEBT, never a
+   * payment: no method, no tender; main posts the sale, its lines and ONE receivable for the full total
+   * in one transaction, OWNER ONLY (channel + service, live role). The same checkout key as the cart, so
+   * a double click or a lost reply replays the same request and can never create a second sale or debt.
+   */
+  const payOnAccount = async () => {
+    if (!priced || busy || customer === null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await call(
+        pos().createCustomerCreditSale({
+          idempotencyKey: attemptKey,
+          lines: cart.map((l) => ({ productId: l.productId, quantityMilli: l.quantityMilli })),
+          expectedTotalMinor: priced.total.minor.toString(),
+          customerId: customer.id,
+        }),
+      );
+      finishSale(result.sale, customer.displayName);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const pay = async (method: PaymentMethod, whish?: { readonly reference: string; readonly fundsConfirmed: boolean }) => {
     if (!priced || busy) return;
     setBusy(true);
@@ -385,15 +429,7 @@ export function SellScreen({
           ...(whish === undefined ? {} : { whish }),
         }),
       );
-      setCompleted(result.sale);
-      setCart([]);
-      setCustomer(null);
-      setPaying(false);
-      setAttemptKey(newIdempotencyKey());
-      // Also straight to App: if the operator switched tab while this sale was in flight, this screen
-      // is gone and the state updates above land nowhere — the recorded sale must not come back as a cart.
-      draftSink.current?.({ cart: [], customer: null, attemptKey: newIdempotencyKey() });
-      setDroppedOnReturn(0);
+      finishSale(result.sale, null);
     } catch (e) {
       const own = whish !== undefined && e instanceof ApiError ? WHISH_ERROR_KEY[e.code] : undefined;
       setError(own ? t(own) : errorText(e));
@@ -404,7 +440,13 @@ export function SellScreen({
 
   const whishReady = whishReference.trim() !== "" && whishConfirmed && !busy;
 
-  if (completed) return <Receipt sale={completed} onNewSale={() => setCompleted(null)} />;
+  /** Leaves a receipt for a fresh till. */
+  const startNewSale = () => {
+    setCompleted(null);
+    setCompletedOnAccountFor(null);
+  };
+
+  if (completed) return <Receipt sale={completed} onAccountFor={completedOnAccountFor} onNewSale={startNewSale} />;
   if (!catalog) return <div className="center muted">{error ?? t("common.loading")}</div>;
 
   return (
@@ -937,6 +979,25 @@ export function SellScreen({
               ))}
             </div>
             )}
+            {/* SELL-CREDIT: the owner's third choice — not a payment method, a debt on the chosen customer.
+                A cashier never sees it (and the channel and the service refuse them anyway). Without an
+                active customer it stays disabled and says why. */}
+            {!whishOpen && role === "owner" && (
+              <div className="on-account" data-testid="on-account">
+                <button
+                  className="btn big"
+                  disabled={busy || customer === null}
+                  data-testid="pay-on-account"
+                  onKeyDown={refuseEnterActivation}
+                  onClick={() => void payOnAccount()}
+                >
+                  {t("pay.onAccount")}
+                </button>
+                <p className="muted small" data-testid="pay-on-account-note">
+                  {customer === null ? t("pay.onAccountNeedCustomer") : t("pay.onAccountNote")}
+                </p>
+              </div>
+            )}
             {whishOpen && (
               /* P2 · SELL-WHISH-REFERENCE-AND-CONFIRMATION. Nothing is recorded until the operator has
                  typed the Whish reference AND ticked that the money really arrived (never pre-ticked).
@@ -1007,7 +1068,7 @@ export function SellScreen({
               </p>
             )}
             {error && <p className="error">{error}</p>}
-            <button className="btn ghost wide" disabled={busy} onClick={() => setPaying(false)}>
+            <button className="btn ghost wide" disabled={busy} onClick={() => setPaying(false)} data-testid="pay-back">
               {t("pay.back")}
             </button>
           </div>

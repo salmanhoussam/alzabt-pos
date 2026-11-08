@@ -280,6 +280,32 @@ function patchObject(payload: unknown, keys: readonly string[]): Record<string, 
   return payload as Record<string, unknown>;
 }
 
+/**
+ * The till's sale lines, as both sale channels accept them (createSale and, SELL-CREDIT, the owner's
+ * createCustomerCreditSale): exactly { productId, quantityMilli } each, 1..200 of them. ONE parser, so the
+ * two channels can never drift on what a line is.
+ */
+function saleLinesOf(lines: unknown): Array<{ productId: string; quantityMilli: number }> {
+  if (!Array.isArray(lines) || lines.length === 0 || lines.length > 200) invalid("'lines' must be a non-empty array");
+  return lines.map((raw) => {
+    const l = exactObject(raw, ["productId", "quantityMilli"]);
+    // Thousandths of a sale unit, as an integer. The unit's own rule (whole-only vs fractional)
+    // needs the catalog and is applied in the domain, not here.
+    if (
+      typeof l.quantityMilli !== "number" ||
+      !Number.isSafeInteger(l.quantityMilli) ||
+      l.quantityMilli < 1 ||
+      l.quantityMilli > MAX_QUANTITY_MILLI
+    ) {
+      invalid(`'quantityMilli' must be an integer between 1 and ${MAX_QUANTITY_MILLI}`);
+    }
+    return {
+      productId: str(l.productId, "productId", MAX_PRODUCT_ID_LENGTH),
+      quantityMilli: l.quantityMilli as number,
+    };
+  });
+}
+
 function str(value: unknown, field: string, max = 200): string {
   if (typeof value !== "string" || value.length === 0 || value.length > max) invalid(`'${field}' must be a string`);
   return value;
@@ -845,24 +871,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       // other unexpected key is still refused, so the renderer cannot choose a customer's name.
       // P2: `whish` is the second optional key — exactly { reference, fundsConfirmed }, nothing else.
       const o = objectWithOptional(p, ["idempotencyKey", "lines", "paymentMethod", "expectedTotalMinor"], ["customerId", "whish"]);
-      if (!Array.isArray(o.lines) || o.lines.length === 0 || o.lines.length > 200) invalid("'lines' must be a non-empty array");
-      const lines = o.lines.map((raw) => {
-        const l = exactObject(raw, ["productId", "quantityMilli"]);
-        // Thousandths of a sale unit, as an integer. The unit's own rule (whole-only vs fractional)
-        // needs the catalog and is applied in the domain, not here.
-        if (
-          typeof l.quantityMilli !== "number" ||
-          !Number.isSafeInteger(l.quantityMilli) ||
-          l.quantityMilli < 1 ||
-          l.quantityMilli > MAX_QUANTITY_MILLI
-        ) {
-          invalid(`'quantityMilli' must be an integer between 1 and ${MAX_QUANTITY_MILLI}`);
-        }
-        return {
-          productId: str(l.productId, "productId", MAX_PRODUCT_ID_LENGTH),
-          quantityMilli: l.quantityMilli as number,
-        };
-      });
+      const lines = saleLinesOf(o.lines);
       assertPaymentMethod(o.paymentMethod);
       const result = service.createSale({
         idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
@@ -881,6 +890,33 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       }
       return { sale: toSaleDto(result.sale, invoiceNumberFor(result.sale)), duplicate: result.duplicate };
     }, (p) => saleFailureTruth(service, p, operatorLanguage())),
+    /**
+     * SELL-CREDIT (owner, 2026-11-08): a FULLY UNPAID sale on one identified customer's account — a debt,
+     * never a payment. OWNER ONLY at this channel AND in the service (which re-reads the live role inside
+     * its transaction). The sale, its lines and the receivable commit together or not at all; no tender
+     * row is written because no money was received. Every key is required; nothing else is accepted.
+     */
+    createCustomerCreditSale: wrap("createCustomerCreditSale", (p) => {
+      const o = exactObject(p, ["idempotencyKey", "lines", "expectedTotalMinor", "customerId"]);
+      const result = service.createCustomerCreditSale({
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+        lines: saleLinesOf(o.lines),
+        expectedTotalMinor: parseMinor(o.expectedTotalMinor),
+        customerId: str(o.customerId, "customerId", 100),
+      });
+      if (!result.duplicate) {
+        try {
+          options.afterSale?.();
+        } catch (err) {
+          log.warn("after-sale-hook-failed", { error: err });
+        }
+      }
+      return {
+        sale: toSaleDto(result.sale, invoiceNumberFor(result.sale)),
+        obligationId: result.obligation.id,
+        duplicate: result.duplicate,
+      };
+    }),
     voidSale: wrap("voidSale", (p) => {
       const o = exactObject(p, ["saleId", "reason"]);
       return toVoidDto(service.voidSale(str(o.saleId, "saleId", 64), str(o.reason, "reason", 400)));
