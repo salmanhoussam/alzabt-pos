@@ -10,6 +10,7 @@ import { fromCatalogDto } from "../../shared/dto";
 import type { AdminProductDto, SaleDto } from "../../shared/ipcContract";
 import { ApiError, call, errorText, newIdempotencyKey, pos } from "../api";
 import { useThumbnails } from "../useThumbnails";
+import { type SellDraft, keepSellableLines } from "../sellDraft";
 import { LineMath } from "../components/LineMath";
 import { Receipt } from "./Receipt";
 import { useT } from "../i18n";
@@ -62,20 +63,31 @@ const WHISH_ERROR_KEY: Readonly<Record<string, string>> = {
 export function SellScreen({
   focusRequest = 0,
   role,
+  draft = null,
+  onDraftChange,
 }: {
   readonly focusRequest?: number;
   /** DEMO-FALLBACK: chooses the empty-state guidance only (owner: add / import; cashier: ask the owner). */
   readonly role?: string;
+  /**
+   * SELL-CART-LOST-ON-TAB: the cart this operator left when they opened another tab (App hands it back
+   * only to the same operator). Memory only — see ../sellDraft.ts.
+   */
+  readonly draft?: SellDraft | null;
+  /** Called with the screen's unfinished work whenever it changes, so App can keep it across tabs. */
+  readonly onDraftChange?: (next: Omit<SellDraft, "operatorId">) => void;
 } = {}) {
   const { t, unit } = useT();
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [clearing, setClearing] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const cashRef = useRef<HTMLButtonElement | null>(null);
-  const [cart, setCart] = useState<CartLine[]>([]);
+  const [cart, setCart] = useState<CartLine[]>(() => (draft ? [...draft.cart] : []));
   const [paying, setPaying] = useState(false);
   // One idempotency key per checkout attempt: kept across retries, replaced when the cart changes.
-  const [attemptKey, setAttemptKey] = useState(newIdempotencyKey);
+  // SELL-CART-LOST-ON-TAB: the key travels WITH the kept cart, so a payment retried after a tab switch
+  // replays the same request (never a second sale); every cart edit still replaces it, as before.
+  const [attemptKey, setAttemptKey] = useState(() => draft?.attemptKey ?? newIdempotencyKey());
   const [busy, setBusy] = useState(false);
   /** P2: the Whish Money step — open, the typed reference, and the explicit "the money arrived". */
   const [whishOpen, setWhishOpen] = useState(false);
@@ -109,11 +121,28 @@ export function SellScreen({
    */
   const [photoMeta, setPhotoMeta] = useState<readonly AdminProductDto[]>([]);
 
+  /** Lines dropped from a kept cart because their product stopped being sellable while away. */
+  const [droppedOnReturn, setDroppedOnReturn] = useState(0);
+
   useEffect(() => {
     call(pos().getCatalog())
-      .then((dto) => setCatalog(fromCatalogDto(dto)))
+      .then((dto) => {
+        const fresh = fromCatalogDto(dto);
+        // SELL-CART-LOST-ON-TAB: a kept cart is checked against the catalogue AS IT IS NOW. Prices are
+        // never carried (they are recomputed from `fresh`); a product deactivated meanwhile is removed
+        // and said so, and the checkout key is replaced because the request is no longer the same.
+        setCart((current) => {
+          const { kept, dropped } = keepSellableLines(current, fresh);
+          if (dropped === 0) return current;
+          setDroppedOnReturn(dropped);
+          setAttemptKey(newIdempotencyKey());
+          return kept;
+        });
+        setCatalog(fresh);
+      })
       .catch((e) => setError(errorText(e)));
   }, []);
+
 
   useEffect(() => {
     let live = true;
@@ -163,7 +192,15 @@ export function SellScreen({
    * customer replaces the checkout key, like a cart edit, so a retry can never land on the previous
    * customer; a completed sale clears it, so the next sale never inherits it.
    */
-  const [customer, setCustomer] = useState<CustomerDto | null>(null);
+  const [customer, setCustomer] = useState<CustomerDto | null>(() => draft?.customer ?? null);
+
+  // SELL-CART-LOST-ON-TAB: hand the unfinished work to App on every change. The latest callback is
+  // kept in a ref so a sale that finishes AFTER the operator left the tab can still empty the draft.
+  const draftSink = useRef(onDraftChange);
+  draftSink.current = onDraftChange;
+  useEffect(() => {
+    draftSink.current?.({ cart, customer, attemptKey });
+  }, [cart, customer, attemptKey]);
   const [findingCustomer, setFindingCustomer] = useState(false);
 
   /**
@@ -353,6 +390,10 @@ export function SellScreen({
       setCustomer(null);
       setPaying(false);
       setAttemptKey(newIdempotencyKey());
+      // Also straight to App: if the operator switched tab while this sale was in flight, this screen
+      // is gone and the state updates above land nowhere — the recorded sale must not come back as a cart.
+      draftSink.current?.({ cart: [], customer: null, attemptKey: newIdempotencyKey() });
+      setDroppedOnReturn(0);
     } catch (e) {
       const own = whish !== undefined && e instanceof ApiError ? WHISH_ERROR_KEY[e.code] : undefined;
       setError(own ? t(own) : errorText(e));
@@ -568,6 +609,12 @@ export function SellScreen({
             </button>
           )}
         </div>
+        {/* SELL-CART-LOST-ON-TAB: never shrink a kept cart silently. */}
+        {droppedOnReturn > 0 && (
+          <p className="notice small" role="status" data-testid="cart-dropped-note">
+            {t("sell.cartKept.dropped").replace("{n}", String(droppedOnReturn))}
+          </p>
+        )}
 
         {/* ── The customer of this PAID sale (ACC-2) ────────────────────────────────────────────
             🔴 THE SENTENCE UNDER IT IS LOAD-BEARING. The sale is linked to the customer and shows in

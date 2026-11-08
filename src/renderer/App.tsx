@@ -6,6 +6,7 @@ import { HistoryScreen } from "./screens/HistoryScreen";
 import { LoginScreen } from "./screens/LoginScreen";
 import { SetupScreen } from "./screens/SetupScreen";
 import { SellScreen } from "./screens/SellScreen";
+import { type SellDraft, draftFor } from "./sellDraft";
 import { TodayScreen } from "./screens/TodayScreen";
 import { ProductsScreen } from "./screens/ProductsScreen";
 import { InvoicesScreen } from "./screens/InvoicesScreen";
@@ -59,6 +60,10 @@ export function App() {
   // typed into a tab button would go nowhere).
   const [sellFocusRequest, setSellFocusRequest] = useState(0);
   const [importResult, setImportResult] = useState<ImportCatalogResponse | ExportNotice | ErrorNotice | null>(null);
+  // SELL-CART-LOST-ON-TAB: the Sell screen's unfinished cart, kept while another tab is open. Memory
+  // only, ONE operator's — handed back only to them (`draftFor`), dropped on sign-out and on a catalogue
+  // import. See ./sellDraft.ts for what it does and does not keep.
+  const [sellDraft, setSellDraft] = useState<SellDraft | null>(null);
 
   useEffect(() => {
     call(pos().currentCashier())
@@ -134,6 +139,8 @@ export function App() {
 
   const logout = async () => {
     await call(pos().logout());
+    // Signing out ends the cart with the session: the next operator never inherits it.
+    setSellDraft(null);
     setCashier(null);
     setSetup(null);
     setTab("sell");
@@ -145,6 +152,8 @@ export function App() {
       if (result.status === "cancelled") return;
       setImportResult(result);
       if (result.status === "imported") {
+        // A new catalogue starts a fresh till, as it always did (the kept cart is dropped with it).
+        setSellDraft(null);
         setCatalogVersion((v) => v + 1);
         setTab("sell");
       }
@@ -213,7 +222,15 @@ export function App() {
         </p>
       )}
       <main className="content">
-        {tab === "sell" && <SellScreen key={catalogVersion} focusRequest={sellFocusRequest} role={cashier?.role} />}
+        {tab === "sell" && (
+          <SellScreen
+            key={catalogVersion}
+            focusRequest={sellFocusRequest}
+            role={cashier?.role}
+            draft={draftFor(sellDraft, cashier.id)}
+            onDraftChange={(d) => setSellDraft({ operatorId: cashier.id, ...d })}
+          />
+        )}
         {tab === "today" && <TodayScreen />}
         {tab === "history" && <HistoryScreen />}
         {tab === "products" && <ProductsScreen operator={cashier} />}
