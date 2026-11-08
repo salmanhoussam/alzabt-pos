@@ -718,6 +718,7 @@ const AR: Dict = {
   "void.reasonHint": "مثال: صنف خاطئ",
   "void.confirm": "تأكيد الإبطال",
   "void.dismiss": "تراجع",
+  "void.notRefund": "الإبطال يلغي البيعة في هذا البرنامج فقط، ولا يعني أنّ المبلغ أُعيد للزبون. أيّ إرجاع عبر ويش موني يتمّ خارج البرنامج ويحتاج تحقّقاً منفصلاً.",
 
   "receipt.done": "تمّت البيعة",
   "receipt.number": "إيصال",
@@ -1444,6 +1445,7 @@ const EN: Dict = {
   "void.reasonHint": "e.g. wrong item rung up",
   "void.confirm": "Confirm void",
   "void.dismiss": "Cancel",
+  "void.notRefund": "Voiding cancels the sale in this program only; it does not mean the money went back to the customer. Any Whish Money refund happens outside the program and must be checked separately.",
 
   "receipt.done": "Sale completed",
   "receipt.number": "Receipt",
