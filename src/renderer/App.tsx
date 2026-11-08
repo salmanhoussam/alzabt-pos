@@ -215,7 +215,7 @@ export function App() {
       <main className="content">
         {tab === "sell" && <SellScreen key={catalogVersion} focusRequest={sellFocusRequest} role={cashier?.role} />}
         {tab === "today" && <TodayScreen />}
-        {tab === "history" && <HistoryScreen />}
+        {tab === "history" && <HistoryScreen role={cashier?.role} />}
         {tab === "products" && <ProductsScreen operator={cashier} />}
         {tab === "customers" && <CustomersScreen operator={cashier} />}
         {tab === "invoices" && <InvoicesScreen />}

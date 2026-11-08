@@ -72,10 +72,39 @@ describe("🔴 a cashier cannot void a Whish sale — refused by the service, no
     expect(voidRows(h.db)).toEqual([]);
   });
 
-  it("INVARIANT: a CASH sale's service rule is unchanged (any signed-in operator; the channel stays owner-only)", () => {
+});
+
+describe("🔴 a CASH void is the owner's too (owner decision 2026-11-08)", () => {
+  // TRANSITION: this was the INVARIANT "a CASH sale's service rule is unchanged" — a cashier's cash void
+  // succeeded at the service (`cashierId` "cashier-02"). Old value: allowed. New: NOT_AUTHORIZED.
+  it("cashier → NOT_AUTHORIZED, nothing written; the sale and its tender untouched", () => {
     const sale = cashSale();
+    const before = { sale: saleRow(h.db, sale.id), tender: tenderOf(h.db, sale.id) };
     asCashier();
-    expect(h.service.voidSale(sale.id, "wrong item").cashierId).toBe("cashier-02");
+    expect(codeOf(() => h.service.voidSale(sale.id, "wrong item"))).toBe("NOT_AUTHORIZED");
+    expect(voidRows(h.db)).toEqual([]);
+    expect({ sale: saleRow(h.db, sale.id), tender: tenderOf(h.db, sale.id) }).toEqual(before);
+  });
+  it("a demoted owner is refused at once (live role)", () => {
+    const sale = cashSale();
+    h.db.prepare("UPDATE operators SET role = 'cashier' WHERE id = 'cashier-01'").run();
+    expect(codeOf(() => h.service.voidSale(sale.id, "wrong item"))).toBe("NOT_AUTHORIZED");
+    expect(voidRows(h.db)).toEqual([]);
+  });
+  it("no session → NOT_LOGGED_IN before anything is read", () => {
+    const sale = cashSale();
+    h.service.logout();
+    expect(codeOf(() => h.service.voidSale(sale.id, "wrong item"))).toBe("NOT_LOGGED_IN");
+  });
+  it("the owner voids a cash sale: one audit row, the report nets it out, a second void is refused", () => {
+    const sale = cashSale();
+    const before = { sale: saleRow(h.db, sale.id), tender: tenderOf(h.db, sale.id) };
+    const v = h.service.voidSale(sale.id, "wrong item");
+    expect(voidRows(h.db)).toEqual([expect.objectContaining({ id: v.id, sale_id: sale.id, cashier_id: "cashier-01", reason: "wrong item" })]);
+    expect({ sale: saleRow(h.db, sale.id), tender: tenderOf(h.db, sale.id) }).toEqual(before);
+    expect(h.service.getTodaySales().netSales.minor).toBe(0n);
+    expect(codeOf(() => h.service.voidSale(sale.id, "again"))).toBe("ALREADY_VOIDED");
+    expect(voidRows(h.db)).toHaveLength(1);
   });
 });
 
