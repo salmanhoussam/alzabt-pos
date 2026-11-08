@@ -70,7 +70,8 @@ describe("🔴 a receipt is counted ONCE", () => {
     const l = owe(c.id, "L", 900000n, "LBP");
     ok(ipc.recordCustomerPayment({ customerId: c.id, obligationId: d.id, idempotencyKey: "direct-key-1001", amountMinor: "2500", method: "cash" } as never));
     ok(ipc.recordCustomerPayment({ customerId: c.id, obligationId: d.id, idempotencyKey: "direct-key-1002", amountMinor: "700", method: "whish", reference: "WH-DIRECT", fundsConfirmed: true } as never));
-    ok(ipc.recordCustomerPayment({ customerId: c.id, obligationId: l.id, idempotencyKey: "direct-key-1003", amountMinor: "50000", method: "card" } as never));
+    // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old method here: "card" (row ["LBP", "card", …]).
+    ok(ipc.recordCustomerPayment({ customerId: c.id, obligationId: l.id, idempotencyKey: "direct-key-1003", amountMinor: "50000", method: "cash" } as never));
     ok(
       ipc.recordAllocatedReceipt({
         customerId: c.id,
@@ -84,7 +85,7 @@ describe("🔴 a receipt is counted ONCE", () => {
       } as never),
     );
     expect(totals()).toEqual([
-      ["LBP", "card", null, 1, 50000n],
+      ["LBP", "cash", null, 1, 50000n],
       ["USD", "cash", null, 1, 2500n],
       ["USD", "external", "whish", 2, 10700n], // the receipt (10000) + the direct Whish (700), never the two shares
     ]);
@@ -147,8 +148,9 @@ describe("the receipt integrity read-back agrees with the seal", () => {
       ipc.recordAllocatedReceipt({
         customerId: c.id,
         idempotencyKey: "receipt-tot-0003",
-        channel: "bank_transfer",
-        reference: "BT-1",
+        // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old: bank_transfer / "BT-1".
+        channel: "whish",
+        reference: "WH-SEAL-1",
         fundsConfirmed: true,
         currency: "USD",
         totalMinor: "10000",

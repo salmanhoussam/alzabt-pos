@@ -109,7 +109,8 @@ describe("complete-sale atomicity", () => {
     const { sale } = ok.service.createSale({
       idempotencyKey: newKey(),
       lines: THREE_LINES,
-      paymentMethod: "card",
+      // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old method here: "card".
+      paymentMethod: "cash",
       expectedTotalMinor: THREE_LINES_TOTAL,
     });
     expect(sale.receiptNumber).toBe(1);

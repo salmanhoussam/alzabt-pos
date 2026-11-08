@@ -87,6 +87,9 @@ export type DomainErrorCode =
   | "RECEIPT_NEEDS_TWO_DEBTS"
   | "RECEIPT_ALLOCATION_MISMATCH"
   | "RECEIPT_CHANNEL_NOT_ALLOWED"
+  // DEC-35 / P3 — a NEW payment by a method the shop no longer accepts (card, other, bank transfer).
+  // History is never refused or re-labelled; only a new write is.
+  | "PAYMENT_METHOD_NOT_ACCEPTED"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

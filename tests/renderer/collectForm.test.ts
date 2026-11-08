@@ -102,8 +102,9 @@ describe("what the form offers", () => {
   // 🔴 TRANSITION with migration 17 (M17A): this pinned CASH ONLY. The form now offers exactly five
   // channels; 'credit' (a state) and 'external' (a stored value, not a channel) are still never a
   // choice, and the method sent is the owner's selection, never a literal.
-  it("🔴 offers exactly the five channels — never credit, never a bare 'external'", () => {
-    expect(STATEMENT).toContain('["cash", "card", "whish", "bank_transfer", "other"]');
+  it("🔴 offers exactly cash and Whish (P3, DEC-35) — never credit, never a bare 'external'", () => {
+    // TRANSITION (P3): was the five channels ["cash", "card", "whish", "bank_transfer", "other"].
+    expect(STATEMENT).toContain('const COLLECTION_METHODS: ReadonlyArray<CollectionMethodDto> = ["cash", "whish"];');
     expect(STATEMENT).not.toMatch(/method: "cash"/);
     expect(STATEMENT).toMatch(/\n\s+method,\n/);
     expect(STATEMENT.toLowerCase()).not.toContain("credit");

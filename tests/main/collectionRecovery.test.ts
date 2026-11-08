@@ -1,4 +1,10 @@
 /**
+ * TRANSITION (P3, DEC-35, 2026-11-07): this file used "card" as "a method with no reference" and a bank
+ * transfer (BT-1) as "a referenced method". New payments are cash or Whish only, so those are now "cash"
+ * and Whish (WH-ORIG-1); the card-number refusal is shown on a Whish reference. Every recovery rule
+ * under test is unchanged.
+ */
+/**
  * M17A final safety gate — an UNKNOWN collection outcome is recovered from the ledger, under the
  * ORIGINAL key, across navigation, a closed window and a restart; and the owner role is re-read
  * INSIDE the write transaction.
@@ -85,28 +91,28 @@ describe("the intent is durable before the money can move", () => {
     const c = customer();
     const o = owe(c.id, "b1", 5000n);
     breakSettlements();
-    pay(req(c, o, "key-orig-000002", "700", "bank_transfer", { reference: "BT-1", fundsConfirmed: true }));
+    pay(req(c, o, "key-orig-000002", "700", "whish", { reference: "WH-ORIG-1", fundsConfirmed: true }));
     mendSettlements(); // the fault was transient; the attempt row is what persisted
     h.db.close();
     open(); // restart: nothing of the screen's memory exists any more
     const p = statement(c).pendingCollections;
     expect(p.map((x) => [x.idempotencyKey, x.status])).toEqual([["key-orig-000002", "not_recorded"]]);
-    const repeat = ok<RecordPaymentResponse>(pay(req(c, o, "key-orig-000002", "700", "bank_transfer", { reference: "BT-1", fundsConfirmed: true })));
+    const repeat = ok<RecordPaymentResponse>(pay(req(c, o, "key-orig-000002", "700", "whish", { reference: "WH-ORIG-1", fundsConfirmed: true })));
     expect(repeat.duplicate).toBe(false);
     expect(settlements()).toBe(1);
     expect(statement(c).pendingCollections).toEqual([]); // closed atomically with its settlement
     expect(attempts()[0]!.resolution).toBe("recorded");
     // …and a further repeat is a duplicate, not a second collection.
-    expect(ok<RecordPaymentResponse>(pay(req(c, o, "key-orig-000002", "700", "bank_transfer", { reference: "BT-1", fundsConfirmed: true }))).duplicate).toBe(true);
+    expect(ok<RecordPaymentResponse>(pay(req(c, o, "key-orig-000002", "700", "whish", { reference: "WH-ORIG-1", fundsConfirmed: true }))).duplicate).toBe(true);
     expect(settlements()).toBe(1);
   });
 
   it("a lost RESPONSE after a successful commit leaves nothing open and a replay is a duplicate", () => {
     const c = customer();
     const o = owe(c.id, "b1", 5000n);
-    ok(pay(req(c, o, "key-lost-000001", "300", "card"))); // committed; imagine the answer never arrived
+    ok(pay(req(c, o, "key-lost-000001", "300", "cash"))); // committed; imagine the answer never arrived
     expect(statement(c).pendingCollections).toEqual([]);
-    expect(ok<RecordPaymentResponse>(pay(req(c, o, "key-lost-000001", "300", "card"))).duplicate).toBe(true);
+    expect(ok<RecordPaymentResponse>(pay(req(c, o, "key-lost-000001", "300", "cash"))).duplicate).toBe(true);
     expect(settlements()).toBe(1);
   });
 
@@ -115,7 +121,7 @@ describe("the intent is durable before the money can move", () => {
     const o = owe(c.id, "b1", 500n);
     expect(errCode(pay(req(c, o, "key-bad-0000001", "100", "whish")))).toBe("INVALID_INPUT"); // no reference
     expect(attempts()).toHaveLength(0);
-    expect(errCode(pay(req(c, o, "key-bad-0000002", "501", "card")))).toBe("INVALID_AMOUNT"); // overpayment
+    expect(errCode(pay(req(c, o, "key-bad-0000002", "501", "cash")))).toBe("INVALID_AMOUNT"); // overpayment
     expect(attempts().map((a) => [a.idempotency_key, a.resolution])).toEqual([["key-bad-0000002", "not_recorded"]]);
     expect(statement(c).pendingCollections).toEqual([]);
   });
@@ -124,10 +130,11 @@ describe("the intent is durable before the money can move", () => {
     const c = customer();
     const o = owe(c.id, "b1", 5000n);
     breakSettlements();
-    pay(req(c, o, "key-conf-000001", "400", "card"));
+    pay(req(c, o, "key-conf-000001", "400", "cash"));
     mendSettlements();
-    expect(errCode(pay(req(c, o, "key-conf-000001", "401", "card")))).toBe("IDEMPOTENCY_CONFLICT");
-    expect(errCode(pay(req(c, o, "key-conf-000001", "400", "cash")))).toBe("IDEMPOTENCY_CONFLICT");
+    expect(errCode(pay(req(c, o, "key-conf-000001", "401", "cash")))).toBe("IDEMPOTENCY_CONFLICT");
+    // TRANSITION (P3): the "different METHOD" was card → cash; it is now cash → Whish (same amount).
+    expect(errCode(pay(req(c, o, "key-conf-000001", "400", "whish", { reference: "WH-CONF-1", fundsConfirmed: true })))).toBe("IDEMPOTENCY_CONFLICT");
     expect(settlements()).toBe(0);
   });
 });
@@ -137,9 +144,9 @@ describe("a new collection only after a trustworthy answer", () => {
     const c = customer();
     const o = owe(c.id, "b1", 5000n);
     breakSettlements();
-    pay(req(c, o, "key-first-00001", "400", "card"));
+    pay(req(c, o, "key-first-00001", "400", "cash"));
     mendSettlements();
-    ok(pay(req(c, o, "key-second-0001", "200", "card")));
+    ok(pay(req(c, o, "key-second-0001", "200", "cash")));
     expect(attempts().map((a) => [a.idempotency_key, a.resolution]).sort()).toEqual([
       ["key-first-00001", "not_recorded"],
       ["key-second-0001", "recorded"],
@@ -151,13 +158,13 @@ describe("a new collection only after a trustworthy answer", () => {
     const c = customer();
     const o = owe(c.id, "b1", 5000n);
     breakSettlements();
-    pay(req(c, o, "key-closed-00001", "400", "card"));
+    pay(req(c, o, "key-closed-00001", "400", "cash"));
     mendSettlements();
     // A separate collection closes the earlier, provably unrecorded attempt.
-    ok(pay(req(c, o, "key-replace-0001", "200", "card")));
+    ok(pay(req(c, o, "key-replace-0001", "200", "cash")));
     expect(attempts().find((a) => a.idempotency_key === "key-closed-00001")!.resolution).toBe("not_recorded");
     // A delayed replay must NOT turn the permanently closed attempt into another settlement.
-    expect(errCode(pay(req(c, o, "key-closed-00001", "400", "card")))).toBe("IDEMPOTENCY_CONFLICT");
+    expect(errCode(pay(req(c, o, "key-closed-00001", "400", "cash")))).toBe("IDEMPOTENCY_CONFLICT");
     expect(settlements()).toBe(1);
     expect(attempts().find((a) => a.idempotency_key === "key-closed-00001")!.resolution).toBe("not_recorded");
     // The SQLite backstop refuses a late settlement even if the service is bypassed.
@@ -173,7 +180,7 @@ describe("a new collection only after a trustworthy answer", () => {
     const c = customer();
     const o = owe(c.id, "b1", 5000n);
     breakSettlements();
-    pay(req(c, o, "key-unk-0000001", "400", "card"));
+    pay(req(c, o, "key-unk-0000001", "400", "cash"));
     mendSettlements();
     const real = h.ledgerStore.findSettlementByIdempotencyKey.bind(h.ledgerStore);
     // Only THIS attempt's lookup fails; a new key's own lookup works — the refusal must come from the
@@ -184,7 +191,7 @@ describe("a new collection only after a trustworthy answer", () => {
     };
     try {
       expect(statement(c).pendingCollections.map((p) => p.status)).toEqual(["unknown"]);
-      expect(errCode(pay(req(c, o, "key-new-00000001", "100", "card")))).toBe("COLLECTION_UNRESOLVED");
+      expect(errCode(pay(req(c, o, "key-new-00000001", "100", "cash")))).toBe("COLLECTION_UNRESOLVED");
       expect(attempts()).toHaveLength(1); // no second attempt was minted
     } finally {
       h.ledgerStore.findSettlementByIdempotencyKey = real;
@@ -198,7 +205,7 @@ describe("a new collection only after a trustworthy answer", () => {
     const c = customer();
     const o = owe(c.id, "b1", 5000n);
     breakSettlements();
-    pay(req(c, o, "key-cfl-0000001", "400", "card"));
+    pay(req(c, o, "key-cfl-0000001", "400", "cash"));
     mendSettlements();
     const op = (h.db.prepare("SELECT id FROM operators LIMIT 1").get() as { id: string }).id;
     h.db
@@ -208,7 +215,7 @@ describe("a new collection only after a trustworthy answer", () => {
       )
       .run(o.id, op);
     expect(statement(c).pendingCollections.map((p) => p.status)).toEqual(["conflict"]);
-    expect(errCode(pay(req(c, o, "key-new-00000002", "100", "card")))).toBe("COLLECTION_UNRESOLVED");
+    expect(errCode(pay(req(c, o, "key-new-00000002", "100", "cash")))).toBe("COLLECTION_UNRESOLVED");
   });
 
   it("an attempt still open although its settlement committed (damaged bookkeeping) reads as recorded and closes on the exact repeat", () => {
@@ -250,7 +257,7 @@ describe("a new collection only after a trustworthy answer", () => {
     );
     const c = customer();
     const o = owe(c.id, "b1", 5000n);
-    expect(errCode(pay(req(c, o, "key-pan-0000001", "100", "card", { reference: "4111 1111 1111 1111" })))).toBe("INVALID_INPUT");
+    expect(errCode(pay(req(c, o, "key-pan-0000001", "100", "whish", { reference: "4111 1111 1111 1111" })))).toBe("INVALID_INPUT");
     expect(attempts()).toHaveLength(0); // a card number never even reaches the table
   });
 });
@@ -286,8 +293,8 @@ describe("the live owner role is re-read INSIDE the transaction", () => {
     obligationId: o.id,
     idempotencyKey: key,
     amountMinor: 300n,
-    method: "card",
-    channel: "card",
+    method: "cash",
+    channel: "cash",
   });
 
   it("🔴 demoted before the INTENT is written: not authorized, and NOTHING is written", () => {
@@ -319,17 +326,17 @@ describe("the live owner role is re-read INSIDE the transaction", () => {
     const c = customer();
     const o = owe(c.id, "b1", 5000n);
     breakSettlements();
-    pay(req(c, o, "key-role-0000003", "300", "card"));
+    pay(req(c, o, "key-role-0000003", "300", "cash"));
     mendSettlements();
     h.service.login("cashier-02", "2222"); // a genuine cashier on the same terminal
     expect(errCode(ipc.getCustomerStatement({ customerId: c.id }))).toBe("NOT_AUTHORIZED");
-    expect(errCode(pay(req(c, o, "key-role-0000003", "300", "card")))).toBe("NOT_AUTHORIZED");
+    expect(errCode(pay(req(c, o, "key-role-0000003", "300", "cash")))).toBe("NOT_AUTHORIZED");
     expect(settlements()).toBe(0);
     expect(attempts()[0]!.resolved_at).toBeNull();
     // The owner, signing back in, recovers it.
     h.service.login("cashier-01", "1111");
     expect(statement(c).pendingCollections.map((p) => p.status)).toEqual(["not_recorded"]);
-    ok(pay(req(c, o, "key-role-0000003", "300", "card")));
+    ok(pay(req(c, o, "key-role-0000003", "300", "cash")));
     expect(settlements()).toBe(1);
   });
 

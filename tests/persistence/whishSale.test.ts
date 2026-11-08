@@ -262,7 +262,8 @@ describe("cash and customer debt are unchanged; a Whish sale creates no debt", (
     h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", ...espresso });
     whishSale("WH-SUM-1");
     whishSale("WH-SUM-2");
-    h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "card", ...espresso });
+    // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old method here: "card".
+    h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", ...espresso });
     expect(
       n(
         h.db,

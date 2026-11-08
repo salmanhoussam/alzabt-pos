@@ -49,10 +49,12 @@ describe("the title names the method actually chosen", () => {
     expect(STATEMENT).toContain("{t(`collect.title.${method}`)}");
   });
 
-  it("the methods offered are exactly the ledger's channels — none added, none renamed", () => {
-    expect(STATEMENT).toContain('["cash", "card", "whish", "bank_transfer", "other"]');
+  it("the methods offered are exactly the shop's accepted ones — none added, none renamed (P3)", () => {
+    // TRANSITION (P3, DEC-35): was the five channels on the statement form and whish + bank_transfer on the
+    // shared receipt. The per-method titles stay in the dictionary for the channels a history may hold.
+    expect(STATEMENT).toContain('["cash", "whish"]');
     expect(FORM).toContain('value="whish"');
-    expect(FORM).toContain('value="bank_transfer"');
+    expect(FORM).not.toContain('value="bank_transfer"');
     expect(FORM).not.toMatch(/value="(cash|card|other)"/);
   });
 });

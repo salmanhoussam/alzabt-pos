@@ -256,8 +256,10 @@ describe("settlement", () => {
     const c = customer("سمير");
     const { record } = owe(c.id, "bill-1", 1000n);
     pay(record.id, c.id, "pay-00001", 400n);
-    pay(record.id, c.id, "pay-00002", 350n, "card");
-    pay(record.id, c.id, "pay-00003", 250n, "external");
+    // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old methods here: "card" and a
+    // provider-less "external". The three cash payments still prove the debt clears exactly.
+    pay(record.id, c.id, "pay-00002", 350n);
+    pay(record.id, c.id, "pay-00003", 250n);
     expect(ledger.outstandingOf(record.id).minor).toBe(0n);
     expect(ledger.balancesOf(c.id).get("USD")).toBe(0n);
     expect(ledger.settlementsOf(record.id)).toHaveLength(3);
