@@ -444,7 +444,11 @@ describe("Sell tab clicked while Sell is open", () => {
     expect(app).toContain('if (name === "sell" && tab === "sell") setSellFocusRequest((n) => n + 1);');
     // TRANSITION (DEMO-FALLBACK): was `<SellScreen key={catalogVersion} focusRequest={sellFocusRequest} />`;
     // the role is passed for the empty-state guidance only.
-    expect(app).toContain("<SellScreen key={catalogVersion} focusRequest={sellFocusRequest} role={cashier?.role} />");
+    // TRANSITION (SELL-CART-LOST-ON-TAB): was the one-liner
+    // `<SellScreen key={catalogVersion} focusRequest={sellFocusRequest} role={cashier?.role} />`; Sell now also
+    // receives its operator's kept cart. The focus request and the remount on import are unchanged.
+    const sell = app.replace(/\s+/g, " ");
+    expect(sell).toContain("<SellScreen key={catalogVersion} focusRequest={sellFocusRequest} role={cashier?.role} draft={draftFor(sellDraft, cashier.id)}");
   });
 });
 
