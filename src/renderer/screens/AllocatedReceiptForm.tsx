@@ -39,7 +39,7 @@ import type { AllocatedReceiptRequest, CustomerStatementDto, StatementObligation
 /** The two outcomes after which a second recording must NOT be offered (same as a collection). */
 const UNSAFE_TO_RETRY: ReadonlySet<string> = new Set(["PAYMENT_RECORDED", "PAYMENT_STATUS_UNKNOWN"]);
 const OWN_CODES: ReadonlySet<string> = new Set(["RECEIPT_ALLOCATION_MISMATCH", "RECEIPT_NEEDS_TWO_DEBTS", "RECEIPT_CHANNEL_NOT_ALLOWED"]);
-const COLLECT_CODES: ReadonlySet<string> = new Set(["FUNDS_NOT_CONFIRMED", "DUPLICATE_PAYMENT_REFERENCE", "COLLECTION_UNRESOLVED"]);
+const COLLECT_CODES: ReadonlySet<string> = new Set(["FUNDS_NOT_CONFIRMED", "DUPLICATE_PAYMENT_REFERENCE", "COLLECTION_UNRESOLVED", "PAYMENT_METHOD_NOT_ACCEPTED"]);
 
 type Provider = "whish" | "bank_transfer";
 
@@ -243,7 +243,8 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
           }}
         >
           <option value="whish">{t("collect.method.whish")}</option>
-          <option value="bank_transfer">{t("collect.method.bank_transfer")}</option>
+          {/* P3 (DEC-35): bank transfer is no longer offered for a NEW shared receipt (the service refuses
+              it too); historic bank-transfer receipts keep their own words. Old: whish, bank_transfer. */}
         </select>
       </label>
       <label>

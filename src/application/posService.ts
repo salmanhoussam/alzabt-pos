@@ -12,6 +12,7 @@ import { MAX_CART_LINES, type CartLine, priceCart } from "../domain/cart";
 import { BASE_UNITS, type Catalog, loadCatalog } from "../domain/catalog";
 import { decodeUtf8Strict, toImportCsv, validateImport, type ImportRejection } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
+import { assertAcceptedNewSalePayment } from "../domain/acceptedPayments";
 import { cleanPaymentReference } from "../domain/ledger";
 import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
@@ -2106,6 +2107,16 @@ export class PosService {
 
   // ── Sales ───────────────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * P3 (DEC-35): the ONE place a new till sale's method is checked against the shop's accepted methods.
+   * `protected` for exactly one reason: a TEST may stand in for a build released before DEC-35 to seed the
+   * historic card / other rows only such a build could write (tests/helpers/preDec35.ts). Nothing in
+   * src/ overrides it — a source test proves that.
+   */
+  protected assertAcceptedNewSale(method: PaymentMethod): void {
+    assertAcceptedNewSalePayment(method);
+  }
+
   createSale(input: CreateSaleInput): CreateSaleResult {
     const cashier = this.requireCashier();
     assertPaymentMethod(input.paymentMethod);
@@ -2169,6 +2180,9 @@ export class PosService {
     if (input.paymentMethod === "external" && whish === null) {
       throw new DomainError("INVALID_INPUT", "A Whish Money payment needs its reference and the confirmation that the money arrived");
     }
+    // 🔴 P3 (DEC-35): a NEW sale is paid in cash or Whish Money only. Card and Other stay readable on every
+    // historic sale, and a pre-P3 card / other request still replays above under its own key.
+    this.assertAcceptedNewSale(input.paymentMethod);
 
     const priced = priceCart(this.catalog, input.lines);
     if (priced.total.minor !== input.expectedTotalMinor) {

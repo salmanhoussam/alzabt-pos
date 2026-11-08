@@ -519,7 +519,7 @@ describe("SB-RISK-03: a scan while the payment pane is open says why it did noth
     expect(sell).toContain("t(PAY_SCAN_MESSAGE_KEY)");
   });
 
-  it("every method still refuses Enter (cash, whish, card, other render from one map)", () => {
+  it("every method still refuses Enter (cash and whish render from one map — P3; was cash, whish, card, other)", () => {
     // TRANSITION (P2): one map, `TILL_BUTTONS`; old: PAYMENT_METHODS (cash, card, external, other).
     const sell = sellSource();
     const methods = sell.slice(sell.indexOf("TILL_BUTTONS.map("), sell.indexOf("void pay(m);") + 30);

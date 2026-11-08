@@ -30,8 +30,17 @@ const ok = <T>(r: { ok: boolean; data?: unknown; error?: unknown }): T => {
 };
 const errCode = (r: { ok: boolean; error?: { code: string } }) => (r.ok ? null : r.error!.code);
 
+/**
+ * TRANSITION (P3, DEC-35, 2026-11-07): this file is the migration-17 specification of the FIVE collection
+ * channels (cash · card · whish · bank transfer · other) — how they are validated, recorded, replayed,
+ * backed up and reported. Today's build accepts NEW collections in cash or Whish only, so card / bank /
+ * other rows can only come from a build released before DEC-35. The file therefore runs on that build
+ * (`build: "pre-dec35"`, tests/helpers/preDec35.ts — identical services minus the one DEC-35 check), which
+ * is exactly how such rows exist in a shop's ledger. What TODAY's build accepts is proven in
+ * tests/application/acceptedPayments.test.ts. Old value: makeHarness(t.dbPath).
+ */
 function open(): void {
-  h = makeHarness(t.dbPath);
+  h = makeHarness(t.dbPath, { build: "pre-dec35" });
   ipc = syncHandlers(createIpcHandlers(h.service, { parties: h.parties, ledger: h.ledger }));
 }
 beforeEach(() => {

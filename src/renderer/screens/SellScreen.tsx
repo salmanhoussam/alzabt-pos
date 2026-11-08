@@ -34,11 +34,14 @@ import {
  *
  * P2 (owner, 2026-11-07): the plain «تحويل خارجي» button is GONE. An `external` sale is now Whish Money
  * only, and it is recorded only with its reference and the operator's explicit "the money arrived"
- * (`whish` below opens that step; it never records on one click). Card and Other stay exactly as they
- * were until the owner's separate decision on narrowing the till to Cash / Whish / On account.
+ * (`whish` below opens that step; it never records on one click).
+ *
+ * P3 (DEC-35): the till offers ONLY the shop's accepted methods for new money — Cash and Whish Money. Card
+ * and Other are gone from this screen AND refused by the service for a new sale; every historic card /
+ * other sale keeps its own words in History and on its receipt. (On account from Sell is a later slice.)
  */
 type TillButton = "cash" | "whish" | "card" | "other";
-const TILL_BUTTONS: ReadonlyArray<TillButton> = ["cash", "whish", "card", "other"];
+const TILL_BUTTONS: ReadonlyArray<TillButton> = ["cash", "whish"];
 const METHOD_KEY: Record<TillButton, string> = {
   cash: "pay.cash",
   whish: "pay.whish",

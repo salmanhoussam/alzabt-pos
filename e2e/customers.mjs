@@ -956,18 +956,26 @@ try {
   assert((await card6("o-part").innerText()).includes("WH-E2E-001"), "and carries its reference");
   await p6.screenshot({ path: SHOTS + "M17A-A2-after-whish.png" });
 
-  // Card terminal (no reference) and bank transfer (reference + confirmation) on the same debt.
+  // TRANSITION (P3, DEC-35): this step recorded 3.00 by CARD and 4.00 by BANK TRANSFER (BT-E2E-001). New
+  // collections are cash or Whish only, so the form must offer exactly those two, and the same 3.00 + 4.00
+  // are recorded as two more Whish payments — the amounts, and everything asserted after, are unchanged.
   await card6("o-part").locator('[data-testid="collect-open"]').click();
   await testid(p6, "collect-form").waitFor({ state: "visible", timeout: 30000 });
-  await testid(p6, "collect-method").selectOption("card");
+  {
+    const offered = await testid(p6, "collect-method").evaluate((s) => [...s.options].map((o) => o.value));
+    assert(JSON.stringify(offered) === JSON.stringify(["cash", "whish"]), `🔴 P3: a new collection offers ONLY cash and Whish (${offered})`);
+  }
+  await testid(p6, "collect-method").selectOption("whish");
   await testid(p6, "collect-amount").fill("3.00");
+  await testid(p6, "collect-payment-reference").fill("WH-E2E-002");
+  await testid(p6, "collect-funds-confirmed").check();
   await testid(p6, "collect-confirm").click();
   await testid(p6, "collect-done").waitFor({ state: "visible", timeout: 30000 });
   await card6("o-part").locator('[data-testid="collect-open"]').click();
   await testid(p6, "collect-form").waitFor({ state: "visible", timeout: 30000 });
-  await testid(p6, "collect-method").selectOption("bank_transfer");
+  await testid(p6, "collect-method").selectOption("whish");
   await testid(p6, "collect-amount").fill("4.00");
-  await testid(p6, "collect-payment-reference").fill("BT-E2E-001");
+  await testid(p6, "collect-payment-reference").fill("WH-E2E-003");
   await testid(p6, "collect-funds-confirmed").check();
   await testid(p6, "collect-confirm").click();
   await testid(p6, "collect-done").waitFor({ state: "visible", timeout: 30000 });
@@ -982,10 +990,11 @@ try {
     assert(rec.k === "e2e-pending-key-01" && rec.m === "external" && rec.p === "whish" && rec.r === "recorded", `🔴 the recovered payment kept its ORIGINAL key and closed its attempt (${JSON.stringify(rec)})`);
     const w = db.prepare("SELECT method, provider, reference, funds_confirmed AS c, amount_minor AS a FROM settlements WHERE reference = 'WH-E2E-001'").get();
     assert(w.method === "external" && w.provider === "whish" && Number(w.c) === 1 && Number(w.a) === 500, `🔴 Whish is stored as external/whish, confirmed, 5.00 (${JSON.stringify(w)})`);
-    const c = db.prepare("SELECT method, provider, reference FROM settlements WHERE method = 'card' AND obligation_id = 'o-part'").get();
-    assert(c.provider === null && c.reference === null, "card is stored as card with no reference");
-    const b = db.prepare("SELECT method, provider, reference, funds_confirmed AS c FROM settlements WHERE reference = 'BT-E2E-001'").get();
-    assert(b.method === "external" && b.provider === "bank_transfer" && Number(b.c) === 1, "bank transfer is stored as external/bank_transfer, confirmed");
+    // TRANSITION (P3): were "card is stored as card with no reference" and "bank transfer is stored as
+    // external/bank_transfer". Now: the two payments are Whish, and NO new card / bank row was written.
+    const w23 = db.prepare("SELECT count(*) AS n FROM settlements WHERE method = 'external' AND provider = 'whish' AND reference IN ('WH-E2E-002', 'WH-E2E-003') AND funds_confirmed = 1").get();
+    assert(Number(w23.n) === 2, "🔴 P3: the 3.00 and 4.00 are stored as confirmed Whish payments");
+    assert(n("SELECT count(*) AS n FROM settlements WHERE obligation_id = 'o-part' AND (method IN ('card', 'other') OR provider = 'bank_transfer')") === 0, "🔴 P3: no new card / other / bank-transfer collection exists");
     assert(
       n("SELECT coalesce(sum(amount_minor), 0) AS n FROM settlements WHERE method = 'cash'") === cashBefore,
       "🔴 NONE of it is cash: the cash total is exactly what it was",
@@ -1326,9 +1335,9 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
     await testid(pq, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
     assert((await testid(pq, "receipt-confirm").isDisabled()), "🔴 Confirm starts DISABLED (nothing is allocated yet)");
     assert(!(await testid(pq, "receipt-funds-confirmed").isChecked()), "🔴 the funds-received confirmation starts UNCHECKED");
-    // Only Whish and bank transfer are offered.
+    // TRANSITION (P3, DEC-35): was "only Whish and bank transfer are offered" (["whish", "bank_transfer"]).
     const methods = await testid(pq, "receipt-method").evaluate((s) => [...s.options].map((o) => o.value));
-    assert(JSON.stringify(methods) === JSON.stringify(["whish", "bank_transfer"]), `only Whish and bank transfer are offered (${methods})`);
+    assert(JSON.stringify(methods) === JSON.stringify(["whish"]), `🔴 P3: only Whish is offered for a shared receipt (${methods})`);
     const shareFor = (id) => pq.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
     await testid(pq, "receipt-currency").selectOption("USD");
     await testid(pq, "receipt-reference").fill("WH-S1-DUP");
@@ -1515,8 +1524,10 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       );
       assert(await lbpCurrency.isDisabled(), "the single-currency selector is intentionally disabled");
       assert((await lbpCurrency.inputValue()) === "LBP", "LBP is selected automatically");
-      await testid(pe, "receipt-method").selectOption("bank_transfer");
-      await testid(pe, "receipt-reference").fill("BT-S1-77");
+      // TRANSITION (P3, DEC-35): this LBP receipt was a BANK TRANSFER (BT-S1-77); it is now Whish (WH-S1-77).
+      // The subject — currencies stay apart — is unchanged.
+      await testid(pe, "receipt-method").selectOption("whish");
+      await testid(pe, "receipt-reference").fill("WH-S1-77");
       await testid(pe, "receipt-total").fill("5000000.00");
       const share = (id) => pe.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
       assert((await pe.locator('[data-testid="receipt-debt"]').count()) === 2, "only the two LBP debts are listed for an LBP receipt (USD debts are never mixed in)");
@@ -1528,8 +1539,8 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       await testid(pe, "receipt-confirm").click();
       await testid(pe, "receipt-done").waitFor({ state: "visible", timeout: 30000 });
       assert(outstandingOf("s1-L1") === 0 && outstandingOf("s1-L2") === 0, "both LBP debts are settled to exactly 0");
-      const lbp = readDb((d) => d.prepare("SELECT provider, currency, amount_minor AS a FROM receipts WHERE reference = 'BT-S1-77'").get());
-      assert(lbp.provider === "bank_transfer" && lbp.currency === "LBP" && Number(lbp.a) === 500000000, `the LBP receipt is a bank transfer of 5,000,000.00 (${JSON.stringify(lbp)})`);
+      const lbp = readDb((d) => d.prepare("SELECT provider, currency, amount_minor AS a FROM receipts WHERE reference = 'WH-S1-77'").get());
+      assert(lbp.provider === "whish" && lbp.currency === "LBP" && Number(lbp.a) === 500000000, `the LBP receipt is a Whish receipt of 5,000,000.00 (${JSON.stringify(lbp)})`);
       await pe.screenshot({ path: SHOTS + "M18-S1-A5-after-lbp-english.png" });
     } finally {
       await app.close().catch(() => undefined);
@@ -1539,7 +1550,7 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
   // ── S1-4 · what the whole installed ledger now says ───────────────────────────────────────────
   readDb((d) => {
     const n = (sql) => Number(d.prepare(sql).get().n);
-    assert(n("SELECT count(*) AS n FROM receipts") === 3, "three receipts: USD Whish, recovered USD Whish, LBP bank transfer");
+    assert(n("SELECT count(*) AS n FROM receipts") === 3, "three receipts: USD Whish, recovered USD Whish, LBP Whish (P3; was LBP bank transfer)");
     assert(n("SELECT count(*) AS n FROM settlements WHERE receipt_id IS NOT NULL") === 6, "six allocation shares in all");
     assert(n("SELECT count(*) AS n FROM obligations") === base.obligations, "🔴 no debt was ever created or rewritten");
     assert(n("SELECT coalesce(sum(amount_minor),0) AS n FROM settlements WHERE method = 'cash'") === base.cash, "🔴 the cash total is exactly what it was");
@@ -2007,10 +2018,9 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       await testid(q, "collect-form").waitFor({ state: "visible", timeout: 30000 });
       const title = async () => [(await testid(q, "collect-title").innerText()).trim(), await testid(q, "collect-title").getAttribute("data-method")];
       assert(JSON.stringify(await title()) === JSON.stringify(["تسجيل دفعة نقديّة", "cash"]), "QW: cash (the default) is titled cash");
+      // TRANSITION (P3, DEC-35): the form offers cash and Whish only, so only those two titles can be shown.
+      // Old list: card, bank_transfer, other, whish (their titles stay in the dictionary for history).
       for (const [m, want] of [
-        ["card", "تسجيل دفعة بالبطاقة"],
-        ["bank_transfer", "تسجيل تحويل مصرفي"],
-        ["other", "تسجيل دفعة خارجية أخرى"],
         ["whish", "تسجيل دفعة ويش"],
       ]) {
         await testid(q, "collect-method").selectOption(m);

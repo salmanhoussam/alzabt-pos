@@ -64,7 +64,7 @@ export const FORBIDDEN_CODES: readonly string[] = Object.freeze([
 ]);
 
 /**
- * 18 codes. Each line's English original is quoted so a reviewer can check the Arabic against what
+ * 19 codes (18 before P3 added PAYMENT_METHOD_NOT_ACCEPTED). Each line's English original is quoted so a reviewer can check the Arabic against what
  * it replaces without opening three other files.
  */
 const AR: Readonly<Record<string, string>> = Object.freeze({
@@ -105,6 +105,8 @@ const AR: Readonly<Record<string, string>> = Object.freeze({
   SETUP_NOT_REQUIRED: "هذا الحساب مُهيَّأ أصلاً.",
   // "Save the shop's own details first" / "… before issuing an invoice" — one action either way.
   COMPANY_PROFILE_REQUIRED: "احفظ بيانات المتجر أوّلاً.",
+  // "This shop records new payments in cash or Whish Money only" — P3 / DEC-35, one site per path, one meaning.
+  PAYMENT_METHOD_NOT_ACCEPTED: "هذا المحل يسجّل الدفعات الجديدة نقداً أو بويش موني فقط.",
 });
 
 /** Every code this map answers for. Exported so a test can enumerate it rather than restate it. */

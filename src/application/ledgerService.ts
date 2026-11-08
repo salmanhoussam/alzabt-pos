@@ -31,6 +31,7 @@
  */
 import { createHash } from "node:crypto";
 import { businessDateOf } from "../domain/businessDay";
+import { assertAcceptedNewCollection } from "../domain/acceptedPayments";
 import { DomainError } from "../domain/errors";
 import { formatDecimal, money } from "../domain/money";
 import {
@@ -461,9 +462,23 @@ export class LedgerService {
    * "that is more than is owed" with the real figure; the trigger is the authority, and it is what
    * holds if two payments are ever attempted at once.
    */
+  /**
+   * P3 (DEC-35): the ONE place a new settlement's or receipt's way of paying is checked. `protected` only so
+   * a TEST can stand in for a pre-DEC-35 build when seeding history (tests/helpers/preDec35.ts); nothing in
+   * src/ overrides it — a source test proves that.
+   */
+  protected assertAcceptedNewCollection(method: SettlementMethod, provider: SettlementProvider | null): void {
+    assertAcceptedNewCollection(method, provider);
+  }
+
   settle(draft: SettlementDraft): PostResult<SettlementRecord> {
     const actor = this.requireOwner();
-    return this.commitCollection(this.prepareCollection(draft), actor, true);
+    const prepared = this.prepareCollection(draft);
+    // P3 (DEC-35): a NEW settlement is cash or Whish only; a replay of an existing key answers as before.
+    if (!this.deps.ledger.findSettlementByIdempotencyKey(prepared.key)) {
+      this.assertAcceptedNewCollection(prepared.method, prepared.provider);
+    }
+    return this.commitCollection(prepared, actor, true);
   }
 
   /**
@@ -548,6 +563,9 @@ export class LedgerService {
       }
       return; // only an OPEN same-intent attempt may continue under its original key (Tx2 re-checks the receipt lock)
     }
+    // 🔴 P3 (DEC-35): only a genuinely NEW collection reaches this line (a settlement or an attempt under
+    // this key returned above), and it must be cash or Whish. Nothing is written before this refusal.
+    this.assertAcceptedNewCollection(p.method, p.provider);
     // 🔴 Migration 18: a NEW collection is refused while an earlier allocated receipt of this customer is
     // unknown or in conflict (see assertNoUnresolvedReceipts). A replay or continuation never gets here.
     this.assertNoUnresolvedReceipts(p.partyId);
@@ -944,6 +962,9 @@ export class LedgerService {
       }
       return; // an OPEN attempt of the SAME intent continues under its original key
     }
+    // 🔴 P3 (DEC-35): a NEW shared receipt is Whish only — a bank-transfer receipt recorded before this rule
+    // still replays above under its key, and an open attempt still continues.
+    this.assertAcceptedNewCollection("external", p.provider);
     // 🔴 NOTHING NEW WHILE AN EARLIER MONEY-IN FOR THIS CUSTOMER IS UNANSWERED. Open collection attempts
     // are only READ here (M17A's own behaviour is not touched); open receipt attempts are classified
     // from the ledger and, when it can answer, closed.

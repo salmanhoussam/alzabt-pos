@@ -220,11 +220,16 @@ assert(
 await page.screenshot({ path: SHOTS + "04-receipt.png" });
 await page.locator('[data-testid="new-sale"]').click();
 
-// Second sale — card.
+// Second sale — Whish Money. TRANSITION (P3, DEC-35): this was a CARD sale (pay-card); the till now offers
+// cash and Whish only. The same sale, the same void below, the same totals.
 for (let i = 0; i < 3; i++) await product(page, "Mint Tea").click();
 assert((await totalText(page)) === "5.97 USD", "3 × 1.99 = 5.97");
 await page.locator('[data-testid="complete-sale"]').click();
-await page.locator('[data-testid="pay-card"]').click();
+assert((await page.locator('[data-testid="pay-card"]').count()) === 0 && (await page.locator('[data-testid="pay-other"]').count()) === 0, "🔴 P3: the till offers no Card and no Other");
+await page.locator('[data-testid="pay-whish"]').click();
+await page.locator('[data-testid="whish-reference"]').fill("WH-SMOKE-2");
+await page.locator('[data-testid="whish-confirm"]').check();
+await page.locator('[data-testid="whish-submit"]').click();
 await page.waitForSelector('[data-testid="receipt-number"]:has-text("#2")');
 await page.locator('[data-testid="new-sale"]').click();
 
@@ -248,7 +253,7 @@ await page.screenshot({ path: SHOTS + "05-today.png" });
 // Void receipt #2 from history.
 await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
-await page.locator('tr[data-payment-method="card"]').locator('[data-testid="history-void"]').click();
+await page.locator('tr[data-payment-method="external"]').locator('[data-testid="history-void"]').click(); // P3: was data-payment-method="card"
 await page.locator('[data-testid="void-reason"]').fill("customer cancelled");
 await page.screenshot({ path: SHOTS + "06-void-dialog.png" });
 await page.locator('[data-testid="void-confirm"]').click();
@@ -276,7 +281,7 @@ assert((await stat(page, "Completed sales")) === "2" && (await stat(page, "Net s
 await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Water 500ml").click();
 await page.locator('[data-testid="complete-sale"]').click();
-await page.locator('[data-testid="pay-other"]').click();
+await page.locator('[data-testid="pay-cash"]').click(); // TRANSITION (P3): was pay-other
 await page.waitForSelector('[data-testid="receipt-number"]:has-text("#3")');
 
 // The REAL Electron main PID, asked of the main process itself. NOT app.process().pid: on Windows

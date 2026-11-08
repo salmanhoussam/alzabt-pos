@@ -30,12 +30,25 @@ const tenderCount = (db: Db, saleId: string) => Number((db.prepare("SELECT tende
 const all = (db: Db) => Number((db.prepare("SELECT count(*) AS n FROM sale_tenders").get() as { n: bigint }).n);
 
 describe("which sales get a payment record", () => {
-  it.each(["cash", "card", "other"] as const)("a %s sale: ONE record, the method and the amount paid, sealed; payment_method unchanged", (method) => {
+  // TRANSITION (P3, DEC-35): was it.each(["cash", "card", "other"]). Card and Other are no longer accepted for
+  // a new sale (see the next test); P1's record shape is unchanged for cash.
+  it.each(["cash"] as const)("a %s sale: ONE record, the method and the amount paid, sealed; payment_method unchanged", (method) => {
     const { sale } = h.service.createSale({ idempotencyKey: newKey(), paymentMethod: method, ...espresso });
     expect(tenders(h.db, sale.id)).toEqual([{ seq: 1n, method, provider: null, reference: null, fc: null, amt: 500n }]);
     expect(tenderCount(h.db, sale.id)).toBe(1);
     expect(sale.paymentMethod).toBe(method);
     expect((h.db.prepare("SELECT payment_method AS m FROM sales WHERE id = ?").get(sale.id) as { m: string }).m).toBe(method);
+  });
+
+  it("a NEW card or other sale is refused (DEC-35) — nothing written, no record", () => {
+    const before = countRows(h.db);
+    for (const paymentMethod of ["card", "other"] as const) {
+      expect(() => h.service.createSale({ idempotencyKey: newKey(), paymentMethod, ...espresso })).toThrow(
+        expect.objectContaining({ code: "PAYMENT_METHOD_NOT_ACCEPTED" }),
+      );
+    }
+    expect(countRows(h.db)).toEqual(before);
+    expect(all(h.db)).toBe(0);
   });
 
   it("an external till sale WITHOUT evidence is refused — no reference is invented, nothing is written", () => {
@@ -108,7 +121,8 @@ describe("no duplicate, no partial write, no balance moved", () => {
   it("a linked paid sale moves no customer balance (no obligation, statement unchanged)", () => {
     const c = h.parties.create({ kind: "customer", displayName: "زبون رصيد" }).party;
     const before = h.ledger.statementFor(c.id).obligations.length;
-    const { sale } = h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "card", customerId: c.id, ...espresso });
+    // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old method here: "card".
+    const { sale } = h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", customerId: c.id, ...espresso });
     expect(tenders(h.db, sale.id)).toHaveLength(1);
     expect(h.ledger.statementFor(c.id).obligations.length).toBe(before);
     expect(Number((h.db.prepare("SELECT count(*) AS n FROM obligations WHERE sale_id = ?").get(sale.id) as { n: bigint }).n)).toBe(0);
@@ -116,7 +130,8 @@ describe("no duplicate, no partial write, no balance moved", () => {
 
   it("totals: Σ records = paid on every sale that has records; History reads exactly as before", () => {
     // TRANSITION (P2): the external sale carries its Whish evidence and now HAS a record (old: 4 records).
-    for (const m of ["cash", "card", "other", "external", "cash"] as const) {
+    // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old list: cash, card, other, external, cash (5 records).
+    for (const m of ["cash", "external", "cash"] as const) {
       h.service.createSale({ idempotencyKey: newKey(), paymentMethod: m, ...(m === "external" ? { whish: { reference: "WH-TOTALS-1", fundsConfirmed: true } } : {}), ...espresso });
     }
     const bad = h.db.prepare(
@@ -124,9 +139,9 @@ describe("no duplicate, no partial write, no balance moved", () => {
          OR s.paid_minor <> (SELECT coalesce(sum(amount_minor),0) FROM sale_tenders t WHERE t.sale_id = s.id))`,
     ).get() as { n: bigint };
     expect(Number(bad.n)).toBe(0);
-    expect(all(h.db)).toBe(5);
+    expect(all(h.db)).toBe(3);
     const history = h.service.getSaleHistory(10).map((r) => r.sale.paymentMethod);
-    expect([...history].sort()).toEqual(["card", "cash", "cash", "external", "other"]);
+    expect([...history].sort()).toEqual(["cash", "cash", "external"]);
   });
 });
 

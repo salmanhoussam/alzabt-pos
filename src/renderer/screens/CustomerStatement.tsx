@@ -68,7 +68,12 @@ import type {
  */
 const UNSAFE_TO_RETRY: ReadonlySet<string> = new Set(["PAYMENT_RECORDED", "PAYMENT_STATUS_UNKNOWN"]);
 
-const COLLECTION_METHODS: ReadonlyArray<CollectionMethodDto> = ["cash", "card", "whish", "bank_transfer", "other"];
+/**
+ * P3 (DEC-35): a NEW collection is Cash or Whish Money only. Card, bank transfer and Other are no longer
+ * offered — and the service refuses them for new money — while every historic collection keeps its own
+ * channel on the statement. Old list: cash, card, whish, bank_transfer, other.
+ */
+const COLLECTION_METHODS: ReadonlyArray<CollectionMethodDto> = ["cash", "whish"];
 
 /** How a linked PAID sale was paid at the till — the Sell screen's own method labels (ACC-2). */
 const METHOD_LABEL: Record<PaymentMethod, string> = {
@@ -88,6 +93,7 @@ export function CustomerStatement({ customerId }: Props) {
   const collectErrorText = (err: unknown): string => {
     if (err instanceof ApiError && (err.code === "FUNDS_NOT_CONFIRMED" ||
         err.code === "DUPLICATE_PAYMENT_REFERENCE" ||
+        err.code === "PAYMENT_METHOD_NOT_ACCEPTED" ||
         err.code === "COLLECTION_UNRESOLVED")) {
       return t(`collect.err.${err.code}`);
     }

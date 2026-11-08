@@ -27,6 +27,7 @@ import { PartyService } from "../../src/application/partyService";
 import { LedgerRepository } from "../../src/persistence/ledgerRepository";
 import { ReceiptRepository } from "../../src/persistence/receiptRepository";
 import { LedgerService } from "../../src/application/ledgerService";
+import { PreDec35LedgerService, PreDec35PosService } from "./preDec35";
 
 export interface TempDir {
   readonly dir: string;
@@ -98,6 +99,11 @@ export function makeHarness(
      * is what a terminal looked like before `main.ts` wired them and is worth a test of its own.
      */
     productMaster?: null;
+    /**
+     * P3: "pre-dec35" builds the services as a build released BEFORE DEC-35 would (tests/helpers/preDec35.ts),
+     * ONLY to seed the historic card / other / bank-transfer rows such a build could write. Default: today's build.
+     */
+    build?: "pre-dec35";
   } = {},
 ): Harness {
   const db = openDatabase(dbPath);
@@ -156,7 +162,7 @@ export function makeHarness(
       now: clock.now,
     });
     let creditSaleServices: { readonly parties: PartyService; readonly ledger: LedgerService } | null = null;
-    const service = new PosService({
+    const service = new (opts.build === "pre-dec35" ? PreDec35PosService : PosService)({
       repository,
       pinStates: new PinStateRepository(db),
       catalog: opts.catalog ?? loadCatalog(opts.catalogSource ?? FIXTURE_CATALOG),
@@ -194,7 +200,7 @@ export function makeHarness(
     });
     const ledgerStore = opts.ledgerRepository?.(db) ?? new LedgerRepository(db);
     const receiptStore = new ReceiptRepository(db);
-    const ledger = new LedgerService({
+    const ledger = new (opts.build === "pre-dec35" ? PreDec35LedgerService : LedgerService)({
       ledger: ledgerStore,
       receipts: receiptStore,
       parties: partyStore,
