@@ -154,7 +154,10 @@ describe("the statement channel", () => {
     for (const name of Object.keys(CHANNELS) as ChannelName[]) expect(() => accessFor(name)).not.toThrow();
   });
 
-  it("🔴 the ONE money write is a settlement; nothing creates a debt, nothing mentions a supplier", () => {
+  // TRANSITION (SELL-CREDIT, owner 2026-11-08): this was "… nothing creates a debt …". The owner's
+  // `createCustomerCreditSale` now creates one (owner-only, asserted by name in customerIpc.test.ts); the
+  // names below are unchanged — still no bare Obligation / Balance / Settlement channel and no supplier.
+  it("🔴 the ONE money write is a settlement; no bare obligation or balance channel, nothing mentions a supplier", () => {
     // 🔴 TRANSITION, AND THE OLD ASSERTION IS NAMED. Through S3B this read "no channel on this
     // bridge writes money" and forbade "Payment" outright. S3C deliberately ends that: exactly one
     // channel, `recordCustomerPayment`, now writes a settlement.

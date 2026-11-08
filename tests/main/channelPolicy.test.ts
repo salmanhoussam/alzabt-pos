@@ -78,6 +78,7 @@ describe("the public set", () => {
     // The public set must stay things that cannot change money, master data or the shop's identity.
     const forbidden = [
       "createSale",
+      "createCustomerCreditSale",
       "voidSale",
       "createProduct",
       "updateProduct",
@@ -119,6 +120,8 @@ describe("the owner-only set", () => {
     const ownerOnly = [
       // Reversing money.
       "voidSale",
+      // SELL-CREDIT: a new customer debt from the till (every new debt is the owner's, DEC-35a).
+      "createCustomerCreditSale",
       // Master data. 🔴 `createProduct` WAS IN THIS LIST AND IS NOT ANY MORE — migration 11 made
       // it "owner, or a cashier explicitly granted it", which is asserted on its own below.
       // Editing and retiring an EXISTING product stay owner-only, and that is the whole of the

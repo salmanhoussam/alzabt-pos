@@ -20,8 +20,12 @@ describe("the Sell screen sends the customer by id, and never a stale one", () =
   });
 
   it("🔴 a completed sale clears the customer, so the next sale never inherits it", () => {
-    const pay = between("const pay = async", "if (completed)");
-    expect(pay.indexOf("setCustomer(null)")).toBeGreaterThan(pay.indexOf("setCompleted(result.sale)"));
+    // TRANSITION (SELL-CREDIT): the end of a recorded sale moved into ONE `finishSale`, shared by the paid
+    // sale and the sale on account. Old value: asserted inside `const pay = async` directly.
+    const finish = between("const finishSale = (", "const payOnAccount");
+    expect(finish.indexOf("setCustomer(null)")).toBeGreaterThan(finish.indexOf("setCompleted(sale)"));
+    expect(between("const pay = async", "if (completed)")).toContain("finishSale(result.sale, null)");
+    expect(between("const payOnAccount = async", "const pay = async")).toContain("finishSale(result.sale, customer.displayName)");
   });
 
   it("🔴 choosing or clearing a customer replaces the checkout key, like a cart edit", () => {

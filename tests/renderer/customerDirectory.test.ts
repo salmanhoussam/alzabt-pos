@@ -177,14 +177,15 @@ describe("the Sell screen keeps its cart", () => {
     expect(en).not.toBe("sell.customerPaidLink");
   });
 
-  it("🔴 Sell offers no Credit control — the posting slice has not landed", () => {
-    // TRANSITION (P2, owner 2026-11-07): Whish Money landed on Sell as a PAID method with a reference and
-    // a confirmation, so "whish" / "Whish" left this list. Credit (on account) from Sell is still a later
-    // slice and stays forbidden. Old list: credit, whish, Credit, Whish, على الحساب.
+  // TRANSITION (SELL-CREDIT, owner 2026-11-08): this was "Sell offers no Credit control — the posting slice
+  // has not landed" (forbidden: credit, Credit, على الحساب). The slice landed: the control exists, and what
+  // is pinned now is that it is the OWNER's and needs a chosen customer.
+  it("🔴 Sell's on-account control is the owner's alone and needs a chosen customer", () => {
     const body = code(sell);
-    for (const forbidden of ["credit", "Credit", "على الحساب"]) {
-      expect(body, forbidden).not.toContain(forbidden);
-    }
+    expect(body).toContain('{!whishOpen && role === "owner" && (');
+    expect(body).toContain("disabled={busy || customer === null}");
+    expect(body).toContain("pos().createCustomerCreditSale(");
+    expect(body).not.toContain("paymentMethod: \"credit\""); // never a payment method
     // Positive control: the customer row really IS there, so the test above is not passing by
     // searching a file that has no customer feature in it at all.
     expect(body).toContain('data-testid="sell-choose-customer"');

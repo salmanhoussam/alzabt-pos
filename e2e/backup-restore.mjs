@@ -360,7 +360,8 @@ try {
     const l = await asOwner(await launch(A));
     const { app, page } = l;
     const keys = await page.evaluate(() => Object.keys(window.pos).sort());
-    check(keys.length === 79, "window.pos exposes exactly 79 business methods", { got: keys.length });
+    // TRANSITION SELL-CREDIT: 79 -> 80 (createCustomerCreditSale, owner-only). The old value was 79.
+    check(keys.length === 80, "window.pos exposes exactly 80 business methods", { got: keys.length });
     for (const k of ["exportFullBackup", "inspectRestoreBackup", "applyRestore"]) check(keys.includes(k), `window.pos has ${k}`);
     // settings.json is written only once a language is CHOSEN; choose one, so the package has it.
     await ok(page, "setTerminalLanguage", { language: "ar" });

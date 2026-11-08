@@ -70,7 +70,9 @@ describe("source facts the E2E cannot see", () => {
     expect(app).toContain("draft={draftFor(sellDraft, cashier.id)}");
   });
   it("a completed sale empties the draft directly, even if the screen is already gone", () => {
-    const success = sell.slice(sell.indexOf("setCompleted(result.sale);"), sell.indexOf("} catch (e) {", sell.indexOf("setCompleted(result.sale);")));
+    // TRANSITION (SELL-CREDIT): the end of a sale is the shared `finishSale`. Old value: the slice after
+    // `setCompleted(result.sale);` inside `pay`.
+    const success = sell.slice(sell.indexOf("const finishSale = ("), sell.indexOf("const payOnAccount"));
     expect(success).toMatch(/draftSink\.current\?\.\(\{ cart: \[\], customer: null, attemptKey: newIdempotencyKey\(\) \}\)/);
   });
   it("switching tabs writes nothing: the draft path calls no main-process channel", () => {
