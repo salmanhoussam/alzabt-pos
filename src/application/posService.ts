@@ -2694,7 +2694,7 @@ export class PosService {
    * sale is a refund, which is out of scope.
    */
   voidSale(saleId: string, reason: unknown): VoidRecord {
-    const cashier = this.requireCashier();
+    this.requireCashier(); // no session → NOT_LOGGED_IN, before anything else is read
     const cleanReason = normalizeVoidReason(reason);
     const sale = this.repository.getSale(saleId);
     if (!sale) throw new DomainError("SALE_NOT_FOUND", "Sale not found");
@@ -2709,16 +2709,15 @@ export class PosService {
         "This sale comes from a finalized invoice. Invoice cancellation / credit-note workflow is not implemented yet.",
       );
     }
-    // 🔴 VOIDING A WHISH SALE IS THE OWNER'S ALONE (DEC-35a / option A, owner 2026-11-08) — and it is
-    // decided HERE, in the service, from the LIVE operator row, not by the channel table or a hidden
-    // button. Any `external` sale qualifies: since P2 that is Whish with its evidence, and a
-    // provider-less external sale from an earlier build is outside money just the same.
-    // The void row written below IS the audit record (who, when, why, which sale; immutable by
-    // trigger; UNIQUE per sale). It cancels the sale in this ledger only: it does NOT say the money
-    // went back to the customer — any Whish refund happens outside the program and is checked on its
-    // own. The sale, its tender and its registered reference are untouched, so the reference stays
-    // taken for ever.
-    const voider: Cashier = sale.paymentMethod === "external" ? this.requireOwner() : cashier;
+    // 🔴 VOIDING ANY SALE IS THE OWNER'S ALONE — cash as well as Whish (DEC-35a option A for Whish,
+    // owner 2026-11-08; extended to cash by the owner the same day). Decided HERE, in the service, from
+    // the LIVE operator row; the IPC channel says the same (`voidSale: "owner"`), and neither relies on
+    // the other or on a hidden button. TRANSITION: until this change a cash (or card / other) sale could
+    // be voided at the service by any signed-in operator; only an external sale needed the owner.
+    // The void row written below IS the audit record (who, when, why, which sale; immutable by trigger;
+    // UNIQUE per sale). It cancels the sale in this ledger only: it does NOT say any money went back to
+    // the customer. The sale, its lines, its tender and any registered reference are never edited.
+    const voider: Cashier = this.requireOwner();
     if (this.repository.getVoid(saleId)) throw new DomainError("ALREADY_VOIDED", "This sale is already voided");
     const instant = this.now();
     const today = businessDateOf(instant, this.deps.terminal.timeZone);

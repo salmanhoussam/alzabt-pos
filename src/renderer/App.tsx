@@ -232,7 +232,7 @@ export function App() {
           />
         )}
         {tab === "today" && <TodayScreen />}
-        {tab === "history" && <HistoryScreen />}
+        {tab === "history" && <HistoryScreen role={cashier?.role} />}
         {tab === "products" && <ProductsScreen operator={cashier} />}
         {tab === "customers" && <CustomersScreen operator={cashier} />}
         {tab === "invoices" && <InvoicesScreen />}

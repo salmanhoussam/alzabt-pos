@@ -60,7 +60,7 @@ function currentDebtCell(r: SaleWithVoidDto, t: T) {
   );
 }
 
-export function HistoryScreen() {
+export function HistoryScreen({ role }: { readonly role?: string }) {
   const { t } = useT();
   const [rows, setRows] = useState<SaleWithVoidDto[] | null>(null);
   const [open, setOpen] = useState<SaleWithVoidDto | null>(null);
@@ -152,9 +152,9 @@ export function HistoryScreen() {
           </p>
         )}
         {/* DEC-35a: a voided Whish sale never reads as "refunded" — the void is this ledger's record only. */}
-        {open.void && open.sale.paymentMethod === "external" && (
+        {open.void && (
           <p className="notice small" role="note" data-testid="voided-not-refund">
-            {t("void.notRefund")}
+            {t(open.sale.paymentMethod === "external" ? "void.notRefund" : "void.notRefundCash")}
           </p>
         )}
         <Receipt sale={open.sale} />
@@ -245,7 +245,10 @@ export function HistoryScreen() {
                     {/* 🔴 GHOST-DANGER IN A ROW. Filled danger belongs to the final confirmation
                         only; two filled red blocks used to be the strongest objects on a screen
                         whose whole job is looking things up. */}
-                    {!r.void && r.sale.sourceType === "pos" && (
+                    {/* 🔴 OWNER ONLY (DEC-35c). Voiding any sale — cash or Whish — is the owner's;
+                        the bridge and the service refuse anyone else. A cashier is not offered a
+                        button that can only fail. */}
+                    {!r.void && r.sale.sourceType === "pos" && role === "owner" && (
                       <button
                         className="btn danger ghost small"
                         data-testid="history-void"
@@ -286,11 +289,11 @@ export function HistoryScreen() {
             <p className="muted small">{t("void.body")}</p>
             {/* DEC-35a: voiding a Whish sale is the owner's, and it is NOT a refund. Said before the
                 confirm button, in the shop's language, so nobody takes the void for money returned. */}
-            {voiding.sale.paymentMethod === "external" && (
-              <p className="notice small" role="note" data-testid="void-not-refund">
-                {t("void.notRefund")}
-              </p>
-            )}
+            {/* Owner 2026-11-08: the same is said for a cash sale, in its own words (a different moment:
+                no outside provider, the drawer). */}
+            <p className="notice small" role="note" data-testid="void-not-refund">
+              {t(voiding.sale.paymentMethod === "external" ? "void.notRefund" : "void.notRefundCash")}
+            </p>
             {/* Which receipt this is, so one can be told from another before it is destroyed. */}
             <p className="small">
               <bdi dir="ltr">{stamp(voiding.sale.completedAt)}</bdi> · {voiding.sale.cashierName} ·{" "}
