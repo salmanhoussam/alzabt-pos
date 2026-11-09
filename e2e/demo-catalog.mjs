@@ -217,6 +217,9 @@ await app.close();
 // A5 · the CLEAN showcase copy (catalogue + photos, no sale yet).
 if (process.env.DEMO_SHOWCASE_DIR) {
   cpSync(USERDATA, process.env.DEMO_SHOWCASE_DIR, { recursive: true });
+  // SHOWCASE MARKER: written by THIS tooling into the copy it prepared — never by the app, never into
+  // the test profile itself, which therefore stays an ordinary (merchant-mode) profile.
+  writeFileSync(join(process.env.DEMO_SHOWCASE_DIR, "alzabt-showcase-profile.json"), JSON.stringify({ kind: "alzabt-pos-showcase-profile", version: 1 }) + "\n", "utf8");
   assert(existsSync(join(process.env.DEMO_SHOWCASE_DIR, "alzabt-pos-ledger.sqlite")), "a clean showcase profile was kept (catalogue + photos, no sales)");
 }
 

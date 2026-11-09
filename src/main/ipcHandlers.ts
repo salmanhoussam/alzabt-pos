@@ -133,6 +133,11 @@ export interface PhoneSessionBridge {
 }
 
 export interface IpcHandlerOptions {
+  /**
+   * SHOWCASE MARKER (./showcaseMarker.ts): read ONCE at startup by main, from a file only tooling
+   * writes. Display-only — it adds `showcaseProfile: true` to the catalog DTO and nothing else.
+   */
+  readonly showcaseProfile?: boolean;
   /** Shows the native "open file" dialog. Absent (tests, headless) means import is unavailable. */
   readonly pickCatalogFile?: () => PickedFile | null;
   /** Native "save as" dialog + atomic write of the exported catalog. Absent means unavailable. */
@@ -891,7 +896,8 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     }),
     getCatalog: wrap("getCatalog", (p) => {
       noPayload(p);
-      return toCatalogDto(service.getCatalog());
+      // The showcase flag is display-only and independent of `demo` (DEMO-FALLBACK), which is unchanged.
+      return { ...toCatalogDto(service.getCatalog()), showcaseProfile: options.showcaseProfile === true };
     }),
     createSale: wrap("createSale", (p) => {
       // ACC-2: `customerId` is the ONE optional key — an account id, never a name or a snapshot. Every

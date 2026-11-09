@@ -223,6 +223,11 @@ export interface CatalogDto {
   readonly inactiveBarcodes: ReadonlyArray<string>;
   /** DEMO-FALLBACK: true only for the sample catalog under the explicit demo switch. Additive. */
   readonly demo: boolean;
+  /**
+   * SHOWCASE MARKER: true only when this profile carries the tooling-written marker file. Display-only:
+   * a banner. Never enables the sample catalog, never changes a rule. Optional (absent = false).
+   */
+  readonly showcaseProfile?: boolean;
 }
 
 export interface SaleLineDto {
