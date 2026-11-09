@@ -285,6 +285,25 @@ export interface CreateCreditSaleInput {
   readonly lines: ReadonlyArray<CartLine>;
   readonly expectedTotalMinor: bigint;
   readonly customerId: string;
+  /**
+   * SELL-PARTIAL-DEBT (owner, 2026-11-08): part of the total received NOW, by ONE accepted method (cash,
+   * or Whish Money with its reference and the explicit "the money arrived"). Absent or null → the
+   * whole total goes on the account, exactly as SELL-CREDIT (same fingerprint, same rows).
+   */
+  readonly downPayment?: CreditDownPaymentInput | null;
+}
+
+export interface CreditDownPaymentInput {
+  readonly amountMinor: bigint;
+  readonly method: "cash" | "external";
+  readonly whish?: { readonly reference: unknown; readonly fundsConfirmed: unknown } | null;
+}
+
+/** A down payment after validation: what is actually written (one tender) — never a debt. */
+interface CreditDownPayment {
+  readonly amountMinor: bigint;
+  readonly method: "cash" | "external";
+  readonly whish: { readonly provider: "whish"; readonly reference: string; readonly fundsConfirmed: true } | null;
 }
 
 export interface CreateCreditSaleResult {
@@ -2296,9 +2315,17 @@ export class PosService {
   }
 
   /**
-   * Internal-only, owner-authorized, fully unpaid POS sale. Its outer transaction is the sole
-   * commit boundary for the sale header, every line and the LedgerService-posted receivable.
-   * This method is deliberately not registered on the renderer bridge.
+   * Owner-authorized POS sale on a customer's account. Its outer transaction is the sole commit
+   * boundary for the sale header, every line, the tender of any down payment and the LedgerService-
+   * posted receivable. Reached from the till through the owner-only `createCustomerCreditSale` channel
+   * (SELL-CREDIT, 2026-11-08).
+   *
+   * SELL-PARTIAL-DEBT (owner, 2026-11-08): with a `downPayment`, the sale is `partial`: ONE tender for
+   * the amount received now (cash, or Whish with its reference — registered, so it can never be used
+   * twice), and ONE receivable for exactly the rest. The received part is a payment and is never a
+   * debt; the rest is a debt and is never a payment. 0 < received < total, always: a sale paid in full
+   * is an ordinary paid sale, and more than the total is refused. Without a down payment nothing at
+   * all changes — the same rows and the same request fingerprint as before.
    */
   createCustomerCreditSale(input: CreateCreditSaleInput): CreateCreditSaleResult {
     const cashier = this.requireCashier();
@@ -2319,6 +2346,7 @@ export class PosService {
     }
 
     this.validateCreditSaleRequestLines(input.lines);
+    const down = this.creditDownPaymentOf(input.downPayment, input.expectedTotalMinor);
 
     // The owner is authorized before this transaction reads any persisted sale or receivable.
     // Existing keys are resolved only from immutable original transaction facts, never today's
@@ -2363,6 +2391,19 @@ export class PosService {
             "The displayed total no longer matches the catalog; please review the cart",
           );
         }
+        // SELL-PARTIAL-DEBT: what is received now, and the debt that is exactly the rest. Re-checked
+        // against the TRUSTED total (the early check used the displayed one).
+        const paidMinor = down?.amountMinor ?? 0n;
+        if (down !== null && paidMinor >= amount.minor) {
+          throw new DomainError(
+            "DOWN_PAYMENT_NOT_PARTIAL",
+            "The amount received now must be less than the total; a sale paid in full is not a debt",
+          );
+        }
+        const balance =
+          down === null ? amount : services.ledger.validateObligationAmount(amount.minor - paidMinor, priced.currency);
+        const paymentStatus = down === null ? "unpaid" : "partial";
+        const paymentMethod: PaymentMethod | null = down?.method ?? null;
         const fingerprint = this.creditSaleFingerprint({
           cashierId: cashier.id,
           customerId: input.customerId,
@@ -2370,11 +2411,12 @@ export class PosService {
           expectedTotalMinor: input.expectedTotalMinor,
           totalMinor: amount.minor,
           currency: priced.currency,
-          paidMinor: 0n,
-          paymentStatus: "unpaid",
-          balanceDueMinor: amount.minor,
-          paymentMethod: null,
+          paidMinor,
+          paymentStatus,
+          balanceDueMinor: balance.minor,
+          paymentMethod,
           taxMinor: 0n,
+          externalReference: down?.whish?.reference ?? null,
         });
         const customer = services.parties.activeCustomerForSale(input.customerId);
         const instant = this.now();
@@ -2409,22 +2451,34 @@ export class PosService {
           subtotalMinor: priced.subtotal.minor,
           taxMinor: 0n,
           totalMinor: amount.minor,
-          paidMinor: 0n,
-          balanceDueMinor: amount.minor,
-          paymentStatus: "unpaid",
-          paymentMethod: null,
+          paidMinor,
+          balanceDueMinor: balance.minor,
+          paymentStatus,
+          paymentMethod,
+          // The repository writes ONE tender for `paidMinor` when > 0 (cash, or Whish with this evidence).
+          externalPayment: down?.whish ?? null,
           businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
           completedAt: timestamp,
           createdAt: timestamp,
         };
-        this.repository.commitSaleWithinTransaction(header, lines);
+        try {
+          this.repository.commitSaleWithinTransaction(header, lines);
+        } catch (err) {
+          // The ledger refuses a Whish reference already used anywhere; the whole transaction rolls back.
+          if (down?.whish && err instanceof Error && !(err instanceof DomainError) && REFERENCE_TAKEN.test(err.message)) {
+            throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
+          }
+          throw err;
+        }
         const posted = services.ledger.postObligation({
           partyId: customer.id,
           direction: "receivable",
           sourceKind: "sale",
           sourceRef: newSaleId,
           currency: priced.currency,
-          amountMinor: amount.minor,
+          // The debt is exactly the unpaid part — never the received part (the ledger's own trigger
+          // refuses any receivable that differs from the sale's balance due).
+          amountMinor: balance.minor,
         });
         const keyed = this.repository.findByIdempotencyKey(input.idempotencyKey);
         if (!keyed) throw new DomainError("LEDGER_INTEGRITY", "Credit sale disappeared before verification");
@@ -2498,6 +2552,8 @@ export class PosService {
     readonly balanceDueMinor: bigint;
     readonly paymentMethod: PaymentMethod | null;
     readonly taxMinor: bigint;
+    /** SELL-PARTIAL-DEBT: a Whish down payment's reference; appended ONLY when present (see below). */
+    readonly externalReference?: string | null;
   }): string {
     return createHash("sha256")
       .update(
@@ -2515,9 +2571,49 @@ export class PosService {
           paymentStatus: input.paymentStatus,
           balanceDueMinor: input.balanceDueMinor.toString(),
           taxMinor: input.taxMinor.toString(),
+          // 🔴 Appended only when present, so every SELL-CREDIT request keeps its exact fingerprint; the
+          // reference is part of WHAT was paid: the same key with another reference is a conflict.
+          ...(input.externalReference ? { externalReference: input.externalReference } : {}),
         }),
       )
       .digest("hex");
+  }
+
+  /**
+   * SELL-PARTIAL-DEBT: the down payment's SHAPE, checked before anything is read. Amounts against the
+   * trusted total are checked again inside the transaction. Cash or Whish Money only (P3, DEC-35); a
+   * Whish down payment needs its reference (the collection form's own cleaning rule) and an explicit
+   * "the money arrived" — never a default.
+   */
+  private creditDownPaymentOf(given: CreditDownPaymentInput | null | undefined, expectedTotalMinor: bigint): CreditDownPayment | null {
+    if (given === undefined || given === null) return null;
+    if (typeof given !== "object") throw new DomainError("INVALID_INPUT", "The amount received now is malformed");
+    if (typeof given.amountMinor !== "bigint" || given.amountMinor <= 0n) {
+      throw new DomainError("DOWN_PAYMENT_INVALID", "The amount received now must be more than zero");
+    }
+    if (given.amountMinor >= expectedTotalMinor) {
+      throw new DomainError(
+        "DOWN_PAYMENT_NOT_PARTIAL",
+        "The amount received now must be less than the total; a sale paid in full is not a debt",
+      );
+    }
+    if (given.method !== "cash" && given.method !== "external") {
+      // One code, one sentence across the codebase (refusalText criterion a).
+      throw new DomainError("PAYMENT_METHOD_NOT_ACCEPTED", "This shop records new payments in cash or Whish Money only");
+    }
+    this.assertAcceptedNewSale(given.method);
+    const w = given.whish ?? null;
+    if (given.method === "cash") {
+      if (w !== null) throw new DomainError("INVALID_INPUT", "A Whish reference belongs to a Whish Money payment only");
+      return { amountMinor: given.amountMinor, method: "cash", whish: null };
+    }
+    if (w === null || typeof w !== "object") {
+      throw new DomainError("INVALID_INPUT", "A Whish Money payment needs its reference and the confirmation that the money arrived");
+    }
+    const reference = cleanPaymentReference(w.reference, "whish");
+    if (reference === null) throw new DomainError("INVALID_INPUT", "This payment method needs a reference");
+    if (w.fundsConfirmed !== true) throw new DomainError("FUNDS_NOT_CONFIRMED", "Confirm that the money was actually received");
+    return { amountMinor: given.amountMinor, method: "external", whish: { provider: "whish", reference, fundsConfirmed: true } };
   }
 
   /**
@@ -2538,18 +2634,29 @@ export class PosService {
     ) {
       throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key belongs to a different transaction");
     }
+    // Two valid recorded shapes: fully unpaid (SELL-CREDIT) or partial with ONE accepted method
+    // (SELL-PARTIAL-DEBT). Anything else under this key is not a sale on an account.
+    const fullyUnpaid =
+      sale.paymentStatus === "unpaid" &&
+      sale.paymentMethod === null &&
+      sale.paid.minor === 0n &&
+      sale.balanceDue.minor === sale.total.minor;
+    const partial =
+      sale.paymentStatus === "partial" &&
+      (sale.paymentMethod === "cash" || sale.paymentMethod === "external") &&
+      sale.paid.minor > 0n &&
+      sale.balanceDue.minor > 0n &&
+      sale.paid.minor + sale.balanceDue.minor === sale.total.minor &&
+      (sale.paymentMethod === "cash") === (sale.externalPayment === null);
     if (
       sale.customerId === null ||
       sale.customerNameSnapshot === null ||
       sale.customerNameSnapshot.trim().length === 0 ||
-      sale.paymentStatus !== "unpaid" ||
-      sale.paymentMethod !== null ||
-      sale.paid.minor !== 0n ||
+      !(fullyUnpaid || partial) ||
       sale.total.minor <= 0n ||
-      sale.balanceDue.minor !== sale.total.minor ||
       sale.tax.minor !== 0n
     ) {
-      throw new DomainError("LEDGER_INTEGRITY", "The keyed sale is not a valid fully unpaid customer-credit sale");
+      throw new DomainError("LEDGER_INTEGRITY", "The keyed sale is not a valid sale on a customer's account");
     }
 
     const lineSum = sale.lines.reduce((sum, line) => sum + line.lineTotal.minor, 0n);
@@ -2598,11 +2705,22 @@ export class PosService {
           line.productId === sale.lines[index]!.productId &&
           line.quantityMilli === sale.lines[index]!.quantityMilli,
       );
+    // SELL-PARTIAL-DEBT: the replayed request must describe the SAME money received now — none for a
+    // fully unpaid sale; the same amount, method and Whish reference for a partial one.
+    const down = this.creditDownPaymentOf(input.downPayment, input.expectedTotalMinor);
+    const sameDownPayment =
+      down === null
+        ? fullyUnpaid
+        : partial &&
+          down.amountMinor === sale.paid.minor &&
+          down.method === sale.paymentMethod &&
+          (down.whish?.reference ?? null) === (sale.externalPayment?.reference ?? null);
     if (
       cashierId !== sale.cashierId ||
       input.customerId !== sale.customerId ||
       !sameRequestLines ||
-      input.expectedTotalMinor !== sale.total.minor
+      input.expectedTotalMinor !== sale.total.minor ||
+      !sameDownPayment
     ) {
       throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
     }
@@ -2619,6 +2737,7 @@ export class PosService {
       balanceDueMinor: sale.balanceDue.minor,
       paymentMethod: sale.paymentMethod,
       taxMinor: sale.tax.minor,
+      externalReference: sale.externalPayment?.reference ?? null,
     });
     if (keyed.fingerprint !== originalFingerprint) {
       throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
