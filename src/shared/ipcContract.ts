@@ -206,6 +206,9 @@ export interface ProductDto {
   readonly id: string;
   readonly sku: string | null;
   readonly name: string;
+  /** TILL-NAMES: both stored names, for display/search only. Additive and optional. */
+  readonly nameAr?: string;
+  readonly nameEn?: string | null;
   readonly price: MoneyDto;
   readonly baseUnit: string;
   readonly priceNeedsReview: boolean;

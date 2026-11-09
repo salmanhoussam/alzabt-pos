@@ -269,6 +269,8 @@ export class CatalogRepository {
         id: r.id,
         sku: r.sku,
         name: displayName(r.name_ar, r.name_en),
+        nameAr: r.name_ar,
+        nameEn: r.name_en,
         price: formatDecimal(money(r.selling_price_minor, r.currency)),
         baseUnit: r.base_unit,
         priceNeedsReview: r.price_needs_review === 1n,
