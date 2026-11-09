@@ -8,6 +8,13 @@ export interface Product {
   readonly sku: string | null;
   /** The name shown and snapshotted on the sale line (see displayName for local catalogs). */
   readonly name: string;
+  /**
+   * TILL-NAMES: the two stored names, exactly as the merchant wrote them, for DISPLAY and SEARCH
+   * only. Absent on a catalog that has one name (the bundled fixture). `name` above stays the
+   * snapshot rule (displayName) — what a sale line records never depends on the screen's language.
+   */
+  readonly nameAr?: string;
+  readonly nameEn?: string | null;
   readonly price: Money;
   /** The unit one quantity of this product is sold in ("piece", "box"). Quantities stay whole. */
   readonly baseUnit: string;
@@ -27,6 +34,9 @@ export interface CatalogSource {
     readonly id: string;
     readonly sku: string | null;
     readonly name: string;
+    /** TILL-NAMES: see Product.nameAr / nameEn. Optional; absent on single-name sources. */
+    readonly nameAr?: string;
+    readonly nameEn?: string | null;
     readonly price: string;
     readonly baseUnit?: string;
     readonly priceNeedsReview?: boolean;
@@ -82,6 +92,41 @@ export { FRACTIONAL_SALE_UNITS } from "./quantity";
  */
 export function displayName(nameAr: string, nameEn: string | null): string {
   return nameEn ?? nameAr;
+}
+
+/**
+ * TILL-NAMES (DEC-35h §3): the name a SCREEN shows in a given UI language. Arabic UI → name_ar;
+ * English UI → name_en, falling back to name_ar. A single-name product (no nameAr/nameEn) shows
+ * `name`. Never invents a translation, and never feeds a sale line — `name` is the snapshot.
+ */
+export function nameForLanguage(
+  p: { readonly name: string; readonly nameAr?: string; readonly nameEn?: string | null },
+  lang: "ar" | "en",
+): string {
+  const ar = p.nameAr ?? p.name;
+  if (lang === "ar") return ar;
+  return p.nameEn ?? ar;
+}
+
+/**
+ * The OTHER stored name, for a smaller second line when it helps the merchant; null when the
+ * product has only one name or both are the same text.
+ */
+export function secondaryName(
+  p: { readonly name: string; readonly nameAr?: string; readonly nameEn?: string | null },
+  lang: "ar" | "en",
+): string | null {
+  if (p.nameAr === undefined || p.nameEn === undefined || p.nameEn === null) return null;
+  const other = lang === "ar" ? p.nameEn : p.nameAr;
+  return other.trim() === nameForLanguage(p, lang).trim() ? null : other;
+}
+
+/**
+ * The fields the till searches: both stored names, the snapshot name, SKU and barcode. Used with
+ * domain/arabic.ts `matchesSearch`, the same normalisation Products and Invoices already use.
+ */
+export function searchFields(p: Product): ReadonlyArray<string | null | undefined> {
+  return [p.nameAr, p.nameEn, p.name, p.sku, p.barcode];
 }
 
 export interface Catalog {
@@ -141,6 +186,8 @@ export function loadCatalog(source: CatalogSource): Catalog {
       id: raw.id,
       sku: raw.sku,
       name: raw.name.trim(),
+      ...(raw.nameAr !== undefined ? { nameAr: raw.nameAr } : {}),
+      ...(raw.nameEn !== undefined ? { nameEn: raw.nameEn } : {}),
       price: parseDecimal(raw.price, source.currency),
       baseUnit,
       priceNeedsReview: raw.priceNeedsReview ?? false,

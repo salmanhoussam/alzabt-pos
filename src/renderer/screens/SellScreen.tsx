@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CustomerFinder } from "./CustomerFinder";
 import type { CustomerDto } from "../../shared/ipcContract";
 import { type CartLine, type PricedCart, addProduct, decrement, priceCart, removeProduct } from "../../domain/cart";
-import type { Catalog } from "../../domain/catalog";
+import { type Catalog, nameForLanguage, searchFields, secondaryName } from "../../domain/catalog";
+import { matchesSearch } from "../../domain/arabic";
 import { formatDecimal, parseDecimal } from "../../domain/money";
 import { formatQuantity, parseQuantity } from "../../domain/quantity";
 import type { PaymentMethod } from "../../domain/sale";
@@ -90,7 +91,7 @@ export function SellScreen({
   /** Called with the screen's unfinished work whenever it changes, so App can keep it across tabs. */
   readonly onDraftChange?: (next: Omit<SellDraft, "operatorId">) => void;
 } = {}) {
-  const { t, unit } = useT();
+  const { t, unit, lang } = useT();
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [clearing, setClearing] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -175,13 +176,19 @@ export function SellScreen({
     [catalog, cart],
   );
 
-  // Plain substring search on the displayed name (and SKU). No Arabic normalisation in this pilot.
+  // TILL-SEARCH-AR (DEC-35h §2): both stored names, SKU and barcode, through the SAME Arabic
+  // normalisation Products and Invoices already use (domain/arabic.ts). It used to be a plain
+  // substring on the DISPLAYED name, so a product with an English name was unreachable in Arabic.
+  // The haystacks are normalised once per catalog, not once per keystroke per product.
+  const searchIndex = useMemo(
+    () => (catalog ? catalog.products.map((p) => ({ p, fields: searchFields(p) })) : []),
+    [catalog],
+  );
   const visible = useMemo(() => {
     if (!catalog) return [];
-    const q = query.trim().toLowerCase();
-    if (!q) return catalog.products;
-    return catalog.products.filter((p) => p.name.toLowerCase().includes(q) || (p.sku ?? "").toLowerCase().includes(q));
-  }, [catalog, query]);
+    if (!query.trim()) return catalog.products;
+    return searchIndex.filter(({ fields }) => matchesSearch(fields, query)).map(({ p }) => p);
+  }, [catalog, searchIndex, query]);
 
   /**
    * The photo rows for the products ON SCREEN — the input the shared hook's six rules consume.
@@ -667,7 +674,7 @@ export function SellScreen({
                 if (isPhotoPreviewShortcut(e)) {
                   if (url === null) return;
                   e.preventDefault();
-                  setPreview({ name: p.name, url });
+                  setPreview({ name: nameForLanguage(p, lang), url });
                   return;
                 }
                 const cards = Array.from(
@@ -689,9 +696,14 @@ export function SellScreen({
                 refocusAfterClick(e);
               }}
             >
-              <span className="product-name" dir="auto">
-                {p.name}
+              <span className="product-name" dir="auto" data-testid="product-name">
+                {nameForLanguage(p, lang)}
               </span>
+              {secondaryName(p, lang) !== null && (
+                <span className="product-name-alt muted small" dir="auto" data-testid="product-name-alt">
+                  {secondaryName(p, lang)}
+                </span>
+              )}
               {p.sku && <span className="product-sku muted">{p.sku}</span>}
               <span className="product-price">
                 {/* One isolated run, amount and currency together — the same shape the cart line
@@ -717,8 +729,8 @@ export function SellScreen({
                 data-testid="sell-thumb"
                 data-product={p.id}
                 title={t("sell.photoOpen")}
-                aria-label={`${t("sell.photoOpen")}: ${p.name}`}
-                onClick={() => setPreview({ name: p.name, url })}
+                aria-label={`${t("sell.photoOpen")}: ${nameForLanguage(p, lang)}`}
+                onClick={() => setPreview({ name: nameForLanguage(p, lang), url })}
               >
                 <img src={url} alt="" data-testid="sell-thumb-image" />
               </button>
@@ -849,7 +861,14 @@ export function SellScreen({
               return (
               <li key={l.productId} className="line">
                 <div className="line-main">
-                  <span dir="auto">{l.productName}</span>
+                  {/* Display only, in the screen's language. The sale line still snapshots
+                      `productName` (the catalog's snapshot rule) — main reprices and records it. */}
+                  <span dir="auto" data-testid="cart-line-name">
+                    {(() => {
+                      const prod = catalog.byId.get(l.productId);
+                      return prod ? nameForLanguage(prod, lang) : l.productName;
+                    })()}
+                  </span>
                   <span className="muted">
                     <LineMath
                       quantityMilli={l.quantityMilli}
@@ -1045,7 +1064,7 @@ export function SellScreen({
                 const product = catalog.products.find((p) => p.id === l.productId);
                 return (
                   <li key={l.productId}>
-                    <span dir="auto">{product?.name ?? l.productId}</span>{" "}
+                    <span dir="auto">{product ? nameForLanguage(product, lang) : l.productId}</span>{" "}
                     <span className="muted small">
                       <bdi dir="ltr">{formatQuantity(l.quantityMilli)}</bdi>
                     </span>
