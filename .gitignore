@@ -17,6 +17,9 @@ e2e-output/
 # Field data: merchant catalogs, invoices and exports never enter this public repo.
 *.csv
 field-data/
+# …except the ONE synthetic demo import file (no merchant data: demo prices, GS1 prefix-200 barcodes),
+# checked by tests/domain/demoCatalogFixture.test.ts. Nothing else under tests/ is let through.
+!tests/fixtures/demo-catalog/alzabt-demo-catalog-import.csv
 
 # Rendered invoice samples for visual review — produced by CI, never committed.
 invoice-pdf-samples/
