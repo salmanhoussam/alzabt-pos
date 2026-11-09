@@ -323,6 +323,21 @@ function whishPayment(value: unknown): { reference: string; fundsConfirmed: bool
   return { reference: w.reference, fundsConfirmed: w.fundsConfirmed };
 }
 
+/**
+ * SELL-PARTIAL-DEBT: the money received now on a sale on account — exactly { amountMinor, method } and,
+ * for Whish Money only, `whish` = { reference, fundsConfirmed }. The method is "cash" or "external"
+ * here; every rule about amounts and accepted methods is the service's.
+ */
+function creditDownPayment(value: unknown): { amountMinor: bigint; method: "cash" | "external"; whish?: { reference: string; fundsConfirmed: boolean } } {
+  const d = objectWithOptional(value, ["amountMinor", "method"], ["whish"]);
+  if (d.method !== "cash" && d.method !== "external") invalid("'downPayment.method' must be cash or external");
+  return {
+    amountMinor: parseMinor(d.amountMinor),
+    method: d.method,
+    ...("whish" in d ? { whish: whishPayment(d.whish) } : {}),
+  };
+}
+
 /** An optional text field: null, undefined and "" all mean "not given". */
 function optionalStr(value: unknown, field: string, max: number): string | null {
   if (value === null || value === undefined) return null;
@@ -895,14 +910,20 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
      * never a payment. OWNER ONLY at this channel AND in the service (which re-reads the live role inside
      * its transaction). The sale, its lines and the receivable commit together or not at all; no tender
      * row is written because no money was received. Every key is required; nothing else is accepted.
+     *
+     * SELL-PARTIAL-DEBT (owner, 2026-11-08): `downPayment` is the ONE optional key — exactly
+     * { amountMinor, method } plus `whish` for a Whish Money down payment, nothing else. With it the sale
+     * is partial: one tender for what was received now, one receivable for exactly the rest, still in one
+     * transaction and still OWNER ONLY. Without it, everything above is unchanged.
      */
     createCustomerCreditSale: wrap("createCustomerCreditSale", (p) => {
-      const o = exactObject(p, ["idempotencyKey", "lines", "expectedTotalMinor", "customerId"]);
+      const o = objectWithOptional(p, ["idempotencyKey", "lines", "expectedTotalMinor", "customerId"], ["downPayment"]);
       const result = service.createCustomerCreditSale({
         idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
         lines: saleLinesOf(o.lines),
         expectedTotalMinor: parseMinor(o.expectedTotalMinor),
         customerId: str(o.customerId, "customerId", 100),
+        ...("downPayment" in o ? { downPayment: creditDownPayment(o.downPayment) } : {}),
       });
       if (!result.duplicate) {
         try {

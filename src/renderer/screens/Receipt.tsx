@@ -84,6 +84,22 @@ export function Receipt({
           </strong>
         </div>
         )}
+        {/* SELL-PARTIAL-DEBT: a partial till sale says BOTH halves — what was received now (by the method
+            above) and what stays on the customer's account. Never one total read as paid. */}
+        {sale.sourceType === "pos" && sale.paymentStatus === "partial" && (
+          <>
+            <div className="receipt-paid">
+              <span className="muted small">{t("receipt.paidNow")}</span>
+              <strong data-testid="receipt-paid-amount"><bdi dir="ltr">{fmt(sale.paid)}</bdi></strong>
+            </div>
+            <div className="receipt-paid" data-testid="receipt-on-account">
+              <span className="muted small">{t("receipt.onAccount")}</span>
+              {onAccountFor !== null && onAccountFor !== undefined && <bdi data-testid="receipt-on-account-customer">{onAccountFor}</bdi>}
+              <span className="muted small">{t("receipt.balanceDue")}</span>
+              <strong data-testid="receipt-balance-due"><bdi dir="ltr">{fmt(sale.balanceDue)}</bdi></strong>
+            </div>
+          </>
+        )}
         {/* P2: the Whish reference the operator recorded — the receipt is the customer's proof of it. */}
         {sale.externalPayment && (
           <div className="receipt-paid">

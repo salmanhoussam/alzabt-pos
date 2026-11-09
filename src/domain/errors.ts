@@ -90,6 +90,10 @@ export type DomainErrorCode =
   // DEC-35 / P3 — a NEW payment by a method the shop no longer accepts (card, other, bank transfer).
   // History is never refused or re-labelled; only a new write is.
   | "PAYMENT_METHOD_NOT_ACCEPTED"
+  // SELL-PARTIAL-DEBT (owner, 2026-11-08) — the amount received now on a sale on account. Two codes,
+  // two different corrections: "type more than zero" vs "less than the total, or it is a paid sale".
+  | "DOWN_PAYMENT_INVALID"
+  | "DOWN_PAYMENT_NOT_PARTIAL"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

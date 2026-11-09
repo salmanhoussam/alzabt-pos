@@ -350,6 +350,15 @@ export interface CreateCustomerCreditSaleRequest {
   readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
   readonly expectedTotalMinor: string;
   readonly customerId: string;
+  /**
+   * SELL-PARTIAL-DEBT: part of the total received now — cash, or Whish Money ("external") with its
+   * reference and the explicit confirmation. Omitted → the whole total goes on the account.
+   */
+  readonly downPayment?: {
+    readonly amountMinor: string;
+    readonly method: "cash" | "external";
+    readonly whish?: { readonly reference: string; readonly fundsConfirmed: boolean };
+  };
 }
 
 export interface CreateCustomerCreditSaleResponse {

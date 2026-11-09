@@ -3,7 +3,7 @@ import { CustomerFinder } from "./CustomerFinder";
 import type { CustomerDto } from "../../shared/ipcContract";
 import { type CartLine, type PricedCart, addProduct, decrement, priceCart, removeProduct } from "../../domain/cart";
 import type { Catalog } from "../../domain/catalog";
-import { formatDecimal } from "../../domain/money";
+import { formatDecimal, parseDecimal } from "../../domain/money";
 import { formatQuantity, parseQuantity } from "../../domain/quantity";
 import type { PaymentMethod } from "../../domain/sale";
 import { fromCatalogDto } from "../../shared/dto";
@@ -54,6 +54,11 @@ const WHISH_ERROR_KEY: Readonly<Record<string, string>> = {
   DUPLICATE_PAYMENT_REFERENCE: "pay.whishErr.duplicate",
   FUNDS_NOT_CONFIRMED: "pay.whishErr.notConfirmed",
   INVALID_INPUT: "pay.whishErr.reference",
+};
+/** SELL-PARTIAL-DEBT: the amount-received-now step's own sentences (text follows the operation). */
+const PARTIAL_ERROR_KEY: Readonly<Record<string, string>> = {
+  DOWN_PAYMENT_INVALID: "pay.partial.invalid",
+  DOWN_PAYMENT_NOT_PARTIAL: "pay.partial.notLess",
 };
 
 /**
@@ -362,12 +367,22 @@ export function SellScreen({
     return false;
   };
 
+  /**
+   * SELL-PARTIAL-DEBT (owner, 2026-11-08): the amount the owner receives NOW on a sale on account, as
+   * typed. Empty = the whole total on the account (SELL-CREDIT, unchanged). `whishForPartial` says the
+   * open Whish step is for that down payment, not for a sale paid in full.
+   */
+  const [partialText, setPartialText] = useState("");
+  const [whishForPartial, setWhishForPartial] = useState(false);
+
   /** P2: every opening of the payment pane starts the Whish step empty and UNconfirmed. */
   useEffect(() => {
     if (paying) return;
     setWhishOpen(false);
     setWhishReference("");
     setWhishConfirmed(false);
+    setPartialText("");
+    setWhishForPartial(false);
   }, [paying]);
 
   /** SELL-CREDIT: the customer an on-account sale was recorded for, shown on its receipt (the DTO carries no name). */
@@ -393,7 +408,13 @@ export function SellScreen({
    * in one transaction, OWNER ONLY (channel + service, live role). The same checkout key as the cart, so
    * a double click or a lost reply replays the same request and can never create a second sale or debt.
    */
-  const payOnAccount = async () => {
+  const payOnAccount = async (
+    down?: {
+      readonly amountMinor: bigint;
+      readonly method: "cash" | "external";
+      readonly whish?: { readonly reference: string; readonly fundsConfirmed: boolean };
+    },
+  ) => {
     if (!priced || busy || customer === null) return;
     setBusy(true);
     setError(null);
@@ -404,15 +425,53 @@ export function SellScreen({
           lines: cart.map((l) => ({ productId: l.productId, quantityMilli: l.quantityMilli })),
           expectedTotalMinor: priced.total.minor.toString(),
           customerId: customer.id,
+          // SELL-PARTIAL-DEBT: only when something is received now; otherwise the request is
+          // byte-identical to SELL-CREDIT's.
+          ...(down === undefined
+            ? {}
+            : {
+                downPayment: {
+                  amountMinor: down.amountMinor.toString(),
+                  method: down.method,
+                  ...(down.whish === undefined ? {} : { whish: down.whish }),
+                },
+              }),
         }),
       );
       finishSale(result.sale, customer.displayName);
     } catch (e) {
-      setError(errorText(e));
+      const own =
+        e instanceof ApiError
+          ? (PARTIAL_ERROR_KEY[e.code] ?? (down?.whish !== undefined ? WHISH_ERROR_KEY[e.code] : undefined))
+          : undefined;
+      setError(own ? t(own) : errorText(e));
     } finally {
       setBusy(false);
     }
   };
+
+  /**
+   * SELL-PARTIAL-DEBT: what the typed amount means against the CURRENT total. "none" = nothing typed
+   * (the whole total on the account). The domain's own parser decides; nothing here does arithmetic on
+   * floats. The service checks all of it again against the trusted total.
+   */
+  const partial = useMemo(():
+    | { readonly kind: "none" | "invalid" | "notLess" }
+    | { readonly kind: "ok"; readonly paid: bigint; readonly rest: bigint } => {
+    const text = partialText.trim();
+    if (text === "" || !priced) return { kind: "none" };
+    let paid: bigint;
+    try {
+      paid = parseDecimal(text, priced.currency).minor;
+    } catch {
+      return { kind: "invalid" };
+    }
+    if (paid <= 0n) return { kind: "invalid" };
+    if (paid >= priced.total.minor) return { kind: "notLess" };
+    return { kind: "ok", paid, rest: priced.total.minor - paid };
+  }, [partialText, priced]);
+  const money = (minor: bigint) =>
+    priced ? `${formatDecimal({ minor, currency: priced.currency })} ${priced.currency}` : "";
 
   const pay = async (method: PaymentMethod, whish?: { readonly reference: string; readonly fundsConfirmed: boolean }) => {
     if (!priced || busy) return;
@@ -962,7 +1021,10 @@ export function SellScreen({
                   key={m}
                   ref={m === "cash" ? cashRef : undefined}
                   className={m === "cash" ? "btn primary big" : "btn big"}
-                  disabled={busy}
+                  /* 🔴 SELL-PARTIAL-DEBT: once an amount received NOW is typed, a full-payment button would
+                     record the WHOLE total as paid — the opposite of what the owner just typed. They wait
+                     until the field is empty again. */
+                  disabled={busy || partial.kind !== "none"}
                   data-testid={`pay-${m}`}
                   onKeyDown={refuseEnterActivation}
                   onClick={() => {
@@ -984,17 +1046,86 @@ export function SellScreen({
                 active customer it stays disabled and says why. */}
             {!whishOpen && role === "owner" && (
               <div className="on-account" data-testid="on-account">
-                <button
-                  className="btn big"
-                  disabled={busy || customer === null}
-                  data-testid="pay-on-account"
-                  onKeyDown={refuseEnterActivation}
-                  onClick={() => void payOnAccount()}
-                >
-                  {t("pay.onAccount")}
-                </button>
-                <p className="muted small" data-testid="pay-on-account-note">
-                  {customer === null ? t("pay.onAccountNeedCustomer") : t("pay.onAccountNote")}
+                {/* SELL-PARTIAL-DEBT: optionally, part of the total received NOW. Empty = the whole total on
+                    the account (unchanged). Typed = one accepted method for that part, the rest a debt. */}
+                <label className="field">
+                  <span>{t("pay.partial.amount")}</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
+                    maxLength={20}
+                    value={partialText}
+                    disabled={busy || customer === null}
+                    placeholder="0.00"
+                    data-testid="pay-partial-amount"
+                    onChange={(e) => {
+                      setPartialText(e.target.value);
+                      setError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      // A scanner or a habit ends in Enter: it never records the sale from here.
+                      if (e.key === "Enter") e.preventDefault();
+                    }}
+                  />
+                </label>
+                {partial.kind === "none" && (
+                  <button
+                    className="btn big"
+                    disabled={busy || customer === null}
+                    data-testid="pay-on-account"
+                    onKeyDown={refuseEnterActivation}
+                    onClick={() => void payOnAccount()}
+                  >
+                    {t("pay.onAccount")}
+                  </button>
+                )}
+                {(partial.kind === "invalid" || partial.kind === "notLess") && (
+                  <p className="error small" role="status" data-testid="pay-partial-note" data-kind={partial.kind}>
+                    {t(partial.kind === "invalid" ? "pay.partial.invalid" : "pay.partial.notLess")}
+                  </p>
+                )}
+                {partial.kind === "ok" && (
+                  <>
+                    <p className="small" data-testid="pay-partial-split" data-paid={partial.paid.toString()} data-rest={partial.rest.toString()}>
+                      {t("pay.partial.now")} <bdi dir="ltr">{money(partial.paid)}</bdi>
+                      {" · "}
+                      {t("pay.partial.rest")} <bdi dir="ltr">{money(partial.rest)}</bdi>
+                    </p>
+                    <div className="methods">
+                      <button
+                        className="btn big"
+                        disabled={busy || customer === null}
+                        data-testid="pay-partial-cash"
+                        onKeyDown={refuseEnterActivation}
+                        onClick={() => void payOnAccount({ amountMinor: partial.paid, method: "cash" })}
+                      >
+                        {t("pay.partial.cash")}
+                      </button>
+                      <button
+                        className="btn big"
+                        disabled={busy || customer === null}
+                        data-testid="pay-partial-whish"
+                        onKeyDown={refuseEnterActivation}
+                        onClick={() => {
+                          setError(null);
+                          setWhishForPartial(true);
+                          setWhishOpen(true);
+                        }}
+                      >
+                        {t("pay.partial.whish")}
+                      </button>
+                    </div>
+                  </>
+                )}
+                {/* Text follows the operation: "the whole total is a debt, nothing received" is FALSE once a
+                    part is received now, so the partial case says its own sentence. */}
+                <p className="muted small" data-testid="pay-on-account-note" data-kind={customer === null ? "need-customer" : partial.kind === "none" ? "full" : "partial"}>
+                  {customer === null
+                    ? t("pay.onAccountNeedCustomer")
+                    : partial.kind === "none"
+                      ? t("pay.onAccountNote")
+                      : t("pay.partial.note")}
                 </p>
               </div>
             )}
@@ -1003,8 +1134,16 @@ export function SellScreen({
                  typed the Whish reference AND ticked that the money really arrived (never pre-ticked).
                  The till does not contact Whish; the main process refuses a reused reference, and the
                  whole sale is rolled back, so a refusal here leaves nothing behind. */
-              <div className="whish-step" data-testid="whish-step">
+              <div className="whish-step" data-testid="whish-step" data-for={whishForPartial ? "partial" : "full"}>
                 <h3>{t("pay.whish")}</h3>
+                {whishForPartial && partial.kind === "ok" && (
+                  /* SELL-PARTIAL-DEBT: said before the reference is typed — only this part is paid by Whish. */
+                  <p className="small" data-testid="whish-partial-split">
+                    {t("pay.partial.now")} <bdi dir="ltr">{money(partial.paid)}</bdi>
+                    {" · "}
+                    {t("pay.partial.rest")} <bdi dir="ltr">{money(partial.rest)}</bdi>
+                  </p>
+                )}
                 <label className="field">
                   <span>{t("pay.whishReference")}</span>
                   <input
@@ -1044,6 +1183,16 @@ export function SellScreen({
                   onKeyDown={refuseEnterActivation}
                   onClick={() => {
                     if (!whishReady) return;
+                    if (whishForPartial) {
+                      // SELL-PARTIAL-DEBT: only the typed part by Whish; the rest on the chosen customer.
+                      if (partial.kind !== "ok") return;
+                      void payOnAccount({
+                        amountMinor: partial.paid,
+                        method: "external",
+                        whish: { reference: whishReference, fundsConfirmed: true },
+                      });
+                      return;
+                    }
                     void pay("external", { reference: whishReference, fundsConfirmed: true });
                   }}
                 >
@@ -1055,6 +1204,7 @@ export function SellScreen({
                   data-testid="whish-back"
                   onClick={() => {
                     setWhishOpen(false);
+                    setWhishForPartial(false);
                     setError(null);
                   }}
                 >
