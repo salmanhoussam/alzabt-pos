@@ -40,7 +40,8 @@ describe("the confirmation figures", () => {
     h.invoices.updateDraftHeader(invoice.id, { customerName: "زبون", paid: "50.00" });
 
     const displayed = shown(invoice.id);
-    const final = h.invoices.finalizeInvoice(invoice.id).invoice;
+    // TRANSITION (INV-PAY-METHOD): 50.00 is marked paid, so the issue names how. Old: finalizeInvoice(invoice.id).
+    const final = h.invoices.finalizeInvoice(invoice.id, { payment: { method: "cash" } }).invoice;
 
     expect(displayed.total_minor).toBe(11_100n);
     expect(final.total_minor).toBe(displayed.total_minor);

@@ -60,6 +60,7 @@ import type {
 import type { ReconciliationRepository, ReconciliationRow } from "../persistence/reconciliationRepository";
 import type { NewSaleLine, NewSaleHeader } from "../persistence/saleRepository";
 import { type SaleRecord, paymentStatusFor } from "../domain/sale";
+import { cleanPaymentReference } from "../domain/ledger";
 import type { TerminalConfig } from "../fixtures/terminal";
 
 /** Where a reconciliation edit says it came from, in audit metadata. */
@@ -197,7 +198,35 @@ export interface InvoiceServiceDeps {
 export interface InvoiceView {
   readonly invoice: InvoiceRow;
   readonly lines: ReadonlyArray<InvoiceLineRow>;
+  /**
+   * INV-PAY-METHOD (owner, 2026-11-09): HOW the paid amount of a FINAL invoice arrived, read from the
+   * invoice's own sale. Present only when its issue recorded a method; absent for a draft, an unpaid
+   * invoice and every invoice issued before this slice — nothing is ever invented for them.
+   */
+  readonly payment?: InvoicePaymentView;
 }
+
+export interface InvoicePaymentView {
+  readonly method: "cash" | "card" | "external" | "other";
+  readonly provider: "whish" | "bank_transfer" | null;
+  readonly reference: string | null;
+}
+
+/**
+ * INV-PAY-METHOD: how the amount marked paid on the draft actually arrived, given AT ISSUE — cash, or
+ * Whish Money with its reference and the operator's explicit "the money arrived". Nothing else (P3).
+ */
+export type InvoicePaymentInput =
+  | { readonly method: "cash" }
+  | { readonly method: "external"; readonly whish: { readonly reference: unknown; readonly fundsConfirmed: unknown } };
+
+/** After validation: what is written onto the invoice's sale (and its one tender). */
+interface InvoicePayment {
+  readonly method: "cash" | "external";
+  readonly whish: { readonly provider: "whish"; readonly reference: string; readonly fundsConfirmed: true } | null;
+}
+
+const REFERENCE_TAKEN_ON_ISSUE = /payment reference is already recorded/;
 
 /** The header fields an operator may edit while a draft is open. */
 export interface InvoiceHeaderDraft {
@@ -464,7 +493,7 @@ export class InvoiceService {
     this.requireCashier();
     const invoice = this.deps.invoices.findById(invoiceId);
     if (!invoice) throw new DomainError("INVOICE_NOT_FOUND", "This invoice no longer exists");
-    return { invoice, lines: this.deps.invoices.listLines(invoiceId) };
+    return this.withPayment({ invoice, lines: this.deps.invoices.listLines(invoiceId) });
   }
 
   listDrafts(limit?: number): InvoiceRow[] {
@@ -792,7 +821,10 @@ export class InvoiceService {
    * is returned, no reconciliation row survives, and the invoice is still an editable draft. That
    * is asserted by a failure-injection test, not assumed from the word "transaction".
    */
-  finalizeInvoice(invoiceId: string, options?: { readonly issueOnAccount?: boolean }): InvoiceView {
+  finalizeInvoice(
+    invoiceId: string,
+    options?: { readonly issueOnAccount?: boolean; readonly payment?: InvoicePaymentInput | null },
+  ): InvoiceView {
     const cashier = this.requireCashier();
     const instant = this.now();
     // 🔴 ON ACCOUNT IS AN EXPLICIT ACT, never inferred from a linked customer or an unpaid balance.
@@ -800,7 +832,55 @@ export class InvoiceService {
     const credit = onAccount ? this.requireCreditPort() : null;
     // Refused before any work, and re-read INSIDE the transaction below.
     credit?.requireLiveOwner();
+    // INV-PAY-METHOD: the method's SHAPE is checked before anything is read; whether one is required
+    // (something was paid) is decided inside the transaction, from the persisted draft.
+    const payment = this.invoicePaymentOf(options?.payment);
 
+    try {
+      return this.finalizeWithin(invoiceId, cashier, instant, credit, payment);
+    } catch (err) {
+      // A Whish reference already used anywhere: the tender's registration aborts the WHOLE issue —
+      // no number, no sale, no tender — and the operator reads the same sentence as everywhere else.
+      if (payment?.whish && err instanceof Error && !(err instanceof DomainError) && REFERENCE_TAKEN_ON_ISSUE.test(err.message)) {
+        throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * INV-PAY-METHOD: cash, or Whish Money with its reference (the collection form's own cleaning rule)
+   * and an explicit confirmation. Card / Other / bank are refused (P3, DEC-35) — never a default.
+   */
+  private invoicePaymentOf(given: InvoicePaymentInput | null | undefined): InvoicePayment | null {
+    if (given === undefined || given === null) return null;
+    if (typeof given !== "object") throw new DomainError("INVALID_INPUT", "The payment method is malformed");
+    if (given.method === "cash") {
+      if ("whish" in given && (given as { whish?: unknown }).whish != null) {
+        throw new DomainError("INVALID_INPUT", "A Whish reference belongs to a Whish Money payment only");
+      }
+      return { method: "cash", whish: null };
+    }
+    if (given.method !== "external") {
+      throw new DomainError("PAYMENT_METHOD_NOT_ACCEPTED", "This shop records new payments in cash or Whish Money only");
+    }
+    const w = given.whish;
+    if (w === null || w === undefined || typeof w !== "object") {
+      throw new DomainError("INVALID_INPUT", "A Whish Money payment needs its reference and the confirmation that the money arrived");
+    }
+    const reference = cleanPaymentReference(w.reference, "whish");
+    if (reference === null) throw new DomainError("INVALID_INPUT", "This payment method needs a reference");
+    if (w.fundsConfirmed !== true) throw new DomainError("FUNDS_NOT_CONFIRMED", "Confirm that the money was actually received");
+    return { method: "external", whish: { provider: "whish", reference, fundsConfirmed: true } };
+  }
+
+  private finalizeWithin(
+    invoiceId: string,
+    cashier: Cashier,
+    instant: Date,
+    credit: InvoiceCreditPort | null,
+    payment: InvoicePayment | null,
+  ): InvoiceView {
     return this.deps.transact((): InvoiceView => {
       if (credit) {
         credit.requireLiveOwner();
@@ -873,6 +953,19 @@ export class InvoiceService {
         money(invoice.paid_minor, invoice.currency),
       );
 
+      // 5b · INV-PAY-METHOD (owner, 2026-11-09): money marked paid must say how it arrived — cash, or
+      //      Whish with its evidence — and nothing paid must not carry a method. Decided from the
+      //      PERSISTED paid amount, before the number (the first irreversible act) is allocated.
+      if (totals.paid.minor > 0n && payment === null) {
+        throw new DomainError(
+          "INVOICE_PAYMENT_METHOD_REQUIRED",
+          "Choose how the paid amount was received — cash or Whish Money — before issuing",
+        );
+      }
+      if (totals.paid.minor === 0n && payment !== null) {
+        throw new DomainError("INVALID_INPUT", "Nothing is marked paid on this invoice, so it takes no payment method");
+      }
+
       // 6 · the words, frozen onto the document so a later build cannot reword a printed invoice
       const amountInWords = amountInWordsAr(totals.total);
 
@@ -928,7 +1021,8 @@ export class InvoiceService {
       );
 
       // 10 · THE SALE. A finalized invoice is a real sale for business reporting (migration 7).
-      this.createSaleForInvoice(finalized, lines, cashier, instant);
+      //      INV-PAY-METHOD: with the method given at issue, the paid amount becomes ONE tender of it.
+      this.createSaleForInvoice(finalized, lines, cashier, instant, payment);
 
       // 10b · ON ACCOUNT: the one matching receivable, in THIS transaction, then verified by reading
       //       both rows back. Any mismatch throws and rolls the whole finalization back.
@@ -950,8 +1044,26 @@ export class InvoiceService {
       // 11 · classify every line against the catalog AS IT IS NOW, and write the review queue
       this.createReconciliation(finalized, lines, cashier, instant);
 
-      return { invoice: finalized, lines: this.deps.invoices.listLines(invoiceId) };
+      return this.withPayment({ invoice: finalized, lines: this.deps.invoices.listLines(invoiceId) });
     });
+  }
+
+  /**
+   * INV-PAY-METHOD: adds `payment` to a FINAL invoice's view when its sale recorded a method — read
+   * from the sale (and its one tender), never stored a second time on the invoice. Unchanged otherwise.
+   */
+  private withPayment(view: InvoiceView): InvoiceView {
+    if (view.invoice.status !== "final") return view;
+    const sale = this.deps.sales.findByInvoiceId(view.invoice.id);
+    if (!sale || sale.paymentMethod === null) return view;
+    return {
+      ...view,
+      payment: {
+        method: sale.paymentMethod,
+        provider: sale.externalPayment?.provider ?? null,
+        reference: sale.externalPayment?.reference ?? null,
+      },
+    };
   }
 
   // ── The sale a finalized invoice is ─────────────────────────────────────────────────────────────
@@ -1039,6 +1151,7 @@ export class InvoiceService {
     lines: ReadonlyArray<InvoiceLineRow>,
     cashier: Cashier,
     instant: Date,
+    payment: InvoicePayment | null = null,
   ): void {
     const key = invoiceSaleIdempotencyKey(invoice.id);
 
@@ -1088,6 +1201,9 @@ export class InvoiceService {
             totalMinor: invoice.total_minor.toString(),
             paidMinor: invoice.paid_minor.toString(),
             lines: saleLines.map((l) => [l.lineNo, l.quantityMilli, l.unitPriceMinor.toString()]),
+            // INV-PAY-METHOD: appended ONLY when a method was given, so every earlier invoice sale keeps
+            // its exact fingerprint; the method and the reference are part of WHAT was paid.
+            ...(payment === null ? {} : { paymentMethod: payment.method, ...(payment.whish ? { whish: payment.whish.reference } : {}) }),
           }),
         )
         .digest("hex"),
@@ -1104,7 +1220,10 @@ export class InvoiceService {
       paidMinor: invoice.paid_minor,
       balanceDueMinor: invoice.balance_due_minor,
       paymentStatus: paymentStatusFor(paid.minor, balanceDue.minor),
-      paymentMethod: null,
+      // TRANSITION · INV-PAY-METHOD: was always NULL ("not recorded"). Now the method given at issue —
+      // and only then; an invoice issued without one (nothing paid) keeps NULL, never an invented method.
+      paymentMethod: payment?.method ?? null,
+      externalPayment: payment?.whish ?? null,
       // 🔴 THE BUSINESS DAY THIS WAS RECORDED, not the date printed on the document. An invoice may
       // be back-dated; "Today's Sales" means what the shop recorded today, and changing that
       // definition would silently alter a report every POS sale already feeds. The document keeps
@@ -1213,7 +1332,7 @@ export class InvoiceService {
     this.requireCashier();
     const invoice = this.deps.invoices.findByNumber(invoiceNumber);
     if (!invoice || invoice.status !== "final") return null;
-    return { invoice, lines: this.deps.invoices.listLines(invoice.id) };
+    return this.withPayment({ invoice, lines: this.deps.invoices.listLines(invoice.id) });
   }
 
   /** The frozen invoice behind a review item — read, never recomputed from today's catalog. */

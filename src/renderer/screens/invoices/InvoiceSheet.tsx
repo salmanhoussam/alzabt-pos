@@ -32,6 +32,13 @@ import { isTypedTaxRateUnsaved } from "./taxRateDirty";
 import { classifyFlushFailure } from "./flushOutcome";
 import { accountPrefill } from "./accountPrefill";
 
+/** INV-PAY-METHOD: the issue step's own sentences for the refusals it can meet. */
+const PAY_ERROR_KEY: Readonly<Record<string, string>> = {
+  INVOICE_PAYMENT_METHOD_REQUIRED: "inv.pay.needed",
+  DUPLICATE_PAYMENT_REFERENCE: "pay.whishErr.duplicate",
+  FUNDS_NOT_CONFIRMED: "pay.whishErr.notConfirmed",
+};
+
 const EMPTY_LINE: InvoiceLineRequest = {
   description: null,
   unitLabel: null,
@@ -201,6 +208,14 @@ export function InvoiceSheet({
   const [isOwner, setIsOwner] = useState(false);
   /** Explicit, per attempt, never remembered: issuing on account is a deliberate act every time. */
   const [issueOnAccount, setIssueOnAccount] = useState(false);
+  /**
+   * INV-PAY-METHOD (owner, 2026-11-09): how the amount marked paid arrived, chosen in the confirmation
+   * itself — the one moment before the document becomes immutable. Cash, or Whish Money with its
+   * reference and an explicit (never pre-ticked) "the money arrived". Reset every time it opens.
+   */
+  const [payMethod, setPayMethod] = useState<"cash" | "whish" | null>(null);
+  const [payReference, setPayReference] = useState("");
+  const [payConfirmed, setPayConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   /** The tax-rate input, so Finalize can read what is typed instead of trusting that a blur happened. */
   const taxInput = useRef<HTMLInputElement | null>(null);
@@ -525,6 +540,8 @@ export function InvoiceSheet({
 
   /** The operator's own language for the account refusals; every other error keeps its normal text. */
   const accountErrorText = (e: unknown): string => {
+    // INV-PAY-METHOD: the method step's own sentences (text follows the operation).
+    if (e instanceof ApiError && PAY_ERROR_KEY[e.code]) return t(PAY_ERROR_KEY[e.code]!);
     if (e instanceof ApiError && e.code.startsWith("CREDIT_")) {
       const key = `inv.account.err.${e.code}`;
       const text = t(key);
@@ -610,6 +627,9 @@ export function InvoiceSheet({
         setError(t("inv.account.err.CREDIT_NEEDS_UNPAID"));
         return;
       }
+      setPayMethod(null);
+      setPayReference("");
+      setPayConfirmed(false);
       setConfirming(true);
     } catch (e) {
       setError(errorText(e));
@@ -618,7 +638,13 @@ export function InvoiceSheet({
     }
   };
 
+  /** INV-PAY-METHOD: is anything marked paid on the stored draft, and is its method complete? */
+  const paidNow = (view?.invoice.paid.minor ?? "0") !== "0";
+  const payReady =
+    !paidNow || payMethod === "cash" || (payMethod === "whish" && payReference.trim() !== "" && payConfirmed);
+
   const finalize = async () => {
+    if (!payReady) return;
     setConfirming(false);
     setBusy(true);
     setError(null);
@@ -644,7 +670,17 @@ export function InvoiceSheet({
       const account = issueOnAccount;
       let next: InvoiceViewDto;
       try {
-        next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: account }));
+        next = await call(
+          pos().finalizeInvoice({
+            invoiceId,
+            issueOnAccount: account,
+            // INV-PAY-METHOD: only when something is marked paid; the service refuses a mismatch.
+            ...(paidNow && payMethod === "cash" ? { payment: { method: "cash" as const } } : {}),
+            ...(paidNow && payMethod === "whish"
+              ? { payment: { method: "external" as const, whish: { reference: payReference, fundsConfirmed: payConfirmed } } }
+              : {}),
+          }),
+        );
       } catch (e) {
         // 🔴 ON ACCOUNT, an unclear outcome is resolved by ASKING the ledger, never by guessing: the
         // same request again verifies the invoice, its sale and its receivable and writes nothing
@@ -1161,6 +1197,21 @@ export function InvoiceSheet({
                 )}
               </td>
             </tr>
+            {/* INV-PAY-METHOD: an issued invoice that recorded how it was paid says so; older ones say nothing new. */}
+            {inv.payment && (
+              <tr>
+                <th>{t("inv.pay.method")}</th>
+                <td data-testid="sheet-payment" data-method={inv.payment.method} data-provider={inv.payment.provider ?? "none"}>
+                  {inv.payment.provider === "whish" ? t("method.whish") : t(`method.${inv.payment.method}`)}
+                  {inv.payment.reference && (
+                    <>
+                      {" · "}
+                      <bdi dir="ltr">{inv.payment.reference}</bdi>
+                    </>
+                  )}
+                </td>
+              </tr>
+            )}
             <tr>
               <th>{t("inv.sheet.balance")}</th>
               <td data-testid="sheet-balance"><bdi dir="ltr">{fmt(inv.balanceDue)}</bdi></td>
@@ -1293,9 +1344,65 @@ export function InvoiceSheet({
               <dt>{t("inv.sheet.balance")}</dt>
               <dd dir="ltr">{fmt(inv.balanceDue)}</dd>
             </dl>
+            {/* INV-PAY-METHOD: money marked paid must say how it arrived before the document is frozen. */}
+            {paidNow && (
+              <div className="inv-pay-method" data-testid="confirm-pay">
+                <p className="small">
+                  {t("inv.pay.question")} <bdi dir="ltr">{fmt(inv.paid)}</bdi>
+                </p>
+                <div className="methods">
+                  <button
+                    type="button"
+                    className={payMethod === "cash" ? "btn primary" : "btn"}
+                    aria-pressed={payMethod === "cash"}
+                    onClick={() => setPayMethod("cash")}
+                    data-testid="confirm-pay-cash"
+                  >
+                    {t("method.cash")}
+                  </button>
+                  <button
+                    type="button"
+                    className={payMethod === "whish" ? "btn primary" : "btn"}
+                    aria-pressed={payMethod === "whish"}
+                    onClick={() => setPayMethod("whish")}
+                    data-testid="confirm-pay-whish"
+                  >
+                    {t("method.whish")}
+                  </button>
+                </div>
+                {payMethod === "whish" && (
+                  <>
+                    <label className="field">
+                      <span>{t("pay.whishReference")}</span>
+                      <input
+                        type="text"
+                        dir="auto"
+                        maxLength={64}
+                        value={payReference}
+                        onChange={(e) => setPayReference(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.preventDefault();
+                        }}
+                        data-testid="confirm-pay-reference"
+                      />
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={payConfirmed}
+                        onChange={(e) => setPayConfirmed(e.target.checked)}
+                        data-testid="confirm-pay-confirmed"
+                      />
+                      <span>{t("pay.whishConfirm")}</span>
+                    </label>
+                  </>
+                )}
+                {!payReady && <p className="muted small" data-testid="confirm-pay-needed">{t("inv.pay.needed")}</p>}
+              </div>
+            )}
             <p className="muted small">{t("inv.sheet.confirmNote")}</p>
             <div className="inv-actions">
-              <button className="btn primary" onClick={finalize} data-testid="finalize-confirm-yes">
+              <button className="btn primary" disabled={!payReady} onClick={finalize} data-testid="finalize-confirm-yes">
                 {t("inv.sheet.finalize")}
               </button>
               <button className="btn ghost" onClick={() => setConfirming(false)}>

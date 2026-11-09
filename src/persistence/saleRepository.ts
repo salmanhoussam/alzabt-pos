@@ -44,6 +44,12 @@ import type { Db } from "./db";
  * the reference and `funds_confirmed = 1`, written in the same transaction. The tender's own trigger
  * registers the reference in `external_references`, whose unique key refuses the same Whish reference
  * a second time anywhere in the ledger (collection, receipt, sale or advance) — the whole sale rolls back.
+ *
+ * TRANSITION · INV-PAY-METHOD (owner, 2026-11-09): an INVOICE sale whose issue recorded HOW the paid
+ * amount arrived (cash, or Whish with its evidence) gets that ONE tender too, by the same rule. The
+ * "invoice sale → no tender" bullet above stays true for every invoice issued WITHOUT a method — every
+ * historic invoice and every unpaid one — because their `payment_method` is NULL and nothing is invented.
+ * Old condition: `sourceType !== "pos"` returned null before the method was even read.
  */
 export type SingleTender =
   | { readonly method: "cash" | "card" | "other"; readonly amountMinor: bigint }
@@ -52,7 +58,7 @@ export type SingleTender =
 export function singleTenderFor(
   header: Pick<NewSaleHeader, "paymentMethod" | "paidMinor" | "sourceType"> & Partial<Pick<NewSaleHeader, "externalPayment">>,
 ): SingleTender | null {
-  if (header.sourceType !== "pos" || header.paidMinor <= 0n) return null;
+  if ((header.sourceType !== "pos" && header.sourceType !== "invoice") || header.paidMinor <= 0n) return null;
   const m = header.paymentMethod;
   if (m === "cash" || m === "card" || m === "other") return { method: m, amountMinor: header.paidMinor };
   const e = header.externalPayment;

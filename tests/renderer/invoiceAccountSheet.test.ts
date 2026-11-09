@@ -60,7 +60,10 @@ describe("the sheet's wiring (source-level)", () => {
     expect(SHEET).toMatch(/linkedId && isOwner[\s\S]{0,400}data-testid="account-issue"/);
     expect(SHEET).toContain("const account = issueOnAccount;");
     expect(SHEET).not.toMatch(/issueOnAccount && viewRef\.current\?\.invoice\.customerPartyId \? issueOnAccount : false/);
-    expect(SHEET).toContain("finalizeInvoice({ invoiceId, issueOnAccount: account })");
+    // TRANSITION (INV-PAY-METHOD): the call grew the paid amount's method. Old text:
+    // "finalizeInvoice({ invoiceId, issueOnAccount: account })". On account is still sent only as ticked.
+    expect(SHEET).toContain("issueOnAccount: account,");
+    expect(SHEET).toContain("pos().finalizeInvoice({");
     expect(SHEET).not.toMatch(/setIssueOnAccount\(true\)/);
   });
   it("🔴 changing the linked customer clears the previous credit authorization", () => {

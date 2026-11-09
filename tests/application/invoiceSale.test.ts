@@ -62,7 +62,10 @@ function draft(lines: ReadonlyArray<LineSpec>, paid?: string): string {
 
 function finalize(lines: ReadonlyArray<LineSpec>, paid?: string): string {
   const id = draft(lines, paid);
-  h.invoices.finalizeInvoice(id);
+  // TRANSITION (INV-PAY-METHOD, 2026-11-09): money marked paid must say how it arrived at issue, so a
+  // paid draft is finalized with cash here. Old call: finalizeInvoice(id) with no method at all.
+  const somethingPaid = paid !== undefined && paid.trim() !== "" && Number(paid) !== 0;
+  h.invoices.finalizeInvoice(id, somethingPaid ? { payment: { method: "cash" } } : undefined);
   return id;
 }
 
@@ -104,16 +107,19 @@ describe("the sale a finalized invoice is", () => {
     const sale = saleOf(id)!;
     expect([sale.paid.minor, sale.balanceDue.minor, sale.total.minor]).toEqual([3_000n, 7_000n, 10_000n]);
     expect(sale.paymentStatus).toBe("partial");
-    expect(sale.paymentMethod).toBeNull();
+    // TRANSITION (INV-PAY-METHOD): was toBeNull() — the paid part now records HOW it arrived.
+    expect(sale.paymentMethod).toBe("cash");
   });
 
-  it("C · a FULLY paid invoice becomes a paid sale — and still invents no method", () => {
+  // TRANSITION (INV-PAY-METHOD, owner 2026-11-09): this test was "… — and still invents no method" and
+  // asserted paymentMethod toBeNull(), because a manual invoice captured no method. It still invents
+  // none: the method is the one GIVEN at issue (cash here), and an unpaid invoice (A) keeps NULL.
+  it("C · a FULLY paid invoice becomes a paid sale with the method GIVEN at issue — never an invented one", () => {
     const id = finalize([{ unitPrice: "100.00" }], "100.00");
     const sale = saleOf(id)!;
     expect([sale.paid.minor, sale.balanceDue.minor]).toEqual([10_000n, 0n]);
     expect(sale.paymentStatus).toBe("paid");
-    // Paid in full, but HOW is still not recorded by a manual invoice in this patch.
-    expect(sale.paymentMethod).toBeNull();
+    expect(sale.paymentMethod).toBe("cash");
   });
 
   it("D · a TAX-ENABLED invoice carries its frozen tax into the sale, exactly", () => {

@@ -320,7 +320,8 @@ describe("ordinary invoices are unchanged", () => {
     h.invoices.updateDraftHeader(partial, { paid: "5.00" });
     const unpaid = draft("20.00");
     const statuses = [paid, partial, unpaid].map((i) => {
-      h.invoices.finalizeInvoice(i);
+      // TRANSITION (INV-PAY-METHOD): a paid / partial invoice names how it was paid. Old: finalizeInvoice(i).
+      h.invoices.finalizeInvoice(i, i === unpaid ? undefined : { payment: { method: "cash" } });
       return (h.db.prepare("SELECT payment_status AS s FROM sales WHERE invoice_id = ?").get(i) as { s: string }).s;
     });
     expect(statuses).toEqual(["paid", "partial", "unpaid"]);

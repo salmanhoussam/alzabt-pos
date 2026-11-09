@@ -44,11 +44,32 @@ const LABELS = {
   subtotal: ["المجموع", "Subtotal"],
   total: ["الإجمالي", "Grand Total"],
   paid: ["المدفوع", "Paid"],
+  // INV-PAY-METHOD: printed only when the invoice's issue recorded how the paid amount arrived.
+  method: ["طريقة الدفع", "Payment method"],
+  methodCash: ["نقداً", "Cash"],
+  methodWhish: ["ويش موني", "Whish Money"],
   balance: ["الرصيد المستحق", "Balance Due"],
   taxpayer: ["الرقم المالي", "Taxpayer No."],
   register: ["السجل التجاري", "Comm. Register"],
   vat: ["رقم التسجيل الضريبي", "VAT Reg. No."],
 } as const;
+
+/**
+ * INV-PAY-METHOD (owner, 2026-11-09): the "how it was paid" row — ONLY for an invoice whose issue
+ * recorded a method. An invoice issued before (or with nothing paid) prints exactly as it always did:
+ * no row, never an invented "cash". A method this shop no longer takes keeps no wording here, so it is
+ * not printed rather than mislabelled.
+ */
+export function paymentMethodRow(payment: InvoiceViewDto["invoice"]["payment"]): string[] {
+  if (!payment) return [];
+  let value: string;
+  if (payment.method === "cash") value = `${escape(LABELS.methodCash[0])} / ${escape(LABELS.methodCash[1])}`;
+  else if (payment.method === "external" && payment.provider === "whish") {
+    value = `${escape(LABELS.methodWhish[0])} / ${escape(LABELS.methodWhish[1])}`;
+    if (payment.reference) value += ` · <bdi dir="ltr">${escape(payment.reference)}</bdi>`;
+  } else return [];
+  return [`<tr class="method"><th>${escape(LABELS.method[0])} / ${escape(LABELS.method[1])}</th><td>${value}</td></tr>`];
+}
 
 /** Every interpolated value passes through here. A description is text an operator typed. */
 export function escape(value: string): string {
@@ -162,6 +183,7 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   }
   totals.push(
     `<tr class="paid"><th>${escape(LABELS.paid[0])} / ${escape(LABELS.paid[1])}</th><td>${printMoney(inv.paid, exponent)}</td></tr>`,
+    ...paymentMethodRow(inv.payment),
     // The one figure the customer acts on, so it is the one figure in red.
     `<tr class="balance"><th>${escape(LABELS.balance[0])} / ${escape(LABELS.balance[1])}</th><td>${printMoney(inv.balanceDue, exponent)}</td></tr>`,
   );
