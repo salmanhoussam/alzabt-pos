@@ -3,7 +3,7 @@ import type { Catalog, Product } from "../domain/catalog";
 import { DomainError } from "../domain/errors";
 import { type Money, money } from "../domain/money";
 import type { TodaySalesReport } from "../domain/report";
-import type { SaleRecord, VoidRecord } from "../domain/sale";
+import type { PaymentMethod, SaleRecord, VoidRecord } from "../domain/sale";
 import type { AdminProductRow } from "../persistence/catalogRepository";
 import type { CategoryRow } from "../persistence/categoryRepository";
 import type { ProductImageMeta } from "../persistence/productImageRepository";
@@ -350,9 +350,11 @@ export function toInvoiceDto(row: InvoiceRow): InvoiceDto {
 export function toInvoiceViewDto(view: {
   readonly invoice: InvoiceRow;
   readonly lines: ReadonlyArray<InvoiceLineRow>;
+  readonly payment?: { readonly method: PaymentMethod; readonly provider: "whish" | "bank_transfer" | null; readonly reference: string | null };
 }): InvoiceViewDto {
   return {
-    invoice: toInvoiceDto(view.invoice),
+    // INV-PAY-METHOD: `payment` only when the service found one, so every other DTO keeps its shape.
+    invoice: view.payment ? { ...toInvoiceDto(view.invoice), payment: { ...view.payment } } : toInvoiceDto(view.invoice),
     lines: view.lines.map((l) => toInvoiceLineDto(l, view.invoice.currency)),
   };
 }

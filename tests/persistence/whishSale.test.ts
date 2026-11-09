@@ -73,7 +73,12 @@ describe("a Whish Money sale is recorded with its evidence", () => {
     });
     expect(singleTenderFor(base)).toBeNull();
     expect(singleTenderFor({ ...base, externalPayment: null })).toBeNull();
-    expect(singleTenderFor({ ...base, sourceType: "invoice", externalPayment: { provider: "whish", reference: "R1", fundsConfirmed: true } })).toBeNull();
+    // TRANSITION (INV-PAY-METHOD): an invoice paid by Whish WITH its evidence now gets its external tender.
+    // Old value: toBeNull(). Without the evidence it still gets none (asserted just below for any source).
+    expect(singleTenderFor({ ...base, sourceType: "invoice", externalPayment: { provider: "whish", reference: "R1", fundsConfirmed: true } })).toEqual(
+      expect.objectContaining({ method: "external", provider: "whish", reference: "R1" }),
+    );
+    expect(singleTenderFor({ ...base, sourceType: "invoice", externalPayment: null })).toBeNull();
   });
 });
 

@@ -50,7 +50,9 @@ function finalized(
     notes: "ملاحظة",
     paid: opts.paid ?? null,
   });
-  return toInvoiceViewDto(h.invoices.finalizeInvoice(invoice.id));
+  // TRANSITION (INV-PAY-METHOD): a paid draft is issued with cash. Old: finalizeInvoice(invoice.id).
+  const paid = opts.paid !== undefined && opts.paid !== null && opts.paid.trim() !== "" && Number(opts.paid) !== 0;
+  return toInvoiceViewDto(h.invoices.finalizeInvoice(invoice.id, paid ? { payment: { method: "cash" } } : undefined));
 }
 
 /**

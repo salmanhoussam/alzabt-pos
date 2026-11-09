@@ -1250,6 +1250,15 @@ export interface InvoiceDto {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly finalizedAt: string | null;
+  /**
+   * INV-PAY-METHOD: how the paid amount of a FINAL invoice arrived, from its sale. Present only when its
+   * issue recorded a method — absent on drafts, unpaid invoices and every invoice issued before.
+   */
+  readonly payment?: {
+    readonly method: PaymentMethod;
+    readonly provider: "whish" | "bank_transfer" | null;
+    readonly reference: string | null;
+  };
 }
 
 export interface InvoiceViewDto {
@@ -1379,7 +1388,17 @@ export interface InvoiceIdRequest {
 export interface FinalizeInvoiceRequest {
   readonly invoiceId: string;
   readonly issueOnAccount?: boolean;
+  /**
+   * INV-PAY-METHOD (owner, 2026-11-09): HOW the amount marked paid arrived — required when something is
+   * marked paid, refused when nothing is. Cash, or Whish Money ("external") with its reference and the
+   * explicit confirmation. Never Card, Other or bank (P3).
+   */
+  readonly payment?: InvoicePaymentDto;
 }
+
+export type InvoicePaymentDto =
+  | { readonly method: "cash" }
+  | { readonly method: "external"; readonly whish: { readonly reference: string; readonly fundsConfirmed: boolean } };
 
 export interface InvoiceNumberRequest {
   readonly invoiceNumber: number;

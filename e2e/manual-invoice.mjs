@@ -399,6 +399,11 @@ await page.waitForSelector('[data-testid="finalize-confirm"]');
 const confirmText = await textOf(page, "finalize-confirm");
 assert(confirmText.includes("496.15") && confirmText.includes("400.00"), "the confirmation shows the real figures");
 await page.screenshot({ path: SHOTS + "I4-finalize-confirm.png" });
+// TRANSITION (INV-PAY-METHOD, 2026-11-09): 96.15 is marked paid, so the confirmation now asks HOW it was
+// received and cannot issue until it is answered. Old flow: finalize-confirm-yes was clicked directly.
+assert((await page.locator('[data-testid="confirm-pay"]').count()) === 1, "INV-PAY-METHOD: the confirmation asks how the paid 96.15 was received");
+assert(await page.locator('[data-testid="finalize-confirm-yes"]').isDisabled(), "INV-PAY-METHOD: …and cannot issue before it is answered");
+await testid(page, "confirm-pay-cash").click();
 await testid(page, "finalize-confirm-yes").click();
 
 await page.waitForSelector('[data-testid="finalized-notice"]');
@@ -457,9 +462,11 @@ await app.close();
   assert(f.salePaid === 9615, `the sale's paid amount is the invoice's 96.15 (got ${f.salePaid})`);
   assert(f.saleBalance === 40000, `and its balance due is 400.00 (got ${f.saleBalance})`);
   assert(f.salePaid + f.saleBalance === f.saleTotal, "paid + balance = total, on the sale itself");
-  // No payment method was invented, even though money really was received: the invoice records
-  // the AMOUNT, and never how it arrived.
-  assert(f.methodlessSales === 1, "and it records NO payment method");
+  // TRANSITION (INV-PAY-METHOD, 2026-11-09): this said "No payment method was invented … the invoice
+  // records the AMOUNT, and never how it arrived" and asserted methodlessSales === 1 (old value: 1).
+  // The 96.15 is now issued with cash, chosen in the confirmation above — still nothing invented: the
+  // method is the one the operator gave, and it is the sale's ONE tender for exactly the paid amount.
+  assert(f.methodlessSales === 0, "and it records the payment method the operator chose (cash), never an invented one");
   // 🔴 THE HALF OF THE OLD BOUNDARY THAT STILL HOLDS: a sale is not a stock movement.
   assert(f.voids === 0, "and no void");
   assert(f.voids === 0, "and no void");

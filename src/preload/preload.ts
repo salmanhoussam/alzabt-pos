@@ -385,8 +385,15 @@ const api: PosApi = {
     ipcRenderer.invoke(CH.removeInvoiceLine, { invoiceId: req.invoiceId, lineId: req.lineId }),
   discardInvoiceDraft: (req) => ipcRenderer.invoke(CH.discardInvoiceDraft, { invoiceId: req.invoiceId }),
 
+  // INV-PAY-METHOD (2026-11-09): `payment` is forwarded ONLY when the renderer gave one, so every earlier
+  // request keeps its exact shape. Found by the first real E2E run: this line used to copy two fields by
+  // name, so the method chosen on screen never reached main — every unit test called the handler directly.
   finalizeInvoice: (req) =>
-    ipcRenderer.invoke(CH.finalizeInvoice, { invoiceId: req.invoiceId, issueOnAccount: req.issueOnAccount === true }),
+    ipcRenderer.invoke(CH.finalizeInvoice, {
+      invoiceId: req.invoiceId,
+      issueOnAccount: req.issueOnAccount === true,
+      ...(req.payment === undefined ? {} : { payment: req.payment }),
+    }),
 
   listInvoices: (req) => ipcRenderer.invoke(CH.listInvoices, { term: req.term, limit: req.limit }),
   listInvoiceDrafts: (req) => ipcRenderer.invoke(CH.listInvoiceDrafts, { term: req.term, limit: req.limit }),

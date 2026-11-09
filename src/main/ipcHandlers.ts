@@ -338,6 +338,18 @@ function creditDownPayment(value: unknown): { amountMinor: bigint; method: "cash
   };
 }
 
+/** INV-PAY-METHOD: the method of an invoice's paid amount, exactly as the contract shapes it. */
+function invoicePayment(value: unknown): { method: "cash" } | { method: "external"; whish: { reference: string; fundsConfirmed: boolean } } {
+  const d = objectWithOptional(value, ["method"], ["whish"]);
+  if (d.method === "cash") {
+    if ("whish" in d) invalid("'payment.whish' belongs to a Whish Money payment only");
+    return { method: "cash" };
+  }
+  if (d.method !== "external") invalid("'payment.method' must be cash or external");
+  if (!("whish" in d)) invalid("'payment.whish' is required for a Whish Money payment");
+  return { method: "external", whish: whishPayment(d.whish) };
+}
+
 /** An optional text field: null, undefined and "" all mean "not given". */
 function optionalStr(value: unknown, field: string, max: number): string | null {
   if (value === null || value === undefined) return null;
@@ -1624,10 +1636,14 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       // The payload is an id and nothing else: every frozen value is computed in the service.
       // `issueOnAccount` may be absent (every caller that predates migration 16); present, it must
       // be a real boolean — never a truthy string that would put a debt on an account by accident.
-      const o = objectWithOptional(p, ["invoiceId"], ["issueOnAccount"]);
+      // INV-PAY-METHOD: `payment` is the second optional key — exactly { method: "cash" } or
+      // { method: "external", whish: { reference, fundsConfirmed } }. The service decides whether one
+      // is required (something marked paid) and refuses Card / Other / bank.
+      const o = objectWithOptional(p, ["invoiceId"], ["issueOnAccount", "payment"]);
       if ("issueOnAccount" in o && typeof o.issueOnAccount !== "boolean") invalid("'issueOnAccount' must be true or false");
       const view = invoices().finalizeInvoice(str(o.invoiceId, "invoiceId", 100), {
         issueOnAccount: o.issueOnAccount === true,
+        ...("payment" in o ? { payment: invoicePayment(o.payment) } : {}),
       });
       log.info("invoice-finalized", {
         id: view.invoice.id,

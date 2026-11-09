@@ -1284,6 +1284,9 @@ if (PHASE === "seed-v2") {
 
   await invTestid(page, "finalize").click();
   await page.waitForSelector('[data-testid="finalize-confirm"]');
+  // TRANSITION (INV-PAY-METHOD, 2026-11-09): 3.25 is marked paid, so the issue names how. Old flow:
+  // finalize-confirm-yes was clicked directly.
+  await invTestid(page, "confirm-pay-cash").click();
   await invTestid(page, "finalize-confirm-yes").click();
   await page.waitForSelector('[data-testid="finalized-notice"]');
   const notice = await invText(page, "finalized-notice");
@@ -1344,7 +1347,9 @@ if (PHASE === "seed-v2") {
     // anyway. Naming the real status is the stronger assertion AND the honest comment.
     assert(f.saleStatuses === "paid=2,partial=1", `two paid till sales and one partial invoice sale (got ${f.saleStatuses})`);
     assert(f.unpaidSales === 1, `exactly one sale is not settled in full (got ${f.unpaidSales})`);
-    assert(f.methodlessSales === 1, `exactly one sale records no payment method (got ${f.methodlessSales})`);
+    // TRANSITION (INV-PAY-METHOD): was 1 — the partial invoice issued above now records the cash it was
+    // paid with. The v5 till sales already carried their methods. Old value: 1.
+    assert(f.methodlessSales === 0, `no sale is left without its payment method (got ${f.methodlessSales})`);
     assert(f.voids === 1, "still exactly the one v5 void");
     // The two v5 till lines are untouched; the invoice's four lines are additional.
     assert(

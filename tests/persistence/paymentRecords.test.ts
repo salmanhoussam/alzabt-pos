@@ -67,16 +67,21 @@ describe("which sales get a payment record", () => {
     expect(tenderCount(h.db, r.sale.id)).toBe(0);
   });
 
-  it("an invoice sale: NO record — the invoice captures no method, and none is invented", () => {
+  // TRANSITION (INV-PAY-METHOD, owner 2026-11-09): this test was "an invoice sale: NO record — the invoice
+  // captures no method, and none is invented" and finalized a paid invoice with no method (method NULL,
+  // tender_count 0). A paid invoice must now SAY how it was paid at issue, and that becomes its ONE record;
+  // still nothing is invented — without a method the issue is refused, and an unpaid invoice keeps none.
+  it("an invoice sale: ONE record of the method GIVEN at issue — and none without one", () => {
     h.invoices.saveCompanyProfile({ nameAr: "متجر P1" });
     const { invoice } = h.invoices.createDraft();
     h.invoices.addLines(invoice.id, [{ description: "بند", unitLabel: "حبة", canonicalUnit: null, productId: null, quantity: "1", unitPrice: "10.00" }], "batch-p1-0001-key");
     h.invoices.updateDraftHeader(invoice.id, { paid: "10.00" });
-    h.invoices.finalizeInvoice(invoice.id);
+    expect(() => h.invoices.finalizeInvoice(invoice.id)).toThrow(/how the paid amount was received/);
+    h.invoices.finalizeInvoice(invoice.id, { payment: { method: "cash" } });
     const s = h.db.prepare("SELECT id, tender_count AS n, payment_method AS m FROM sales WHERE invoice_id = ?").get(invoice.id) as { id: string; n: bigint; m: string | null };
-    expect(s.m).toBeNull();
-    expect(Number(s.n)).toBe(0);
-    expect(tenders(h.db, s.id)).toEqual([]);
+    expect(s.m).toBe("cash");
+    expect(Number(s.n)).toBe(1);
+    expect(tenders(h.db, s.id)).toHaveLength(1);
   });
 
   it("the rule itself: only a paid POS sale with cash / card / other", () => {
@@ -84,7 +89,10 @@ describe("which sales get a payment record", () => {
     expect(singleTenderFor({ sourceType: "pos", paymentMethod: "external", paidMinor: 1n })).toBeNull();
     expect(singleTenderFor({ sourceType: "pos", paymentMethod: null, paidMinor: 0n })).toBeNull();
     expect(singleTenderFor({ sourceType: "pos", paymentMethod: "cash", paidMinor: 0n })).toBeNull();
-    expect(singleTenderFor({ sourceType: "invoice", paymentMethod: "cash", paidMinor: 1n })).toBeNull();
+    // TRANSITION (INV-PAY-METHOD): an invoice sale WITH a method given at issue now gets its record.
+    // Old value: toBeNull(). One WITHOUT a method (every historic and every unpaid invoice) still gets none.
+    expect(singleTenderFor({ sourceType: "invoice", paymentMethod: "cash", paidMinor: 1n })).toEqual({ method: "cash", amountMinor: 1n });
+    expect(singleTenderFor({ sourceType: "invoice", paymentMethod: null, paidMinor: 1n })).toBeNull();
   });
 });
 
