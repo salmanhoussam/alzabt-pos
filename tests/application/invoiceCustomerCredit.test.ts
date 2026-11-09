@@ -182,7 +182,9 @@ describe("issuing on a customer account", () => {
     const part = draft("50.00");
     link(part, c.id);
     h.invoices.updateDraftHeader(part, { paid: "10.00" });
-    expect(code(() => onAccount(part))).toBe("CREDIT_NEEDS_UNPAID");
+    // TRANSITION · INV-PARTIAL-DEBT (Option B): was CREDIT_NEEDS_UNPAID. A part-paid invoice may now go
+    // on account, but only with the paid part's method — without one it is still refused, unwritten.
+    expect(code(() => onAccount(part))).toBe("INVOICE_PAYMENT_METHOD_REQUIRED");
 
     const plain = draft();
     link(plain, c.id);
@@ -313,18 +315,22 @@ describe("immutability and database-level protection", () => {
 });
 
 describe("ordinary invoices are unchanged", () => {
-  it("paid, partial and unpaid unlinked invoices finalize exactly as before", () => {
+  it("paid and unpaid unlinked invoices finalize exactly as before; an unlinked PARTIAL one is now refused", () => {
     const paid = draft("20.00");
     h.invoices.updateDraftHeader(paid, { paid: "20.00" });
     const partial = draft("20.00");
     h.invoices.updateDraftHeader(partial, { paid: "5.00" });
     const unpaid = draft("20.00");
-    const statuses = [paid, partial, unpaid].map((i) => {
-      // TRANSITION (INV-PAY-METHOD): a paid / partial invoice names how it was paid. Old: finalizeInvoice(i).
+    const statuses = [paid, unpaid].map((i) => {
+      // TRANSITION (INV-PAY-METHOD): a paid invoice names how it was paid. Old: finalizeInvoice(i).
       h.invoices.finalizeInvoice(i, i === unpaid ? undefined : { payment: { method: "cash" } });
       return (h.db.prepare("SELECT payment_status AS s FROM sales WHERE invoice_id = ?").get(i) as { s: string }).s;
     });
-    expect(statuses).toEqual(["paid", "partial", "unpaid"]);
+    expect(statuses).toEqual(["paid", "unpaid"]);
+    // TRANSITION · INV-PARTIAL-DEBT (Option B): the unlinked partial used to finalize as "partial" with
+    // NO debt (its remainder untracked). It is now refused, unwritten, before the number.
+    expect(code(() => h.invoices.finalizeInvoice(partial, { payment: { method: "cash" } }))).toBe("CREDIT_PARTIAL_NEEDS_ACCOUNT");
+    expect(h.invoices.getInvoice(partial).invoice.status).toBe("draft");
     expect(obligations()).toBe(0);
     expect(n("SELECT count(*) AS n FROM invoices WHERE customer_party_id IS NOT NULL")).toBe(0);
   });

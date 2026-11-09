@@ -65,6 +65,15 @@ function finalize(lines: ReadonlyArray<LineSpec>, paid?: string): string {
   // TRANSITION (INV-PAY-METHOD, 2026-11-09): money marked paid must say how it arrived at issue, so a
   // paid draft is finalized with cash here. Old call: finalizeInvoice(id) with no method at all.
   const somethingPaid = paid !== undefined && paid.trim() !== "" && Number(paid) !== 0;
+  // TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): a PART-paid invoice now goes on a customer's account
+  // (the owner, cashier-01 here, issues it on account). Fully paid and unpaid invoices are issued as before.
+  const inv = h.invoices.getInvoice(id).invoice;
+  if (somethingPaid && inv.balance_due_minor > 0n) {
+    const account = h.parties.create({ kind: "customer", displayName: "زبون" }).party;
+    h.invoices.updateDraftHeader(id, { customerPartyId: account.id });
+    h.invoices.finalizeInvoice(id, { issueOnAccount: true, payment: { method: "cash" } });
+    return id;
+  }
   h.invoices.finalizeInvoice(id, somethingPaid ? { payment: { method: "cash" } } : undefined);
   return id;
 }

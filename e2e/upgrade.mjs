@@ -1282,6 +1282,15 @@ if (PHASE === "seed-v2") {
   assert(bal.includes("10.00"), `the balance due is 13.25 - 3.25 = 10.00 (got ${bal})`);
   await page.screenshot({ path: SHOTS + "upgrade-e2-draft.png" });
 
+  // TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): 3.25 of 13.25 is paid, so the 10.00 left must go
+  // on a customer's account (owner, issue on account). Old flow: finalize on an unlinked draft.
+  await invTestid(page, "account-choose").click();
+  await invTestid(page, "customer-finder").waitFor({ timeout: 30000 });
+  await invTestid(page, "customer-new").click();
+  await invTestid(page, "customer-field-name").fill("زبون الترقية");
+  await invTestid(page, "customer-save").click();
+  await invTestid(page, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
+  await invTestid(page, "account-issue").check();
   await invTestid(page, "finalize").click();
   await page.waitForSelector('[data-testid="finalize-confirm"]');
   // TRANSITION (INV-PAY-METHOD, 2026-11-09): 3.25 is marked paid, so the issue names how. Old flow:

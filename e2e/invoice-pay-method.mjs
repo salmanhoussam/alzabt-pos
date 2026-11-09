@@ -6,7 +6,7 @@
 // Proven: with money marked paid, the issue confirmation asks how it was received and cannot issue until
 // it is answered (Whish needs its reference AND an unticked-by-default confirmation); Whish 5.00 of 5.00
 // records ONE external tender with the reference and NO debt, and the issued sheet says so; cash 2.00 of
-// 5.00 records ONE cash tender (partial, still no debt — that remainder is INV-PARTIAL-DEBT); an unpaid
+// 5.00 with no account is refused (INV-PARTIAL-DEBT, Option B) and, paid in full, records ONE cash tender; an unpaid
 // invoice is asked nothing and records no method; a reused Whish reference refuses the issue and the
 // invoice stays a draft; History names the method; the bridge refuses a paid issue with no method.
 import { _electron as electron } from "playwright-core";
@@ -88,7 +88,7 @@ okOf(
 );
 
 /** Opens a new outgoing invoice with one 5.00 line and `paid` committed; leaves it at the confirmation. */
-async function draftToConfirmation(paid) {
+async function draftToConfirmation(paid, confirmTimeout = 30000) {
   // After an issue, the "issued" notice is a modal overlay: dismiss it (review later / OK), then close the
   // read-only sheet, which returns to the list. Found by this script's own runs, not assumed.
   for (const dismiss of ["review-later", "review-clear-ok"]) {
@@ -115,7 +115,7 @@ async function draftToConfirmation(paid) {
     await page.waitForFunction((v) => document.querySelector('[data-testid="sheet-paid"]')?.value === v, paid);
   }
   await testid("finalize").click();
-  await testid("finalize-confirm").waitFor();
+  await testid("finalize-confirm").waitFor({ timeout: confirmTimeout });
 }
 
 // ── 1 · Whish, paid in full: the confirmation asks, and nothing issues until it is answered ───────
@@ -144,15 +144,32 @@ assert(a1.final === b1.final + 1 && a1.references === b1.references + 1 && a1.ob
 assert((await testid("sheet-payment").getAttribute("data-provider")) === "whish" && (await testid("sheet-payment").innerText()).includes("WH-INV-E2E-1"), "the issued sheet says Whish Money and its reference");
 await page.screenshot({ path: SHOTS + "INVPAY2-issued-sheet.png" });
 
-// ── 2 · Cash 2.00 of 5.00: one cash tender for the paid part (no debt yet — INV-PARTIAL-DEBT) ─────
-await draftToConfirmation("2.00");
+// ── 2 · Cash 2.00 of 5.00 WITHOUT an account: refused before the confirmation (INV-PARTIAL-DEBT) ───
+// TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): this used to ISSUE as a partial invoice with one cash
+// tender and NO debt (the 3.00 untracked). Now it is refused before the confirmation and nothing is
+// written; the account path is proven in invoice-partial-debt.mjs. The same draft is then paid in full.
+const b2 = footprint();
+let refused = false;
+try {
+  await draftToConfirmation("2.00", 5000);
+} catch {
+  refused = true;
+}
+assert(refused && (await testid("finalize-confirm").count()) === 0, "🔴 a part-paid invoice with no account never reaches the confirmation");
+assert((await page.locator(".error").first().innerText()).includes("مدفوعة جزئياً"), "…and the owner is told the remainder must go on a customer account");
+assert(JSON.stringify(footprint()) === JSON.stringify(b2), "…and nothing was written");
+await testid("sheet-paid").fill("5.00");
+await testid("sheet-paid").press("Tab");
+await page.waitForFunction(() => document.querySelector('[data-testid="sheet-paid"]')?.value === "5.00");
+await testid("finalize").click();
+await testid("finalize-confirm").waitFor();
 await testid("confirm-pay-cash").click();
 assert(!(await testid("finalize-confirm-yes").isDisabled()), "cash needs nothing more");
 await testid("finalize-confirm-yes").click();
 await testid("finalized-notice").waitFor();
 const s2 = invoiceSale(2);
-assert(s2.m === "cash" && s2.st === "partial" && s2.p === 200 && s2.b === 300 && s2.tenders === "cash:200:-", `🔴 invoice #2: partial, ONE cash tender of the paid 2.00 (${JSON.stringify(s2)})`);
-assert(s2.debts === 0, "the unpaid 3.00 is NOT a debt yet (unchanged; that is INV-PARTIAL-DEBT, next slice)");
+assert(s2.m === "cash" && s2.st === "paid" && s2.p === 500 && s2.b === 0 && s2.tenders === "cash:500:-", `🔴 invoice #2: paid in full, ONE cash tender (${JSON.stringify(s2)})`);
+assert(s2.debts === 0, "a fully paid invoice creates no debt");
 
 // ── 3 · Unpaid: asked nothing, records no method ─────────────────────────────────────────────────
 await draftToConfirmation(null);

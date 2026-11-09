@@ -543,7 +543,8 @@ export function InvoiceSheet({
     // INV-PAY-METHOD: the method step's own sentences (text follows the operation).
     if (e instanceof ApiError && PAY_ERROR_KEY[e.code]) return t(PAY_ERROR_KEY[e.code]!);
     if (e instanceof ApiError && e.code.startsWith("CREDIT_")) {
-      const key = `inv.account.err.${e.code}`;
+      // The cashier cannot tick "on account", so a part-paid refusal tells them who can.
+      const key = e.code === "CREDIT_PARTIAL_NEEDS_ACCOUNT" && !isOwner ? `inv.account.err.${e.code}.cashier` : `inv.account.err.${e.code}`;
       const text = t(key);
       if (text !== key) return text;
     }
@@ -621,11 +622,20 @@ export function InvoiceSheet({
         await flushTax();
         await flushHeader();
       });
-      // On account means the WHOLE total is owed: refuse here, on the stored values, rather than
-      // after the operator has confirmed.
-      if (issueOnAccount && viewRef.current && viewRef.current.invoice.paid.minor !== "0") {
-        setError(t("inv.account.err.CREDIT_NEEDS_UNPAID"));
-        return;
+      // INV-PARTIAL-DEBT (Option B): decided here on the STORED values, before the confirmation — and
+      // again by the service, which is the authority. TRANSITION: this used to refuse ANY paid amount
+      // on account (inv.account.err.CREDIT_NEEDS_UNPAID); a part-paid invoice now MUST go on account.
+      const stored = viewRef.current?.invoice;
+      if (stored) {
+        const partlyPaid = stored.paid.minor !== "0" && stored.balanceDue.minor !== "0";
+        if (partlyPaid && !issueOnAccount) {
+          setError(t(isOwner ? "inv.account.err.CREDIT_PARTIAL_NEEDS_ACCOUNT" : "inv.account.err.CREDIT_PARTIAL_NEEDS_ACCOUNT.cashier"));
+          return;
+        }
+        if (issueOnAccount && stored.balanceDue.minor === "0") {
+          setError(t("inv.account.err.CREDIT_NOTHING_OWED"));
+          return;
+        }
       }
       setPayMethod(null);
       setPayReference("");
@@ -668,17 +678,21 @@ export function InvoiceSheet({
       // Never silently downgrade a checked on-account instruction to an ordinary unpaid invoice.
       // The service remains the authority and will refuse a missing/inactive account.
       const account = issueOnAccount;
+      // INV-PAY-METHOD: only when something is marked paid; the service refuses a mismatch. Built ONCE
+      // so a verified replay below repeats exactly the same payment (INV-PARTIAL-DEBT).
+      const paymentPart =
+        paidNow && payMethod === "cash"
+          ? { payment: { method: "cash" as const } }
+          : paidNow && payMethod === "whish"
+            ? { payment: { method: "external" as const, whish: { reference: payReference, fundsConfirmed: payConfirmed } } }
+            : {};
       let next: InvoiceViewDto;
       try {
         next = await call(
           pos().finalizeInvoice({
             invoiceId,
             issueOnAccount: account,
-            // INV-PAY-METHOD: only when something is marked paid; the service refuses a mismatch.
-            ...(paidNow && payMethod === "cash" ? { payment: { method: "cash" as const } } : {}),
-            ...(paidNow && payMethod === "whish"
-              ? { payment: { method: "external" as const, whish: { reference: payReference, fundsConfirmed: payConfirmed } } }
-              : {}),
+            ...paymentPart,
           }),
         );
       } catch (e) {
@@ -689,7 +703,7 @@ export function InvoiceSheet({
           !(e instanceof ApiError) || e.code === "INVOICE_FINALIZED" || e.code === "INVOICE_STATUS_UNKNOWN" || e.code === "INTERNAL";
         if (!account || !unclear) throw e;
         try {
-          next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: true }));
+          next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: true, ...paymentPart }));
         } catch (again) {
           if (again instanceof ApiError && again.code.startsWith("CREDIT_")) throw again;
           throw new Error(t("inv.account.unknown"));
@@ -1329,7 +1343,8 @@ export function InvoiceSheet({
                 <>
                   <dt>{t("inv.account.confirmRow")}</dt>
                   <dd data-testid="confirm-account">
-                    <bdi dir="auto">{linkedName ?? "—"}</bdi> — <bdi dir="ltr">{fmt(inv.total)}</bdi>
+                    {/* The REMAINDER owed (INV-PARTIAL-DEBT); equal to the total when nothing is paid. */}
+                    <bdi dir="auto">{linkedName ?? "—"}</bdi> — <bdi dir="ltr">{fmt(inv.balanceDue)}</bdi>
                   </dd>
                 </>
               )}

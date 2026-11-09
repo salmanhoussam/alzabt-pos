@@ -886,7 +886,7 @@ export class InvoiceService {
         credit.requireLiveOwner();
         // A repeat of a request that already committed (its response was lost): verify, never redo.
         const existing = this.deps.invoices.findById(invoiceId);
-        if (existing && existing.status === "final") return this.verifiedAccountReplay(existing, credit);
+        if (existing && existing.status === "final") return this.verifiedAccountReplay(existing, credit, payment);
       }
       // 1 · reread from the database; whatever the UI believed is irrelevant
       const invoice = this.requireDraft(invoiceId);
@@ -896,9 +896,9 @@ export class InvoiceService {
         if (!invoice.customer_party_id) {
           throw new DomainError("CREDIT_NEEDS_CUSTOMER", "Choose the customer account before issuing on account");
         }
-        if (invoice.paid_minor !== 0n) {
-          throw new DomainError("CREDIT_NEEDS_UNPAID", "An invoice issued on account must have nothing paid yet");
-        }
+        // TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): was CREDIT_NEEDS_UNPAID for any paid amount.
+        // A part-paid invoice now goes on account by design; "is anything left to owe" is decided
+        // from the recomputed totals at 5c, still before the number.
         // Re-read NOW: the account may have been archived since the draft was linked.
         accountCustomerId = credit.activeCustomer(invoice.customer_party_id).id;
       }
@@ -952,6 +952,21 @@ export class InvoiceService {
         tax,
         money(invoice.paid_minor, invoice.currency),
       );
+
+      // 5c · INV-PARTIAL-DEBT — OPTION B (owner, DEC-35h): a part-paid invoice's remainder is ALWAYS a
+      //      debt on a named customer's account. An untracked remainder is no longer possible for a
+      //      NEW invoice: issuing one without the account path is refused, for every role, before
+      //      the number. Unpaid and fully paid invoices keep exactly their earlier rules.
+      const partlyPaid = totals.paid.minor > 0n && totals.balanceDue.minor > 0n;
+      if (partlyPaid && !credit) {
+        throw new DomainError(
+          "CREDIT_PARTIAL_NEEDS_ACCOUNT",
+          "A part-paid invoice must put its remainder on a customer's account (owner, issue on account)",
+        );
+      }
+      if (credit && totals.balanceDue.minor <= 0n) {
+        throw new DomainError("CREDIT_NOTHING_OWED", "Nothing remains to put on the customer's account");
+      }
 
       // 5b · INV-PAY-METHOD (owner, 2026-11-09): money marked paid must say how it arrived — cash, or
       //      Whish with its evidence — and nothing paid must not carry a method. Decided from the
@@ -1027,8 +1042,9 @@ export class InvoiceService {
       // 10b · ON ACCOUNT: the one matching receivable, in THIS transaction, then verified by reading
       //       both rows back. Any mismatch throws and rolls the whole finalization back.
       if (credit && accountCustomerId) {
-        if (finalized.paid_minor !== 0n || finalized.total_minor <= 0n) {
-          throw new DomainError("CREDIT_NEEDS_UNPAID", "An invoice issued on account must have nothing paid yet");
+        // Read back from the FROZEN row: the remainder owed is its balance, never more, never zero.
+        if (finalized.balance_due_minor <= 0n || finalized.paid_minor + finalized.balance_due_minor !== finalized.total_minor) {
+          throw new DomainError("CREDIT_NOTHING_OWED", "Nothing remains to put on the customer's account");
         }
         const sale = this.deps.sales.findByInvoiceId(finalized.id);
         if (!sale) throw new DomainError("LEDGER_INTEGRITY", "The invoice sale was not recorded");
@@ -1096,6 +1112,16 @@ export class InvoiceService {
   private assertAccountPair(invoice: InvoiceRow, credit: InvoiceCreditPort): void {
     const sale = this.deps.sales.findByInvoiceId(invoice.id);
     const ob = sale ? credit.receivableForSale(sale.id) : null;
+    // INV-PARTIAL-DEBT: two shapes are valid. UNPAID — no method, receivable = total. PARTIAL — one
+    // tender (cash, or Whish with its confirmed reference) for the paid part, receivable = balance.
+    const partial = invoice.paid_minor > 0n;
+    const tenderOk =
+      !!sale &&
+      (partial
+        ? (sale.paymentMethod === "cash" && !sale.externalPayment) ||
+          // The tender row itself carries funds_confirmed = 1 (sale_tenders CHECK, M19).
+          (sale.paymentMethod === "external" && !!sale.externalPayment && sale.externalPayment.provider === "whish")
+        : sale.paymentMethod === null);
     if (
       !sale ||
       !ob ||
@@ -1105,20 +1131,21 @@ export class InvoiceService {
       sale.invoiceId !== invoice.id ||
       sale.customerId !== null ||
       sale.currency !== invoice.currency ||
-      sale.paymentMethod !== null ||
-      sale.paymentStatus !== "unpaid" ||
+      !tenderOk ||
+      sale.paymentStatus !== (partial ? "partial" : "unpaid") ||
       sale.subtotal.minor !== invoice.subtotal_minor ||
       sale.tax.minor !== invoice.tax_minor ||
       sale.total.minor !== invoice.total_minor ||
-      sale.paid.minor !== 0n ||
+      sale.paid.minor !== invoice.paid_minor ||
       sale.balanceDue.minor !== invoice.balance_due_minor ||
       !invoice.customer_party_id ||
       ob.partyId !== invoice.customer_party_id ||
       ob.direction !== "receivable" ||
       ob.currency !== invoice.currency ||
       ob.amountMinor !== invoice.balance_due_minor ||
-      ob.amountMinor !== invoice.total_minor ||
-      invoice.paid_minor !== 0n
+      invoice.balance_due_minor <= 0n ||
+      invoice.paid_minor < 0n ||
+      invoice.paid_minor + invoice.balance_due_minor !== invoice.total_minor
     ) {
       throw new DomainError(
         "LEDGER_INTEGRITY",
@@ -1134,7 +1161,7 @@ export class InvoiceService {
    * it never writes. A final invoice with no receivable was issued some other way and is refused
    * plainly rather than reported as having been put on the account.
    */
-  private verifiedAccountReplay(invoice: InvoiceRow, credit: InvoiceCreditPort): InvoiceView {
+  private verifiedAccountReplay(invoice: InvoiceRow, credit: InvoiceCreditPort, payment: InvoicePayment | null): InvoiceView {
     const sale = this.deps.sales.findByInvoiceId(invoice.id);
     if (!sale) {
       throw new DomainError("LEDGER_INTEGRITY", "The finalized invoice's sale is missing");
@@ -1143,7 +1170,15 @@ export class InvoiceService {
       throw new DomainError("CREDIT_NOT_ISSUED", "This invoice was issued without a customer account");
     }
     this.assertAccountPair(invoice, credit);
-    return { invoice, lines: this.deps.invoices.listLines(invoice.id) };
+    // INV-PARTIAL-DEBT: a repeat is the SAME request only if it names the payment the ledger recorded
+    // — same method, same Whish reference — or, for an unpaid one, none. Anything else is a different
+    // request reusing this invoice, refused without writing.
+    const recorded = sale.paymentMethod === null ? null : { method: sale.paymentMethod, reference: sale.externalPayment?.reference ?? null };
+    const asked = payment === null ? null : { method: payment.method, reference: payment.whish?.reference ?? null };
+    if (JSON.stringify(recorded) !== JSON.stringify(asked)) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "This invoice was already issued with a different payment");
+    }
+    return this.withPayment({ invoice, lines: this.deps.invoices.listLines(invoice.id) });
   }
 
   private createSaleForInvoice(

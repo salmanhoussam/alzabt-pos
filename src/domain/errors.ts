@@ -76,6 +76,8 @@ export type DomainErrorCode =
   | "CREDIT_OWNER_ONLY"
   | "CREDIT_NEEDS_CUSTOMER"
   | "CREDIT_NEEDS_UNPAID"
+  | "CREDIT_PARTIAL_NEEDS_ACCOUNT"
+  | "CREDIT_NOTHING_OWED"
   | "CREDIT_NOT_ISSUED"
   // Migration 17 — collection details. Each its own sentence the owner can act on.
   | "FUNDS_NOT_CONFIRMED"
