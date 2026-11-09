@@ -31,6 +31,7 @@ import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
 import { asDemoCatalog, emptyCatalog, loadCatalog } from "../domain/catalog";
 import { decideDemoCatalog, demoCatalogRequested, probeMerchantData } from "./demoCatalog";
+import { readShowcaseMarker } from "./showcaseMarker";
 import { FIXTURE_CASHIERS } from "../fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../fixtures/catalog";
 import { FIXTURE_TERMINAL } from "../fixtures/terminal";
@@ -884,7 +885,12 @@ function startTill(): void {
   // The phone bridge reads this through its getter when a session starts.
   posService = service;
 
+  // SHOWCASE MARKER: read once, never written by the app. Logged so a support check can see why a
+  // banner shows. Independent of the DEMO-FALLBACK decision above, which it cannot influence.
+  const showcaseProfile = readShowcaseMarker(userData);
+  log.info("showcase", { showcaseProfile });
   registerIpc(service, {
+    showcaseProfile,
     invoices,
     parties,
     ledger: ledgerService,

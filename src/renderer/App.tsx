@@ -79,11 +79,19 @@ export function App() {
   // moment a real product exists. A read failure hides nothing it knows about: it only ever shows
   // the banner on `demo === true`, which the main process sets under the explicit switch alone.
   const [demoCatalog, setDemoCatalog] = useState(false);
+  // SHOWCASE MARKER: a separate, display-only banner for a tooling-prepared showcase profile.
+  const [showcaseProfile, setShowcaseProfile] = useState(false);
   useEffect(() => {
     if (screen !== "app") return;
     call(pos().getCatalog())
-      .then((c) => setDemoCatalog(c.demo === true))
-      .catch(() => setDemoCatalog(false));
+      .then((c) => {
+        setDemoCatalog(c.demo === true);
+        setShowcaseProfile(c.showcaseProfile === true);
+      })
+      .catch(() => {
+        setDemoCatalog(false);
+        setShowcaseProfile(false);
+      });
   }, [screen, tab, catalogVersion]);
 
   // These three stay keyed on `cashier` itself so TypeScript narrows it for the till below, while
@@ -219,6 +227,11 @@ export function App() {
       {demoCatalog && (
         <p className="demo-banner" role="alert" data-testid="demo-banner">
           {t("sell.demoBanner")}
+        </p>
+      )}
+      {showcaseProfile && (
+        <p className="demo-banner showcase-banner" role="status" data-testid="showcase-banner">
+          {t("app.showcaseBanner")}
         </p>
       )}
       <main className="content">
