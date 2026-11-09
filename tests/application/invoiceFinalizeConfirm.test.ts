@@ -37,11 +37,14 @@ describe("the confirmation figures", () => {
     const { invoice } = h.invoices.createDraft();
     h.invoices.addLines(invoice.id, [LINE], nextKey());
     h.invoices.setInvoiceTax(invoice.id, { enabled: true, ratePercent: "11" });
-    h.invoices.updateDraftHeader(invoice.id, { customerName: "زبون", paid: "50.00" });
+    // TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): a PART-paid invoice now goes on a customer's account
+    // (the owner, issue on account); the figures under test are unchanged. Old: an unlinked draft.
+    const account = h.parties.create({ kind: "customer", displayName: "زبون" }).party;
+    h.invoices.updateDraftHeader(invoice.id, { customerName: "زبون", paid: "50.00", customerPartyId: account.id });
 
     const displayed = shown(invoice.id);
     // TRANSITION (INV-PAY-METHOD): 50.00 is marked paid, so the issue names how. Old: finalizeInvoice(invoice.id).
-    const final = h.invoices.finalizeInvoice(invoice.id, { payment: { method: "cash" } }).invoice;
+    const final = h.invoices.finalizeInvoice(invoice.id, { issueOnAccount: true, payment: { method: "cash" } }).invoice;
 
     expect(displayed.total_minor).toBe(11_100n);
     expect(final.total_minor).toBe(displayed.total_minor);

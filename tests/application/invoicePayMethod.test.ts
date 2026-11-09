@@ -85,14 +85,15 @@ describe("a paid invoice records how it was paid", () => {
     expect(h.invoices.getInvoice(id).payment).toEqual({ method: "external", provider: "whish", reference: "WH-INV-1" });
   });
 
-  it("a partly paid invoice records the method of the PAID part only — and, until INV-PARTIAL-DEBT, still posts no debt", () => {
+  it("a partly paid invoice issued WITHOUT an account is now refused (INV-PARTIAL-DEBT, Option B)", () => {
+    // TRANSITION · INV-PARTIAL-DEBT: this used to ISSUE (cash tender of 40, sale partial, NO debt —
+    // the remainder untracked). Option B makes that impossible for a new invoice; the account path
+    // and its receivable are covered in invoicePartialDebt.test.ts.
     const id = draft("40.00");
-    h.invoices.finalizeInvoice(id, { payment: { method: "cash" } });
-    const s = saleRow(id);
-    expect({ m: s.m, st: s.st, p: s.p, b: s.b }).toEqual({ m: "cash", st: "partial", p: 4_000n, b: 6_000n });
-    expect(tenderRows(s.id)).toEqual([{ method: "cash", provider: null, reference: null, a: 4_000n }]);
-    // UNCHANGED BEHAVIOUR, named on purpose: the remainder of a partial invoice is the next slice.
-    expect(footprint().obligations).toBe(0);
+    const before = footprint();
+    expect(codeOf(() => h.invoices.finalizeInvoice(id, { payment: { method: "cash" } }))).toBe("CREDIT_PARTIAL_NEEDS_ACCOUNT");
+    expect(footprint()).toEqual(before);
+    expect(status(id)).toEqual({ status: "draft", num: null });
   });
 
   it("a cashier issues a paid invoice exactly as before — the permission is unchanged", () => {

@@ -52,6 +52,13 @@ function finalized(
   });
   // TRANSITION (INV-PAY-METHOD): a paid draft is issued with cash. Old: finalizeInvoice(invoice.id).
   const paid = opts.paid !== undefined && opts.paid !== null && opts.paid.trim() !== "" && Number(opts.paid) !== 0;
+  // TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): a PART-paid invoice now goes on a customer's account
+  // (the owner issues it on account); what the document prints is unchanged.
+  if (paid && h.invoices.getInvoice(invoice.id).invoice.balance_due_minor > 0n) {
+    const account = h.parties.create({ kind: "customer", displayName: opts.customer ?? "زبون اختباري" }).party;
+    h.invoices.updateDraftHeader(invoice.id, { customerPartyId: account.id });
+    return toInvoiceViewDto(h.invoices.finalizeInvoice(invoice.id, { issueOnAccount: true, payment: { method: "cash" } }));
+  }
   return toInvoiceViewDto(h.invoices.finalizeInvoice(invoice.id, paid ? { payment: { method: "cash" } } : undefined));
 }
 

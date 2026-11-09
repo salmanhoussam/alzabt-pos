@@ -394,6 +394,16 @@ assert((await textOf(page, "sheet-words")).includes("("), "the amount in words i
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 4 · Finalize — explicit, confirmed, and the number appears only afterwards
 // ════════════════════════════════════════════════════════════════════════════════════════════════
+// TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): 96.15 of 496.15 is paid, so the 400.00 left must go
+// on a customer's account. Old flow: finalize was clicked on an unlinked draft and the 400.00 stayed
+// untracked. Now the owner picks the account through the ordinary finder and ticks "issue on account".
+await testid(page, "account-choose").click();
+await testid(page, "customer-finder").waitFor({ timeout: 30000 });
+await testid(page, "customer-new").click();
+await testid(page, "customer-field-name").fill("زبون الفاتورة اليدوية");
+await testid(page, "customer-save").click();
+await testid(page, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
+await testid(page, "account-issue").check();
 await testid(page, "finalize").click();
 await page.waitForSelector('[data-testid="finalize-confirm"]');
 const confirmText = await textOf(page, "finalize-confirm");
