@@ -46,6 +46,7 @@ import { useT } from "../i18n";
 import { statementDocumentText } from "../statementDocument";
 import { AllocatedReceiptForm } from "./AllocatedReceiptForm";
 import { type ReceiptReconciliation, reconcileReceiptOutcome, sharableCurrencies } from "./receiptAllocation";
+import { tendersText } from "../tenders";
 import type {
   AllocatedReceiptRequest,
   PendingReceiptDto,
@@ -789,10 +790,20 @@ export function CustomerStatement({ customerId }: Props) {
                 <bdi dir="ltr" data-testid="statement-paid-sale-total">
                   {fmt(ps.total)}
                 </bdi>{" "}
-                <span className="muted small" data-testid="statement-paid-sale-method" data-provider={ps.externalPayment?.provider ?? "none"}>
-                  {ps.externalPayment?.provider === "whish"
-                    ? `${t("method.whish")} · ${ps.externalPayment.reference}`
-                    : t(METHOD_LABEL[ps.paymentMethod])}
+                <span
+                  className="muted small"
+                  data-testid="statement-paid-sale-method"
+                  data-provider={ps.externalPayment?.provider ?? "none"}
+                  data-split={ps.tenders && ps.tenders.length >= 2 ? "1" : "0"}
+                >
+                  {/* SELL-SPLIT-CASH-WHISH: a split sale names each part; it has no single method. */}
+                  {ps.tenders && ps.tenders.length >= 2
+                    ? tendersText(ps.tenders, t)
+                    : ps.externalPayment?.provider === "whish"
+                      ? `${t("method.whish")} · ${ps.externalPayment.reference}`
+                      : ps.paymentMethod
+                        ? t(METHOD_LABEL[ps.paymentMethod])
+                        : t("history.payNoMethod")}
                 </span>{" "}
                 <span className="muted small">
                   <bdi dir="ltr">{ps.completedAt.slice(0, 10)}</bdi>

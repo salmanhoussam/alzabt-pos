@@ -109,6 +109,18 @@ export function toSaleDto(s: SaleRecord, invoiceNumber: number | null = null): S
     paymentStatus: s.paymentStatus,
     paymentMethod: s.paymentMethod,
     ...(s.externalPayment ? { externalPayment: { provider: s.externalPayment.provider, reference: s.externalPayment.reference } } : {}),
+    // SELL-SPLIT-CASH-WHISH: only on a multi-tender sale, so every other DTO keeps its exact shape.
+    ...(s.tenders && s.tenders.length >= 2
+      ? {
+          tenders: s.tenders.map((t) => ({
+            seq: t.seq,
+            method: t.method,
+            amount: toMoneyDto(t.amount),
+            provider: t.provider,
+            reference: t.reference,
+          })),
+        }
+      : {}),
     businessDate: s.businessDate,
     completedAt: s.completedAt,
     lines: s.lines.map((l) => ({

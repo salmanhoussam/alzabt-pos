@@ -101,6 +101,9 @@ describe("IPC surface", () => {
         "createCustomerCreditSale",
         "createCategory",
         "createSale",
+        // TRANSITION (SELL-SPLIT-CASH-WHISH, 2026-11-09): one more name — a sale paid in full by cash +
+        // Whish, same permission as createSale, never a debt. Old list: without it.
+        "createSplitSale",
         "currentCashier",
         "exportBackup",
         "exportCatalog",
@@ -210,7 +213,8 @@ describe("IPC surface", () => {
     // refused again by PosService.assertOwner. The old value was 76.
     // 🔴 TRANSITION (SELL-CREDIT): 79 -> 80 — createCustomerCreditSale, owner-only, the till's ONE way to
     // create a customer debt. The old value was 79.
-    expect(CHANNEL_NAMES).toHaveLength(80);
+    // 🔴 TRANSITION (SELL-SPLIT-CASH-WHISH): 80 -> 81 — createSplitSale. The old value was 80.
+    expect(CHANNEL_NAMES).toHaveLength(81);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

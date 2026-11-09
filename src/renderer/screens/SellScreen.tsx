@@ -60,6 +60,14 @@ const PARTIAL_ERROR_KEY: Readonly<Record<string, string>> = {
   DOWN_PAYMENT_INVALID: "pay.partial.invalid",
   DOWN_PAYMENT_NOT_PARTIAL: "pay.partial.notLess",
 };
+/** SELL-SPLIT-CASH-WHISH: the split step's own sentences (text follows the operation). */
+const SPLIT_ERROR_KEY: Readonly<Record<string, string>> = {
+  SPLIT_AMOUNT_INVALID: "pay.split.invalid",
+  SPLIT_TOTAL_MISMATCH: "pay.split.mismatch",
+  DUPLICATE_PAYMENT_REFERENCE: "pay.whishErr.duplicate",
+  FUNDS_NOT_CONFIRMED: "pay.whishErr.notConfirmed",
+  INVALID_INPUT: "pay.whishErr.reference",
+};
 
 /**
  * `focusRequest` is bumped by the tab bar when the operator clicks Sell while Sell is already open:
@@ -375,6 +383,16 @@ export function SellScreen({
   const [partialText, setPartialText] = useState("");
   const [whishForPartial, setWhishForPartial] = useState(false);
 
+  /**
+   * SELL-SPLIT-CASH-WHISH (owner, 2026-11-09): the split step — a cash part and a Whish Money part that
+   * together pay the WHOLE total (never a debt), with the Whish reference and an explicit confirmation.
+   */
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [splitCashText, setSplitCashText] = useState("");
+  const [splitWhishText, setSplitWhishText] = useState("");
+  const [splitReference, setSplitReference] = useState("");
+  const [splitConfirmed, setSplitConfirmed] = useState(false);
+
   /** P2: every opening of the payment pane starts the Whish step empty and UNconfirmed. */
   useEffect(() => {
     if (paying) return;
@@ -383,6 +401,12 @@ export function SellScreen({
     setWhishConfirmed(false);
     setPartialText("");
     setWhishForPartial(false);
+    // SELL-SPLIT-CASH-WHISH: the same for the split step — empty and never pre-confirmed.
+    setSplitOpen(false);
+    setSplitCashText("");
+    setSplitWhishText("");
+    setSplitReference("");
+    setSplitConfirmed(false);
   }, [paying]);
 
   /** SELL-CREDIT: the customer an on-account sale was recorded for, shown on its receipt (the DTO carries no name). */
@@ -498,6 +522,60 @@ export function SellScreen({
   };
 
   const whishReady = whishReference.trim() !== "" && whishConfirmed && !busy;
+
+  /**
+   * SELL-SPLIT-CASH-WHISH: what the two typed amounts mean against the CURRENT total — in minor units
+   * from the domain's own parser, never floats. `remaining` = total − cash − Whish (negative = over).
+   */
+  const split = useMemo(():
+    | { readonly kind: "empty" | "invalid" }
+    | { readonly kind: "under" | "over" | "ok"; readonly cash: bigint; readonly whish: bigint; readonly remaining: bigint } => {
+    if (!priced) return { kind: "empty" };
+    const c = splitCashText.trim();
+    const w = splitWhishText.trim();
+    if (c === "" && w === "") return { kind: "empty" };
+    let cash: bigint;
+    let whish: bigint;
+    try {
+      cash = c === "" ? 0n : parseDecimal(c, priced.currency).minor;
+      whish = w === "" ? 0n : parseDecimal(w, priced.currency).minor;
+    } catch {
+      return { kind: "invalid" };
+    }
+    const remaining = priced.total.minor - cash - whish;
+    if (remaining > 0n) return { kind: "under", cash, whish, remaining };
+    if (remaining < 0n) return { kind: "over", cash, whish, remaining };
+    // The sum is exact; each part must still be a real part (above zero), or it is not a split.
+    if (cash <= 0n || whish <= 0n) return { kind: "invalid" };
+    return { kind: "ok", cash, whish, remaining };
+  }, [splitCashText, splitWhishText, priced]);
+  const splitReady = split.kind === "ok" && splitReference.trim() !== "" && splitConfirmed && !busy;
+
+  /** SELL-SPLIT-CASH-WHISH: records ONE sale paid in full by both parts (same checkout key as the cart). */
+  const paySplit = async () => {
+    if (!priced || busy || split.kind !== "ok" || !splitReady) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await call(
+        pos().createSplitSale({
+          idempotencyKey: attemptKey,
+          lines: cart.map((l) => ({ productId: l.productId, quantityMilli: l.quantityMilli })),
+          expectedTotalMinor: priced.total.minor.toString(),
+          cashMinor: split.cash.toString(),
+          whishMinor: split.whish.toString(),
+          whish: { reference: splitReference, fundsConfirmed: true },
+          ...(customer === null ? {} : { customerId: customer.id }),
+        }),
+      );
+      finishSale(result.sale, null);
+    } catch (e) {
+      const own = e instanceof ApiError ? SPLIT_ERROR_KEY[e.code] : undefined;
+      setError(own ? t(own) : errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   /** Leaves a receipt for a fresh till. */
   const startNewSale = () => {
@@ -1008,7 +1086,7 @@ export function SellScreen({
                 {t("pay.forCustomer")} <bdi>{customer.displayName}</bdi>
               </p>
             )}
-            {!whishOpen && (
+            {!whishOpen && !splitOpen && (
             <div className="methods">
               {TILL_BUTTONS.map((m) => (
                 /* 🔴 CASH IS THE INITIAL FOCUS, NOT A FORCED CHOICE — AND ENTER DOES NOT PAY. A
@@ -1044,7 +1122,141 @@ export function SellScreen({
             {/* SELL-CREDIT: the owner's third choice — not a payment method, a debt on the chosen customer.
                 A cashier never sees it (and the channel and the service refuse them anyway). Without an
                 active customer it stays disabled and says why. */}
-            {!whishOpen && role === "owner" && (
+            {/* SELL-SPLIT-CASH-WHISH: the whole total paid by cash AND Whish Money — any signed-in operator, like
+                every paid sale; it can never leave a debt. Disabled while the owner types a part-payment. */}
+            {!whishOpen && !splitOpen && (
+              <button
+                className="btn big wide"
+                disabled={busy || partial.kind !== "none"}
+                data-testid="pay-split"
+                onKeyDown={refuseEnterActivation}
+                onClick={() => {
+                  setError(null);
+                  setSplitOpen(true);
+                }}
+              >
+                {t("pay.split.open")}
+              </button>
+            )}
+            {splitOpen && (
+              <div className="whish-step" data-testid="split-step">
+                <h3>{t("pay.split.title")}</h3>
+                <label className="field">
+                  <span>{t("pay.split.cash")}</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
+                    maxLength={20}
+                    autoFocus
+                    placeholder="0.00"
+                    value={splitCashText}
+                    disabled={busy}
+                    data-testid="split-cash"
+                    onChange={(e) => {
+                      setSplitCashText(e.target.value);
+                      setError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") e.preventDefault();
+                    }}
+                  />
+                </label>
+                <label className="field">
+                  <span>{t("pay.split.whish")}</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    dir="ltr"
+                    maxLength={20}
+                    placeholder="0.00"
+                    value={splitWhishText}
+                    disabled={busy}
+                    data-testid="split-whish"
+                    onChange={(e) => {
+                      setSplitWhishText(e.target.value);
+                      setError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") e.preventDefault();
+                    }}
+                  />
+                </label>
+                {/* The total and what is still to be covered, BEFORE anything can be recorded. */}
+                <p
+                  className={split.kind === "ok" ? "small" : "small error"}
+                  role="status"
+                  data-testid="split-remaining"
+                  data-kind={split.kind}
+                  data-remaining={"remaining" in split ? split.remaining.toString() : ""}
+                >
+                  {t("pay.split.total")} <bdi dir="ltr">{money(priced.total.minor)}</bdi>
+                  {" · "}
+                  {split.kind === "under" && (
+                    <>
+                      {t("pay.split.remaining")} <bdi dir="ltr">{money(split.remaining)}</bdi>
+                    </>
+                  )}
+                  {split.kind === "over" && (
+                    <>
+                      {t("pay.split.over")} <bdi dir="ltr">{money(-split.remaining)}</bdi>
+                    </>
+                  )}
+                  {split.kind === "ok" && t("pay.split.exact")}
+                  {split.kind === "invalid" && t("pay.split.invalid")}
+                  {split.kind === "empty" && t("pay.split.enterBoth")}
+                </p>
+                <label className="field">
+                  <span>{t("pay.whishReference")}</span>
+                  <input
+                    type="text"
+                    dir="auto"
+                    maxLength={64}
+                    value={splitReference}
+                    disabled={busy}
+                    data-testid="split-whish-reference"
+                    onChange={(e) => {
+                      setSplitReference(e.target.value);
+                      setError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") e.preventDefault();
+                    }}
+                  />
+                </label>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={splitConfirmed}
+                    disabled={busy}
+                    data-testid="split-whish-confirm"
+                    onChange={(e) => setSplitConfirmed(e.target.checked)}
+                  />
+                  <span>{t("pay.whishConfirm")}</span>
+                </label>
+                <button
+                  className="btn primary big wide"
+                  disabled={!splitReady}
+                  data-testid="split-submit"
+                  onKeyDown={refuseEnterActivation}
+                  onClick={() => void paySplit()}
+                >
+                  {t("pay.split.submit")}
+                </button>
+                <button
+                  className="btn ghost wide"
+                  disabled={busy}
+                  data-testid="split-back"
+                  onClick={() => {
+                    setSplitOpen(false);
+                    setError(null);
+                  }}
+                >
+                  {t("pay.whishBack")}
+                </button>
+              </div>
+            )}
+            {!whishOpen && !splitOpen && role === "owner" && (
               <div className="on-account" data-testid="on-account">
                 {/* SELL-PARTIAL-DEBT: optionally, part of the total received NOW. Empty = the whole total on
                     the account (unchanged). Typed = one accepted method for that part, the rest a debt. */}

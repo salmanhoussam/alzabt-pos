@@ -68,6 +68,23 @@ export function Receipt({
             <span className="muted small">{t("receipt.balanceDue")}</span>
             <strong data-testid="receipt-balance-due"><bdi dir="ltr">{fmt(sale.balanceDue)}</bdi></strong>
           </div>
+        ) : sale.tenders && sale.tenders.length >= 2 ? (
+          /* SELL-SPLIT-CASH-WHISH: one line per part — its method, its amount and, for Whish, its
+             reference — never a single "paid by" for money that arrived two ways. */
+          <div className="receipt-tenders" data-testid="receipt-tenders">
+            {sale.tenders.map((x) => (
+              <div className="receipt-paid" key={x.seq} data-testid="receipt-tender" data-seq={x.seq} data-method={x.method} data-provider={x.provider ?? "none"}>
+                <span className="muted small">{t("receipt.paidBy")}</span>
+                <strong>{x.provider === "whish" ? t("method.whish") : t(`method.${x.method}`)}</strong>
+                <strong data-testid="receipt-tender-amount"><bdi dir="ltr">{fmt(x.amount)}</bdi></strong>
+                {x.reference && (
+                  <bdi dir="auto" data-testid="receipt-tender-reference">
+                    {x.reference}
+                  </bdi>
+                )}
+              </div>
+            ))}
+          </div>
         ) : (
         <div className="receipt-paid">
           <span className="muted small">{t("receipt.paidBy")}</span>

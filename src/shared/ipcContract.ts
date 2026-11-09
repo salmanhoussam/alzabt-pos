@@ -25,6 +25,7 @@ export const CHANNELS = {
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
   createCustomerCreditSale: "pos:createCustomerCreditSale",
+  createSplitSale: "pos:createSplitSale",
   voidSale: "pos:voidSale",
   getTodaySales: "pos:getTodaySales",
   getSaleHistory: "pos:getSaleHistory",
@@ -263,9 +264,34 @@ export interface SaleDto {
    * every other sale, and for a historic `external` sale that was recorded without one.
    */
   readonly externalPayment?: { readonly provider: "whish" | "bank_transfer"; readonly reference: string } | null;
+  /**
+   * SELL-SPLIT-CASH-WHISH: PRESENT ONLY on a sale paid by two or more tenders (`paymentMethod` is then
+   * null) — each tender with its amount and, for Whish, its reference. Absent on every other sale.
+   */
+  readonly tenders?: ReadonlyArray<SaleTenderDto>;
   readonly businessDate: string;
   readonly completedAt: string;
   readonly lines: ReadonlyArray<SaleLineDto>;
+}
+
+export interface SaleTenderDto {
+  readonly seq: number;
+  readonly method: PaymentMethod;
+  readonly amount: MoneyDto;
+  readonly provider: "whish" | "bank_transfer" | null;
+  readonly reference: string | null;
+}
+
+/** SELL-SPLIT-CASH-WHISH: one sale paid in full by a cash part and a Whish Money part. Never a debt. */
+export interface CreateSplitSaleRequest {
+  readonly idempotencyKey: string;
+  readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
+  readonly expectedTotalMinor: string;
+  readonly cashMinor: string;
+  readonly whishMinor: string;
+  readonly whish: { readonly reference: string; readonly fundsConfirmed: boolean };
+  /** As on createSale: the customer this PAID sale is for, or absent. */
+  readonly customerId?: string;
 }
 
 export interface VoidDto {
@@ -890,9 +916,15 @@ export interface StatementPaidSaleDto {
   readonly saleId: string;
   readonly receiptNumber: number;
   readonly total: MoneyDto;
-  readonly paymentMethod: PaymentMethod;
+  /**
+   * TRANSITION (SELL-SPLIT-CASH-WHISH): was `PaymentMethod` (never null). A sale paid by two tenders
+   * carries no single method — null — and lists them in `tenders` instead.
+   */
+  readonly paymentMethod: PaymentMethod | null;
   /** P2: present on a Whish Money sale — its provider and recorded reference. */
   readonly externalPayment?: { readonly provider: "whish" | "bank_transfer"; readonly reference: string };
+  /** SELL-SPLIT-CASH-WHISH: present only on a sale paid by two or more tenders. */
+  readonly tenders?: ReadonlyArray<SaleTenderDto>;
   readonly completedAt: string;
   /** A voided sale stays in the history, marked; it was never a debt either way. */
   readonly voided: boolean;
@@ -1524,6 +1556,7 @@ export interface PosApi {
   getCatalog(): Promise<IpcResult<CatalogDto>>;
   createSale(req: CreateSaleRequest): Promise<IpcResult<CreateSaleResponse>>;
   createCustomerCreditSale(req: CreateCustomerCreditSaleRequest): Promise<IpcResult<CreateCustomerCreditSaleResponse>>;
+  createSplitSale(req: CreateSplitSaleRequest): Promise<IpcResult<CreateSaleResponse>>;
   voidSale(req: VoidSaleRequest): Promise<IpcResult<VoidDto>>;
   getTodaySales(): Promise<IpcResult<TodaySalesDto>>;
   getSaleHistory(req: HistoryRequest): Promise<IpcResult<SaleWithVoidDto[]>>;
