@@ -15,11 +15,15 @@
 | `catalog_def.py` | **The one source.** Every product, category and test note is defined here. |
 | `build_files.py` | Rebuilds every file below from `catalog_def.py` and `image-credits.json` (`python build_files.py`, needs `openpyxl`). |
 | `catalog.json` | The same definition as JSON, read by the Node tests. |
-| `alzabt-demo-catalog-import.csv` | The **only** file the app imports. CSV UTF-8 (BOM, CRLF), exactly 7 columns: `source_id,name_ar,name_en,price,currency,base_unit,price_needs_review`. |
+| `alzabt-demo-catalog-import.csv` | The **only** file the app imports. CSV UTF-8 with BOM, exactly 7 columns: `source_id,name_ar,name_en,price,currency,base_unit,price_needs_review`. |
 | `alzabt-demo-product-catalog.xlsx` | Master workbook. Sheets: README, Products, Import CSV, Categories, Image credits. Editable; reusable as a template for a new shop. |
 | `images/<SKU>.jpg` | 38 photos, 640×640 JPEG, 23–137 KB each. |
 | `image-credits.json` | For every SKU: the Commons file, source page, licence and author, or why there is no photo. |
 | `image-licence-check.json` | The licence metadata as Commons reported it on 2026-11-09 (licence, copyrighted flag, restrictions, attribution required). |
+
+> **Line endings.** `build_files.py` writes the CSV with CRLF (what Excel produces). Git stores it
+> with LF, by this repo's `.gitattributes` rule (`* text=auto eol=lf`). The importer reads both, and
+> `demoCatalogFixture.test.ts` passes on either form.
 
 ## What the app supports (measured in the code, not assumed)
 
