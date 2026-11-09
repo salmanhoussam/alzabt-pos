@@ -4,6 +4,7 @@ import { call, errorText, fmt, pos } from "../api";
 import { Receipt } from "./Receipt";
 import { useT } from "../i18n";
 import { stamp } from "../format";
+import { tendersText } from "../tenders";
 
 type T = (key: string) => string;
 
@@ -17,14 +18,25 @@ type T = (key: string) => string;
 function paymentText(sale: SaleDto, t: T): string {
   if (sale.paymentStatus === "unpaid") return t("history.payUnpaid");
   // P2: a Whish Money sale names Whish and its reference; a historic `external` sale keeps its old words.
-  const method =
-    sale.externalPayment?.provider === "whish"
+  // SELL-SPLIT-CASH-WHISH: a sale paid by several tenders names every part, never "no method".
+  const method = sale.tenders && sale.tenders.length >= 2
+    ? tendersText(sale.tenders, t)
+    : sale.externalPayment?.provider === "whish"
       ? `${t("method.whish")} · ${sale.externalPayment.reference}`
       : sale.paymentMethod
         ? t(`method.${sale.paymentMethod}`)
         : t("history.payNoMethod");
   const head = sale.paymentStatus === "partial" ? t("history.payPartial") : t("history.payPaid");
   return `${head} — ${method}`;
+}
+
+/**
+ * Which "a void is not a refund" sentence fits THIS sale (text follows the operation): Whish, cash, or —
+ * SELL-SPLIT-CASH-WHISH — both, because a split sale's money arrived both ways.
+ */
+function notRefundKey(sale: SaleDto): string {
+  if (sale.tenders && sale.tenders.length >= 2) return "void.notRefundSplit";
+  return sale.paymentMethod === "external" ? "void.notRefund" : "void.notRefundCash";
 }
 
 /** 🔴 unpaid and partial are WARNING, not danger: an outstanding balance is a commercial state. */
@@ -154,7 +166,7 @@ export function HistoryScreen({ role }: { readonly role?: string }) {
         {/* DEC-35a: a voided Whish sale never reads as "refunded" — the void is this ledger's record only. */}
         {open.void && (
           <p className="notice small" role="note" data-testid="voided-not-refund">
-            {t(open.sale.paymentMethod === "external" ? "void.notRefund" : "void.notRefundCash")}
+            {t(notRefundKey(open.sale))}
           </p>
         )}
         <Receipt sale={open.sale} />
@@ -292,7 +304,7 @@ export function HistoryScreen({ role }: { readonly role?: string }) {
             {/* Owner 2026-11-08: the same is said for a cash sale, in its own words (a different moment:
                 no outside provider, the drawer). */}
             <p className="notice small" role="note" data-testid="void-not-refund">
-              {t(voiding.sale.paymentMethod === "external" ? "void.notRefund" : "void.notRefundCash")}
+              {t(notRefundKey(voiding.sale))}
             </p>
             {/* Which receipt this is, so one can be told from another before it is destroyed. */}
             <p className="small">

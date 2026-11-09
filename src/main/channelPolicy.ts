@@ -118,6 +118,9 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // ── Any signed-in operator: the cashier's daily work ──────────────────────────────────────────
   getCatalog: "session",
   createSale: "session",
+  // SELL-SPLIT-CASH-WHISH: a sale PAID IN FULL by cash + Whish — the same permission as createSale. It can
+  // never create a debt (the service refuses any amount that does not equal the total exactly).
+  createSplitSale: "session",
   getTodaySales: "session",
   getSaleHistory: "session",
   listProducts: "session",

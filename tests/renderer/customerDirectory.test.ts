@@ -182,7 +182,9 @@ describe("the Sell screen keeps its cart", () => {
   // is pinned now is that it is the OWNER's and needs a chosen customer.
   it("🔴 Sell's on-account control is the owner's alone and needs a chosen customer", () => {
     const body = code(sell);
-    expect(body).toContain('{!whishOpen && role === "owner" && (');
+    // TRANSITION (SELL-SPLIT-CASH-WHISH): the on-account block also hides while the split step is open.
+    // Old text: '{!whishOpen && role === "owner" && ('. The owner-only condition itself is unchanged.
+    expect(body).toContain('{!whishOpen && !splitOpen && role === "owner" && (');
     expect(body).toContain("disabled={busy || customer === null}");
     expect(body).toContain("pos().createCustomerCreditSale(");
     expect(body).not.toContain("paymentMethod: \"credit\""); // never a payment method

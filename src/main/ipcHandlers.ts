@@ -906,6 +906,32 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       return { sale: toSaleDto(result.sale, invoiceNumberFor(result.sale)), duplicate: result.duplicate };
     }, (p) => saleFailureTruth(service, p, operatorLanguage())),
     /**
+     * SELL-SPLIT-CASH-WHISH (owner, 2026-11-09): ONE sale paid in full by a cash part and a Whish Money
+     * part — never a debt. Exactly these keys (`customerId` optional, as on createSale); amounts are
+     * integer minor-unit strings, never floats. The same permission as createSale. A failure after the
+     * write is answered from the ledger by the same truth-teller createSale uses.
+     */
+    createSplitSale: wrap("createSplitSale", (p) => {
+      const o = objectWithOptional(p, ["idempotencyKey", "lines", "expectedTotalMinor", "cashMinor", "whishMinor", "whish"], ["customerId"]);
+      const result = service.createSplitSale({
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+        lines: saleLinesOf(o.lines),
+        expectedTotalMinor: parseMinor(o.expectedTotalMinor),
+        cashMinor: parseMinor(o.cashMinor),
+        whishMinor: parseMinor(o.whishMinor),
+        whish: whishPayment(o.whish),
+        ...("customerId" in o ? { customerId: str(o.customerId, "customerId", 100) } : {}),
+      });
+      if (!result.duplicate) {
+        try {
+          options.afterSale?.();
+        } catch (err) {
+          log.warn("after-sale-hook-failed", { error: err });
+        }
+      }
+      return { sale: toSaleDto(result.sale, invoiceNumberFor(result.sale)), duplicate: result.duplicate };
+    }, (p) => saleFailureTruth(service, p, operatorLanguage())),
+    /**
      * SELL-CREDIT (owner, 2026-11-08): a FULLY UNPAID sale on one identified customer's account — a debt,
      * never a payment. OWNER ONLY at this channel AND in the service (which re-reads the live role inside
      * its transaction). The sale, its lines and the receivable commit together or not at all; no tender
@@ -1817,9 +1843,22 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         saleId: sale.id,
         receiptNumber: sale.receiptNumber,
         total: { minor: sale.total.minor.toString(), currency: sale.total.currency },
-        // A paid POS sale always carries its real method (migration 14's CHECK); never fabricated.
-        paymentMethod: sale.paymentMethod as PaymentMethod,
+        // TRANSITION (SELL-SPLIT-CASH-WHISH, 2026-11-09): this used to say "a paid POS sale always carries
+        // its real method" and cast it. Since migration 19 a sale paid by two tenders carries NO single
+        // method (NULL), so it is passed as null — never fabricated — with its tenders beside it.
+        paymentMethod: sale.paymentMethod,
         ...(sale.externalPayment ? { externalPayment: { provider: sale.externalPayment.provider, reference: sale.externalPayment.reference } } : {}),
+        ...(sale.tenders && sale.tenders.length >= 2
+          ? {
+              tenders: sale.tenders.map((t) => ({
+                seq: t.seq,
+                method: t.method,
+                amount: { minor: t.amount.minor.toString(), currency: t.amount.currency },
+                provider: t.provider,
+                reference: t.reference,
+              })),
+            }
+          : {}),
         completedAt: sale.completedAt,
         voided,
       })),

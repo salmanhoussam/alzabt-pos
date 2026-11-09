@@ -251,6 +251,17 @@ export interface PosServiceDeps {
  */
 export type { AuditRow, AuditEventType } from "../domain/audit";
 
+/** SELL-SPLIT-CASH-WHISH: a sale paid in full by a cash part and a Whish Money part (minor units). */
+export interface CreateSplitSaleInput {
+  readonly idempotencyKey: string;
+  readonly lines: ReadonlyArray<CartLine>;
+  readonly expectedTotalMinor: bigint;
+  readonly cashMinor: bigint;
+  readonly whishMinor: bigint;
+  readonly whish: { readonly reference: unknown; readonly fundsConfirmed: unknown } | null;
+  readonly customerId?: string | null;
+}
+
 export interface CreateSaleInput {
   readonly idempotencyKey: string;
   readonly lines: ReadonlyArray<CartLine>;
@@ -2295,6 +2306,164 @@ export class PosService {
           lines,
         );
       }));
+      if (raced !== null) return raced;
+    }
+    const sale = this.repository.getSale(saleId);
+    if (!sale) throw new DomainError("LEDGER_INTEGRITY", "Committed sale could not be read back");
+    return { sale, duplicate: false };
+  }
+
+  /**
+   * SELL-SPLIT-CASH-WHISH (owner, 2026-11-09): ONE sale paid IN FULL by cash AND Whish Money — never a
+   * debt. Same permission as an ordinary paid sale (any signed-in operator); creating a debt stays the
+   * owner's, and nothing here can create one: cash + Whish must equal the total EXACTLY.
+   *
+   *  - Amounts are integer minor units end to end (bigint): no floating point anywhere.
+   *  - Each part > 0 (a part of zero is not a split — use the single method); their sum = the TRUSTED
+   *    total, re-priced from the catalogue; anything else is refused before a row is written.
+   *  - The Whish part needs its reference (the collection form's own cleaning rule) and the operator's
+   *    explicit "the money arrived"; a reference already used anywhere rolls back the WHOLE sale.
+   *  - Two tenders (seq 1 cash, seq 2 Whish) + the sale + its lines, in ONE transaction; the sale row
+   *    seals them (migration 19: count and sum must match). `payment_method` is NULL, as M19 requires
+   *    for a multi-tender sale; the tenders ARE the record of how the money arrived.
+   *  - The same key with the same request replays the same sale; the same key with other amounts, another
+   *    reference or another customer is IDEMPOTENCY_CONFLICT.
+   */
+  createSplitSale(input: CreateSplitSaleInput): CreateSaleResult {
+    const cashier = this.requireCashier();
+    if (typeof input.idempotencyKey !== "string" || !/^[A-Za-z0-9-]{8,100}$/.test(input.idempotencyKey)) {
+      throw new DomainError("INVALID_INPUT", "A valid idempotency key is required");
+    }
+    if (typeof input.expectedTotalMinor !== "bigint") {
+      throw new DomainError("INVALID_INPUT", "A valid displayed total is required");
+    }
+    const customerId = input.customerId ?? null;
+    if (customerId !== null && (typeof customerId !== "string" || customerId.length === 0 || customerId.length > 100)) {
+      throw new DomainError("INVALID_INPUT", "A customer account must be given by its id");
+    }
+    if (typeof input.cashMinor !== "bigint" || typeof input.whishMinor !== "bigint" || input.cashMinor <= 0n || input.whishMinor <= 0n) {
+      throw new DomainError("SPLIT_AMOUNT_INVALID", "Both the cash part and the Whish Money part must be more than zero");
+    }
+    if (input.cashMinor + input.whishMinor !== input.expectedTotalMinor) {
+      throw new DomainError("SPLIT_TOTAL_MISMATCH", "Cash plus Whish Money must equal the total exactly");
+    }
+    // P3 (DEC-35): both parts are money this shop takes.
+    this.assertAcceptedNewSale("cash");
+    this.assertAcceptedNewSale("external");
+    const w = input.whish;
+    if (w === null || w === undefined || typeof w !== "object") {
+      throw new DomainError("INVALID_INPUT", "A Whish Money payment needs its reference and the confirmation that the money arrived");
+    }
+    const reference = cleanPaymentReference(w.reference, "whish");
+    if (reference === null) throw new DomainError("INVALID_INPUT", "This payment method needs a reference");
+    if (w.fundsConfirmed !== true) throw new DomainError("FUNDS_NOT_CONFIRMED", "Confirm that the money was actually received");
+
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify({
+          cashierId: cashier.id,
+          paymentIntent: "split_cash_whish",
+          lines: input.lines.map((l) => [l.productId, l.quantityMilli]),
+          expectedTotalMinor: input.expectedTotalMinor.toString(),
+          cashMinor: input.cashMinor.toString(),
+          whishMinor: input.whishMinor.toString(),
+          whish: reference,
+          ...(customerId === null ? {} : { customerId }),
+        }),
+      )
+      .digest("hex");
+
+    const replay = (): CreateSaleResult | null => {
+      const existing = this.repository.findByIdempotencyKey(input.idempotencyKey);
+      if (!existing) return null;
+      if (existing.fingerprint !== fingerprint) {
+        throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
+      }
+      return { sale: existing.sale, duplicate: true };
+    };
+    const earlier = replay();
+    if (earlier) return earlier;
+
+    const priced = priceCart(this.catalog, input.lines);
+    if (priced.total.minor !== input.expectedTotalMinor) {
+      throw new DomainError("TOTAL_MISMATCH", "The displayed total no longer matches the catalog; please review the cart");
+    }
+    const instant = this.now();
+    const timestamp = instant.toISOString();
+    const saleId = this.newId();
+    const header: NewSaleHeader = {
+      id: saleId,
+      idempotencyKey: input.idempotencyKey,
+      requestFingerprint: fingerprint,
+      sourceType: "pos",
+      invoiceId: null,
+      customerId: null,
+      customerNameSnapshot: null,
+      cashierId: cashier.id,
+      cashierName: cashier.name,
+      currency: priced.currency,
+      subtotalMinor: priced.subtotal.minor,
+      taxMinor: 0n,
+      totalMinor: priced.total.minor,
+      paidMinor: priced.total.minor,
+      balanceDueMinor: 0n,
+      paymentStatus: "paid",
+      paymentMethod: null,
+      externalPayment: null,
+      tenders: [
+        { method: "cash", amountMinor: input.cashMinor },
+        { method: "external", amountMinor: input.whishMinor, provider: "whish", reference },
+      ],
+      businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
+      completedAt: timestamp,
+      createdAt: timestamp,
+    };
+    const lines: NewSaleLine[] = priced.lines.map((l) => ({
+      id: this.newId(),
+      lineNo: l.lineNo,
+      invoiceLineId: null,
+      productId: l.productId,
+      sku: l.sku,
+      productName: l.productName,
+      saleUnit: l.saleUnit,
+      unitLabel: null,
+      quantityMilli: l.quantityMilli,
+      unitPriceMinor: l.unitPrice.minor,
+      lineTotalMinor: l.lineTotal.minor,
+    }));
+    const refusingTakenReference = <T>(write: () => T): T => {
+      try {
+        return write();
+      } catch (err) {
+        if (err instanceof Error && !(err instanceof DomainError) && REFERENCE_TAKEN.test(err.message)) {
+          throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
+        }
+        throw err;
+      }
+    };
+
+    if (customerId === null) {
+      refusingTakenReference(() => this.repository.commitSale(header, lines));
+    } else {
+      // As ACC-2 for a paid sale: the account is re-read ACTIVE inside the same transaction that writes
+      // the sale, and the name snapshot is the one it carries at that instant. Still no debt.
+      const services = this.deps.creditSaleServices?.();
+      const transact = this.deps.transact;
+      if (!services || !transact) {
+        throw new DomainError("NOT_AVAILABLE", "Customer accounts are not available on this terminal");
+      }
+      let raced: CreateSaleResult | null = null;
+      refusingTakenReference(() =>
+        transact(() => {
+          raced = replay();
+          if (raced) return;
+          const customer = services.parties.activeCustomerForSale(customerId);
+          this.repository.commitSaleWithinTransaction(
+            { ...header, customerId: customer.id, customerNameSnapshot: customer.display_name },
+            lines,
+          );
+        }),
+      );
       if (raced !== null) return raced;
     }
     const sale = this.repository.getSale(saleId);

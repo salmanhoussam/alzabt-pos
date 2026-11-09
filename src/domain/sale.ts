@@ -120,10 +120,25 @@ export interface SaleRecord {
    * historic `external` sale, which has no record and is never given an invented one.
    */
   readonly externalPayment?: ExternalPaymentEvidence | null;
+  /**
+   * SELL-SPLIT-CASH-WHISH (owner, 2026-11-09): PRESENT ONLY on a sale paid by two or more tenders
+   * (`paymentMethod` is then null) — each tender in `seq` order, with its amount and, for Whish, its
+   * reference. Absent on every other sale, so no existing record changes shape.
+   */
+  readonly tenders?: ReadonlyArray<SaleTender>;
   readonly businessDate: string;
   readonly completedAt: string;
   readonly createdAt: string;
   readonly lines: ReadonlyArray<SaleLineRecord>;
+}
+
+/** One recorded tender of a multi-tender sale. */
+export interface SaleTender {
+  readonly seq: number;
+  readonly method: PaymentMethod;
+  readonly amount: Money;
+  readonly provider: "whish" | "bank_transfer" | null;
+  readonly reference: string | null;
 }
 
 /** A void is a separate, immutable event that points at the sale it cancels. */

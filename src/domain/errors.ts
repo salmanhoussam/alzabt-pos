@@ -94,6 +94,10 @@ export type DomainErrorCode =
   // two different corrections: "type more than zero" vs "less than the total, or it is a paid sale".
   | "DOWN_PAYMENT_INVALID"
   | "DOWN_PAYMENT_NOT_PARTIAL"
+  // SELL-SPLIT-CASH-WHISH (owner, 2026-11-09) — a sale paid in full by cash + Whish Money. Two
+  // corrections: "each part above zero" vs "the two parts must add up to the total exactly".
+  | "SPLIT_AMOUNT_INVALID"
+  | "SPLIT_TOTAL_MISMATCH"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,
