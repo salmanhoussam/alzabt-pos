@@ -8,7 +8,7 @@ import { formatDecimal, parseDecimal } from "../../domain/money";
 import { formatQuantity, parseQuantity } from "../../domain/quantity";
 import type { PaymentMethod } from "../../domain/sale";
 import { fromCatalogDto } from "../../shared/dto";
-import type { AdminProductDto, SaleDto } from "../../shared/ipcContract";
+import type { AdminProductDto, CategoryDto, SaleDto } from "../../shared/ipcContract";
 import { ApiError, call, errorText, newIdempotencyKey, pos } from "../api";
 import { useThumbnails } from "../useThumbnails";
 import { type SellDraft, keepSellableLines } from "../sellDraft";
@@ -134,6 +134,33 @@ export function SellScreen({
    * photo index cannot be read must still sell, so the grid falls back to placeholders.
    */
   const [photoMeta, setPhotoMeta] = useState<readonly AdminProductDto[]>([]);
+  const [categories, setCategories] = useState<readonly CategoryDto[]>([]);
+  /** TILL-CARDS: null = «All». A filter on what is SHOWN — never on what can be scanned. */
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  /**
+   * The chip strip scrolls sideways WITHOUT a scrollbar; instead each edge that still hides chips
+   * fades and gets a small arrow button. Measured in the strip's own direction (RTL scrollLeft is ≤ 0
+   * in Chromium), so "more at the start / end" is right in both languages.
+   */
+  const chipStripRef = useRef<HTMLDivElement | null>(null);
+  const [chipMore, setChipMore] = useState<{ readonly start: boolean; readonly end: boolean }>({ start: false, end: false });
+  const measureChips = () => {
+    const el = chipStripRef.current;
+    if (!el) return;
+    const travelled = Math.abs(el.scrollLeft);
+    const room = el.scrollWidth - el.clientWidth;
+    const next = { start: travelled > 2, end: room - travelled > 2 };
+    setChipMore((prev) => (prev.start === next.start && prev.end === next.end ? prev : next));
+  };
+  const scrollChips = (toward: "start" | "end") => {
+    const el = chipStripRef.current;
+    if (!el) return;
+    const rtl = getComputedStyle(el).direction === "rtl";
+    const step = Math.max(160, Math.round(el.clientWidth * 0.6));
+    // RTL: the start is on the right, i.e. toward scrollLeft 0 (positive); LTR the opposite.
+    const sign = (toward === "start" ? -1 : 1) * (rtl ? -1 : 1);
+    el.scrollBy({ left: sign * step, behavior: "smooth" });
+  };
 
   /** Lines dropped from a kept cart because their product stopped being sellable while away. */
   const [droppedOnReturn, setDroppedOnReturn] = useState(0);
@@ -165,6 +192,13 @@ export function SellScreen({
         if (live) setPhotoMeta(rows);
       })
       .catch(() => undefined);
+    // TILL-CARDS (lab, for owner review): the shop's OWN categories, through the existing session
+    // channel. A failure leaves the till exactly as before — no chips, every product shown.
+    void call(pos().listCategories())
+      .then((rows) => {
+        if (live) setCategories(rows);
+      })
+      .catch(() => undefined);
     return () => {
       live = false;
     };
@@ -184,11 +218,35 @@ export function SellScreen({
     () => (catalog ? catalog.products.map((p) => ({ p, fields: searchFields(p) })) : []),
     [catalog],
   );
+  const categoryOf = useMemo(() => new Map(photoMeta.map((row) => [row.id, row.categoryId] as const)), [photoMeta]);
+  /** Only ACTIVE categories that hold at least one sellable product, in the owner's own order. */
+  const chips = useMemo(() => {
+    if (!catalog) return [];
+    const used = new Set(catalog.products.map((p) => categoryOf.get(p.id)).filter((c): c is string => !!c));
+    return [...categories].filter((c) => c.isActive && used.has(c.id)).sort((a, b) => a.sortOrder - b.sortOrder);
+  }, [catalog, categories, categoryOf]);
+  useEffect(() => {
+    const el = chipStripRef.current;
+    measureChips();
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => measureChips());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [chips.length, lang]);
+  /**
+   * The chip actually in force. A category archived, or emptied of sellable products, while the till
+   * stays open loses its chip; keeping its id as the filter would show an empty grid with no chip
+   * lit. So a filter whose chip is gone falls back to «All».
+   */
+  const activeCategory = categoryFilter !== null && chips.some((c) => c.id === categoryFilter) ? categoryFilter : null;
   const visible = useMemo(() => {
     if (!catalog) return [];
-    if (!query.trim()) return catalog.products;
-    return searchIndex.filter(({ fields }) => matchesSearch(fields, query)).map(({ p }) => p);
-  }, [catalog, searchIndex, query]);
+    // 🔴 A typed search spans EVERY category: a cashier who types a name must not be told "not
+    // found" because a chip was left on. The chip narrows browsing, never searching.
+    if (query.trim()) return searchIndex.filter(({ fields }) => matchesSearch(fields, query)).map(({ p }) => p);
+    if (activeCategory === null) return catalog.products;
+    return catalog.products.filter((p) => categoryOf.get(p.id) === activeCategory);
+  }, [catalog, searchIndex, query, activeCategory, categoryOf]);
 
   /**
    * The photo rows for the products ON SCREEN — the input the shared hook's six rules consume.
@@ -650,7 +708,70 @@ export function SellScreen({
             <p>{t(role === "owner" ? "sell.emptyCatalog.owner" : "sell.emptyCatalog.cashier")}</p>
           </div>
         )}
-        <div className="products">
+        {chips.length > 0 && (
+          <div
+            className={`category-strip${chipMore.start ? " more-start" : ""}${chipMore.end ? " more-end" : ""}`}
+            data-testid="category-strip"
+          >
+            {chipMore.start && (
+              <button
+                type="button"
+                className="chip-arrow chip-arrow-start"
+                tabIndex={-1}
+                aria-label={t("sell.categoriesPrev")}
+                onClick={() => scrollChips("start")}
+                data-testid="category-more-start"
+              >
+                ‹
+              </button>
+            )}
+          <div
+            ref={chipStripRef}
+            onScroll={measureChips}
+            className="category-chips"
+            role="toolbar"
+            aria-label={t("sell.categories")}
+            data-testid="category-chips"
+          >
+            <button
+              type="button"
+              className={activeCategory === null ? "chip on" : "chip"}
+              aria-pressed={activeCategory === null}
+              onClick={() => setCategoryFilter(null)}
+              data-testid="category-chip-all"
+            >
+              {t("sell.categoryAll")}
+            </button>
+            {chips.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className={activeCategory === c.id ? "chip on" : "chip"}
+                aria-pressed={activeCategory === c.id}
+                onClick={() => setCategoryFilter(c.id)}
+                data-testid="category-chip"
+                data-category={c.id}
+                dir="auto"
+              >
+                {lang === "ar" ? c.nameAr : (c.nameEn ?? c.nameAr)}
+              </button>
+            ))}
+          </div>
+            {chipMore.end && (
+              <button
+                type="button"
+                className="chip-arrow chip-arrow-end"
+                tabIndex={-1}
+                aria-label={t("sell.categoriesNext")}
+                onClick={() => scrollChips("end")}
+                data-testid="category-more-end"
+              >
+                ›
+              </button>
+            )}
+          </div>
+        )}
+        <div className="products products-cards">
           {visible.map((p, i) => {
             const thumb = thumbs.get(p.id);
             const url = thumb?.kind === "ready" ? thumb.url : null;
@@ -696,6 +817,14 @@ export function SellScreen({
                 refocusAfterClick(e);
               }}
             >
+              {/* TILL-CARDS: the photo is PART OF THE CARD — a tap anywhere on it adds to the cart. Decorative
+                  (alt=""): the name below is what is read. The viewer stays the small sibling button. */}
+              {url !== null ? (
+                <img className="product-photo" src={url} alt="" aria-hidden="true" draggable={false} />
+              ) : (
+                /* An empty frame: the visible "no photo" marker is the sibling placeholder drawn over it. */
+                <span className="product-photo product-photo-empty" aria-hidden="true" />
+              )}
               <span className="product-name" dir="auto" data-testid="product-name">
                 {nameForLanguage(p, lang)}
               </span>
@@ -733,12 +862,19 @@ export function SellScreen({
                 onClick={() => setPreview({ name: nameForLanguage(p, lang), url })}
               >
                 <img src={url} alt="" data-testid="sell-thumb-image" />
+                {/* TILL-CARDS: in the card grid the viewer is drawn as a magnifier, so it never reads
+                    as part of the card the cashier taps to sell. */}
+                <svg className="zoom-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" strokeWidth="2.2" />
+                  <path d="M15 15l5 5M10.5 8v5M8 10.5h5" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+                </svg>
               </button>
             ) : (
               /* A product with no photo, one whose photo failed its checksum, and one still
                  loading all land here: the same quiet placeholder, never a broken frame, and
                  never anything the cashier has to resolve before selling. */
               <span
+                data-initial={nameForLanguage(p, lang).trim().charAt(0)}
                 className="product-thumb product-thumb-empty"
                 data-testid="sell-thumb-empty"
                 data-product={p.id}

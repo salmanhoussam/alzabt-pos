@@ -441,6 +441,10 @@ const AR: Dict = {
   "sell.increase": "زيادة",
   "sell.remove": "إزالة السطر",
   "sell.quantityOf": "الكمية",
+  "sell.categories": "الفئات",
+  "sell.categoryAll": "الكل",
+  "sell.categoriesPrev": "فئات سابقة",
+  "sell.categoriesNext": "فئات أخرى",
   "sell.placeholderPrice": "سعر مبدئي — اضبط السعر الحقيقي",
   "sell.priceUnknown": "سعر مبدئي",
 
@@ -1249,6 +1253,10 @@ const EN: Dict = {
   "sell.increase": "Increase",
   "sell.remove": "Remove line",
   "sell.quantityOf": "Quantity",
+  "sell.categories": "Categories",
+  "sell.categoryAll": "All",
+  "sell.categoriesPrev": "Previous categories",
+  "sell.categoriesNext": "More categories",
   "sell.placeholderPrice": "Placeholder price — set the real price",
   "sell.priceUnknown": "price?",
 
