@@ -20,6 +20,9 @@ import { type TempDir, tempDir } from "../helpers/harness";
 const V18 = 18;
 const V19 = 19;
 const MIGRATIONS_V18 = MIGRATIONS.slice(0, V18);
+// TRANSITION (migration 20): these tests used the full registry `MIGRATIONS`, which WAS v19 when they were
+// written. They test migration 19, so they open the ledger at v19 exactly; migration 20 has its own tests.
+const MIGRATIONS_V19 = MIGRATIONS.slice(0, V19);
 const AT = "2026-11-07T09:00:00.000Z";
 const DAY = "2026-11-07";
 
@@ -156,7 +159,7 @@ function upgraded(): { before: Record<string, Row[]>; objectsBefore: Row[]; db: 
   const before = history(pre);
   const objectsBefore = objects(pre);
   pre.close();
-  const db = openDatabase(t.dbPath, MIGRATIONS);
+  const db = openDatabase(t.dbPath, MIGRATIONS_V19);
   return { before, objectsBefore, db };
 }
 

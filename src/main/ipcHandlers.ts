@@ -29,6 +29,8 @@ import { invoiceOutcomeError } from "./invoiceOutcomeText";
 import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
 import type { LedgerService } from "../application/ledgerService";
+import type { AdvanceCorrectionView, AdvanceService, AdvanceView } from "../application/advanceService";
+import type { AdvanceCorrectionDto, AdvanceDto, PendingAdvanceDto } from "../shared/ipcContract";
 import type { BackupRestoreActions } from "./backupRestore";
 import type { RestoreLock } from "./restoreLock";
 import type { PartyRow } from "../persistence/partyRepository";
@@ -223,6 +225,12 @@ export interface IpcHandlerOptions {
   readonly parties?: PartyService;
   /** S3B: the read-only statement source. Absent on a terminal without the ledger. */
   readonly ledger?: LedgerService;
+  /** Customer advances (migration 20). Absent means every advance channel answers NOT_AVAILABLE. */
+  readonly advances?: AdvanceService;
+  /** Prints one ADV- document. Main loads it from the ledger BY ID; no markup crosses the bridge. */
+  readonly printAdvance?: (advanceId: string) => Promise<"printed" | "cancelled">;
+  /** Save-as dialog + PDF of one ADV- document. Null when the operator cancelled. */
+  readonly saveAdvancePdf?: (advanceId: string) => Promise<SavedFile | null>;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -1786,7 +1794,124 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         ? { status: "saved" as const, fileName: saved.fileName, logoMissing: saved.logoMissing, logoUnverified: saved.logoUnverified }
         : { status: "cancelled" as const };
     }),
+
+    // ── Customer advances (migration 20) ───────────────────────────────────────────────────────
+    // Every rule lives in `AdvanceService` and in the database triggers; these handlers validate the
+    // payload's SHAPE, call the service once, and map bigints to strings. No arithmetic here.
+    recordAdvance: wrap("recordAdvance", (p) => {
+      const o = objectWithOptional(p, ["customerId", "amountMinor", "channel", "idempotencyKey"], ["reference", "fundsConfirmed"]);
+      if (o.reference !== undefined && o.reference !== null && typeof o.reference !== "string") invalid("'reference' must be text or null");
+      if (o.fundsConfirmed !== undefined && typeof o.fundsConfirmed !== "boolean") invalid("'fundsConfirmed' must be true or false");
+      const r = advances().record({
+        customerId: str(o.customerId, "customerId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+        channel: o.channel,
+        reference: o.reference,
+        fundsConfirmed: o.fundsConfirmed,
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      log.info("advance-recorded", { id: r.record.id, docNo: r.record.docNo, duplicate: r.duplicate });
+      return { advance: advanceDto(advances().view(r.record)), duplicate: r.duplicate };
+    }),
+    pendingAdvances: wrap("pendingAdvances", (p) => {
+      noPayload(p);
+      return advances()
+        .pending()
+        .map((x): PendingAdvanceDto => {
+          if (x.status === "recorded") return { status: "recorded", key: x.key, advance: advanceDto(advances().view(x.advance)) };
+          if (x.status === "unknown") return { status: "unknown", key: x.key, createdAt: x.createdAt };
+          return {
+            status: x.status,
+            key: x.key,
+            customerId: x.intent.customerId,
+            customerName: advances().customerName(x.intent.customerId),
+            amount: { minor: x.intent.amountMinor.toString(), currency: x.intent.currency },
+            channel: x.intent.channel,
+            reference: x.intent.reference,
+            createdAt: x.createdAt,
+          };
+        });
+    }),
+    finishAdvance: wrap("finishAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey"]);
+      const r = advances().finish(str(o.idempotencyKey, "idempotencyKey", 100));
+      log.info("advance-finished", { id: r.record.id, docNo: r.record.docNo, duplicate: r.duplicate });
+      return { advance: advanceDto(advances().view(r.record)), duplicate: r.duplicate };
+    }),
+    closeAdvance: wrap("closeAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey"]);
+      advances().close(str(o.idempotencyKey, "idempotencyKey", 100));
+      log.info("advance-closed-not-received", { key: o.idempotencyKey });
+      return null;
+    }),
+    acknowledgeAdvance: wrap("acknowledgeAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey"]);
+      advances().acknowledge(str(o.idempotencyKey, "idempotencyKey", 100));
+      return null;
+    }),
+    getAdvanceStatement: wrap("getAdvanceStatement", (p) => {
+      const o = exactObject(p, ["customerId"]);
+      const customerId = str(o.customerId, "customerId", 100);
+      return {
+        customerId,
+        lines: advances()
+          .statement(customerId)
+          .map((l) => ({
+            advance: advanceDto(advances().view(l.advance)),
+            unused: { minor: l.unusedMinor.toString(), currency: l.advance.currency },
+            correction: correctionDto(advances().correctionView(l.correction)),
+          })),
+      };
+    }),
+    correctAdvance: wrap("correctAdvance", (p) => {
+      const o = objectWithOptional(
+        p,
+        ["advanceId", "kind", "reason", "idempotencyKey"],
+        ["confirmNotReceived", "customerId", "amountMinor", "channel", "reference", "fundsConfirmed"],
+      );
+      const r = advances().correct({
+        advanceId: str(o.advanceId, "advanceId", 100),
+        kind: o.kind,
+        reason: o.reason,
+        confirmNotReceived: o.confirmNotReceived,
+        customerId: o.customerId,
+        amountMinor: o.amountMinor === undefined ? undefined : parseMinor(o.amountMinor),
+        channel: o.channel,
+        reference: o.reference,
+        fundsConfirmed: o.fundsConfirmed,
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      log.info("advance-corrected", { advance: r.original.id, kind: r.correction.kind, successor: r.successor?.id ?? null, duplicate: r.duplicate });
+      const correction = correctionDto(advances().correctionView(r.correction));
+      if (!correction) throw new DomainError("LEDGER_INTEGRITY", "A correction could not be read back");
+      return {
+        original: advanceDto(advances().view(r.original)),
+        successor: r.successor ? advanceDto(advances().view(r.successor)) : null,
+        correction,
+        duplicate: r.duplicate,
+      };
+    }),
+    printAdvance: wrapAsync("printAdvance", async (p) => {
+      const o = exactObject(p, ["advanceId"]);
+      const id = str(o.advanceId, "advanceId", 100);
+      advances().document(id); // exists, and the caller may record advances — before any window opens
+      if (!options.printAdvance) return { status: "unavailable" as const };
+      return { status: await options.printAdvance(id) };
+    }),
+    saveAdvancePdf: wrapAsync("saveAdvancePdf", async (p) => {
+      const o = exactObject(p, ["advanceId"]);
+      const id = str(o.advanceId, "advanceId", 100);
+      advances().document(id);
+      if (!options.saveAdvancePdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveAdvancePdf(id);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
   };
+
+  function advances(): AdvanceService {
+    if (!options.advances) throw new DomainError("NOT_AVAILABLE", "Customer advances are not available on this terminal");
+    return options.advances;
+  }
 
   // ── Shapes used by the invoice channels only ─────────────────────────────────────────────────
 
@@ -2034,6 +2159,39 @@ export function syncHandlers(
     };
   }
   return out;
+}
+
+/** An advance as the ledger holds it, bigints as strings. No arithmetic. */
+export function advanceDto(v: AdvanceView): AdvanceDto {
+  const a = v.record;
+  return {
+    id: a.id,
+    docNo: a.docNo,
+    number: v.number,
+    customerId: a.customerId,
+    customerName: v.customerName,
+    amount: { minor: a.amountMinor.toString(), currency: a.currency },
+    channel: a.method === "external" ? "whish" : "cash",
+    reference: a.reference,
+    receivedByName: v.receivedByName,
+    receivedAt: a.receivedAt,
+    businessDate: a.businessDate,
+    origin: a.origin ?? "receipt",
+    correctsNumber: v.correctsNumber,
+  };
+}
+
+export function correctionDto(c: AdvanceCorrectionView | null): AdvanceCorrectionDto | null {
+  if (!c) return null;
+  return {
+    kind: c.record.kind,
+    reason: c.record.reason,
+    fundsNotReceived: c.record.fundsNotReceived,
+    correctedByName: c.correctedByName,
+    correctedAt: c.record.correctedAt,
+    businessDate: c.record.businessDate,
+    successorNumber: c.successorNumber,
+  };
 }
 
 /** Every handler maps to exactly one fixed channel string. */

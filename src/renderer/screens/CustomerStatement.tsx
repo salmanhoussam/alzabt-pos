@@ -84,11 +84,15 @@ const METHOD_LABEL: Record<PaymentMethod, string> = {
   other: "pay.other",
 };
 
+import { AdvanceStatementSection } from "./AdvancePanels";
+
 interface Props {
   readonly customerId: string;
+  /** Migration 20: bumps when an advance was recorded/settled, so the advances section re-reads. */
+  readonly advanceRefresh?: number;
 }
 
-export function CustomerStatement({ customerId }: Props) {
+export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
   const { t } = useT();
   /** Own sentences for this slice's refusals (own codes, so the refusal-audit rules are untouched). */
   const collectErrorText = (err: unknown): string => {
@@ -821,6 +825,9 @@ export function CustomerStatement({ customerId }: Props) {
           </ul>
         )}
       </section>
+      {/* Migration 20 — the customer's ADVANCES, inside the statement (they are its figures, owner
+          only) but in their OWN section: never netted against the debt above (owner decision D2). */}
+      <AdvanceStatementSection customerId={customerId} refreshKey={advanceRefresh} />
     </section>
   );
 }

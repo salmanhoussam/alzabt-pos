@@ -986,3 +986,14 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
   .products-cards .product-name-alt, .products-cards .product-sku { font-size: 12px; }
   .products-cards .product-price { font-size: 17px; }
 }
+
+/* ── Customer advances (migration 20) ── */
+.receipt.adv-receipt { width: auto; max-width: 560px; }
+.adv-receipt-fields { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 12px 0; }
+.adv-receipt-fields dt { color: var(--muted, #666); }
+.adv-receipt-fields dd { margin: 0; font-weight: 600; }
+.adv-statement .statement-table { width: 100%; border-collapse: collapse; }
+.adv-statement .statement-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.adv-pending { margin: 12px 16px; border: 2px solid var(--warn, #b26b00); }
+.adv-pending li { padding: 6px 0; }
+.adv-pending li .btn { margin-inline-start: 8px; }

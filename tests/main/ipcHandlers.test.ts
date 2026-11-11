@@ -184,6 +184,16 @@ describe("IPC surface", () => {
         "exportFullBackup",
         "inspectRestoreBackup",
         "applyRestore",
+        // 🔴 TRANSITION (migration 20): the nine customer-advance channels. Old list: without them.
+        "recordAdvance",
+        "pendingAdvances",
+        "finishAdvance",
+        "closeAdvance",
+        "acknowledgeAdvance",
+        "getAdvanceStatement",
+        "correctAdvance",
+        "printAdvance",
+        "saveAdvancePdf",
       ].sort(),
     );
     // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
@@ -214,7 +224,9 @@ describe("IPC surface", () => {
     // 🔴 TRANSITION (SELL-CREDIT): 79 -> 80 — createCustomerCreditSale, owner-only, the till's ONE way to
     // create a customer debt. The old value was 79.
     // 🔴 TRANSITION (SELL-SPLIT-CASH-WHISH): 80 -> 81 — createSplitSale. The old value was 80.
-    expect(CHANNEL_NAMES).toHaveLength(81);
+    // 🔴 TRANSITION (migration 20, customer advances): 81 -> 90 — the nine advance channels named in
+    // the list above. The old value was 81.
+    expect(CHANNEL_NAMES).toHaveLength(90);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

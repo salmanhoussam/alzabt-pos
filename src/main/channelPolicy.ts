@@ -167,6 +167,20 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   searchInvoices: "session",
   printInvoice: "session",
   saveInvoicePdf: "session",
+  // Customer advances (migration 20, owner decision D1): the OWNER and the CASHIER record an
+  // advance and print its receipt. The service re-reads the live role and refuses an admin.
+  // Printing takes an advance ID only; main loads the document from the ledger.
+  recordAdvance: "session",
+  pendingAdvances: "session",
+  finishAdvance: "session",
+  closeAdvance: "session",
+  acknowledgeAdvance: "session",
+  printAdvance: "session",
+  saveAdvancePdf: "session",
+  // 🔴 OWNER: what a customer holds (like a statement) and every correction. Refused again by
+  // `AdvanceService.requireOwner` / the trigger on `advance_corrections.corrected_by`.
+  getAdvanceStatement: "owner",
+  correctAdvance: "owner",
 
   // ── Owner only ────────────────────────────────────────────────────────────────────────────────
   // Reversing money.

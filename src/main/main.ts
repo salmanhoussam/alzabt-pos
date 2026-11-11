@@ -23,6 +23,10 @@ import { makeInvoiceCreditPort } from "../application/invoiceCreditPort";
 import { InvoiceService } from "../application/invoiceService";
 import { PartyService } from "../application/partyService";
 import { LedgerService } from "../application/ledgerService";
+import { AdvanceService } from "../application/advanceService";
+import { AdvanceRepository } from "../persistence/advanceRepository";
+import { renderAdvanceDocument } from "./advanceDocument";
+import { advanceDto, correctionDto } from "./ipcHandlers";
 import { PartyRepository } from "../persistence/partyRepository";
 import { LedgerRepository } from "../persistence/ledgerRepository";
 import { ReceiptRepository } from "../persistence/receiptRepository";
@@ -80,6 +84,7 @@ let db: Db | null = null;
 let invoices: InvoiceService | null = null;
 let parties: PartyService | null = null;
 let ledgerService: LedgerService | null = null;
+let advanceService: AdvanceService | null = null;
 let log: Logger = nullLogger;
 
 /**
@@ -512,6 +517,70 @@ async function saveInvoicePdfFile(
   return { fileName: basename(path), logoMissing, logoUnverified };
 }
 
+/**
+ * The ADV- document's HTML, loaded from the ledger BY ID (same rules as the invoice: the renderer
+ * never supplies markup). The shop name is read best-effort; without a profile the receipt still
+ * prints, with the title alone.
+ */
+function advanceHtml(advanceId: string): { html: string; number: string } {
+  if (!advanceService) throw new DomainError("NOT_AVAILABLE", "Customer advances are not available");
+  const doc = advanceService.document(advanceId);
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  const html = renderAdvanceDocument({
+    advance: advanceDto(doc.advance),
+    correction: correctionDto(doc.correction),
+    shopName,
+    timeZone: FIXTURE_TERMINAL.timeZone,
+  });
+  return { html, number: doc.advance.number };
+}
+
+async function withPrintWindow<T>(html: string, name: string, fn: (win: BrowserWindow) => Promise<T>): Promise<T> {
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
+  });
+  const staged = stagePrintable(html, name);
+  try {
+    await win.loadURL(staged.url);
+    return await fn(win);
+  } finally {
+    win.destroy();
+    staged.cleanup();
+  }
+}
+
+async function printAdvanceDocument(advanceId: string): Promise<"printed" | "cancelled"> {
+  const { html, number } = advanceHtml(advanceId);
+  const printed = await withPrintWindow(html, "advance-print", (win) =>
+    new Promise<boolean>((done) => win.webContents.print({ silent: false, printBackground: true }, (ok) => done(ok))),
+  );
+  log.info("advance-printed", { id: advanceId, number, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveAdvancePdfFile(advanceId: string): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const { html, number } = advanceHtml(advanceId);
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save advance receipt PDF",
+    defaultPath: join(app.getPath("documents"), `${number}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(html, "advance-pdf", (win) =>
+    win.webContents.printToPDF({ pageSize: "A5", printBackground: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } }),
+  );
+  writeFileSync(path, pdf);
+  log.info("advance-pdf-saved", { id: advanceId, number, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
 /** Native "save as" + a verified consistent snapshot of the live ledger (never a raw file copy). */
 function exportBackup(ledgerPath: string): SavedFile | null {
   if (!mainWindow || !db) return null;
@@ -882,6 +951,27 @@ function startTill(): void {
   });
   creditSaleServices = { parties, ledger: ledgerService };
 
+  // Customer advances (migration 20): the SAME connection, the SAME transaction provider and the
+  // SAME live actor as the ledger above. The service owns who may record (owner + cashier) and who
+  // may correct (owner); the triggers enforce both again.
+  advanceService = new AdvanceService({
+    advances: new AdvanceRepository(db),
+    ledger: new LedgerRepository(db),
+    parties: new PartyRepository(db),
+    actor: () => {
+      const cashier = service.currentCashier();
+      if (!cashier) return null;
+      const role = service.currentRole();
+      return role === null ? null : { id: cashier.id, name: cashier.name, role };
+    },
+    transact: (fn) => {
+      if (!db) throw new Error("ledger is not open");
+      restoreLock.assertOpen();
+      return db.transaction(fn).immediate();
+    },
+    terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
+  });
+
   // The phone bridge reads this through its getter when a session starts.
   posService = service;
 
@@ -894,6 +984,9 @@ function startTill(): void {
     invoices,
     parties,
     ledger: ledgerService,
+    advances: advanceService,
+    printAdvance: printAdvanceDocument,
+    saveAdvancePdf: saveAdvancePdfFile,
     pickInvoiceLogo,
     pickProductPhoto,
     printInvoice: printInvoiceDocument,

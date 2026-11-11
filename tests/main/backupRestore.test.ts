@@ -608,9 +608,11 @@ describe("🔴 P0 — after a restore is staged, nothing can change the data unt
   it("🔴 main.ts checks the lock in EVERY transaction provider it hands out", () => {
     const main = readFileSync("src/main/main.ts", "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
     const providers = main.match(/transact: \(fn\) => \{[^}]*\}/g) ?? [];
-    expect(providers.length).toBe(5);
+    // TRANSITION (migration 20): 5 → 6. The sixth is `AdvanceService`'s provider (customer advances),
+    // and the loop below holds it to the same rule as the other five: the lock is checked first.
+    expect(providers.length).toBe(6);
     for (const p of providers) expect(p).toMatch(/restoreLock\.assertOpen\(\);[\s\S]*\.transaction\(fn\)\.immediate\(\)/);
-    expect(main.match(/\.transaction\(fn\)\.immediate\(\)/g)).toHaveLength(5);
+    expect(main.match(/\.transaction\(fn\)\.immediate\(\)/g)).toHaveLength(6);
   });
 
   it("normal operation is untouched while nothing is staged — including after a REFUSED restore", () => {

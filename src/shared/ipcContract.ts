@@ -119,6 +119,15 @@ export const CHANNELS = {
   pickInvoiceLogo: "pos:pickInvoiceLogo",
   printInvoice: "pos:printInvoice",
   saveInvoicePdf: "pos:saveInvoicePdf",
+  recordAdvance: "pos:recordAdvance",
+  pendingAdvances: "pos:pendingAdvances",
+  finishAdvance: "pos:finishAdvance",
+  closeAdvance: "pos:closeAdvance",
+  acknowledgeAdvance: "pos:acknowledgeAdvance",
+  getAdvanceStatement: "pos:getAdvanceStatement",
+  correctAdvance: "pos:correctAdvance",
+  printAdvance: "pos:printAdvance",
+  saveAdvancePdf: "pos:saveAdvancePdf",
 } as const;
 
 export type ChannelName = keyof typeof CHANNELS;
@@ -1566,6 +1575,115 @@ export type SaveInvoicePdfResponse =
   | { readonly status: "cancelled" }
   | { readonly status: "saved"; readonly fileName: string; readonly logoMissing?: boolean; readonly logoUnverified?: boolean };
 
+// ── Customer advances (migration 20: ADV-RECORD-CASH-WHISH + G2 correction) ──────────────────────
+
+/** A NEW receipt of money is Cash or Whish Money only (P3 / DEC-35). */
+export type AdvanceChannelDto = "cash" | "whish";
+
+/** One ADV- document as main read it from the ledger. Every figure is the ledger's own. */
+export interface AdvanceDto {
+  readonly id: string;
+  readonly docNo: number;
+  /** `ADV-000001` — formatted in main, never by the renderer. */
+  readonly number: string;
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly amount: MoneyDto;
+  readonly channel: AdvanceChannelDto;
+  readonly reference: string | null;
+  /** WHO really received the money (for a correction: copied from the original). */
+  readonly receivedByName: string;
+  readonly receivedAt: string;
+  readonly businessDate: string;
+  /** 'correction' = a restatement of `correctsNumber`, NOT a new receipt of money. */
+  readonly origin: "receipt" | "correction";
+  readonly correctsNumber: string | null;
+}
+
+export interface RecordAdvanceRequest {
+  readonly customerId: string;
+  readonly amountMinor: string;
+  readonly channel: AdvanceChannelDto;
+  readonly reference?: string | null;
+  readonly fundsConfirmed?: boolean;
+  readonly idempotencyKey: string;
+}
+
+export interface RecordAdvanceResponse {
+  readonly advance: AdvanceDto;
+  /** True when this exact request had already been recorded: nothing new was written. */
+  readonly duplicate: boolean;
+}
+
+/** An advance whose outcome the operator has not seen yet — answered from the ledger, never guessed. */
+export type PendingAdvanceDto =
+  | { readonly status: "recorded"; readonly key: string; readonly advance: AdvanceDto }
+  | {
+      readonly status: "open" | "closed";
+      readonly key: string;
+      readonly customerId: string;
+      readonly customerName: string;
+      readonly amount: MoneyDto;
+      readonly channel: AdvanceChannelDto;
+      readonly reference: string | null;
+      readonly createdAt: string;
+    }
+  | { readonly status: "unknown"; readonly key: string; readonly createdAt: string };
+
+export interface AdvanceKeyRequest {
+  readonly idempotencyKey: string;
+}
+
+export interface AdvanceIdRequest {
+  readonly advanceId: string;
+}
+
+export interface AdvanceCorrectionDto {
+  readonly kind: "not_received" | "replaced";
+  readonly reason: string;
+  readonly fundsNotReceived: boolean;
+  readonly correctedByName: string;
+  readonly correctedAt: string;
+  readonly businessDate: string;
+  /** For 'replaced': the successor's ADV number. */
+  readonly successorNumber: string | null;
+}
+
+export interface AdvanceStatementLineDto {
+  readonly advance: AdvanceDto;
+  /** The live, applicable balance — 0 once corrected. Never netted against debt (D2). */
+  readonly unused: MoneyDto;
+  readonly correction: AdvanceCorrectionDto | null;
+}
+
+export interface AdvanceStatementDto {
+  readonly customerId: string;
+  readonly lines: readonly AdvanceStatementLineDto[];
+}
+
+export interface CorrectAdvanceRequest {
+  readonly advanceId: string;
+  readonly kind: "not_received" | "replaced";
+  readonly reason: string;
+  readonly confirmNotReceived?: boolean;
+  readonly customerId?: string;
+  readonly amountMinor?: string;
+  readonly channel?: AdvanceChannelDto;
+  readonly reference?: string | null;
+  readonly fundsConfirmed?: boolean;
+  readonly idempotencyKey: string;
+}
+
+export interface CorrectAdvanceResponse {
+  readonly original: AdvanceDto;
+  readonly successor: AdvanceDto | null;
+  readonly correction: AdvanceCorrectionDto;
+  readonly duplicate: boolean;
+}
+
+export type PrintAdvanceResponse = { readonly status: "printed" | "cancelled" | "unavailable" };
+export type SaveAdvancePdfResponse = { readonly status: "cancelled" } | { readonly status: "saved"; readonly fileName: string };
+
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
   listCashiers(): Promise<IpcResult<CashierDto[]>>;
@@ -1703,4 +1821,23 @@ export interface PosApi {
   /** The renderer sends an INVOICE ID. Main loads the frozen invoice and owns the print. */
   printInvoice(req: InvoiceIdRequest): Promise<IpcResult<PrintInvoiceResponse>>;
   saveInvoicePdf(req: InvoiceIdRequest): Promise<IpcResult<SaveInvoicePdfResponse>>;
+
+  // ── Customer advances (migration 20) ─────────────────────────────────────────────────────────
+  /** Owner OR cashier (D1). Crash-safe: intent, then ADV number + advance + resolution. */
+  recordAdvance(req: RecordAdvanceRequest): Promise<IpcResult<RecordAdvanceResponse>>;
+  /** Every advance whose outcome was not yet seen, answered from the ledger. */
+  pendingAdvances(): Promise<IpcResult<PendingAdvanceDto[]>>;
+  /** Finish an OPEN advance under its ORIGINAL key (the money really was received). */
+  finishAdvance(req: AdvanceKeyRequest): Promise<IpcResult<RecordAdvanceResponse>>;
+  /** Close an OPEN advance as NOT received (its creator or the owner). Final. */
+  closeAdvance(req: AdvanceKeyRequest): Promise<IpcResult<null>>;
+  /** The operator has SEEN the outcome. */
+  acknowledgeAdvance(req: AdvanceKeyRequest): Promise<IpcResult<null>>;
+  /** Owner only: a customer's advances with balances and corrections (separate from debt). */
+  getAdvanceStatement(req: { readonly customerId: string }): Promise<IpcResult<AdvanceStatementDto>>;
+  /** Owner only (G2): not received, or replaced by a corrected restatement. */
+  correctAdvance(req: CorrectAdvanceRequest): Promise<IpcResult<CorrectAdvanceResponse>>;
+  /** Main loads the ADV document from the ledger by id and owns the print / the PDF. */
+  printAdvance(req: AdvanceIdRequest): Promise<IpcResult<PrintAdvanceResponse>>;
+  saveAdvancePdf(req: AdvanceIdRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
 }

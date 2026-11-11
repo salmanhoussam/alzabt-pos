@@ -90,7 +90,12 @@ describe("the customer channels", () => {
     // 🔴 TRANSITION (SELL-SPLIT-CASH-WHISH, 2026-11-09): 80 -> 81 with createSplitSale — a PAID sale (cash +
     // Whish = the total exactly), same permission as createSale; it creates no debt, so the debt-creator
     // list below is unchanged. The old value was 80.
-    expect(Object.keys(CHANNELS)).toHaveLength(81);
+    // 🔴 TRANSITION (migration 20, ADV-RECORD-CASH-WHISH, owner DEC-35s): 81 -> 90 with the nine
+    // customer-advance channels (record / pending / finish / close / acknowledge / statement /
+    // correct / print / PDF). The three that move money are named in their OWN closed list in the
+    // next test, because the money-writer pattern there (/payment|receipt/) would not see them.
+    // The old value was 81.
+    expect(Object.keys(CHANNELS)).toHaveLength(90);
   });
 
   // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".
@@ -134,6 +139,28 @@ describe("the customer channels", () => {
     const debtCreators = names.filter((n) => /credit|debt|obligation|onAccount/i.test(n)).sort();
     expect(debtCreators).toEqual(["createCustomerCreditSale"]);
     expect(accessFor("createCustomerCreditSale")).toBe("owner");
+    // 🔴 MIGRATION 20 — the advance channels, as a CLOSED NAMED list (the money-writer pattern above
+    // cannot see them: an enumeration that skips unknown names goes blind, it does not fail).
+    const advanceChannels = names.filter((n) => /advance/i.test(n)).sort();
+    expect(advanceChannels).toEqual(
+      [
+        "acknowledgeAdvance",
+        "closeAdvance",
+        "correctAdvance",
+        "finishAdvance",
+        "getAdvanceStatement",
+        "pendingAdvances",
+        "printAdvance",
+        "recordAdvance",
+        "saveAdvancePdf",
+      ].sort(),
+    );
+    // The three that MOVE money: record and finish (owner + cashier, decision D1 — the cashier takes
+    // the money at the till) and correct (owner only). None creates a debt; none settles one.
+    expect(accessFor("recordAdvance")).toBe("session");
+    expect(accessFor("finishAdvance")).toBe("session");
+    expect(accessFor("correctAdvance")).toBe("owner");
+    expect(accessFor("getAdvanceStatement")).toBe("owner");
   });
 
   it("🔴 every channel is classified, and the customer ones carry the intended level", () => {

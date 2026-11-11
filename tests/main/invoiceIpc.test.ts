@@ -104,7 +104,10 @@ describe("the invoice channels exist and answer", () => {
   // The list stays EXHAUSTIVE and pinned by name rather than counted: a channel that becomes async
   // by accident is a caller somewhere receiving a Promise it treats as a value, and `syncHandlers`
   // throwing is how that gets caught.
-  it("printInvoice, saveInvoicePdf and the two phone-session channels are the ONLY asynchronous channels", () => {
+  // TRANSITION (migration 20, ADV-RECORD): the list above was four. `printAdvance` and
+  // `saveAdvancePdf` join it for the invoice's own reason — they open an offscreen window and await
+  // the print dialog / printToPDF — so the list is now six, still pinned by name.
+  it("the invoice + advance print/PDF channels and the two phone-session channels are the ONLY asynchronous channels", () => {
     // `syncHandlers` assumes exactly this. Asserting it keeps that assumption honest rather than
     // leaving a cast that would quietly hand a Promise to a caller expecting a result.
     const handlers = createIpcHandlers(h.service, { invoices: h.invoices });
@@ -124,7 +127,9 @@ describe("the invoice channels exist and answer", () => {
     }
     expect(async_.sort()).toEqual([
       "cancelPhoneSession",
+      "printAdvance",
       "printInvoice",
+      "saveAdvancePdf",
       "saveInvoicePdf",
       "startPhoneSession",
     ]);

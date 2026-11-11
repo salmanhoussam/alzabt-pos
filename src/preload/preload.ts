@@ -197,6 +197,15 @@ const CH = {
   pickInvoiceLogo: "pos:pickInvoiceLogo",
   printInvoice: "pos:printInvoice",
   saveInvoicePdf: "pos:saveInvoicePdf",
+  recordAdvance: "pos:recordAdvance",
+  pendingAdvances: "pos:pendingAdvances",
+  finishAdvance: "pos:finishAdvance",
+  closeAdvance: "pos:closeAdvance",
+  acknowledgeAdvance: "pos:acknowledgeAdvance",
+  getAdvanceStatement: "pos:getAdvanceStatement",
+  correctAdvance: "pos:correctAdvance",
+  printAdvance: "pos:printAdvance",
+  saveAdvancePdf: "pos:saveAdvancePdf",
 } as const satisfies typeof CHANNELS;
 
 const api: PosApi = {
@@ -429,6 +438,37 @@ const api: PosApi = {
   pickInvoiceLogo: () => ipcRenderer.invoke(CH.pickInvoiceLogo),
   printInvoice: (req) => ipcRenderer.invoke(CH.printInvoice, { invoiceId: req.invoiceId }),
   saveInvoicePdf: (req) => ipcRenderer.invoke(CH.saveInvoicePdf, { invoiceId: req.invoiceId }),
+
+  // Customer advances — every field copied by name, so nothing extra crosses the bridge.
+  recordAdvance: (req) =>
+    ipcRenderer.invoke(CH.recordAdvance, {
+      customerId: req.customerId,
+      amountMinor: req.amountMinor,
+      channel: req.channel,
+      reference: req.reference ?? null,
+      fundsConfirmed: req.fundsConfirmed ?? false,
+      idempotencyKey: req.idempotencyKey,
+    }),
+  pendingAdvances: () => ipcRenderer.invoke(CH.pendingAdvances),
+  finishAdvance: (req) => ipcRenderer.invoke(CH.finishAdvance, { idempotencyKey: req.idempotencyKey }),
+  closeAdvance: (req) => ipcRenderer.invoke(CH.closeAdvance, { idempotencyKey: req.idempotencyKey }),
+  acknowledgeAdvance: (req) => ipcRenderer.invoke(CH.acknowledgeAdvance, { idempotencyKey: req.idempotencyKey }),
+  getAdvanceStatement: (req) => ipcRenderer.invoke(CH.getAdvanceStatement, { customerId: req.customerId }),
+  correctAdvance: (req) =>
+    ipcRenderer.invoke(CH.correctAdvance, {
+      advanceId: req.advanceId,
+      kind: req.kind,
+      reason: req.reason,
+      confirmNotReceived: req.confirmNotReceived,
+      customerId: req.customerId,
+      amountMinor: req.amountMinor,
+      channel: req.channel,
+      reference: req.reference,
+      fundsConfirmed: req.fundsConfirmed,
+      idempotencyKey: req.idempotencyKey,
+    }),
+  printAdvance: (req) => ipcRenderer.invoke(CH.printAdvance, { advanceId: req.advanceId }),
+  saveAdvancePdf: (req) => ipcRenderer.invoke(CH.saveAdvancePdf, { advanceId: req.advanceId }),
 };
 
 contextBridge.exposeInMainWorld("pos", Object.freeze(api));

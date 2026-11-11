@@ -103,6 +103,18 @@ export type DomainErrorCode =
   // INV-PAY-METHOD (owner, 2026-11-09) — an invoice marked (part-)paid must say, at issue, how the money
   // arrived (cash, or Whish with its evidence). Its own sentence: the fix is "choose a method".
   | "INVOICE_PAYMENT_METHOD_REQUIRED"
+  // Migration 20 (DEC-35r) — an earlier advance for this customer was started and its outcome has not
+  // been settled (finished under its own key, or closed as not received). Its own sentence: the fix is
+  // "resolve the pending advance", which is not the collection's sentence.
+  | "ADVANCE_UNRESOLVED"
+  // Migration 20 G2 (DEC-35s) — correcting a mistaken advance. Each its own sentence and its own fix:
+  // the advance does not exist / was already corrected / is already used (apply or refund) / the
+  // corrected amount is ABOVE what was recorded (the extra of one transfer cannot reuse its reference:
+  // owner review, never a second receipt).
+  | "ADVANCE_NOT_FOUND"
+  | "ADVANCE_ALREADY_CORRECTED"
+  | "ADVANCE_IN_USE"
+  | "ADVANCE_CORRECTION_ABOVE_ORIGINAL"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

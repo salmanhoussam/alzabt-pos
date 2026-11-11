@@ -13,6 +13,8 @@ import type { CustomerDto } from "../../shared/ipcContract";
 import { contactPatch, disambiguator, mayMutateCustomers, nameIsValid, sameNamed } from "../customerDirectory";
 import { CustomerFinder } from "./CustomerFinder";
 import { CustomerStatement } from "./CustomerStatement";
+import { AdvanceSheet } from "./AdvanceSheet";
+import { PendingAdvances } from "./AdvancePanels";
 
 interface Props {
   // `role` is optional on CashierDto, so it is optional here; `mayMutateCustomers` treats an
@@ -34,6 +36,10 @@ export function CustomersScreen({ operator }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
+  // Customer advances (migration 20): owner AND cashier receive one. Every money figure lives in the
+  // sheet and the owner-only section (their own files) — this directory still renders none.
+  const [advanceFor, setAdvanceFor] = useState<CustomerDto | null>(null);
+  const [advanceTick, setAdvanceTick] = useState(0);
 
   const reload = useCallback(async () => {
     setError(null);
@@ -254,10 +260,29 @@ export function CustomersScreen({ operator }: Props) {
                 classified "owner" and `LedgerService.requireOwner` re-reads the live role, so a
                 cashier reaching the channel directly is refused. This only avoids offering a
                 panel that would be refused. Read-only: nothing here can post a debt or a payment. */}
-            {mayMutate && <CustomerStatement customerId={selected.id} />}
+            {selected.isActive && (
+              <div className="panel-actions">
+                <button className="btn primary" onClick={() => setAdvanceFor(selected)} data-testid="customers-advance">
+                  {t("adv.open")}
+                </button>
+              </div>
+            )}
+            {mayMutate && <CustomerStatement customerId={selected.id} advanceRefresh={advanceTick} />}
           </div>
         )}
       </div>
+
+      <PendingAdvances refreshKey={advanceTick} onSettled={() => setAdvanceTick((n) => n + 1)} />
+
+      {advanceFor && (
+        <AdvanceSheet
+          customer={advanceFor}
+          onClose={() => {
+            setAdvanceFor(null);
+            setAdvanceTick((n) => n + 1);
+          }}
+        />
+      )}
 
       {adding && (
         <CustomerFinder
