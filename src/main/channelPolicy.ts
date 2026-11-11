@@ -181,6 +181,12 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // `AdvanceService.requireOwner` / the trigger on `advance_corrections.corrected_by`.
   getAdvanceStatement: "owner",
   correctAdvance: "owner",
+  // 🔴 OWNER: the day's money per channel and per operator (DEC-35x). A cashier keeps Today's Sales.
+  // Refused again by `DailyMoneyService.day`, which re-reads the live role.
+  getDailyMoney: "owner",
+  // 🔴 OWNER (D3): apply an advance to an existing debt — refused again by `AdvanceService.requireOwner`
+  // and by the M19 trigger on `advance_applications.applied_by`.
+  applyAdvanceToDebt: "owner",
 
   // ── Owner only ────────────────────────────────────────────────────────────────────────────────
   // Reversing money.

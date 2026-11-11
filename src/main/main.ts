@@ -24,6 +24,8 @@ import { InvoiceService } from "../application/invoiceService";
 import { PartyService } from "../application/partyService";
 import { LedgerService } from "../application/ledgerService";
 import { AdvanceService } from "../application/advanceService";
+import { DailyMoneyService } from "../application/dailyMoneyService";
+import { DailyMoneyRepository } from "../persistence/dailyMoneyRepository";
 import { AdvanceRepository } from "../persistence/advanceRepository";
 import { renderAdvanceDocument } from "./advanceDocument";
 import { advanceDto, correctionDto } from "./ipcHandlers";
@@ -972,6 +974,19 @@ function startTill(): void {
     terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
   });
 
+  // DAILY MONEY IN / OUT (DEC-35x): read-only, the SAME connection and the SAME live actor. No
+  // transaction provider — it never writes.
+  const dailyMoney = new DailyMoneyService({
+    repository: new DailyMoneyRepository(db),
+    actor: () => {
+      const cashier = service.currentCashier();
+      if (!cashier) return null;
+      const role = service.currentRole();
+      return role === null ? null : { id: cashier.id, role };
+    },
+    terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
+  });
+
   // The phone bridge reads this through its getter when a session starts.
   posService = service;
 
@@ -985,6 +1000,7 @@ function startTill(): void {
     parties,
     ledger: ledgerService,
     advances: advanceService,
+    dailyMoney,
     printAdvance: printAdvanceDocument,
     saveAdvancePdf: saveAdvancePdfFile,
     pickInvoiceLogo,

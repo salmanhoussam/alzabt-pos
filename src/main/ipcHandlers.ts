@@ -30,6 +30,9 @@ import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
 import type { LedgerService } from "../application/ledgerService";
 import type { AdvanceCorrectionView, AdvanceService, AdvanceView } from "../application/advanceService";
+import type { AdvanceApplicationRecord } from "../persistence/advanceRepository";
+import type { DailyMoneyService } from "../application/dailyMoneyService";
+import { type ChannelAmounts, type DailyMoneyReport, type MoneyPart, MONEY_CHANNELS } from "../domain/dailyMoney";
 import type { AdvanceCorrectionDto, AdvanceDto, PendingAdvanceDto } from "../shared/ipcContract";
 import type { BackupRestoreActions } from "./backupRestore";
 import type { RestoreLock } from "./restoreLock";
@@ -227,6 +230,8 @@ export interface IpcHandlerOptions {
   readonly ledger?: LedgerService;
   /** Customer advances (migration 20). Absent means every advance channel answers NOT_AVAILABLE. */
   readonly advances?: AdvanceService;
+  /** DAILY MONEY IN / OUT (owner, read-only). Absent means the channel answers NOT_AVAILABLE. */
+  readonly dailyMoney?: DailyMoneyService;
   /** Prints one ADV- document. Main loads it from the ledger BY ID; no markup crosses the bridge. */
   readonly printAdvance?: (advanceId: string) => Promise<"printed" | "cancelled">;
   /** Save-as dialog + PDF of one ADV- document. Null when the operator cancelled. */
@@ -1860,8 +1865,30 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
             advance: advanceDto(advances().view(l.advance)),
             unused: { minor: l.unusedMinor.toString(), currency: l.advance.currency },
             correction: correctionDto(advances().correctionView(l.correction)),
+            applications: advances().applicationsOf(l.advance.id).map(applicationDto),
           })),
       };
+    }),
+    applyAdvanceToDebt: wrap("applyAdvanceToDebt", (p) => {
+      const o = exactObject(p, ["advanceId", "obligationId", "amountMinor", "idempotencyKey"]);
+      const r = advances().applyToDebt({
+        advanceId: str(o.advanceId, "advanceId", 100),
+        obligationId: str(o.obligationId, "obligationId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      return {
+        application: applicationDto(r.application),
+        advanceNumber: advances().view(r.advance).number,
+        unused: { minor: r.unusedMinor.toString(), currency: r.advance.currency },
+        debtOutstanding: { minor: r.debtOutstandingMinor.toString(), currency: r.advance.currency },
+        duplicate: r.duplicate,
+      };
+    }),
+    getDailyMoney: wrap("getDailyMoney", (p) => {
+      const o = objectWithOptional(p, [], ["date"]);
+      if (!options.dailyMoney) throw new DomainError("NOT_AVAILABLE", "The day's money is not available on this terminal");
+      return dailyMoneyDto(options.dailyMoney.day("date" in o ? o.date : undefined));
     }),
     correctAdvance: wrap("correctAdvance", (p) => {
       const o = objectWithOptional(
@@ -1907,6 +1934,60 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
     }),
   };
+
+  /** One application, named by the debt's own document — the same words the debt statement uses. */
+  function applicationDto(a: AdvanceApplicationRecord) {
+    const debt = advances().debtOf(a.obligationId);
+    return {
+      id: a.id,
+      obligationId: a.obligationId,
+      debtDocument: debt ? statementDocument(debt) : ({ kind: "unresolved" } as const),
+      amount: { minor: a.amountMinor.toString(), currency: a.currency },
+      appliedAt: a.appliedAt,
+      appliedByName: advances().operatorName(a.appliedBy),
+    };
+  }
+
+  function dailyMoneyDto(r: DailyMoneyReport) {
+    const ch = (m: ChannelAmounts) => Object.fromEntries(MONEY_CHANNELS.map((c) => [c, m[c].toString()])) as Record<(typeof MONEY_CHANNELS)[number], string>;
+    const m = (v: bigint) => ({ minor: v.toString(), currency: r.currency });
+    const part = (x: MoneyPart) => ({ count: x.count, byChannel: ch(x.byChannel), total: m(x.totalMinor) });
+    return {
+      date: r.date,
+      currency: r.currency,
+      sales: {
+        count: r.sales.count,
+        voidedCount: r.sales.voidedCount,
+        revenue: m(r.sales.revenueMinor),
+        voidedTotal: m(r.sales.voidedTotalMinor),
+        onAccount: m(r.sales.onAccountMinor),
+        received: part(r.sales.received),
+        voidedReceived: part(r.sales.voidedReceived),
+      },
+      collections: part(r.collections),
+      advances: part(r.advances),
+      corrections: part(r.corrections),
+      moneyIn: part(r.moneyIn),
+      refunds: part(r.refunds),
+      supplierPayments: part(r.supplierPayments),
+      moneyOut: part(r.moneyOut),
+      net: { byChannel: ch(r.net.byChannel), total: m(r.net.totalMinor) },
+      advanceApplied: part(r.advanceApplied),
+      byOperator: r.byOperator.map((o) => ({
+        operatorId: o.operatorId,
+        operatorName: o.operatorName,
+        sales: ch(o.sales),
+        voidedSales: ch(o.voidedSales),
+        collections: ch(o.collections),
+        advances: ch(o.advances),
+        corrections: ch(o.corrections),
+        moneyIn: ch(o.moneyIn),
+        moneyOut: ch(o.moneyOut),
+      })),
+      correctionsBy: r.correctionsBy.map((c) => ({ ...c })),
+      lateVoids: r.lateVoids.map((v) => ({ saleId: v.saleId, saleDate: v.saleDate, total: { minor: v.totalMinor.toString(), currency: v.currency } })),
+    };
+  }
 
   function advances(): AdvanceService {
     if (!options.advances) throw new DomainError("NOT_AVAILABLE", "Customer advances are not available on this terminal");
@@ -1982,6 +2063,10 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   function toStatementDto(customer: PartyRow, s: ReturnType<LedgerService["statementFor"]>): CustomerStatementDto {
     // Migration 18: which settlements are SHARES of a receipt (display only; a share is not money).
     const shares = ledger().receiptsOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)));
+    // DEC-35x: which settlements were paid FROM an advance (display only; not money of that day).
+    const fromAdvance = options.advances
+      ? options.advances.advancesOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)))
+      : new Map<string, { advanceId: string; number: string }>();
     return {
       customer: toCustomerDto(customer),
       // ACC-2: built HERE, so every channel that returns a statement (read, and the refreshed one
@@ -2037,6 +2122,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
                   total: { minor: r.amountMinor.toString(), currency: r.currency },
                 }
               : null)(shares.get(st.id)),
+          advance: fromAdvance.get(st.id) ?? null,
         })),
       })),
       // One entry per currency, in a stable order so the screen does not reshuffle between reads.

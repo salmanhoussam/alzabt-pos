@@ -93,6 +93,8 @@ interface Props {
 }
 
 export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
+  // DEC-35x: an advance applied to a debt changes THIS statement too — re-read it from main.
+  const [reload, setReload] = useState(0);
   const { t } = useT();
   /** Own sentences for this slice's refusals (own codes, so the refusal-audit rules are untouched). */
   const collectErrorText = (err: unknown): string => {
@@ -383,7 +385,7 @@ export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
     return () => {
       live = false;
     };
-  }, [customerId]);
+  }, [customerId, reload]);
 
   if (error !== null) {
     return (
@@ -581,9 +583,16 @@ export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
                       {o.settlements.map((s) => (
                         <li key={s.id} data-testid="statement-settlement">
                           <bdi dir="ltr">{fmt(s.amount)}</bdi>{" "}
-                          <span className="muted small" data-testid="statement-settlement-method" data-method={s.method} data-provider={s.provider ?? ""}>
-                            {t(`statement.channel.${s.provider ?? s.method}`)}
-                          </span>{" "}
+                          {s.advance !== null ? (
+                            /* DEC-35x: paid FROM an advance — not money received that day, so no channel is named. */
+                            <span className="muted small" data-testid="statement-settlement-advance" data-advance={s.advance.number}>
+                              {t("statement.fromAdvance")} <bdi dir="ltr">{s.advance.number}</bdi>
+                            </span>
+                          ) : (
+                            <span className="muted small" data-testid="statement-settlement-method" data-method={s.method} data-provider={s.provider ?? ""}>
+                              {t(`statement.channel.${s.provider ?? s.method}`)}
+                            </span>
+                          )}{" "}
                           {s.reference !== null && (
                             <span className="muted small" data-testid="statement-settlement-reference">
                               <bdi dir="ltr">{s.reference}</bdi>{" "}
@@ -827,7 +836,7 @@ export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
       </section>
       {/* Migration 20 — the customer's ADVANCES, inside the statement (they are its figures, owner
           only) but in their OWN section: never netted against the debt above (owner decision D2). */}
-      <AdvanceStatementSection customerId={customerId} refreshKey={advanceRefresh} />
+      <AdvanceStatementSection customerId={customerId} refreshKey={advanceRefresh} onChanged={() => setReload((n) => n + 1)} />
     </section>
   );
 }

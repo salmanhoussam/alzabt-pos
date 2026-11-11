@@ -125,7 +125,9 @@ export const CHANNELS = {
   closeAdvance: "pos:closeAdvance",
   acknowledgeAdvance: "pos:acknowledgeAdvance",
   getAdvanceStatement: "pos:getAdvanceStatement",
+  getDailyMoney: "pos:getDailyMoney",
   correctAdvance: "pos:correctAdvance",
+  applyAdvanceToDebt: "pos:applyAdvanceToDebt",
   printAdvance: "pos:printAdvance",
   saveAdvancePdf: "pos:saveAdvancePdf",
 } as const;
@@ -350,6 +352,57 @@ export interface TodaySalesDto {
   readonly grossSales: MoneyDto;
   readonly voidTotal: MoneyDto;
   readonly netSales: MoneyDto;
+}
+
+/** DAILY MONEY IN / OUT — one channel's amounts (minor units, as text). Cash and Whish are always present. */
+export type DailyMoneyChannelDto = "cash" | "whish" | "bank_transfer" | "external" | "card" | "other" | "unspecified";
+export type ChannelAmountsDto = Readonly<Record<DailyMoneyChannelDto, string>>;
+
+export interface MoneyPartDto {
+  readonly count: number;
+  readonly byChannel: ChannelAmountsDto;
+  readonly total: MoneyDto;
+}
+
+export interface DailyMoneyOperatorDto {
+  readonly operatorId: string;
+  readonly operatorName: string;
+  readonly sales: ChannelAmountsDto;
+  readonly voidedSales: ChannelAmountsDto;
+  readonly collections: ChannelAmountsDto;
+  readonly advances: ChannelAmountsDto;
+  readonly corrections: ChannelAmountsDto;
+  readonly moneyIn: ChannelAmountsDto;
+  readonly moneyOut: ChannelAmountsDto;
+}
+
+/** Owner only. Every figure is folded by main from immutable ledger rows of that business day. */
+export interface DailyMoneyDto {
+  readonly date: string;
+  readonly currency: string;
+  readonly sales: {
+    readonly count: number;
+    readonly voidedCount: number;
+    readonly revenue: MoneyDto;
+    readonly voidedTotal: MoneyDto;
+    readonly onAccount: MoneyDto;
+    readonly received: MoneyPartDto;
+    readonly voidedReceived: MoneyPartDto;
+  };
+  readonly collections: MoneyPartDto;
+  readonly advances: MoneyPartDto;
+  readonly corrections: MoneyPartDto;
+  readonly moneyIn: MoneyPartDto;
+  readonly refunds: MoneyPartDto;
+  readonly supplierPayments: MoneyPartDto;
+  readonly moneyOut: MoneyPartDto;
+  readonly net: { readonly byChannel: ChannelAmountsDto; readonly total: MoneyDto };
+  readonly advanceApplied: MoneyPartDto;
+  readonly byOperator: readonly DailyMoneyOperatorDto[];
+  /** Who RECORDED the day's corrections — audit only; the money stays with the original receiver. */
+  readonly correctionsBy: ReadonlyArray<{ readonly operatorId: string; readonly operatorName: string; readonly count: number }>;
+  /** Voids dated today for a sale of another day (foreign data). Not applied to any day's money. */
+  readonly lateVoids: ReadonlyArray<{ readonly saleId: string; readonly saleDate: string; readonly total: MoneyDto }>;
 }
 
 export interface LoginRequest {
@@ -849,6 +902,11 @@ export interface StatementSettlementDto {
    * is never additional money. Null for every direct collection and every historical row.
    */
   readonly receipt: StatementReceiptDto | null;
+  /**
+   * DEC-35x. Set when this row was paid FROM a customer advance: it is NOT money received that day
+   * (the money arrived as the ADV-), so the screen names the advance instead of a payment channel.
+   */
+  readonly advance: { readonly advanceId: string; readonly number: string } | null;
 }
 
 /** The receipt a settlement is a share of (migration 18). Display only; the amount is the WHOLE receipt. */
@@ -1654,6 +1712,34 @@ export interface AdvanceStatementLineDto {
   /** The live, applicable balance — 0 once corrected. Never netted against debt (D2). */
   readonly unused: MoneyDto;
   readonly correction: AdvanceCorrectionDto | null;
+  /** DEC-35x: what this advance paid, debt by debt (oldest first). Not money received. */
+  readonly applications: readonly AdvanceApplicationDto[];
+}
+
+export interface AdvanceApplicationDto {
+  readonly id: string;
+  readonly obligationId: string;
+  /** The debt's own document (receipt number / invoice / manual reference), as the debt statement shows it. */
+  readonly debtDocument: StatementDocumentDto;
+  readonly amount: MoneyDto;
+  readonly appliedAt: string;
+  readonly appliedByName: string;
+}
+
+export interface ApplyAdvanceRequest {
+  readonly advanceId: string;
+  readonly obligationId: string;
+  readonly amountMinor: string;
+  readonly idempotencyKey: string;
+}
+
+export interface ApplyAdvanceResponse {
+  readonly application: AdvanceApplicationDto;
+  readonly advanceNumber: string;
+  /** Read back AFTER the commit. */
+  readonly unused: MoneyDto;
+  readonly debtOutstanding: MoneyDto;
+  readonly duplicate: boolean;
 }
 
 export interface AdvanceStatementDto {
@@ -1835,6 +1921,10 @@ export interface PosApi {
   acknowledgeAdvance(req: AdvanceKeyRequest): Promise<IpcResult<null>>;
   /** Owner only: a customer's advances with balances and corrections (separate from debt). */
   getAdvanceStatement(req: { readonly customerId: string }): Promise<IpcResult<AdvanceStatementDto>>;
+  /** Owner only (DEC-35x): pay part or all of ONE existing debt from the SAME customer's advance. Not new money. */
+  applyAdvanceToDebt(req: ApplyAdvanceRequest): Promise<IpcResult<ApplyAdvanceResponse>>;
+  /** Owner only: one business day's money in / out (date absent = today). Read-only. */
+  getDailyMoney(req: { readonly date?: string }): Promise<IpcResult<DailyMoneyDto>>;
   /** Owner only (G2): not received, or replaced by a corrected restatement. */
   correctAdvance(req: CorrectAdvanceRequest): Promise<IpcResult<CorrectAdvanceResponse>>;
   /** Main loads the ADV document from the ledger by id and owns the print / the PDF. */

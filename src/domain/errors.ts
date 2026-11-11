@@ -115,6 +115,17 @@ export type DomainErrorCode =
   | "ADVANCE_ALREADY_CORRECTED"
   | "ADVANCE_IN_USE"
   | "ADVANCE_CORRECTION_ABOVE_ORIGINAL"
+  // DEC-35x — APPLY AN ADVANCE TO AN EXISTING DEBT (owner only). Each its own sentence and its own fix:
+  // the debt does not exist / belongs to another customer / owes nothing (settled, or its sale voided) /
+  // is in another currency / the amount is above the advance's unused balance / above what the debt
+  // still owes / the advance was corrected (its successor, if any, is the one to apply).
+  | "ADVANCE_DEBT_NOT_FOUND"
+  | "ADVANCE_DEBT_OTHER_CUSTOMER"
+  | "ADVANCE_DEBT_NOT_OPEN"
+  | "ADVANCE_DEBT_CURRENCY"
+  | "ADVANCE_APPLY_ABOVE_BALANCE"
+  | "ADVANCE_APPLY_ABOVE_DEBT"
+  | "ADVANCE_CORRECTED_NOT_APPLICABLE"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

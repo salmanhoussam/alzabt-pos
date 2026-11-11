@@ -95,7 +95,12 @@ describe("the customer channels", () => {
     // correct / print / PDF). The three that move money are named in their OWN closed list in the
     // next test, because the money-writer pattern there (/payment|receipt/) would not see them.
     // The old value was 81.
-    expect(Object.keys(CHANNELS)).toHaveLength(90);
+    // 🔴 TRANSITION (DEC-35x, Daily Money In/Out): 90 -> 91 with getDailyMoney — owner-only and a READ:
+    // it moves no money, so neither the money-writer nor the advance list below changes. The old value was 90.
+    // 🔴 TRANSITION (DEC-35x, Apply Advance to Existing Debt): 91 -> 92 with applyAdvanceToDebt — owner-only;
+    // it SETTLES an existing debt from an advance (no new money) and creates none. Named in every closed
+    // list in the next test. The old value was 91.
+    expect(Object.keys(CHANNELS)).toHaveLength(92);
   });
 
   // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".
@@ -127,8 +132,11 @@ describe("the customer channels", () => {
     expect(accessFor("recordCustomerPayment")).toBe("owner");
     // 🔴 EXACTLY ONE CHANNEL MENTIONS PAYMENT OR SETTLEMENT. If a second financial write is ever
     // added, this count moves and whoever adds it has to come and say so here.
-    const financial = names.filter((n) => /payment|settle|obligation|balance|debt/i.test(n));
-    expect(financial).toEqual(["recordCustomerPayment"]);
+    // 🔴 TRANSITION (DEC-35x): exactly one became a CLOSED NAMED list of two — applyAdvanceToDebt settles a
+    // debt FROM an advance (owner-only). Old value: ["recordCustomerPayment"].
+    const financial = names.filter((n) => /payment|settle|obligation|balance|debt/i.test(n)).sort();
+    expect(financial).toEqual(["applyAdvanceToDebt", "recordCustomerPayment"]);
+    expect(accessFor("applyAdvanceToDebt")).toBe("owner");
     // 🔴 TRANSITION (M17B-S1): "exactly one money writer" became a CLOSED, NAMED list of exactly two.
     // The new one shares one real external receipt across debts; it is owner-only and cannot post a
     // debt. A third money-moving channel must come here and be named — never matched by a pattern.
@@ -136,7 +144,9 @@ describe("the customer channels", () => {
     expect(moneyWriters).toEqual(["recordAllocatedReceipt", "recordCustomerPayment"]);
     expect(accessFor("recordAllocatedReceipt")).toBe("owner");
     // SELL-CREDIT: the closed, NAMED list of debt creators. Old value: none.
-    const debtCreators = names.filter((n) => /credit|debt|obligation|onAccount/i.test(n)).sort();
+    // 🔴 TRANSITION (DEC-35x): the pattern now also sees applyAdvanceToDebt, which REDUCES a debt and
+    // creates none — so it is removed BY NAME, and the creators stay exactly one. Old filter: unchanged.
+    const debtCreators = names.filter((n) => /credit|debt|obligation|onAccount/i.test(n) && n !== "applyAdvanceToDebt").sort();
     expect(debtCreators).toEqual(["createCustomerCreditSale"]);
     expect(accessFor("createCustomerCreditSale")).toBe("owner");
     // 🔴 MIGRATION 20 — the advance channels, as a CLOSED NAMED list (the money-writer pattern above
@@ -145,6 +155,8 @@ describe("the customer channels", () => {
     expect(advanceChannels).toEqual(
       [
         "acknowledgeAdvance",
+        // TRANSITION (DEC-35x): the owner's application of an advance to a debt. Old list: without it.
+        "applyAdvanceToDebt",
         "closeAdvance",
         "correctAdvance",
         "finishAdvance",
@@ -161,6 +173,7 @@ describe("the customer channels", () => {
     expect(accessFor("finishAdvance")).toBe("session");
     expect(accessFor("correctAdvance")).toBe("owner");
     expect(accessFor("getAdvanceStatement")).toBe("owner");
+    expect(accessFor("applyAdvanceToDebt")).toBe("owner");
   });
 
   it("🔴 every channel is classified, and the customer ones carry the intended level", () => {

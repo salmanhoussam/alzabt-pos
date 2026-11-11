@@ -203,7 +203,9 @@ const CH = {
   closeAdvance: "pos:closeAdvance",
   acknowledgeAdvance: "pos:acknowledgeAdvance",
   getAdvanceStatement: "pos:getAdvanceStatement",
+  getDailyMoney: "pos:getDailyMoney",
   correctAdvance: "pos:correctAdvance",
+  applyAdvanceToDebt: "pos:applyAdvanceToDebt",
   printAdvance: "pos:printAdvance",
   saveAdvancePdf: "pos:saveAdvancePdf",
 } as const satisfies typeof CHANNELS;
@@ -454,6 +456,7 @@ const api: PosApi = {
   closeAdvance: (req) => ipcRenderer.invoke(CH.closeAdvance, { idempotencyKey: req.idempotencyKey }),
   acknowledgeAdvance: (req) => ipcRenderer.invoke(CH.acknowledgeAdvance, { idempotencyKey: req.idempotencyKey }),
   getAdvanceStatement: (req) => ipcRenderer.invoke(CH.getAdvanceStatement, { customerId: req.customerId }),
+  getDailyMoney: (req) => ipcRenderer.invoke(CH.getDailyMoney, req.date === undefined ? {} : { date: req.date }),
   correctAdvance: (req) =>
     ipcRenderer.invoke(CH.correctAdvance, {
       advanceId: req.advanceId,
@@ -465,6 +468,13 @@ const api: PosApi = {
       channel: req.channel,
       reference: req.reference,
       fundsConfirmed: req.fundsConfirmed,
+      idempotencyKey: req.idempotencyKey,
+    }),
+  applyAdvanceToDebt: (req) =>
+    ipcRenderer.invoke(CH.applyAdvanceToDebt, {
+      advanceId: req.advanceId,
+      obligationId: req.obligationId,
+      amountMinor: req.amountMinor,
       idempotencyKey: req.idempotencyKey,
     }),
   printAdvance: (req) => ipcRenderer.invoke(CH.printAdvance, { advanceId: req.advanceId }),

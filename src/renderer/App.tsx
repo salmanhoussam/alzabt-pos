@@ -244,7 +244,7 @@ export function App() {
             onDraftChange={(d) => setSellDraft({ operatorId: cashier.id, ...d })}
           />
         )}
-        {tab === "today" && <TodayScreen />}
+        {tab === "today" && <TodayScreen role={cashier?.role} />}
         {tab === "history" && <HistoryScreen role={cashier?.role} />}
         {tab === "products" && <ProductsScreen operator={cashier} />}
         {tab === "customers" && <CustomersScreen operator={cashier} />}

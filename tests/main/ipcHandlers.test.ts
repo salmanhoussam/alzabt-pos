@@ -194,6 +194,10 @@ describe("IPC surface", () => {
         "correctAdvance",
         "printAdvance",
         "saveAdvancePdf",
+        // 🔴 TRANSITION (DEC-35x, Daily Money In/Out): the owner-only, read-only day report. Old list: without it.
+        "getDailyMoney",
+        // 🔴 TRANSITION (DEC-35x, Apply Advance to Existing Debt): owner-only. Old list: without it.
+        "applyAdvanceToDebt",
       ].sort(),
     );
     // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
@@ -226,7 +230,10 @@ describe("IPC surface", () => {
     // 🔴 TRANSITION (SELL-SPLIT-CASH-WHISH): 80 -> 81 — createSplitSale. The old value was 80.
     // 🔴 TRANSITION (migration 20, customer advances): 81 -> 90 — the nine advance channels named in
     // the list above. The old value was 81.
-    expect(CHANNEL_NAMES).toHaveLength(90);
+    // 🔴 TRANSITION (DEC-35x, Daily Money In/Out): 90 -> 91 — getDailyMoney, an owner-classified READ
+    // that writes nothing. The old value was 90.
+    // 🔴 TRANSITION (DEC-35x): 91 -> 92 — applyAdvanceToDebt, owner-classified. The old value was 91.
+    expect(CHANNEL_NAMES).toHaveLength(92);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

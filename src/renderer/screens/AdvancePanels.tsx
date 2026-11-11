@@ -13,9 +13,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { call, fmt, pos } from "../api";
 import { useT } from "../i18n";
-import type { AdvanceDto, AdvanceStatementDto, PendingAdvanceDto } from "../../shared/ipcContract";
+import type { AdvanceDto, AdvanceStatementDto, MoneyDto, PendingAdvanceDto } from "../../shared/ipcContract";
 import { AdvanceReceipt, advanceErrorText } from "./AdvanceSheet";
 import { AdvanceCorrectionSheet } from "./AdvanceCorrectionSheet";
+import { AdvanceApplySheet } from "./AdvanceApplySheet";
+import { statementDocumentText } from "../statementDocument";
 
 export function PendingAdvances({ refreshKey, onSettled }: { refreshKey: number; onSettled: () => void }) {
   const { t } = useT();
@@ -121,12 +123,13 @@ export function PendingAdvances({ refreshKey, onSettled }: { refreshKey: number;
   );
 }
 
-export function AdvanceStatementSection({ customerId, refreshKey }: { customerId: string; refreshKey: number }) {
+export function AdvanceStatementSection({ customerId, refreshKey, onChanged }: { customerId: string; refreshKey: number; onChanged?: () => void }) {
   const { t } = useT();
   const [data, setData] = useState<AdvanceStatementDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [shown, setShown] = useState<AdvanceDto | null>(null);
   const [correcting, setCorrecting] = useState<AdvanceDto | null>(null);
+  const [applying, setApplying] = useState<{ advance: AdvanceDto; unused: MoneyDto } | null>(null);
   const [tick, setTick] = useState(0);
   useEffect(() => {
     let live = true;
@@ -189,6 +192,18 @@ export function AdvanceStatementSection({ customerId, refreshKey }: { customerId
                       </span>
                     )}
                     {/* Offered only on a fully unused, uncorrected advance — the trigger refuses anything else anyway. */}
+                    {/* DEC-35x: apply what is left to one of this customer's debts (owner; main decides the limits). */}
+                    {!l.correction && l.unused.minor !== "0" && (
+                      <button className="btn ghost" onClick={() => setApplying({ advance: l.advance, unused: l.unused })} data-testid="adv-stmt-apply">
+                        {t("adv.apply.open")}
+                      </button>
+                    )}
+                    {l.applications.map((a) => (
+                      <span key={a.id} className="muted small adv-stmt-applied" data-testid="adv-stmt-applied">
+                        {t("adv.apply.appliedTo")} <bdi>{statementDocumentText(a.debtDocument, t)}</bdi> · <bdi dir="ltr">{fmt(a.amount)}</bdi> ·{" "}
+                        <bdi dir="ltr">{a.appliedAt.slice(0, 10)}</bdi>
+                      </span>
+                    ))}
                     {!l.correction && l.unused.minor === l.advance.amount.minor && (
                       <button className="btn ghost" onClick={() => setCorrecting(l.advance)} data-testid="adv-stmt-correct">
                         {t("adv.corr.open")}
@@ -213,6 +228,19 @@ export function AdvanceStatementSection({ customerId, refreshKey }: { customerId
             <AdvanceReceipt advance={shown} duplicate={false} onClose={() => setShown(null)} />
           </div>
         </div>
+      )}
+      {applying && (
+        <AdvanceApplySheet
+          advance={applying.advance}
+          unused={applying.unused}
+          onClose={(changed) => {
+            setApplying(null);
+            if (changed) {
+              setTick((n) => n + 1);
+              onChanged?.();
+            }
+          }}
+        />
       )}
       {correcting && (
         <AdvanceCorrectionSheet

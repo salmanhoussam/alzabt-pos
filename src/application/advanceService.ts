@@ -32,11 +32,12 @@
 import { createHash } from "node:crypto";
 import { businessDateOf } from "../domain/businessDay";
 import { DomainError } from "../domain/errors";
-import { cleanPaymentReference, ledgerAmount } from "../domain/ledger";
+import { type ObligationRecord, cleanPaymentReference, ledgerAmount } from "../domain/ledger";
 import type {
   AdvanceChannel,
   AdvanceCorrectionRecord,
   AdvanceIntent,
+  AdvanceApplicationRecord,
   AdvanceRecord,
   AdvanceRepository,
 } from "../persistence/advanceRepository";
@@ -155,6 +156,25 @@ export function formatAdvanceNo(docNo: number): string {
 }
 
 const KEY_SHAPE = /^[A-Za-z0-9_-]{8,100}$/;
+/** An application's key also names its settlement (`advapp-<key>`), which must stay within 100 characters. */
+const APPLY_KEY_SHAPE = /^[A-Za-z0-9_-]{8,90}$/;
+
+/** DEC-35x — apply an advance to ONE existing debt of the SAME customer (owner only). */
+export interface ApplyAdvanceDraft {
+  readonly advanceId: unknown;
+  readonly obligationId: unknown;
+  readonly amountMinor: unknown;
+  readonly idempotencyKey: unknown;
+}
+
+export interface ApplyAdvanceResult {
+  readonly application: AdvanceApplicationRecord;
+  readonly advance: AdvanceRecord;
+  /** Read back AFTER the commit: what this advance still holds, and what the debt still owes. */
+  readonly unusedMinor: bigint;
+  readonly debtOutstandingMinor: bigint;
+  readonly duplicate: boolean;
+}
 
 export class AdvanceService {
   private readonly now: () => Date;
@@ -388,6 +408,8 @@ export class AdvanceService {
 
   /** Crash-test seam (tests/helpers/advanceCrashChild.ts). Nothing in src/ overrides it. */
   protected afterCorrectionCommitted(): void {}
+  /** Crash seam INSIDE the application transaction: the settlement is written, the application not yet. */
+  protected afterApplicationSettlementWritten(): void {}
 
   private requireOwner(): AdvanceActor {
     const actor = this.requireRecorder();
@@ -627,6 +649,146 @@ export class AdvanceService {
         correctsNo: corrects ? corrects.docNo : null,
       };
     });
+  }
+
+  // ── DEC-35x: APPLY AN ADVANCE TO AN EXISTING DEBT ─────────────────────────────────────────────────
+  //
+  // 🔴 NOT NEW MONEY. The money arrived on the advance's own day (ADV-). Applying it writes ONE
+  // settlement against the debt — in the advance's own method, with NO provider and NO reference (the
+  // Whish reference stays on the advance, registered once) — and ONE application row naming the
+  // advance. The daily money report classifies that settlement as an application, never a collection.
+  //
+  // 🔴 ATOMIC. Both rows commit in ONE transaction or neither does; the M19 trigger re-checks owner,
+  // same customer, receivable, method and the unused balance; the M20 trigger refuses a corrected
+  // advance; the overpayment trigger refuses more than the debt owes. A process killed between the two
+  // inserts leaves nothing (SQLite rolls the open transaction back).
+  //
+  // 🔴 IDEMPOTENT. The request key IS the application's identity: a retry after a lost reply returns
+  // the SAME application (duplicate: true); the same key with a different advance, debt or amount is
+  // IDEMPOTENCY_CONFLICT. No attempt table is needed: nothing is handed over at the till, so there is
+  // no receipt to acknowledge — the one transaction is the whole operation.
+
+  applyToDebt(draft: ApplyAdvanceDraft): ApplyAdvanceResult {
+    const actor = this.requireOwner();
+    if (typeof draft.idempotencyKey !== "string" || !APPLY_KEY_SHAPE.test(draft.idempotencyKey)) {
+      throw new DomainError("INVALID_INPUT", "An application needs a request key");
+    }
+    const key = draft.idempotencyKey;
+    if (typeof draft.advanceId !== "string" || draft.advanceId.length === 0 || draft.advanceId.length > 100) {
+      throw new DomainError("INVALID_INPUT", "An application needs an advance");
+    }
+    if (typeof draft.obligationId !== "string" || draft.obligationId.length === 0 || draft.obligationId.length > 100) {
+      throw new DomainError("INVALID_INPUT", "An application needs a debt");
+    }
+    const advanceId = draft.advanceId;
+    const obligationId = draft.obligationId;
+    const fingerprint = (amount: unknown) => hash({ op: "apply-advance", advanceId, obligationId, amountMinor: typeof amount === "bigint" ? amount.toString() : String(amount) });
+
+    // A repeat under a committed key is answered BEFORE re-validating against today's balances (the
+    // advance and the debt have moved since — validation alone would wrongly refuse the replay).
+    const done = this.deps.advances.findApplicationByKey(key);
+    if (done) {
+      if (done.fingerprint !== fingerprint(draft.amountMinor) || done.advanceId !== advanceId || done.obligationId !== obligationId) {
+        throw new DomainError("IDEMPOTENCY_CONFLICT", "That request key was already used for a different application");
+      }
+      return this.applicationResult(done, true);
+    }
+    if (this.deps.ledger.findSettlementByIdempotencyKey(`advapp-${key}`)) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "That request key was already used");
+    }
+
+    const check = () => {
+      const advance = this.deps.advances.findAdvanceById(advanceId);
+      if (!advance) throw new DomainError("ADVANCE_NOT_FOUND", "That advance does not exist");
+      if (this.deps.advances.findCorrectionOf(advance.id)) {
+        throw new DomainError("ADVANCE_CORRECTED_NOT_APPLICABLE", "That advance was corrected and cannot be applied");
+      }
+      const debt = this.deps.ledger.findObligationById(obligationId);
+      if (!debt || debt.direction !== "receivable") throw new DomainError("ADVANCE_DEBT_NOT_FOUND", "That debt does not exist");
+      if (debt.partyId !== advance.customerId) {
+        throw new DomainError("ADVANCE_DEBT_OTHER_CUSTOMER", "An advance can only pay its own customer's debt");
+      }
+      if (debt.currency !== advance.currency) throw new DomainError("ADVANCE_DEBT_CURRENCY", "The advance and the debt are in different currencies");
+      const amount = ledgerAmount(draft.amountMinor, advance.currency).minor;
+      const outstanding = debt.amountMinor - this.deps.ledger.settledTotal(debt.id);
+      if (outstanding <= 0n || this.deps.advances.obligationSaleVoided(debt.id)) {
+        throw new DomainError("ADVANCE_DEBT_NOT_OPEN", "That debt owes nothing");
+      }
+      if (amount > this.deps.advances.unusedMinor(advance.id)) {
+        throw new DomainError("ADVANCE_APPLY_ABOVE_BALANCE", "The amount is above what the advance still holds");
+      }
+      if (amount > outstanding) throw new DomainError("ADVANCE_APPLY_ABOVE_DEBT", "The amount is above what the debt still owes");
+      return { advance, debt, amount };
+    };
+    check(); // Everything validated BEFORE anything is written: a refused application leaves no trace.
+
+    const result = this.deps.transact(() => {
+      const live = this.requireOwner();
+      if (live.id !== actor.id) throw new DomainError("NOT_AUTHORIZED", "The signed-in operator changed during the application");
+      if (this.deps.advances.findApplicationByKey(key)) throw new DomainError("IDEMPOTENCY_CONFLICT", "That request key was already used");
+      const { advance, debt, amount } = check(); // the SAME rules again, inside the write lock
+      const at = this.now().toISOString();
+      const settlementId = this.newId();
+      this.deps.ledger.insertSettlement({
+        id: settlementId,
+        obligationId: debt.id,
+        currency: debt.currency,
+        idempotencyKey: `advapp-${key}`,
+        requestFingerprint: fingerprint(amount),
+        amountMinor: amount,
+        method: advance.method,
+        provider: null,
+        reference: null,
+        fundsConfirmed: null,
+        settledBy: live.id,
+        settledAt: at,
+        businessDate: businessDateOf(this.now(), this.deps.terminal.timeZone),
+      });
+      this.afterApplicationSettlementWritten();
+      this.deps.advances.insertApplication({ id: this.newId(), advanceId: advance.id, settlementId, amountMinor: amount, key, appliedBy: live.id, appliedAt: at });
+      const written = this.deps.advances.findApplicationByKey(key);
+      if (!written) throw new DomainError("LEDGER_INTEGRITY", "The application could not be read back");
+      return written;
+    });
+    return this.applicationResult(result, false);
+  }
+
+  private applicationResult(app: AdvanceApplicationRecord, duplicate: boolean): ApplyAdvanceResult {
+    const advance = this.deps.advances.findAdvanceById(app.advanceId);
+    const debt = this.deps.ledger.findObligationById(app.obligationId);
+    if (!advance || !debt) throw new DomainError("LEDGER_INTEGRITY", "The application's advance or debt is missing");
+    return {
+      application: app,
+      advance,
+      unusedMinor: this.deps.advances.unusedMinor(advance.id),
+      debtOutstandingMinor: debt.amountMinor - this.deps.ledger.settledTotal(debt.id),
+      duplicate,
+    };
+  }
+
+  /** Owner: the debt an application paid (display only). */
+  debtOf(obligationId: string): ObligationRecord | null {
+    this.requireOwner();
+    return this.deps.ledger.findObligationById(obligationId);
+  }
+
+  /** A display name for an operator id (the id itself when the row is gone). */
+  operatorName(operatorId: string): string {
+    return this.deps.advances.names("", operatorId).operator ?? operatorId;
+  }
+
+  /** Owner: what one advance paid, debt by debt (statement / document). */
+  applicationsOf(advanceId: string): AdvanceApplicationRecord[] {
+    this.requireOwner();
+    return this.deps.advances.listApplications(advanceId);
+  }
+
+  /** Display only: which statement settlements were paid FROM an advance, and from which ADV-. */
+  advancesOfSettlements(settlementIds: ReadonlyArray<string>): Map<string, { advanceId: string; number: string }> {
+    this.requireOwner();
+    const out = new Map<string, { advanceId: string; number: string }>();
+    for (const [sid, a] of this.deps.advances.advancesOfSettlements(settlementIds)) out.set(sid, { advanceId: a.advanceId, number: formatAdvanceNo(a.docNo) });
+    return out;
   }
 
   /** Everything a document or a screen shows about one advance, read from the ledger. No arithmetic. */

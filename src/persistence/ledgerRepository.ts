@@ -336,8 +336,12 @@ export class LedgerRepository {
         `SELECT currency, method, provider, count(*) AS n, sum(amount_minor) AS total FROM (
            SELECT currency, 'external' AS method, provider, amount_minor FROM receipts WHERE business_date = ?
            UNION ALL
-           SELECT currency, method, provider, amount_minor FROM settlements
+           SELECT currency, method, provider, amount_minor FROM settlements AS st
             WHERE business_date = ? AND receipt_id IS NULL
+              -- DEC-35x: a settlement paid FROM an advance is not money collected (it arrived as the ADV-).
+              AND NOT EXISTS (SELECT 1 FROM advance_applications AS aa WHERE aa.settlement_id = st.id)
+              -- and a supplier payment is money OUT, never a collection.
+              AND EXISTS (SELECT 1 FROM obligations AS o WHERE o.id = st.obligation_id AND o.direction = 'receivable')
          )
           GROUP BY currency, method, provider ORDER BY currency, method, provider`,
       )

@@ -394,4 +394,99 @@ export class AdvanceRepository {
       .get(advanceId) as { unused: bigint | number } | undefined;
     return row ? minor(row.unused) : 0n;
   }
+
+  // ── DEC-35x: applying an advance to an existing debt ─────────────────────────────────────────────
+
+  /** The application row. Its settlement is written FIRST, in the same transaction (M19 trigger). */
+  insertApplication(a: { id: string; advanceId: string; settlementId: string; amountMinor: bigint; key: string; appliedBy: string; appliedAt: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO advance_applications (id, advance_id, settlement_id, amount_minor, idempotency_key, applied_by, applied_at)
+         VALUES (@id, @advanceId, @settlementId, @amountMinor, @key, @appliedBy, @appliedAt)`,
+      )
+      .run(a);
+  }
+
+  findApplicationByKey(key: string): AdvanceApplicationRecord | null {
+    const row = this.db.prepare(`${APP_SELECT} WHERE aa.idempotency_key = ?`).get(key) as ApplicationRow | undefined;
+    return row ? application(row) : null;
+  }
+
+  listApplications(advanceId: string): AdvanceApplicationRecord[] {
+    return (this.db.prepare(`${APP_SELECT} WHERE aa.advance_id = ? ORDER BY aa.applied_at, aa.id`).all(advanceId) as ApplicationRow[]).map(application);
+  }
+
+  /** For a statement: which of these settlements were paid FROM an advance (display only — not money). */
+  advancesOfSettlements(settlementIds: ReadonlyArray<string>): Map<string, { advanceId: string; docNo: number }> {
+    const out = new Map<string, { advanceId: string; docNo: number }>();
+    if (settlementIds.length === 0) return out;
+    const stmt = this.db.prepare(
+      `SELECT aa.settlement_id AS s, a.id AS a, a.doc_no AS n FROM advance_applications AS aa
+         JOIN customer_advances AS a ON a.id = aa.advance_id WHERE aa.settlement_id = ?`,
+    );
+    for (const id of settlementIds) {
+      const row = stmt.get(id) as { s: string; a: string; n: bigint | number } | undefined;
+      if (row) out.set(row.s, { advanceId: row.a, docNo: Number(row.n) });
+    }
+    return out;
+  }
+
+  /** A debt raised by a sale that was later voided owes nothing usable: never apply money to it. */
+  obligationSaleVoided(obligationId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM obligations AS o JOIN voids AS v ON v.sale_id = o.sale_id WHERE o.id = ?) AS v`,
+      )
+      .get(obligationId) as { v: bigint | number };
+    return Number(row.v) === 1;
+  }
+}
+
+export interface AdvanceApplicationRecord {
+  readonly id: string;
+  readonly advanceId: string;
+  readonly settlementId: string;
+  readonly obligationId: string;
+  readonly currency: string;
+  readonly amountMinor: bigint;
+  readonly key: string;
+  /** The settlement's request fingerprint: a replay must carry the same advance, debt and amount. */
+  readonly fingerprint: string;
+  readonly appliedBy: string;
+  readonly appliedAt: string;
+  readonly businessDate: string;
+}
+
+interface ApplicationRow {
+  id: string;
+  advance_id: string;
+  settlement_id: string;
+  obligation_id: string;
+  currency: string;
+  amount_minor: bigint | number;
+  idempotency_key: string;
+  request_fingerprint: string;
+  applied_by: string;
+  applied_at: string;
+  business_date: string;
+}
+
+const APP_SELECT = `SELECT aa.id, aa.advance_id, aa.settlement_id, s.obligation_id, s.currency, aa.amount_minor,
+       aa.idempotency_key, s.request_fingerprint, aa.applied_by, aa.applied_at, s.business_date
+  FROM advance_applications AS aa JOIN settlements AS s ON s.id = aa.settlement_id`;
+
+function application(r: ApplicationRow): AdvanceApplicationRecord {
+  return {
+    id: r.id,
+    advanceId: r.advance_id,
+    settlementId: r.settlement_id,
+    obligationId: r.obligation_id,
+    currency: r.currency,
+    amountMinor: typeof r.amount_minor === "bigint" ? r.amount_minor : BigInt(r.amount_minor),
+    key: r.idempotency_key,
+    fingerprint: r.request_fingerprint,
+    appliedBy: r.applied_by,
+    appliedAt: r.applied_at,
+    businessDate: r.business_date,
+  };
 }
