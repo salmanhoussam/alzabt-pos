@@ -11,6 +11,7 @@
  * no round trip. The normalisation itself is the shared domain function, so the rule the operator
  * experiences is the same one the tests assert.
  */
+import { PhotoInvoiceFlow } from "./PhotoInvoiceFlow";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BASE_UNITS, FRACTIONAL_SALE_UNITS } from "../../domain/catalog";
 import { matchesSearch } from "../../domain/arabic";
@@ -126,6 +127,7 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
   const [products, setProducts] = useState<AdminProductDto[] | null>(null);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<Editing | null>(null);
+  const [photoFlow, setPhotoFlow] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [categories, setCategories] = useState<CategoryDto[]>([]);
@@ -247,6 +249,19 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
 
   return (
     <div className="catalog-admin">
+      {photoFlow && products && (
+        <PhotoInvoiceFlow
+          products={products}
+          onClose={(n) => {
+            setPhotoFlow(false);
+            if (n > 0) void reload();
+          }}
+          onManual={() => {
+            setPhotoFlow(false);
+            setEditing({ mode: "add" });
+          }}
+        />
+      )}
       <header className="admin-head">
         <h2>{t("products.title")}</h2>
         <input
@@ -293,6 +308,11 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
             data-testid="add-product-phone"
           >
             {t("phone.add")}
+          </button>
+        )}
+        {mayCreate && products && (
+          <button className="btn" onClick={() => setPhotoFlow(true)} data-testid="photo-invoice">
+            من صورة فاتورة
           </button>
         )}
         {mayCreate && (

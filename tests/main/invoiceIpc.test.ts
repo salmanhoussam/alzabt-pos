@@ -122,9 +122,12 @@ describe("the invoice channels exist and answer", () => {
         void (result as Promise<unknown>).catch(() => undefined);
       }
     }
+    // TRANSITION (PHOTO-INVOICE-TO-ITEMS): readInvoicePhoto is async for the print channels' reason — a
+    // native dialog and an OCR run. Old list: the four below without it.
     expect(async_.sort()).toEqual([
       "cancelPhoneSession",
       "printInvoice",
+      "readInvoicePhoto",
       "saveInvoicePdf",
       "startPhoneSession",
     ]);

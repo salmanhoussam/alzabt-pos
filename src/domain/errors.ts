@@ -103,6 +103,9 @@ export type DomainErrorCode =
   // INV-PAY-METHOD (owner, 2026-11-09) — an invoice marked (part-)paid must say, at issue, how the money
   // arrived (cash, or Whish with its evidence). Its own sentence: the fix is "choose a method".
   | "INVOICE_PAYMENT_METHOD_REQUIRED"
+  // PHOTO-INVOICE-TO-ITEMS (DEC-35u): the offline reading of an invoice photo failed. Its own code: the fix is
+  // "try again or enter the items by hand", and the POS keeps running.
+  | "OCR_FAILED"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

@@ -334,7 +334,8 @@ try {
     const keys = await page.evaluate(() => Object.keys(window.pos).sort());
     // TRANSITION SELL-CREDIT: 79 -> 80 (createCustomerCreditSale, owner-only). The old value was 79.
     // TRANSITION SELL-SPLIT-CASH-WHISH: 80 -> 81 (createSplitSale, same permission as createSale). The old value was 80.
-    check(keys.length === 81, "window.pos exposes exactly 81 business methods", { got: keys.length });
+    // TRANSITION (PHOTO-INVOICE-TO-ITEMS): 81 -> 82 (readInvoicePhoto). The old value was 81.
+    check(keys.length === 82, "window.pos exposes exactly 82 business methods", { got: keys.length });
     for (const k of ["exportFullBackup", "inspectRestoreBackup", "applyRestore"]) check(keys.includes(k), `window.pos has ${k}`);
     // settings.json is written only once a language is CHOSEN; choose one, so the package has it.
     await ok(page, "setTerminalLanguage", { language: "ar" });

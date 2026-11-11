@@ -197,6 +197,7 @@ const CH = {
   pickInvoiceLogo: "pos:pickInvoiceLogo",
   printInvoice: "pos:printInvoice",
   saveInvoicePdf: "pos:saveInvoicePdf",
+  readInvoicePhoto: "pos:readInvoicePhoto",
 } as const satisfies typeof CHANNELS;
 
 const api: PosApi = {
@@ -429,6 +430,7 @@ const api: PosApi = {
   pickInvoiceLogo: () => ipcRenderer.invoke(CH.pickInvoiceLogo),
   printInvoice: (req) => ipcRenderer.invoke(CH.printInvoice, { invoiceId: req.invoiceId }),
   saveInvoicePdf: (req) => ipcRenderer.invoke(CH.saveInvoicePdf, { invoiceId: req.invoiceId }),
+  readInvoicePhoto: () => ipcRenderer.invoke(CH.readInvoicePhoto),
 };
 
 contextBridge.exposeInMainWorld("pos", Object.freeze(api));

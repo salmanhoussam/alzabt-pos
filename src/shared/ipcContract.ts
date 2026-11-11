@@ -119,6 +119,7 @@ export const CHANNELS = {
   pickInvoiceLogo: "pos:pickInvoiceLogo",
   printInvoice: "pos:printInvoice",
   saveInvoicePdf: "pos:saveInvoicePdf",
+  readInvoicePhoto: "pos:readInvoicePhoto",
 } as const;
 
 export type ChannelName = keyof typeof CHANNELS;
@@ -1566,6 +1567,32 @@ export type SaveInvoicePdfResponse =
   | { readonly status: "cancelled" }
   | { readonly status: "saved"; readonly fileName: string; readonly logoMissing?: boolean; readonly logoUnverified?: boolean };
 
+// ── PHOTO-INVOICE-TO-ITEMS (offline OCR) ─────────────────────────────────────────────────────────
+/** One candidate row read from a supplier invoice photo. Money as minor-unit strings; nothing decided. */
+export interface InvoicePhotoRowDto {
+  readonly id: string;
+  readonly rawText: string;
+  readonly name: string;
+  readonly quantityMilli: number | null;
+  readonly supplierPriceMinor: string | null;
+  readonly lineTotalMinor: string | null;
+  readonly arithmeticOk: boolean;
+  /** R1 qty×price · R2 discount · R3 boxes · R4 pack — an explanation, never a proof. */
+  readonly relation: "R1" | "R2" | "R3" | "R4";
+  readonly discountPercent: number | null;
+}
+export type ReadInvoicePhotoResponse =
+  | { readonly status: "cancelled" }
+  | { readonly status: "unavailable" }
+  | {
+      readonly status: "read";
+      readonly currency: string;
+      readonly rows: readonly InvoicePhotoRowDto[];
+      /** Lines with amounts that no relation explained: for manual entry from the photo. */
+      readonly unexplained: readonly string[];
+      readonly ms: number;
+    };
+
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
   listCashiers(): Promise<IpcResult<CashierDto[]>>;
@@ -1703,4 +1730,6 @@ export interface PosApi {
   /** The renderer sends an INVOICE ID. Main loads the frozen invoice and owns the print. */
   printInvoice(req: InvoiceIdRequest): Promise<IpcResult<PrintInvoiceResponse>>;
   saveInvoicePdf(req: InvoiceIdRequest): Promise<IpcResult<SaveInvoicePdfResponse>>;
+  /** Main shows the picker, reads the photo OFFLINE and returns candidate rows. Writes nothing. */
+  readInvoicePhoto(): Promise<IpcResult<ReadInvoicePhotoResponse>>;
 }

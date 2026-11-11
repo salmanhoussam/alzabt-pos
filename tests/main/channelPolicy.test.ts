@@ -109,9 +109,11 @@ describe("the create-products set", () => {
    * `authorizePhoneSession` refuses EDIT_PRODUCT to anyone who is not an owner, which
    * `tests/main/phoneSessionAuth.test.ts` proves by execution rather than by this table.
    */
-  it("🔴 is EXACTLY these two channels", () => {
+  // TRANSITION (PHOTO-INVOICE-TO-ITEMS): two -> three. `readInvoicePhoto` READS a photo to prepare products
+  // and writes nothing; every product it leads to is still created through createProduct. Old value: two.
+  it("🔴 is EXACTLY these three channels", () => {
     const create = names.filter((n) => CHANNEL_POLICY[n] === "create-products").sort();
-    expect(create).toEqual(["createProduct", "startPhoneSession"]);
+    expect(create).toEqual(["createProduct", "readInvoicePhoto", "startPhoneSession"]);
   });
 });
 

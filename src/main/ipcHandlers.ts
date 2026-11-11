@@ -29,6 +29,7 @@ import { invoiceOutcomeError } from "./invoiceOutcomeText";
 import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
 import type { LedgerService } from "../application/ledgerService";
+import { rowsFromLines } from "../domain/invoiceOcrRows";
 import type { BackupRestoreActions } from "./backupRestore";
 import type { RestoreLock } from "./restoreLock";
 import type { PartyRow } from "../persistence/partyRepository";
@@ -206,6 +207,11 @@ export interface IpcHandlerOptions {
    * BARE FILE NAME; the renderer never sees or supplies a path.
    */
   readonly pickInvoiceLogo?: () => string | null;
+  /**
+   * PHOTO-INVOICE-TO-ITEMS: main shows the picker and reads the photo OFFLINE; null = cancelled.
+   * Absent (tests, headless) answers "unavailable". It never writes anything.
+   */
+  readonly readInvoicePhoto?: () => Promise<{ readonly lines: readonly string[]; readonly ms: number } | null>;
   /**
    * Native photo picker for a product. Main shows the dialog, reads the file and NORMALIZES it
    * (decode, re-encode, bound the dimensions), then returns the bytes it produced — so the only
@@ -1785,6 +1791,33 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       return saved
         ? { status: "saved" as const, fileName: saved.fileName, logoMissing: saved.logoMissing, logoUnverified: saved.logoUnverified }
         : { status: "cancelled" as const };
+    }),
+    readInvoicePhoto: wrapAsync("readInvoicePhoto", async (p) => {
+      noPayload(p);
+      if (!options.readInvoicePhoto) return { status: "unavailable" as const };
+      const reading = await options.readInvoicePhoto();
+      if (reading === null) return { status: "cancelled" as const };
+      const currency = service.getCatalog().currency;
+      const exponent = currency === "LBP" ? 0 : 2;
+      const r = rowsFromLines(reading.lines, exponent);
+      log.info("invoice-photo-read", { rows: r.rows.length, unexplained: r.unexplained.length, ms: reading.ms });
+      return {
+        status: "read" as const,
+        currency,
+        rows: r.rows.map((x) => ({
+          id: x.id,
+          rawText: x.rawText,
+          name: x.name,
+          quantityMilli: x.quantityMilli,
+          supplierPriceMinor: x.supplierPriceMinor === null ? null : x.supplierPriceMinor.toString(),
+          lineTotalMinor: x.lineTotalMinor === null ? null : x.lineTotalMinor.toString(),
+          arithmeticOk: x.arithmeticOk,
+          relation: x.relation,
+          discountPercent: x.discountPercent,
+        })),
+        unexplained: r.unexplained,
+        ms: reading.ms,
+      };
     }),
   };
 

@@ -90,7 +90,8 @@ describe("the customer channels", () => {
     // 🔴 TRANSITION (SELL-SPLIT-CASH-WHISH, 2026-11-09): 80 -> 81 with createSplitSale — a PAID sale (cash +
     // Whish = the total exactly), same permission as createSale; it creates no debt, so the debt-creator
     // list below is unchanged. The old value was 80.
-    expect(Object.keys(CHANNELS)).toHaveLength(81);
+    // 🔴 TRANSITION (PHOTO-INVOICE-TO-ITEMS): 81 -> 82 with readInvoicePhoto (writes nothing, not a money channel). The old value was 81.
+    expect(Object.keys(CHANNELS)).toHaveLength(82);
   });
 
   // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".
