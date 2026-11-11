@@ -1580,6 +1580,12 @@ export interface InvoicePhotoRowDto {
   /** R1 qty×price · R2 discount · R3 boxes · R4 pack — an explanation, never a proof. */
   readonly relation: "R1" | "R2" | "R3" | "R4";
   readonly discountPercent: number | null;
+  /** DEC-35v: where this row sits on the ORIGINAL photo, and a crop of that strip (JPEG data URL). */
+  readonly y: number;
+  readonly crop: string | null;
+  readonly readings: number;
+  readonly alternativeNames: readonly string[];
+  readonly warnings: ReadonlyArray<"CONFLICT" | "SINGLE_READING" | "NOT_PLAIN_ARITHMETIC">;
 }
 export type ReadInvoicePhotoResponse =
   | { readonly status: "cancelled" }
@@ -1588,9 +1594,11 @@ export type ReadInvoicePhotoResponse =
       readonly status: "read";
       readonly currency: string;
       readonly rows: readonly InvoicePhotoRowDto[];
-      /** Lines with amounts that no relation explained: for manual entry from the photo. */
-      readonly unexplained: readonly string[];
+      /** Lines with amounts that no relation explained: for manual entry from the photo (with their crop). */
+      readonly unexplained: ReadonlyArray<{ readonly text: string; readonly y: number; readonly crop: string | null }>;
       readonly ms: number;
+      /** The photo itself (JPEG data URL) shown beside the rows. */
+      readonly preview: string | null;
     };
 
 /** What the preload script exposes as `window.pos`. */

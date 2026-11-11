@@ -59,6 +59,12 @@ const app = await electron.launch({ executablePath: ELECTRON, args: APP_ARGS, en
 try {
   const page = await app.firstWindow();
   await signIn(page, "Cashier One", "1111");
+  // Two EXISTING products, so "the catalog stays intact" is checked against real rows, not an empty table.
+  const seeded = await page.evaluate(async () => {
+    const mk = async (nameAr, price) => (await window.pos.createProduct({ draft: { nameAr, nameEn: null, sku: null, price, baseUnit: "piece" } })).ok;
+    return [await mk("صنف قائم أ", "3.50"), await mk("صنف قائم ب", "7.25")];
+  });
+  assert(seeded.every(Boolean), "two existing products seeded");
 
   // ── FAILURE FIRST: a file that is not an image → an on-screen refusal, NO main-process error box,
   //    the POS stays alive, retry and manual entry are offered, nothing is written ──────────────────
@@ -90,6 +96,16 @@ try {
   assert(rows > 0, `the photo produced candidate rows (${rows})`);
   assert((await page.locator('[data-testid="photo-review-row"][data-decision="pending"]').count()) === rows, "🔴 every row starts PENDING");
   assert(await testid(page, "photo-review-finish").isDisabled(), "🔴 finishing is impossible while a row is pending");
+  assert((await testid(page, "photo-review-preview").count()) === 1, "the photo is shown BESIDE the rows");
+  assert((await testid(page, "photo-review-crop").count()) === rows, `every row shows its strip of the ORIGINAL photo (${rows})`);
+  // 🔴 NO NETWORK: the app's processes hold no TCP connection after an OCR run (Windows connection table).
+  if (process.platform === "win32") {
+    const { execFileSync } = await import("node:child_process");
+    const pid = app.process().pid;
+    const out = execFileSync("powershell", ["-NoProfile", "-Command", `$ids = @(${pid}) + @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${pid} } | ForEach-Object { $_.ProcessId }); @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object { $ids -contains $_.OwningProcess -and $_.RemoteAddress -notin @('127.0.0.1','::1','0.0.0.0','::') }).Count`], { encoding: "utf8" }).trim();
+    assert(out === "0", `🔴 no outbound network connection from the app during OCR (found ${out})`);
+  }
+  const existingBefore = q("SELECT id, name_ar, selling_price_minor AS p, sku FROM catalog_products ORDER BY id");
   await page.screenshot({ path: SHOTS + "PHOTO-review.png", fullPage: true });
   const before = Number(productsBefore());
 
@@ -110,6 +126,9 @@ try {
   await testid(page, "photo-flow-done").waitFor({ timeout: 15000 });
   const made = q("SELECT id, name_ar, sku, barcode, selling_price_minor AS p FROM catalog_products WHERE name_ar = ?", name + " (اختبار)");
   assert(made.length === 1, "exactly one product created");
+  const existingAfter = q("SELECT id, name_ar, selling_price_minor AS p, sku FROM catalog_products WHERE id <> ? ORDER BY id", made[0].id);
+  assert(existingBefore.length >= 2 && JSON.stringify(existingAfter) === JSON.stringify(existingBefore), `🔴 every existing product is untouched (${existingBefore.length})`);
+  assert((await page.getByText("أُضيف 1").count()) >= 1, "the result says what was added / linked / not done");
   assert(made[0].sku === null && made[0].barcode === null, "🔴 no SKU and no barcode invented");
   assert(Number(made[0].p) === 975, `🔴 the price is the SALE price typed (${made[0].p} minor), not the supplier cost`);
   assert(q("SELECT count(*) AS n FROM audit_events WHERE event_type = 'PRODUCT_CREATED' AND entity_id = ?", made[0].id)[0].n >= 1, "the creation is in the durable audit trail");

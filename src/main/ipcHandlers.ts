@@ -29,7 +29,8 @@ import { invoiceOutcomeError } from "./invoiceOutcomeText";
 import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
 import type { LedgerService } from "../application/ledgerService";
-import { rowsFromLines } from "../domain/invoiceOcrRows";
+import { rowsFromPositioned } from "../domain/invoiceOcrRows";
+import type { PositionedLine } from "../domain/ocrLayout";
 import type { BackupRestoreActions } from "./backupRestore";
 import type { RestoreLock } from "./restoreLock";
 import type { PartyRow } from "../persistence/partyRepository";
@@ -211,7 +212,12 @@ export interface IpcHandlerOptions {
    * PHOTO-INVOICE-TO-ITEMS: main shows the picker and reads the photo OFFLINE; null = cancelled.
    * Absent (tests, headless) answers "unavailable". It never writes anything.
    */
-  readonly readInvoicePhoto?: () => Promise<{ readonly lines: readonly string[]; readonly ms: number } | null>;
+  readonly readInvoicePhoto?: () => Promise<{
+    readonly lines: readonly PositionedLine[];
+    readonly ms: number;
+    readonly preview: string | null;
+    readonly crop: (y: number, h: number) => string | null;
+  } | null>;
   /**
    * Native photo picker for a product. Main shows the dialog, reads the file and NORMALIZES it
    * (decode, re-encode, bound the dimensions), then returns the bytes it produced — so the only
@@ -1799,7 +1805,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       if (reading === null) return { status: "cancelled" as const };
       const currency = service.getCatalog().currency;
       const exponent = currency === "LBP" ? 0 : 2;
-      const r = rowsFromLines(reading.lines, exponent);
+      const r = rowsFromPositioned(reading.lines, exponent);
       log.info("invoice-photo-read", { rows: r.rows.length, unexplained: r.unexplained.length, ms: reading.ms });
       return {
         status: "read" as const,
@@ -1814,9 +1820,15 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           arithmeticOk: x.arithmeticOk,
           relation: x.relation,
           discountPercent: x.discountPercent,
+          y: x.y,
+          crop: reading.crop(x.y, x.h),
+          readings: x.readings,
+          alternativeNames: x.alternativeNames,
+          warnings: x.warnings,
         })),
-        unexplained: r.unexplained,
+        unexplained: r.unexplained.map((u) => ({ text: u.text, y: u.y, crop: reading.crop(u.y, u.h) })),
         ms: reading.ms,
+        preview: reading.preview,
       };
     }),
   };

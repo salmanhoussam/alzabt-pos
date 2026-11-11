@@ -15,6 +15,7 @@
  *    starts PENDING in the review (photoInvoiceReview.ts) with its original text beside it.
  */
 import type { ExtractedRow } from "./photoInvoiceReview";
+import type { OcrSource, PositionedLine } from "./ocrLayout";
 
 export type Relation = "R1" | "R2" | "R3" | "R4";
 
@@ -94,6 +95,10 @@ function nameOf(line: string, used: readonly Num[]): string {
   for (const u of [...used].sort((a, b) => b.i - a.i)) s = s.slice(0, u.i) + " " + s.slice(u.i + u.s.length);
   return s
     .replace(/[|[\]]/g, " ")
+    // Leftover MONEY-format numbers of other columns (a 0.00 discount, a repeated net price) are not part
+    // of a product name (seen on the installed build: «4.00 0.00 تنر غلون COBRA»). Integers — sizes such as
+    // 500, 1007 — are kept.
+    .replace(/(^|\s)\d+[.,]\d{2,3}(?=\s|$)/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/^(\d{1,2}\s+)+/, "")
@@ -144,4 +149,119 @@ export function rowsFromLines(lines: readonly string[], exponent = 2): OcrRowsRe
     });
   }
   return { rows, unexplained: [...new Set(unexplained)] };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+// DEC-35v — rows from POSITIONED readings (ocrLayout.ts). Identity = numbers AND place on the page.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+export type RowWarning =
+  /** Another reading at the SAME place gives different numbers: both are shown, neither is trusted. */
+  | "CONFLICT"
+  /** Only one of several readings found this row. */
+  | "SINGLE_READING"
+  /** Explained by a discount / box / pack relation, not by plain qty × price. */
+  | "NOT_PLAIN_ARITHMETIC";
+
+export interface PlacedRow extends OcrRow {
+  /** Vertical centre on the ORIGINAL photo, and the row height — for the crop shown in the review. */
+  readonly y: number;
+  readonly h: number;
+  readonly readings: number;
+  readonly sources: readonly OcrSource[];
+  /** Other names read for the same row (distinct), for the operator to pick from. */
+  readonly alternativeNames: readonly string[];
+  readonly warnings: readonly RowWarning[];
+}
+
+export interface PlacedUnexplained {
+  readonly text: string;
+  readonly y: number;
+  readonly h: number;
+}
+
+export interface PlacedRowsResult {
+  readonly rows: readonly PlacedRow[];
+  readonly unexplained: readonly PlacedUnexplained[];
+}
+
+const letters = (s: string) => (s.match(/[A-Za-z؀-ۿ]/g) ?? []).length;
+
+export function rowsFromPositioned(lines: readonly PositionedLine[], exponent = 2): PlacedRowsResult {
+  const sourcesPresent = new Set(lines.map((l) => l.source));
+  // ONE tolerance for "same row": 60 % of the page's TYPICAL line height (median of the word-geometry lines),
+  // never of one oversized engine box (which once merged two paints) nor of one thin box (which once kept the
+  // same line twice after the straightened reading was mapped back).
+  const hs = lines.filter((l) => l.kind === "geometry").map((l) => l.h).sort((a, b) => a - b);
+  const typical = hs[Math.floor(hs.length / 2)] ?? 20;
+  const tol = Math.max(6, typical * 0.6);
+  interface Cand { k: string; e: Candidate; line: PositionedLine; name: string }
+  const cands: Cand[] = [];
+  const unexplainedRaw: PositionedLine[] = [];
+  for (const line of lines) {
+    const e = explain(line.text);
+    if (!e) {
+      // NO SILENT LOSS (DEC-35v, measured on the paint invoice: 12.50 read as «1250» on 6 lines): a ROW-LIKE
+      // line — letters, two or more numbers, at least one printed with decimals — that no relation explains
+      // is listed for manual entry with its strip of the photo. Its digits are never repaired or guessed.
+      const nums = numbersOf(line.text);
+      if (nums.length >= 2 && nums.some((x) => x.dec) && letters(line.text) >= 2) unexplainedRaw.push(line);
+      continue;
+    }
+    cands.push({ k: `${e.qty}|${e.price}|${e.total}`, e, line, name: nameOf(line.text, e.used) });
+  }
+  // Group: SAME numbers AND same place (|Δy| within 60 % of the SHORTER line — an engine line box can span
+  // two printed rows, and the taller height once merged two different paints). Different place = different row.
+  interface Group { k: string; y: number; h: number; members: Cand[] }
+  const groups: Group[] = [];
+  for (const c of [...cands].sort((a, b) => a.line.y - b.line.y)) {
+    const g = groups.find((x) => x.k === c.k && Math.abs(x.y - c.line.y) <= tol);
+    if (g) {
+      g.members.push(c);
+      g.y = g.members.reduce((s, m) => s + m.line.y, 0) / g.members.length;
+      g.h = Math.min(g.h, c.line.h);
+    } else groups.push({ k: c.k, y: c.line.y, h: c.line.h, members: [c] });
+  }
+  const rows: PlacedRow[] = groups.map((g, i) => {
+    // The name: the engine's own line of the ORIGINAL photo first, then the one with most letters.
+    const ranked = [...g.members].sort(
+      (a, b) =>
+        Number(b.line.kind === "engine") - Number(a.line.kind === "engine") ||
+        Number(b.line.source === "original") - Number(a.line.source === "original") ||
+        letters(b.name) - letters(a.name),
+    );
+    const best = ranked[0]!;
+    const names = [...new Set(g.members.map((m) => m.name.trim()).filter((n) => n && n !== best.name.trim()))];
+    const sources = [...new Set(g.members.map((m) => m.line.source))];
+    const warnings: RowWarning[] = [];
+    // CONFLICT: another group at the same place with DIFFERENT numbers.
+    if (groups.some((o) => o !== g && o.k !== g.k && Math.abs(o.y - g.y) <= tol)) warnings.push("CONFLICT");
+    if (sourcesPresent.size > 1 && sources.length < sourcesPresent.size) warnings.push("SINGLE_READING");
+    if (best.e.rel !== "R1") warnings.push("NOT_PLAIN_ARITHMETIC");
+    return {
+      id: `row-${i + 1}`,
+      rawText: best.line.text.trim(),
+      name: best.name,
+      quantityMilli: Math.round(best.e.qty * 1000),
+      supplierPriceMinor: toMinor(best.e.price, exponent),
+      lineTotalMinor: toMinor(best.e.total, exponent),
+      arithmeticOk: best.e.rel === "R1",
+      relation: best.e.rel,
+      discountPercent: best.e.disc,
+      y: Math.round(g.y),
+      h: Math.round(g.h),
+      readings: g.members.length,
+      sources,
+      alternativeNames: names.slice(0, 3),
+      warnings,
+    };
+  });
+  // Unexplained lines: one per place, and none where a row was already found (the same line read badly).
+  const unexplained: PlacedUnexplained[] = [];
+  for (const l of [...unexplainedRaw].sort((a, b) => a.y - b.y)) {
+    if (rows.some((r) => Math.abs(r.y - l.y) <= tol)) continue;
+    if (unexplained.some((u) => Math.abs(u.y - l.y) <= tol)) continue;
+    unexplained.push({ text: l.text.trim(), y: Math.round(l.y), h: Math.round(l.h) });
+  }
+  return { rows, unexplained };
 }

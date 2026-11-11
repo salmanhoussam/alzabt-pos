@@ -17,11 +17,17 @@ import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { nativeImage } from "electron";
 import { DomainError } from "../domain/errors";
+import { type PositionedLine, type TesseractLikeData, positionedLines } from "../domain/ocrLayout";
 
 export interface OcrReading {
-  readonly lines: readonly string[];
+  /** Every line of both readings, placed on the ORIGINAL photo (ocrLayout.ts). */
+  readonly lines: readonly PositionedLine[];
   readonly ms: number;
   readonly skewDegrees: number;
+  /** A JPEG data URL of the photo (≤ 1400 px wide) to show beside the rows. Memory only. */
+  readonly preview: string | null;
+  /** A JPEG data URL of one horizontal strip of the ORIGINAL photo (a row's place). Memory only. */
+  readonly crop: (y: number, h: number) => string | null;
 }
 
 const req = createRequire(__filename);
@@ -104,23 +110,6 @@ function straightened(path: string): { png: Buffer; skew: number } | null {
   return { png: nativeImage.createFromBitmap(out, { width: w, height: h }).toPNG(), skew };
 }
 
-interface TWord { text: string; bbox: { x0: number; y0: number; x1: number; y1: number } }
-interface TData { text: string; blocks?: Array<{ paragraphs?: Array<{ lines?: Array<{ words?: TWord[] }> }> }> | null }
-
-/** The engine's own lines, plus lines rebuilt from word geometry (a table row is one height). */
-function linesOf(data: TData): string[] {
-  const words: Array<{ text: string; x: number; y: number; h: number }> = [];
-  for (const b of data.blocks ?? []) for (const p of b.paragraphs ?? []) for (const l of p.lines ?? []) for (const w of l.words ?? [])
-    if (w.text.trim()) words.push({ text: w.text, x: (w.bbox.x0 + w.bbox.x1) / 2, y: (w.bbox.y0 + w.bbox.y1) / 2, h: w.bbox.y1 - w.bbox.y0 });
-  const hs = words.map((w) => w.h).sort((a, b) => a - b);
-  const tol = (hs[Math.floor(hs.length / 2)] ?? 20) * 0.6;
-  const groups: Array<{ y: number; w: typeof words }> = [];
-  for (const w of [...words].sort((a, b) => a.y - b.y)) {
-    const g = groups.find((x) => Math.abs(x.y - w.y) <= tol);
-    if (g) { g.w.push(w); g.y = g.w.reduce((s, q) => s + q.y, 0) / g.w.length; } else groups.push({ y: w.y, w: [w] });
-  }
-  return [...data.text.split(/\r?\n/).filter((l) => l.trim()), ...groups.map((g) => g.w.sort((a, b) => b.x - a.x).map((w) => w.text).join(" "))];
-}
 
 /** Reads one invoice photo: the photo as taken, then a straightened copy. */
 export async function readInvoiceImage(path: string, userData: string): Promise<OcrReading> {
@@ -148,14 +137,25 @@ export async function readInvoiceImage(path: string, userData: string): Promise<
   try {
     worker = await guarded(createWorker(["ara", "eng"], 1, { cachePath, cacheMethod: "readOnly", logger: () => undefined, errorHandler: fail }));
     await guarded(worker.setParameters({ preserve_interword_spaces: "1", tessedit_pageseg_mode: "4" as never }));
-    const a = await guarded(worker.recognize(path, { rotateAuto: true }, { text: true, blocks: true }));
+    const photo = nativeImage.createFromPath(path);
+    const { width, height } = photo.getSize();
+    const a = await guarded(worker.recognize(path, {}, { text: true, blocks: true }));
     const st = straightened(path);
-    const lines = linesOf(a.data as unknown as TData);
+    const lines: PositionedLine[] = positionedLines(a.data as unknown as TesseractLikeData, "original");
     if (st && Math.abs(st.skew) >= 0.1) {
-      const b = await guarded(worker.recognize(st.png, { rotateAuto: true }, { text: true, blocks: true }));
-      lines.push(...linesOf(b.data as unknown as TData));
+      const b = await guarded(worker.recognize(st.png, {}, { text: true, blocks: true }));
+      lines.push(...positionedLines(b.data as unknown as TesseractLikeData, "deskewed", { skewDegrees: st.skew, width, height }));
     }
-    return { lines, ms: Math.round(performance.now() - t0), skewDegrees: st?.skew ?? 0 };
+    const jpeg = (img: Electron.NativeImage) => `data:image/jpeg;base64,${img.toJPEG(72).toString("base64")}`;
+    const preview = width > 0 ? jpeg(width > 1400 ? photo.resize({ width: 1400 }) : photo) : null;
+    const crop = (y: number, h: number): string | null => {
+      const top = Math.max(0, Math.round(y - h * 1.3));
+      const ch = Math.min(height - top, Math.round(h * 2.6));
+      if (ch <= 0 || width <= 0) return null;
+      const strip = photo.crop({ x: 0, y: top, width, height: ch });
+      return jpeg(width > 1100 ? strip.resize({ width: 1100 }) : strip);
+    };
+    return { lines, ms: Math.round(performance.now() - t0), skewDegrees: st?.skew ?? 0, preview, crop };
   } catch (e) {
     if (e instanceof DomainError) throw e;
     // The technical cause is for the log (no supplier data in it: never the text read); the operator
