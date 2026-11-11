@@ -56,6 +56,7 @@ import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createOwned, endOwned } from "./_owned.mjs";
 
 const PHASE = process.argv[2];
 const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -302,14 +303,11 @@ function saveFacts(name, data) {
 }
 const loadFacts = (name) => JSON.parse(readFileSync(factFile(name), "utf8"));
 
-function killTree(pid) {
-  try {
-    if (process.platform === "win32") execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
-    else process.kill(pid, "SIGKILL");
-  } catch {
-    // already gone
-  }
-}
+// 🔴 Processes this test starts are recorded BY IDENTITY (pid + executable + OS creation time) and
+// ended ONLY through _owned.mjs, which proves that identity while holding a handle — never by pid
+// alone (Windows reuses pids). The exit handler also runs when an assertion throws.
+const owned = createOwned();
+process.on("exit", () => owned.endAll());
 
 function windowTitle(pid) {
   if (process.platform !== "win32") return null;
@@ -339,10 +337,12 @@ async function runRefusing(expectedCode) {
   const logFile = join(DEFAULT_PROFILE, "logs", "alzabt-pos.log");
   const before = existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").length : 0;
   log(`log lines before the refusal attempt: ${before}`);
+  const tChild = Date.now();
   const child = spawn(ELECTRON, [...EXTRA_ARGS, ...APP_ARGS], {
     env: { ...env, ALZABT_POS_DISABLE_AUTOSTART: "1" },
     stdio: "ignore",
   });
+  const childId = owned.addStartedNear(child.pid, tChild);
   let exited = null;
   child.on("exit", (code) => (exited = code));
   let line = null;
@@ -357,7 +357,7 @@ async function runRefusing(expectedCode) {
     title = windowTitle(child.pid);
     if (!title) await sleep(250);
   }
-  killTree(child.pid);
+  endOwned([childId]);
   assert(line !== null, `the old build recorded a NEW startup failure (not a stale one)`);
   const entry = JSON.parse(line);
   assert(entry.code === expectedCode, `and classified it as ${expectedCode} (got ${entry.code})`);
