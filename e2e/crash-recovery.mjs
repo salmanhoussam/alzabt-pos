@@ -27,6 +27,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron } from "playwright-core";
 import { signIn } from "./_signin.mjs";
+import { createOwned, endOwned, identifyStartedNear, identifyTree, stillRunning } from "./_owned.mjs";
 
 const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
 const EXE = process.env.E2E_EXECUTABLE;
@@ -44,6 +45,13 @@ const check = (cond, msg) => {
 mkdirSync(OUT, { recursive: true });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// 🔴 This check ENDS processes on purpose (graceful close, kill-main, kill-tree, kill-wrapper). Every
+// one it ends is a process IT started, recorded BY IDENTITY (pid + executable + OS creation time) and
+// ended ONLY through _owned.mjs, which proves that identity while holding a handle. It never ends a
+// process by pid alone and never by image name (the old `taskkill /F /IM` cleanup is gone: it would
+// have ended every 'Alzabt POS.exe' on the machine, including a shop's real one).
+const owned = createOwned();
+process.on("exit", () => owned.endAll());
 const alive = (pid) => {
   try {
     process.kill(pid, 0);
@@ -101,8 +109,10 @@ async function waitFor(fn, timeoutMs) {
 }
 
 function startLikeAMerchant(env) {
+  const t = Date.now();
   const child = spawn(EXE, [], { env, detached: true, stdio: "ignore" });
-  const info = { pid: child.pid, startedAt: Date.now(), exit: null };
+  const info = { pid: child.pid, startedAt: Date.now(), exit: null, identity: null };
+  info.identity = owned.addStartedNear(child.pid, t);
   child.on("exit", (code, signal) => {
     info.exit = { code, signal, afterMs: Date.now() - info.startedAt };
   });
@@ -111,10 +121,26 @@ function startLikeAMerchant(env) {
 }
 
 function killAll() {
-  // Test-harness cleanup between scenarios, AFTER measurement. (The product must never do this.)
-  try {
-    execFileSync("taskkill", ["/F", "/IM", IMAGE], { stdio: "ignore" });
-  } catch {}
+  // Test-harness cleanup between scenarios, AFTER measurement: ONLY processes this check started
+  // (recorded by identity). Anything not proven is left alone and reported. (The product never does this.)
+  const rows = owned.endAll();
+  const notProven = rows.filter((r) => r.outcome === "not-ours" || r.outcome === "unknown");
+  if (notProven.length) console.log(`cleanup LEFT ALONE (not proven this check's): ${JSON.stringify(notProven)}`);
+  return rows;
+}
+/** The instance's OWN processes (root + descendants), recorded for cleanup; the report lists only these. */
+function instanceProcesses(rootPid) {
+  const tree = identifyTree(rootPid);
+  for (const i of tree) owned.add(i);
+  const pids = new Set(tree.map((i) => i.pid));
+  return listProcesses().filter((p) => pids.has(p.pid));
+}
+/** The deliberate action, applied to the PROVEN process only; fails the check if it did not reach it. */
+function act(identity, mode, tree, label) {
+  const rows = endOwned([identity], { mode, tree });
+  const reached = rows.some((r) => r.pid === identity?.pid && (r.outcome === "ended" || r.outcome === "asked-to-close"));
+  check(reached, `${label}: the ${mode}${tree ? " (tree)" : ""} reached the proven process (${JSON.stringify(rows)})`);
+  return JSON.stringify(rows);
 }
 
 function newProfile(name) {
@@ -132,13 +158,6 @@ function newProfile(name) {
   return { env, diagFile };
 }
 
-const taskkill = (args) => {
-  try {
-    return execFileSync("taskkill", args, { encoding: "utf8" }).trim();
-  } catch (e) {
-    return `taskkill failed: ${String(e.stderr || e.message).trim()}`;
-  }
-};
 
 /** Relaunch like a merchant and wait until the new process shows a window or exits. */
 async function merchantRelaunch(env, diagFile) {
@@ -155,6 +174,7 @@ async function merchantRelaunch(env, diagFile) {
   const ev = (name) => events.find((e) => e.event === name);
   return {
     pid: relaunch.pid,
+    identity: relaunch.identity,
     exit: relaunch.exit,
     events,
     lockAcquired: ev("single-instance-lock")?.acquired ?? null,
@@ -194,9 +214,10 @@ function expectRecovered(r) {
   check(r.relaunch.windowMs !== null, `${r.name}: relaunch showed the POS window (${r.relaunch.windowMs} ms)`);
 }
 
-async function closeGracefully(pid) {
-  taskkill(["/PID", String(pid)]);
-  if (!(await waitFor(() => !alive(pid), 15000))) taskkill(["/F", "/T", "/PID", String(pid)]);
+async function closeGracefully(identity) {
+  if (!identity) return console.log("closeGracefully: no proven identity — nothing ended");
+  endOwned([identity], { mode: "graceful", tree: false });
+  if (!(await waitFor(() => !stillRunning(identity), 15000))) endOwned([identity], { mode: "kill", tree: true });
 }
 
 process.on("exit", () => {
@@ -215,17 +236,15 @@ for (const [name, action] of [
   const first = startLikeAMerchant(env);
   await waitFor(() => readDiag(diagFile).some((e) => e.pid === first.pid && e.event === "window-ready"), 30000);
   await sleep(1000);
-  const before = listProcesses();
+  const before = instanceProcesses(first.pid);
   const tAction = Date.now();
-  const actionOutput = taskkill(
-    { graceful: ["/PID", String(first.pid)], "kill-main": ["/F", "/PID", String(first.pid)], "kill-tree": ["/F", "/T", "/PID", String(first.pid)] }[action],
-  );
+  const actionOutput = act(first.identity, action === "graceful" ? "graceful" : "kill", action === "kill-tree", name);
   const goneAfterMs = await survivalTimes(before.map((p) => p.pid), tAction, action === "graceful" ? 15000 : 10000);
   const relaunch = await merchantRelaunch(env, diagFile);
   const r = { name, action, actionOutput, mainPid: first.pid, before, goneAfterMs, relaunch };
   report(r);
   expectRecovered(r);
-  await closeGracefully(relaunch.pid);
+  await closeGracefully(relaunch.identity);
   killAll();
   await sleep(1500);
 }
@@ -233,7 +252,9 @@ for (const [name, action] of [
 // ── D: a real sale, then a crash of the REAL main process, then a merchant relaunch ─────────────
 {
   const { env, diagFile } = newProfile("D-ledger");
+  const tD = Date.now();
   const app = await electron.launch({ executablePath: EXE, env });
+  owned.addStartedNear(app.process().pid, tD);
   const page = await app.firstWindow();
 
   // 🔴 THIS WAIT USED TO BE MUTE, and that cost two CI rounds. When it timed out it reported only
@@ -269,16 +290,17 @@ for (const [name, action] of [
   await page.waitForSelector('[data-testid="receipt-number"]:has-text("#1")');
   const mainPid = await app.evaluate(() => process.pid);
   const launcherPid = app.process().pid; // read BEFORE the kill: the handle is disposed afterwards
-  const before = listProcesses();
+  const mainId = owned.addStartedNear(mainPid, tD);
+  const before = instanceProcesses(mainPid);
   const tAction = Date.now();
-  const actionOutput = taskkill(["/F", "/PID", String(mainPid)]); // the main process only
+  const actionOutput = act(mainId, "kill", false, "D"); // the PROVEN main process only
   const goneAfterMs = await survivalTimes(before.map((p) => p.pid), tAction, 10000);
   const relaunch = await merchantRelaunch(env, diagFile);
   const r = { name: "D-ledger-kill-real-main", action: "kill-main", actionOutput, mainPid, launcherPid, before, goneAfterMs, relaunch };
   report(r);
   expectRecovered(r);
   check(r.relaunch.ledger?.sales === 1, `D: the sale committed before the crash is in the reopened ledger (sales=${r.relaunch.ledger?.sales})`);
-  await closeGracefully(relaunch.pid);
+  await closeGracefully(relaunch.identity);
   killAll();
   await sleep(1500);
 }
@@ -286,16 +308,19 @@ for (const [name, action] of [
 // ── N: NEGATIVE CONTROL — kill only Playwright's cmd.exe wrapper (the old broken E2E kill) ──────
 {
   const { env, diagFile } = newProfile("N-control");
+  const tN = Date.now();
   const app = await electron.launch({ executablePath: EXE, env });
   await app.firstWindow();
   const mainPid = await app.evaluate(() => process.pid);
   const launcherPid = app.process().pid;
+  const launcherId = owned.addStartedNear(launcherPid, tN);
+  owned.addStartedNear(mainPid, tN);
   const mainInfo = listProcesses().find((p) => p.pid === mainPid);
   const parent = mainInfo ? processName(mainInfo.ppid) : null;
   const launcher = processName(launcherPid);
   console.log(`CONTROL launcher pid ${launcherPid} = ${launcher?.Name} ; real main pid ${mainPid}, parent ${mainInfo?.ppid} = ${parent?.Name}`);
-  const before = listProcesses();
-  const actionOutput = taskkill(["/F", "/PID", String(launcherPid)]);
+  const before = instanceProcesses(mainPid);
+  const actionOutput = act(launcherId, "kill", false, "N"); // the PROVEN wrapper only
   await sleep(2000);
   const relaunch = await merchantRelaunch(env, diagFile);
   const r = { name: "N-negative-control-kill-wrapper-only", action: "kill-launcher", actionOutput, mainPid, launcherPid, launcherName: launcher?.Name, mainParentName: parent?.Name, before, goneAfterMs: {}, relaunch, mainStillAlive: alive(mainPid) };

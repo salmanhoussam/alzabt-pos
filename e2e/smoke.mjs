@@ -9,6 +9,7 @@
 // e2e-output/ (git-ignored).
 import { _electron as electron } from "playwright-core";
 import { E2E_PIN, signIn } from "./_signin.mjs";
+import { createOwned, endOwned, identifyTree } from "./_owned.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -40,13 +41,21 @@ const assert = (cond, msg) => {
   log("PASS", msg);
 };
 
+// 🔴 Processes this test starts are recorded BY IDENTITY (pid + executable + OS creation time) and
+// ended ONLY through _owned.mjs, which proves that identity while holding a handle — never by pid
+// alone (Windows reuses pids). The exit handler also runs when an assertion throws.
+const owned = createOwned();
+process.on("exit", () => owned.endAll());
 async function launch() {
+  const t = Date.now();
   const app = await electron.launch({
     executablePath: ELECTRON,
     args: [...EXTRA_ARGS, ...APP_ARGS],
     env,
   });
+  owned.addStartedNear(app.process().pid, t);
   const page = await app.firstWindow();
+  owned.addStartedNear(await app.evaluate(() => process.pid), t);
   await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
   return { app, page };
 }
@@ -305,16 +314,25 @@ const isAlive = (p) => {
   }
 };
 const image = basename(ELECTRON);
-const appPids = () =>
+// 🔴 THIS instance only — its launcher, its main process and their descendants. Counting every
+// process with the same image name made a process left behind by ANOTHER test look like this
+// instance failing to exit (installed run 2026-11-11: 8 counted, 4 were someone else's).
+const sameImage = () =>
   process.platform === "win32"
     ? execFileSync("tasklist", ["/FI", `IMAGENAME eq ${image}`, "/FO", "CSV", "/NH"], { encoding: "utf8" })
         .split(/\r?\n/)
         .filter((l) => l.toLowerCase().includes(image.toLowerCase()))
         .map((l) => Number(l.split('","')[1]))
     : [mainPid];
-const beforeKill = appPids();
-log(`app processes before the kill: ${beforeKill.length}`);
-process.kill(mainPid, "SIGKILL"); // TerminateProcess on Windows
+const beforeIds = [...identifyTree(launcherPid), ...identifyTree(mainPid)].filter((i, k, a) => a.findIndex((j) => j.pid === i.pid) === k);
+const beforeKill = beforeIds.map((i) => i.pid);
+for (const i of beforeIds) owned.add(i);
+const foreign = sameImage().filter((p) => !beforeKill.includes(p));
+log(`app processes before the kill: ${beforeKill.length} of this instance${foreign.length ? `; ${foreign.length} other ${image} process(es) NOT counted: ${foreign.join(", ")}` : ""}`);
+// The identity recorded AT LAUNCH (creation time checked against the launch moment), not a fresh read.
+const mainId = owned.list().find((i) => i.pid === mainPid) ?? null;
+const hardKill = endOwned([mainId], { tree: false }); // TerminateProcess on the PROVEN main process only
+assert(hardKill.length === 1 && hardKill[0].outcome === "ended", `the hard kill reached the proven main process (${JSON.stringify(hardKill)})`);
 log("hard-killed the Electron main process only", mainPid);
 
 // No cleanup: every process of the killed instance must go away BY ITSELF.

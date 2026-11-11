@@ -30,6 +30,8 @@
  */
 import { _electron as electron } from "playwright-core";
 import { E2E_PIN, signIn } from "./_signin.mjs";
+import { RESTORED_TITLES, unexpectedErrors, waitForTitle, windowTitlesOf } from "./_dialogs.mjs";
+import { createOwned, endOwned, identifyStartedNear, stillRunning } from "./_owned.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { connect } from "node:net";
@@ -79,6 +81,10 @@ const profile = (name) => join(ROOT, name, "userData");
 
 const log = (...a) => console.log("•", ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Declared bound for a native notice to appear after the window is up (cold installed start included). */
+const NOTICE_TIMEOUT_MS = 20000;
+const RESTORED_AR = RESTORED_TITLES[0];
+const NOT_RESTORED_AR = "لم تتمّ الاستعادة";
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 const shaFile = (p) => sha(readFileSync(p));
 
@@ -159,8 +165,11 @@ const envFor = (userData) => {
 };
 
 async function launch(userData) {
+  const t = Date.now();
   const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env: envFor(userData) });
+  owned.addStartedNear(app.process().pid, t);
   const page = await app.firstWindow();
+  owned.addStartedNear(await app.evaluate(() => process.pid), t);
   return { app, page };
 }
 const asOwner = async (l) => (await signIn(l.page, "Cashier One", "1111"), l);
@@ -209,49 +218,12 @@ function desktopShot(name) {
   fact(`screenshot:${name}`, `${name}.png`);
 }
 
-/** Every visible top-level window title of a process, read as UTF-8 through Base64 (Arabic-safe). */
-function windowTitlesOf(pid) {
-  if (!WINDOWS) return null;
-  const ps = `
-Add-Type @"
-using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices;
-public static class W {
-  public delegate bool P(IntPtr h, IntPtr l);
-  [DllImport("user32.dll")] public static extern bool EnumWindows(P f, IntPtr l);
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
-  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
-  public static List<string> Of(uint pid) { var r = new List<string>(); EnumWindows((h,l) => { uint p; GetWindowThreadProcessId(h, out p);
-    if (p == pid && IsWindowVisible(h)) { var sb = new StringBuilder(512); GetWindowText(h, sb, 512); if (sb.Length > 0) r.Add(sb.ToString()); } return true; }, IntPtr.Zero); return r; }
-}
-"@
-[W]::Of(${pid}) | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) }`;
-  try {
-    return execFileSync("powershell", ["-NoProfile", "-Command", ps], { encoding: "utf8" })
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((b) => Buffer.from(b.trim(), "base64").toString("utf8"));
-  } catch {
-    return [];
-  }
-}
-
-function killTree(pid) {
-  try {
-    if (WINDOWS) execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
-    else process.kill(pid, "SIGKILL");
-  } catch {
-    // already gone
-  }
-}
-const alive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
+// 🔴 Every process this test starts (or that app.relaunch starts for it) is recorded BY IDENTITY —
+// pid + executable + OS creation time — and ended ONLY through _owned.mjs, which proves that
+// identity while holding a handle. A pid alone is never enough (Windows reuses pids). The exit
+// handler runs even when an assertion throws, so a failing run does not leave the app running.
+const owned = createOwned();
+process.on("exit", () => owned.endAll());
 
 const appLog = (userData) => {
   const f = join(userData, "logs", "alzabt-pos.log");
@@ -550,7 +522,12 @@ try {
       () => diagEvents().find((e) => e.t >= t0 && e.pid !== oldPid && e.event === "window-ready")?.pid,
       90000,
     );
-    fact("relaunch", { oldPid, newPid });
+    // The relaunched process was started by app.relaunch(), not by this test: its identity is taken
+    // now and accepted only if its OS creation time matches the start its own diag log recorded.
+    const mainStart = diagEvents().find((e) => e.pid === newPid && e.event === "main-start");
+    const newId = owned.addStartedNear(newPid, mainStart?.t ?? t0, (mainStart?.t ?? Date.now()) + 1000);
+    fact("relaunch", { oldPid, newPid, identity: newId });
+    check(newId !== null, "D · the relaunched process's identity (path + creation time) was recorded", { newPid, mainStart });
     check(newPid !== oldPid, "D · 🔴 a NEW process was started by app.relaunch() — not by this test", { oldPid, newPid });
     check(appLog(B).includes('"event":"restore-applied"'), "D · the relaunched process applied the restore");
     check(lastRestore(B).outcome === "restored", "D · last-restore.json says restored");
@@ -558,17 +535,23 @@ try {
     const applied = logLines.findIndex((l) => l.includes('"event":"restore-applied"'));
     const opened = logLines.findIndex((l, i) => i > applied && l.includes('"event":"db-open"'));
     check(applied >= 0 && opened > applied, "D · 🔴 the restore ran BEFORE the ledger was opened in that process");
-    await sleep(2500);
-    if (WINDOWS) {
-      const titles = windowTitlesOf(newPid);
-      fact("relaunchWindowTitles", titles);
-      desktopShot("P4-D2-after-relaunch-notice");
-      check(titles.includes("تمّت استعادة النسخة الاحتياطيّة"), "D · the owner is shown the 'restored' notice", { titles });
-    } else {
-      skip("D · native notice window (enumerating windows is Windows-only)");
+    try {
+      if (WINDOWS) {
+        const seen = await waitForTitle(newPid, RESTORED_AR, NOTICE_TIMEOUT_MS);
+        fact("relaunchWindowTitles", seen.titles);
+        fact("relaunchNoticeMs", seen.ms);
+        desktopShot("P4-D2-after-relaunch-notice");
+        check(seen.found, `D · the owner is shown the 'restored' notice (within ${NOTICE_TIMEOUT_MS} ms)`, seen);
+        check(unexpectedErrors(seen.titles).length === 0, "D · 🔴 no error box is open in the relaunched app", seen);
+      } else {
+        skip("D · native notice window (enumerating windows is Windows-only)");
+      }
+    } finally {
+      // This test did not start this process (app.relaunch did), so nothing else would end it —
+      // ended through its PROVEN identity only.
+      fact("relaunchEnded", endOwned([newId]));
     }
-    killTree(newPid);
-    await until("the relaunched process to end", () => !alive(newPid), 30000);
+    await until("the relaunched process to end", () => !stillRunning(newId), 30000);
   }
   {
     // The restored money, read from the real profile.
@@ -660,10 +643,11 @@ try {
     await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 60000 });
     check(lastRestore(C).outcome === "restored", "G · 🔴 after a FAILED restart, the next start completed the restore");
     if (WINDOWS) {
-      await sleep(1500);
-      const titles = windowTitlesOf(pid);
+      const seen = await waitForTitle(pid, RESTORED_AR, NOTICE_TIMEOUT_MS);
+      fact("nextStartNoticeMs", seen.ms);
       desktopShot("P4-G1-next-start-notice");
-      check(titles.includes("تمّت استعادة النسخة الاحتياطيّة"), "G · and showed the 'restored' notice", { titles });
+      check(seen.found, "G · and showed the 'restored' notice", seen);
+      check(unexpectedErrors(seen.titles).length === 0, "G · 🔴 no error box is open", seen);
     }
     await app.close();
     const restored = readLedger(C, LEDGER_FILE, (db) => count(db, "sales"));
@@ -702,6 +686,12 @@ try {
 
     const { app, page } = await launch(D);
     await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 60000 });
+    if (WINDOWS) {
+      const seen = await waitForTitle(await app.evaluate(() => process.pid), RESTORED_AR, NOTICE_TIMEOUT_MS);
+      desktopShot("P4-E1-resumed-notice");
+      check(seen.found, "E · the resumed restore shows the 'restored' notice", seen);
+      check(unexpectedErrors(seen.titles).length === 0, "E · 🔴 no error box is open after the resumed restore", seen);
+    }
     await app.close();
     check(lastRestore(D).outcome === "restored", "E · 🔴 the installed app resumed the interrupted restore at start and finished it");
     const money = readLedger(D, LEDGER_FILE, (db) => moneyRows(db));
@@ -718,7 +708,9 @@ try {
     // THIS start writes counts.
     const logStart = appLog(H).length;
     const thisStart = () => appLog(H).slice(logStart);
+    const tChild = Date.now();
     const child = spawn(ELECTRON, [...EXTRA_ARGS, ...APP_ARGS], { env: envFor(H), stdio: "ignore" });
+    const childId = owned.addStartedNear(child.pid, tChild);
     const line = await until(
       "the startup failure to be logged",
       () => thisStart().split("\n").find((l) => l.includes('"event":"startup-failure"')),
@@ -729,7 +721,7 @@ try {
       title = await until("the error box", () => windowTitlesOf(child.pid).find((t) => t === "Alzabt POS — cannot start"), 20000).catch(() => null);
       desktopShot("P4-E2-halted-error-box");
     }
-    killTree(child.pid);
+    fact("haltedEnded", endOwned([childId]));
     check(JSON.parse(line).code === "RESTORE_INCOMPLETE", "E · 🔴 a damaged journal stops startup as RESTORE_INCOMPLETE");
     check(!thisStart().includes('"event":"catalog"'), "E · the till never started");
     check(!thisStart().includes('"event":"db-open"'), "E · no ledger was opened");
@@ -746,18 +738,25 @@ try {
     check(existsSync(settings), "E · the profile has a settings.json to lock");
     const ready = join(HOME, "lock-held.txt");
     // Another process opens settings.json WITHOUT FILE_SHARE_DELETE: Windows refuses to rename it.
+    const tHolder = Date.now();
     const holder = spawn(
       "powershell",
       ["-NoProfile", "-Command", `$f=[IO.File]::Open('${settings.replace(/'/g, "''")}','Open','Read','Read'); Set-Content -Path '${ready.replace(/'/g, "''")}' -Value held; Start-Sleep -Seconds 90; $f.Close()`],
       { stdio: "ignore" },
     );
+    const holderId = owned.addStartedNear(holder.pid, tHolder);
     await until("the lock to be held", () => existsSync(ready), 30000);
     const { app, page } = await launch(L);
     await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 60000 });
     const outcome = lastRestore(L);
     fact("fileLockOutcome", outcome);
+    // PROVOKED on purpose (a real lock): the owner must be TOLD the restore did not happen.
+    const warned = await waitForTitle(await app.evaluate(() => process.pid), NOT_RESTORED_AR, NOTICE_TIMEOUT_MS);
+    desktopShot("P4-E3-rolled-back-warning");
+    check(warned.found, "E · 🔴 the PROVOKED rollback shows its 'not restored' warning", warned);
+    check(unexpectedErrors(warned.titles, [NOT_RESTORED_AR]).length === 0, "E · and no other error box", warned);
     await app.close();
-    killTree(holder.pid);
+    fact("lockHolderEnded", endOwned([holderId], { tree: false }));
     check(outcome.outcome === "rolled-back", "E · 🔴 a real Windows lock on settings.json made the restore ROLL BACK", outcome);
     check(!journalExists(L), "E · the journal is closed");
     check(shaFile(join(L, LEDGER_FILE)) === before, "E · the original ledger is back byte-for-byte");
@@ -777,4 +776,15 @@ try {
   persist();
   console.error(e);
   process.exitCode = 1;
+} finally {
+  // Only processes PROVEN to be this test's own (identity recorded at start) — never by pid alone.
+  const rows = owned.endAll();
+  const ended = rows.filter((r) => r.outcome === "ended");
+  const notProven = rows.filter((r) => r.outcome === "not-ours" || r.outcome === "unknown");
+  if (ended.length) console.error(`[cleanup] ended ${ended.length} process(es) this test started and left running: ${ended.map((r) => r.pid).join(", ")}`);
+  if (notProven.length) console.error(`[cleanup] LEFT ALONE — not proven to be this test's: ${JSON.stringify(notProven)}`);
+  if (rows.length) {
+    evidence.cleanup = rows;
+    persist();
+  }
 }
