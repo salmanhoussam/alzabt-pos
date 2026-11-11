@@ -997,3 +997,9 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .adv-pending { margin: 12px 16px; border: 2px solid var(--warn, #b26b00); }
 .adv-pending li { padding: 6px 0; }
 .adv-pending li .btn { margin-inline-start: 8px; }
+
+/* G2 correction sheet: choices inline, controls their natural size (the global input rule stretches them). */
+.adv-correct fieldset { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; border: 1px solid var(--border); padding: 10px; }
+.adv-correct fieldset label { display: inline-flex; align-items: center; gap: 6px; }
+.adv-correct input[type="radio"], .adv-correct input[type="checkbox"] { width: auto; height: auto; margin: 0; }
+.adv-correct select { width: 100%; }

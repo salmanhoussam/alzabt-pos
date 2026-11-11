@@ -15,6 +15,7 @@ import { call, fmt, pos } from "../api";
 import { useT } from "../i18n";
 import type { AdvanceDto, AdvanceStatementDto, PendingAdvanceDto } from "../../shared/ipcContract";
 import { AdvanceReceipt, advanceErrorText } from "./AdvanceSheet";
+import { AdvanceCorrectionSheet } from "./AdvanceCorrectionSheet";
 
 export function PendingAdvances({ refreshKey, onSettled }: { refreshKey: number; onSettled: () => void }) {
   const { t } = useT();
@@ -125,6 +126,8 @@ export function AdvanceStatementSection({ customerId, refreshKey }: { customerId
   const [data, setData] = useState<AdvanceStatementDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [shown, setShown] = useState<AdvanceDto | null>(null);
+  const [correcting, setCorrecting] = useState<AdvanceDto | null>(null);
+  const [tick, setTick] = useState(0);
   useEffect(() => {
     let live = true;
     call(pos().getAdvanceStatement({ customerId }))
@@ -133,7 +136,7 @@ export function AdvanceStatementSection({ customerId, refreshKey }: { customerId
     return () => {
       live = false;
     };
-  }, [customerId, refreshKey, t]);
+  }, [customerId, refreshKey, tick, t]);
 
   if (error) return <p className="error" data-testid="adv-stmt-error">{error}</p>;
   if (!data) return null;
@@ -185,6 +188,12 @@ export function AdvanceStatementSection({ customerId, refreshKey }: { customerId
                         <bdi>{l.correction.reason}</bdi>
                       </span>
                     )}
+                    {/* Offered only on a fully unused, uncorrected advance — the trigger refuses anything else anyway. */}
+                    {!l.correction && l.unused.minor === l.advance.amount.minor && (
+                      <button className="btn ghost" onClick={() => setCorrecting(l.advance)} data-testid="adv-stmt-correct">
+                        {t("adv.corr.open")}
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -204,6 +213,15 @@ export function AdvanceStatementSection({ customerId, refreshKey }: { customerId
             <AdvanceReceipt advance={shown} duplicate={false} onClose={() => setShown(null)} />
           </div>
         </div>
+      )}
+      {correcting && (
+        <AdvanceCorrectionSheet
+          advance={correcting}
+          onClose={(changed) => {
+            setCorrecting(null);
+            if (changed) setTick((n) => n + 1);
+          }}
+        />
       )}
     </section>
   );
