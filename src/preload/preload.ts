@@ -206,6 +206,7 @@ const CH = {
   getDailyMoney: "pos:getDailyMoney",
   correctAdvance: "pos:correctAdvance",
   applyAdvanceToDebt: "pos:applyAdvanceToDebt",
+  sellOnAdvance: "pos:sellOnAdvance",
   printAdvance: "pos:printAdvance",
   saveAdvancePdf: "pos:saveAdvancePdf",
 } as const satisfies typeof CHANNELS;
@@ -476,6 +477,15 @@ const api: PosApi = {
       obligationId: req.obligationId,
       amountMinor: req.amountMinor,
       idempotencyKey: req.idempotencyKey,
+    }),
+  sellOnAdvance: (req) =>
+    ipcRenderer.invoke(CH.sellOnAdvance, {
+      idempotencyKey: req.idempotencyKey,
+      lines: req.lines,
+      expectedTotalMinor: req.expectedTotalMinor,
+      customerId: req.customerId,
+      advanceId: req.advanceId,
+      amountMinor: req.amountMinor,
     }),
   printAdvance: (req) => ipcRenderer.invoke(CH.printAdvance, { advanceId: req.advanceId }),
   saveAdvancePdf: (req) => ipcRenderer.invoke(CH.saveAdvancePdf, { advanceId: req.advanceId }),

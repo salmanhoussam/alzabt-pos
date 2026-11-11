@@ -128,6 +128,7 @@ export const CHANNELS = {
   getDailyMoney: "pos:getDailyMoney",
   correctAdvance: "pos:correctAdvance",
   applyAdvanceToDebt: "pos:applyAdvanceToDebt",
+  sellOnAdvance: "pos:sellOnAdvance",
   printAdvance: "pos:printAdvance",
   saveAdvancePdf: "pos:saveAdvancePdf",
 } as const;
@@ -461,6 +462,28 @@ export interface CreateCustomerCreditSaleResponse {
   readonly sale: SaleDto;
   /** The receivable posted with the sale, in the same transaction. */
   readonly obligationId: string;
+  readonly duplicate: boolean;
+}
+
+/** DEC-35x — a NEW sale on the customer's account, paid (part or all) from that customer's advance. Owner only. */
+export interface SellOnAdvanceRequest {
+  readonly idempotencyKey: string;
+  readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
+  readonly expectedTotalMinor: string;
+  readonly customerId: string;
+  readonly advanceId: string;
+  /** How much of the advance pays this sale; the rest of the total stays the customer's debt. */
+  readonly amountMinor: string;
+}
+
+export interface SellOnAdvanceResponse {
+  readonly sale: SaleDto;
+  readonly obligationId: string;
+  readonly advanceNumber: string;
+  /** Read back AFTER the commit. */
+  readonly applied: MoneyDto;
+  readonly unused: MoneyDto;
+  readonly debtOutstanding: MoneyDto;
   readonly duplicate: boolean;
 }
 
@@ -1923,6 +1946,8 @@ export interface PosApi {
   getAdvanceStatement(req: { readonly customerId: string }): Promise<IpcResult<AdvanceStatementDto>>;
   /** Owner only (DEC-35x): pay part or all of ONE existing debt from the SAME customer's advance. Not new money. */
   applyAdvanceToDebt(req: ApplyAdvanceRequest): Promise<IpcResult<ApplyAdvanceResponse>>;
+  /** Owner only (DEC-35x): a new sale on account + its advance application, atomically. Not new money. */
+  sellOnAdvance(req: SellOnAdvanceRequest): Promise<IpcResult<SellOnAdvanceResponse>>;
   /** Owner only: one business day's money in / out (date absent = today). Read-only. */
   getDailyMoney(req: { readonly date?: string }): Promise<IpcResult<DailyMoneyDto>>;
   /** Owner only (G2): not received, or replaced by a corrected restatement. */

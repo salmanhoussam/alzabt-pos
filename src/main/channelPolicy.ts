@@ -187,6 +187,8 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // 🔴 OWNER (D3): apply an advance to an existing debt — refused again by `AdvanceService.requireOwner`
   // and by the M19 trigger on `advance_applications.applied_by`.
   applyAdvanceToDebt: "owner",
+  // 🔴 OWNER (DEC-35x): a new sale on account paid from an advance — refused again by both services.
+  sellOnAdvance: "owner",
 
   // ── Owner only ────────────────────────────────────────────────────────────────────────────────
   // Reversing money.

@@ -20,6 +20,8 @@ export function advanceDeps(h: Harness, repo: AdvanceRepository = new AdvanceRep
     transact: (fn) => h.db.transaction(fn).immediate(),
     terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
     now: h.clock.now,
+    // DEC-35x: the REAL owner-only credit sale of the same harness (same connection, same transaction).
+    creditSale: (input) => h.service.createCustomerCreditSale(input),
   };
 }
 

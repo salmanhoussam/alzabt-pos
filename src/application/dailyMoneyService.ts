@@ -24,7 +24,22 @@ export interface DailyMoneyServiceDeps {
   readonly now?: () => Date;
 }
 
-const DATE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+/**
+ * DEC-35z: a REAL calendar date, strictly. `Date.parse("2026-02-31")` rolls over to 3 March instead of
+ * refusing, so it is never used here: the parts are rebuilt as a UTC date and must come back identical
+ * (2026-02-29 and 2026-04-31 refused; 2028-02-29 accepted). Business day and time zone are unchanged.
+ */
+export function isCalendarDate(text: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!m) return false;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return false;
+  const date = new Date(0);
+  date.setUTCFullYear(y, mo - 1, d);
+  return date.getUTCFullYear() === y && date.getUTCMonth() === mo - 1 && date.getUTCDate() === d;
+}
 
 export class DailyMoneyService {
   private readonly now: () => Date;
@@ -41,7 +56,7 @@ export class DailyMoneyService {
     const today = businessDateOf(this.now(), this.deps.terminal.timeZone);
     let d = today;
     if (date !== undefined && date !== null) {
-      if (typeof date !== "string" || !DATE.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00Z`))) {
+      if (typeof date !== "string" || !isCalendarDate(date)) {
         throw new DomainError("INVALID_INPUT", "A business date is YYYY-MM-DD");
       }
       if (date > today) throw new DomainError("INVALID_INPUT", "A future business day has no money yet");

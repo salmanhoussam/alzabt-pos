@@ -1885,6 +1885,34 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         duplicate: r.duplicate,
       };
     }),
+    sellOnAdvance: wrap("sellOnAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey", "lines", "expectedTotalMinor", "customerId", "advanceId", "amountMinor"]);
+      const r = advances().sellOnAdvance({
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+        lines: saleLinesOf(o.lines),
+        expectedTotalMinor: parseMinor(o.expectedTotalMinor),
+        customerId: str(o.customerId, "customerId", 100),
+        advanceId: str(o.advanceId, "advanceId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+      });
+      if (!r.duplicate) {
+        try {
+          options.afterSale?.();
+        } catch (err) {
+          log.warn("after-sale-hook-failed", { error: err });
+        }
+      }
+      const cur = r.sale.total.currency;
+      return {
+        sale: toSaleDto(r.sale, invoiceNumberFor(r.sale)),
+        obligationId: r.obligation.id,
+        advanceNumber: advances().view(r.application.advance).number,
+        applied: { minor: r.application.application.amountMinor.toString(), currency: cur },
+        unused: { minor: r.application.unusedMinor.toString(), currency: cur },
+        debtOutstanding: { minor: r.application.debtOutstandingMinor.toString(), currency: cur },
+        duplicate: r.duplicate,
+      };
+    }),
     getDailyMoney: wrap("getDailyMoney", (p) => {
       const o = objectWithOptional(p, [], ["date"]);
       if (!options.dailyMoney) throw new DomainError("NOT_AVAILABLE", "The day's money is not available on this terminal");

@@ -83,7 +83,16 @@ export function DailyMoneyPanel() {
 
       {/* Revenue is not money: shown apart, above the money table. */}
       <p className="dm-revenue muted small" data-testid="dm-revenue">
-        {t("dm.revenue")} <bdi dir="ltr">{m(report.sales.revenue.minor)}</bdi> · {t("dm.onAccount")}{" "}
+        {t("dm.revenue")} <bdi dir="ltr">{m(report.sales.revenue.minor)}</bdi>
+        {/* F2: why revenue can be 0 while money received is not — the voided sales are named here. */}
+        {report.sales.voidedCount > 0 && (
+          <>
+            {" · "}
+            {t("dm.voidedSales")} <bdi dir="ltr" data-testid="dm-revenue-voided">{m(report.sales.voidedTotal.minor)}</bdi>
+          </>
+        )}
+        {" · "}
+        {t("dm.onAccount")}{" "}
         <bdi dir="ltr" data-testid="dm-on-account">{m(report.sales.onAccount.minor)}</bdi>
       </p>
 

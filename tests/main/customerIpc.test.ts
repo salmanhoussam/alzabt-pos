@@ -100,7 +100,9 @@ describe("the customer channels", () => {
     // 🔴 TRANSITION (DEC-35x, Apply Advance to Existing Debt): 91 -> 92 with applyAdvanceToDebt — owner-only;
     // it SETTLES an existing debt from an advance (no new money) and creates none. Named in every closed
     // list in the next test. The old value was 91.
-    expect(Object.keys(CHANNELS)).toHaveLength(92);
+    // 🔴 TRANSITION (DEC-35x, Apply Advance to New Sale): 92 -> 93 with sellOnAdvance — owner-only; it CREATES
+    // a debt (the sale on account) and settles part of it from an advance, atomically. The old value was 92.
+    expect(Object.keys(CHANNELS)).toHaveLength(93);
   });
 
   // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".
@@ -146,8 +148,11 @@ describe("the customer channels", () => {
     // SELL-CREDIT: the closed, NAMED list of debt creators. Old value: none.
     // 🔴 TRANSITION (DEC-35x): the pattern now also sees applyAdvanceToDebt, which REDUCES a debt and
     // creates none — so it is removed BY NAME, and the creators stay exactly one. Old filter: unchanged.
-    const debtCreators = names.filter((n) => /credit|debt|obligation|onAccount/i.test(n) && n !== "applyAdvanceToDebt").sort();
-    expect(debtCreators).toEqual(["createCustomerCreditSale"]);
+    // 🔴 TRANSITION (DEC-35x): sellOnAdvance creates a debt but no pattern word names it — it is ADDED BY NAME.
+    // Old value: ["createCustomerCreditSale"].
+    const debtCreators = names.filter((n) => (/credit|debt|obligation|onAccount/i.test(n) && n !== "applyAdvanceToDebt") || n === "sellOnAdvance").sort();
+    expect(debtCreators).toEqual(["createCustomerCreditSale", "sellOnAdvance"]);
+    expect(accessFor("sellOnAdvance")).toBe("owner");
     expect(accessFor("createCustomerCreditSale")).toBe("owner");
     // 🔴 MIGRATION 20 — the advance channels, as a CLOSED NAMED list (the money-writer pattern above
     // cannot see them: an enumeration that skips unknown names goes blind, it does not fail).
@@ -165,6 +170,8 @@ describe("the customer channels", () => {
         "printAdvance",
         "recordAdvance",
         "saveAdvancePdf",
+        // TRANSITION (DEC-35x): a new sale on account paid from an advance. Old list: without it.
+        "sellOnAdvance",
       ].sort(),
     );
     // The three that MOVE money: record and finish (owner + cashier, decision D1 — the cashier takes

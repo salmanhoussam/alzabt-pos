@@ -972,6 +972,8 @@ function startTill(): void {
       return db.transaction(fn).immediate();
     },
     terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
+    // DEC-35x: the till's own owner-only credit sale, run inside the advance transaction.
+    creditSale: (input) => service.createCustomerCreditSale(input),
   });
 
   // DAILY MONEY IN / OUT (DEC-35x): read-only, the SAME connection and the SAME live actor. No
@@ -1059,7 +1061,12 @@ function startTill(): void {
   if (notice) {
     const win = mainWindow;
     win.once("ready-to-show", () => {
-      void dialog.showMessageBox(win, { type: restore.kind === "restored" ? "info" : "warning", title: notice.title, message: notice.title, detail: notice.body, buttons: ["OK"], noLink: true });
+      // Diagnostics only (DEC-35y review): WHEN the notice was handed to Windows and when it was closed,
+      // so a test that does not see it can tell "never shown" from "shown late" or "not enumerated".
+      diag("restore-notice-shown", { kind: restore.kind });
+      void dialog
+        .showMessageBox(win, { type: restore.kind === "restored" ? "info" : "warning", title: notice.title, message: notice.title, detail: notice.body, buttons: ["OK"], noLink: true })
+        .then(() => diag("restore-notice-closed", { kind: restore.kind }));
     });
   }
 

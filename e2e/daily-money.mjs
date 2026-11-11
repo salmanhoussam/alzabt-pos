@@ -109,6 +109,22 @@ try {
   const widths = await page.evaluate(() => [document.querySelector(".card.today").getBoundingClientRect().width, document.querySelector('[data-testid="dm-panel"]').getBoundingClientRect().width]);
   assert(Math.abs(widths[0] - widths[1]) <= 1, `the money panel is as wide as the Today card (${widths.join(" / ")})`);
   await testid(page, "dm-panel").screenshot({ path: SHOTS + "DAILYMONEY-owner-arabic.png" });
+  // ── D · F2 (DEC-35y review): a cash sale VOIDED without handing the money back ─────────────────
+  await page.evaluate(async (SALE) => {
+    const must = (r) => {
+      if (!r.ok) throw new Error(JSON.stringify(r.error));
+      return r.data;
+    };
+    const s = must(await window.pos.createSale({ ...SALE, idempotencyKey: "e2e-dm-sale-void1", paymentMethod: "cash" }));
+    must(await window.pos.voidSale({ saleId: s.sale.id, reason: "wrong item rung up" }));
+  }, SALE);
+  await testid(page, "tab-sell").click();
+  await testid(page, "tab-today").click();
+  await testid(page, "dm-panel").waitFor({ timeout: 30000 });
+  assert(digits(await testid(page, "dm-revenue").innerText()).startsWith("5.97") && (await cell("dm-revenue-voided")) === "1.99", "F2: revenue stays 5.97; the voided 1.99 is named apart from revenue");
+  assert((await cell("dm-voided-cash")) === "1.99" && (await cell("dm-in-cash")) === "25.97", "F2: the voided sale's cash is STILL money received (no refund in the ledger)");
+  assert((await cell("dm-out-total")) === "0.00" && (await testid(page, "dm-voided").count()) === 1, "F2: no cash-out invented; the note says a void is not a refund");
+  await testid(page, "dm-panel").screenshot({ path: SHOTS + "DAILYMONEY-voided-arabic.png" });
   await testid(page, "lang-toggle").click();
   await page.waitForFunction(() => document.documentElement.lang === "en");
   await testid(page, "dm-panel").screenshot({ path: SHOTS + "DAILYMONEY-owner-english.png" });

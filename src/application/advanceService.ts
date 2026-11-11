@@ -42,6 +42,7 @@ import type {
   AdvanceRepository,
 } from "../persistence/advanceRepository";
 import type { LedgerRepository } from "../persistence/ledgerRepository";
+import type { CreateCreditSaleInput, CreateCreditSaleResult } from "./posService";
 import type { PartyRepository } from "../persistence/partyRepository";
 
 export interface AdvanceActor {
@@ -62,6 +63,12 @@ export interface AdvanceServiceDeps {
   readonly terminal: { readonly timeZone: string; readonly currency: string };
   readonly now?: () => Date;
   readonly newId?: () => string;
+  /**
+   * DEC-35x — the till's OWN owner-only credit sale (PosService.createCustomerCreditSale), called inside
+   * this service's transaction so the sale, its receivable and the advance application commit together.
+   * Absent → sellOnAdvance answers NOT_AVAILABLE.
+   */
+  readonly creditSale?: (input: CreateCreditSaleInput) => CreateCreditSaleResult;
 }
 
 export interface RecordAdvanceDraft {
@@ -166,6 +173,26 @@ export interface ApplyAdvanceDraft {
   readonly amountMinor: unknown;
   readonly idempotencyKey: unknown;
 }
+
+/** DEC-35x — a NEW sale on the customer's account, paid (part or all) from that customer's advance. */
+export interface SellOnAdvanceDraft {
+  readonly idempotencyKey: unknown;
+  readonly customerId: unknown;
+  readonly lines: CreateCreditSaleInput["lines"];
+  readonly expectedTotalMinor: unknown;
+  readonly advanceId: unknown;
+  readonly amountMinor: unknown;
+}
+
+export interface SellOnAdvanceResult {
+  readonly sale: CreateCreditSaleResult["sale"];
+  readonly obligation: CreateCreditSaleResult["obligation"];
+  readonly application: ApplyAdvanceResult;
+  readonly duplicate: boolean;
+}
+
+/** The sale key also names the application (`<key>-adv`), which must stay within 90 characters. */
+const SALE_KEY_SHAPE = /^[A-Za-z0-9-]{8,86}$/;
 
 export interface ApplyAdvanceResult {
   readonly application: AdvanceApplicationRecord;
@@ -410,6 +437,8 @@ export class AdvanceService {
   protected afterCorrectionCommitted(): void {}
   /** Crash seam INSIDE the application transaction: the settlement is written, the application not yet. */
   protected afterApplicationSettlementWritten(): void {}
+  /** Crash seam INSIDE the sale-on-advance transaction: the sale and its receivable written, no application yet. */
+  protected afterSaleOnAdvanceWritten(): void {}
 
   private requireOwner(): AdvanceActor {
     const actor = this.requireRecorder();
@@ -669,6 +698,11 @@ export class AdvanceService {
   // no receipt to acknowledge — the one transaction is the whole operation.
 
   applyToDebt(draft: ApplyAdvanceDraft): ApplyAdvanceResult {
+    return this.applyWithin(draft, false);
+  }
+
+  /** `inside`: the caller already holds the write transaction (sellOnAdvance) — no transaction of our own. */
+  private applyWithin(draft: ApplyAdvanceDraft, inside: boolean): ApplyAdvanceResult {
     const actor = this.requireOwner();
     if (typeof draft.idempotencyKey !== "string" || !APPLY_KEY_SHAPE.test(draft.idempotencyKey)) {
       throw new DomainError("INVALID_INPUT", "An application needs a request key");
@@ -722,7 +756,7 @@ export class AdvanceService {
     };
     check(); // Everything validated BEFORE anything is written: a refused application leaves no trace.
 
-    const result = this.deps.transact(() => {
+    const write = (): AdvanceApplicationRecord => {
       const live = this.requireOwner();
       if (live.id !== actor.id) throw new DomainError("NOT_AUTHORIZED", "The signed-in operator changed during the application");
       if (this.deps.advances.findApplicationByKey(key)) throw new DomainError("IDEMPOTENCY_CONFLICT", "That request key was already used");
@@ -749,8 +783,62 @@ export class AdvanceService {
       const written = this.deps.advances.findApplicationByKey(key);
       if (!written) throw new DomainError("LEDGER_INTEGRITY", "The application could not be read back");
       return written;
-    });
+    };
+    const result = inside ? write() : this.deps.transact(write);
     return this.applicationResult(result, false);
+  }
+
+  // ── DEC-35x: APPLY AN ADVANCE TO A NEW SALE ──────────────────────────────────────────────────────
+  //
+  // The owner's sale on the customer's account (the till's own createCustomerCreditSale: catalog
+  // pricing, displayed-total check, active customer, owner gate) and the application of the advance to
+  // THAT sale's receivable, in ONE outer transaction (the credit sale's own transactions become
+  // savepoints). Whatever the advance does not cover stays the customer's debt. No down payment is
+  // accepted here, so no new Cash or Whish money enters: the money arrived as the ADV-.
+  //
+  // IDEMPOTENT: the sale key K identifies the sale; the application key is `K-adv`. A retry after a lost
+  // reply returns the SAME sale and the SAME application; the same K for other details is refused.
+  // CRASH-SAFE: the process dying anywhere before COMMIT leaves neither the sale nor the application.
+
+  sellOnAdvance(draft: SellOnAdvanceDraft): SellOnAdvanceResult {
+    this.requireOwner();
+    const sell = this.deps.creditSale;
+    if (!sell) throw new DomainError("NOT_AVAILABLE", "Sales on an advance are not available on this terminal");
+    if (typeof draft.idempotencyKey !== "string" || !SALE_KEY_SHAPE.test(draft.idempotencyKey)) {
+      throw new DomainError("INVALID_INPUT", "A sale on an advance needs a request key");
+    }
+    if (typeof draft.customerId !== "string" || draft.customerId.length === 0) throw new DomainError("INVALID_INPUT", "A customer account is required");
+    if (typeof draft.advanceId !== "string" || draft.advanceId.length === 0) throw new DomainError("INVALID_INPUT", "An advance is required");
+    if (typeof draft.expectedTotalMinor !== "bigint") throw new DomainError("INVALID_INPUT", "A valid displayed total is required");
+    const key = draft.idempotencyKey;
+    const appKey = `${key}-adv`;
+    const input: CreateCreditSaleInput = { idempotencyKey: key, customerId: draft.customerId, lines: draft.lines, expectedTotalMinor: draft.expectedTotalMinor };
+
+    // A committed request is answered from the ledger first (balances have moved since).
+    const done = this.deps.advances.findApplicationByKey(appKey);
+    if (done) {
+      const pair = sell(input); // the credit sale's own replay: same sale, or IDEMPOTENCY_CONFLICT
+      const again = this.applyWithin({ advanceId: draft.advanceId, obligationId: pair.obligation.id, amountMinor: draft.amountMinor, idempotencyKey: appKey }, false);
+      return { sale: pair.sale, obligation: pair.obligation, application: again, duplicate: true };
+    }
+
+    // Refusals that need no sale are decided BEFORE anything is written.
+    const advance = this.deps.advances.findAdvanceById(draft.advanceId);
+    if (!advance) throw new DomainError("ADVANCE_NOT_FOUND", "That advance does not exist");
+    if (this.deps.advances.findCorrectionOf(advance.id)) throw new DomainError("ADVANCE_CORRECTED_NOT_APPLICABLE", "That advance was corrected and cannot be applied");
+    if (advance.customerId !== draft.customerId) throw new DomainError("ADVANCE_DEBT_OTHER_CUSTOMER", "An advance can only pay its own customer's sale");
+    const amount = ledgerAmount(draft.amountMinor, advance.currency).minor;
+    if (amount > this.deps.advances.unusedMinor(advance.id)) throw new DomainError("ADVANCE_APPLY_ABOVE_BALANCE", "The amount is above what the advance still holds");
+    if (amount > draft.expectedTotalMinor) throw new DomainError("ADVANCE_APPLY_ABOVE_DEBT", "The amount is above the sale's total");
+
+    return this.deps.transact(() => {
+      const pair = sell(input);
+      // A key that already names a sale WITHOUT this application is not ours to extend.
+      if (pair.duplicate) throw new DomainError("IDEMPOTENCY_CONFLICT", "That request key already names another sale");
+      this.afterSaleOnAdvanceWritten();
+      const application = this.applyWithin({ advanceId: advance.id, obligationId: pair.obligation.id, amountMinor: amount, idempotencyKey: appKey }, true);
+      return { sale: pair.sale, obligation: pair.obligation, application, duplicate: false };
+    });
   }
 
   private applicationResult(app: AdvanceApplicationRecord, duplicate: boolean): ApplyAdvanceResult {
