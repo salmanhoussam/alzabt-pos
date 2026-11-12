@@ -11,7 +11,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameS
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, dialog, ipcMain, nativeImage, session } from "electron";
-import { PosService, startupCatalog } from "../application/posService";
+import { MAX_HISTORY, PosService, startupCatalog } from "../application/posService";
 import { PHOTO_EXTENSIONS, createProductPhotoPicker, electronCodec } from "./productPhoto";
 import { writeOnlineCatalogPackage, type PackageFs } from "./onlineCatalogPackage";
 import { PhoneSessionBridge } from "./phoneSessionBridge";
@@ -23,7 +23,10 @@ import { makeInvoiceCreditPort } from "../application/invoiceCreditPort";
 import { InvoiceService } from "../application/invoiceService";
 import { PartyService } from "../application/partyService";
 import { LedgerService } from "../application/ledgerService";
-import { AdvanceService } from "../application/advanceService";
+import { AdvanceService, formatAdvanceNo } from "../application/advanceService";
+import { SaleReceiptService } from "../application/saleReceiptService";
+import { SaleReceiptRepository } from "../persistence/saleReceiptRepository";
+import { type ReceiptLayout, renderSaleReceiptDocument } from "./saleReceiptDocument";
 import { DailyMoneyService } from "../application/dailyMoneyService";
 import { DailyMoneyRepository } from "../persistence/dailyMoneyRepository";
 import { AdvanceRepository } from "../persistence/advanceRepository";
@@ -31,7 +34,7 @@ import { renderAdvanceDocument } from "./advanceDocument";
 import { advanceDto, correctionDto, refundDto } from "./ipcHandlers";
 import { renderRefundDocument } from "./refundDocument";
 import { renderCollectionDocument } from "./collectionDocument";
-import type { CollectionDocumentDto } from "../shared/ipcContract";
+import type { CollectionDocumentDto, SaleReceiptDto } from "../shared/ipcContract";
 import { PartyRepository } from "../persistence/partyRepository";
 import { LedgerRepository } from "../persistence/ledgerRepository";
 import { ReceiptRepository } from "../persistence/receiptRepository";
@@ -91,6 +94,8 @@ let invoices: InvoiceService | null = null;
 let parties: PartyService | null = null;
 let ledgerService: LedgerService | null = null;
 let advanceService: AdvanceService | null = null;
+/** TILL-PRINT: the one read model of a till receipt (screen, PDF and print). */
+let saleReceiptService: SaleReceiptService | null = null;
 let log: Logger = nullLogger;
 
 /**
@@ -667,6 +672,62 @@ async function saveCollectionPdfFile(doc: CollectionDocumentDto): Promise<SavedF
   return { fileName: basename(path) };
 }
 
+/**
+ * TILL-PRINT — the till receipt's HTML from the DTO the IPC handler read from the ledger BY SALE ID (visibility
+ * checked there). Printing records nothing; a print/PDF failure never touches the sale.
+ */
+function saleReceiptHtml(doc: SaleReceiptDto, layout: ReceiptLayout, copy: boolean): string {
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  return renderSaleReceiptDocument({ receipt: doc, layout, copy, shopName, timeZone: FIXTURE_TERMINAL.timeZone });
+}
+
+/**
+ * D-TP1: the Windows print dialog lets the operator pick ANY installed printer (a thermal one later, at a shop
+ * that has one). With NO printer installed, nothing is opened and the screen offers «Save PDF» instead — the
+ * app never waits on a dialog that cannot print.
+ */
+async function printSaleReceiptDocument(doc: SaleReceiptDto, layout: ReceiptLayout, copy: boolean): Promise<"printed" | "cancelled" | "no-printer"> {
+  const printers = mainWindow ? await mainWindow.webContents.getPrintersAsync() : [];
+  log.info("sale-receipt-print-request", { receipt: doc.sale.receiptNumber, layout, copy, printers: printers.length });
+  if (printers.length === 0) return "no-printer";
+  const printed = await withPrintWindow(saleReceiptHtml(doc, layout, copy), "sale-receipt-print", (win) =>
+    new Promise<boolean>((done) =>
+      win.webContents.print(
+        { silent: false, printBackground: true, ...(layout === "thermal80" ? { pageSize: { width: 80000, height: 297000 } } : { pageSize: "A5" as const }) },
+        (ok) => done(ok),
+      ),
+    ),
+  );
+  log.info("sale-receipt-printed", { receipt: doc.sale.receiptNumber, layout, copy, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveSaleReceiptPdfFile(doc: SaleReceiptDto, layout: ReceiptLayout, copy: boolean): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save receipt PDF",
+    defaultPath: join(app.getPath("documents"), `receipt-${doc.sale.receiptNumber}${copy ? "-copy" : ""}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(saleReceiptHtml(doc, layout, copy), "sale-receipt-pdf", (win) =>
+    win.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+      ...(layout === "a5" ? { pageSize: "A5" as const } : {}),
+      margins: { top: 0, bottom: 0, left: 0, right: 0 },
+    }),
+  );
+  writeFileSync(path, pdf);
+  log.info("sale-receipt-pdf-saved", { receipt: doc.sale.receiptNumber, layout, copy, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
 /** Native "save as" + a verified consistent snapshot of the live ledger (never a raw file copy). */
 function exportBackup(ledgerPath: string): SavedFile | null {
   if (!mainWindow || !db) return null;
@@ -1060,6 +1121,15 @@ function startTill(): void {
     creditSale: (input) => service.createCustomerCreditSale(input),
   });
 
+  // TILL-PRINT (D-TP2): the SAME live role as everything else; History's own window for non-owners.
+  saleReceiptService = new SaleReceiptService({
+    reads: new SaleReceiptRepository(db),
+    getSale: (id) => service.getSale(id),
+    role: () => service.currentRole(),
+    historyWindow: MAX_HISTORY,
+    formatAdvanceNo,
+  });
+
   // DAILY MONEY IN / OUT (DEC-35x): read-only, the SAME connection and the SAME live actor. No
   // transaction provider — it never writes.
   const dailyMoney = new DailyMoneyService({
@@ -1092,6 +1162,9 @@ function startTill(): void {
     printAdvanceRefund: printRefundDocument,
     saveAdvanceRefundPdf: saveRefundPdfFile,
     printCollectionReceipt: printCollectionDocument,
+    saleReceipts: saleReceiptService ?? undefined,
+    printSaleReceipt: printSaleReceiptDocument,
+    saveSaleReceiptPdf: saveSaleReceiptPdfFile,
     saveCollectionReceiptPdf: saveCollectionPdfFile,
     pickInvoiceLogo,
     // PHOTO-INVOICE-TO-ITEMS: picker + OFFLINE OCR in main; returns lines only, writes nothing.

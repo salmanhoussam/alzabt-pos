@@ -135,11 +135,14 @@ describe("the invoice channels exist and answer", () => {
       // TRANSITION (DEC-35z+ COL): + printCollectionReceipt / saveCollectionReceiptPdf. Old list: without them.
       "printCollectionReceipt",
       "printInvoice",
+      // TRANSITION (DEC-35zz++ TILL-PRINT): + printSaleReceipt / saveSaleReceiptPdf (a native dialog). Old list: without them.
+      "printSaleReceipt",
       "readInvoicePhoto",
       "saveAdvancePdf",
       "saveAdvanceRefundPdf",
       "saveCollectionReceiptPdf",
       "saveInvoicePdf",
+      "saveSaleReceiptPdf",
       "startPhoneSession",
     ]);
   });

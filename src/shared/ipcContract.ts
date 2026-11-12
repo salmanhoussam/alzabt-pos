@@ -137,6 +137,9 @@ export const CHANNELS = {
   getCollectionReceipt: "pos:getCollectionReceipt",
   printCollectionReceipt: "pos:printCollectionReceipt",
   saveCollectionReceiptPdf: "pos:saveCollectionReceiptPdf",
+  getSaleReceipt: "pos:getSaleReceipt",
+  printSaleReceipt: "pos:printSaleReceipt",
+  saveSaleReceiptPdf: "pos:saveSaleReceiptPdf",
   readInvoicePhoto: "pos:readInvoicePhoto",
 } as const;
 
@@ -946,6 +949,30 @@ export interface StatementSettlementDto {
    */
   readonly collection: { readonly docNo: number; readonly number: string } | null;
 }
+
+/**
+ * TILL-PRINT (DEC-35zz++) — ONE till receipt as main read it from the ledger BY SALE ID. The on-screen receipt
+ * (completion and History), the PDF and the print all render THIS, so they can never disagree. Every figure is
+ * a fact of the sale: the customer named at sale time, and — for a sale paid from an advance — the advance
+ * applied WITH the sale and what stayed on account at that moment (F4), never a live balance.
+ */
+export interface SaleReceiptDto {
+  readonly sale: SaleDto;
+  readonly void: VoidDto | null;
+  readonly customerName: string | null;
+  readonly advanceApplied: { readonly number: string; readonly applied: MoneyDto; readonly debtLeft: MoneyDto } | null;
+}
+export interface SaleIdRequest {
+  readonly saleId: string;
+}
+/** thermal80 = 80 mm roll (D-TP1 primary); a5 = an ordinary page / the PDF. copy = a reprint, marked «نسخة» (D-TP3). */
+export interface PrintSaleReceiptRequest {
+  readonly saleId: string;
+  readonly layout: "thermal80" | "a5";
+  readonly copy: boolean;
+}
+/** no-printer: Windows has no printer installed — the screen offers «Save PDF» instead. */
+export type PrintSaleReceiptResponse = { readonly status: "printed" | "cancelled" | "unavailable" | "no-printer" };
 
 /** DEC-35z+ COL — one COL- document as main read it from the ledger. Every figure is the ledger's own. */
 export interface CollectionDocumentDto {
@@ -2088,4 +2115,8 @@ export interface PosApi {
   saveCollectionReceiptPdf(req: CollectionNoRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
   /** Main shows the picker, reads the photo OFFLINE and returns candidate rows. Writes nothing. */
   readInvoicePhoto(): Promise<IpcResult<ReadInvoicePhotoResponse>>;
+  /** TILL-PRINT: one till receipt from the ledger (owner: any sale; others: what History shows them). Read-only. */
+  getSaleReceipt(req: SaleIdRequest): Promise<IpcResult<SaleReceiptDto>>;
+  printSaleReceipt(req: PrintSaleReceiptRequest): Promise<IpcResult<PrintSaleReceiptResponse>>;
+  saveSaleReceiptPdf(req: PrintSaleReceiptRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
 }

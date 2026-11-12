@@ -30,10 +30,11 @@ import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
 import { type LedgerService, formatCollectionNo } from "../application/ledgerService";
 import type { AdvanceCorrectionView, AdvanceRefundView, AdvanceService, AdvanceView } from "../application/advanceService";
+import type { SaleReceiptService, SaleReceiptView } from "../application/saleReceiptService";
 import type { AdvanceApplicationRecord } from "../persistence/advanceRepository";
 import type { DailyMoneyService } from "../application/dailyMoneyService";
 import { type ChannelAmounts, type DailyMoneyReport, type MoneyPart, MONEY_CHANNELS } from "../domain/dailyMoney";
-import type { AdvanceCorrectionDto, AdvanceDto, AdvanceRefundDto, CollectionDocumentDto, PendingAdvanceDto } from "../shared/ipcContract";
+import type { AdvanceCorrectionDto, AdvanceDto, AdvanceRefundDto, CollectionDocumentDto, PendingAdvanceDto, SaleReceiptDto } from "../shared/ipcContract";
 import { rowsFromPositioned } from "../domain/invoiceOcrRows";
 import type { PositionedLine } from "../domain/ocrLayout";
 import type { BackupRestoreActions } from "./backupRestore";
@@ -254,6 +255,11 @@ export interface IpcHandlerOptions {
   /** DEC-35z+ COL: prints / saves one COL- document. The DTO is built HERE from the ledger by number. */
   readonly printCollectionReceipt?: (doc: CollectionDocumentDto) => Promise<"printed" | "cancelled">;
   readonly saveCollectionReceiptPdf?: (doc: CollectionDocumentDto) => Promise<SavedFile | null>;
+  /** TILL-PRINT: the ONE read model of a till receipt (absent → NOT_AVAILABLE). */
+  readonly saleReceipts?: SaleReceiptService;
+  /** TILL-PRINT: print / save the receipt DTO built HERE from the ledger by sale id; no markup crosses. */
+  readonly printSaleReceipt?: (doc: SaleReceiptDto, layout: "thermal80" | "a5", copy: boolean) => Promise<"printed" | "cancelled" | "no-printer">;
+  readonly saveSaleReceiptPdf?: (doc: SaleReceiptDto, layout: "thermal80" | "a5", copy: boolean) => Promise<SavedFile | null>;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -2013,6 +2019,25 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     }),
     // ── DEC-35z+ COL: the COL- document of a collection / receipt (owner, read-only) ──────────────────
     getCollectionReceipt: wrap("getCollectionReceipt", (p) => collectionDto(collectionNo(p))),
+    // ── TILL-PRINT (D-TP1/2/3): one till receipt from the ledger by sale id — screen, PDF and print alike ──
+    getSaleReceipt: wrap("getSaleReceipt", (p) => {
+      const o = exactObject(p, ["saleId"]);
+      return saleReceiptDto(saleReceipts().receipt(str(o.saleId, "saleId", 64)));
+    }),
+    // Visibility is checked BEFORE any window opens; printing writes nothing.
+    printSaleReceipt: wrapAsync("printSaleReceipt", async (p) => {
+      const { saleId, layout, copy } = printRequest(p);
+      const doc = saleReceiptDto(saleReceipts().receipt(saleId));
+      if (!options.printSaleReceipt) return { status: "unavailable" as const };
+      return { status: await options.printSaleReceipt(doc, layout, copy) };
+    }),
+    saveSaleReceiptPdf: wrapAsync("saveSaleReceiptPdf", async (p) => {
+      const { saleId, layout, copy } = printRequest(p);
+      const doc = saleReceiptDto(saleReceipts().receipt(saleId));
+      if (!options.saveSaleReceiptPdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveSaleReceiptPdf(doc, layout, copy);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
     printCollectionReceipt: wrapAsync("printCollectionReceipt", async (p) => {
       const doc = collectionDto(collectionNo(p)); // exists, and the caller is the owner — before any window opens
       if (!options.printCollectionReceipt) return { status: "unavailable" as const };
@@ -2074,6 +2099,35 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       };
     }),
   };
+
+  function saleReceipts(): SaleReceiptService {
+    if (!options.saleReceipts) throw new DomainError("NOT_AVAILABLE", "Receipts are not available on this terminal");
+    return options.saleReceipts;
+  }
+
+  function printRequest(p: unknown): { saleId: string; layout: "thermal80" | "a5"; copy: boolean } {
+    const o = exactObject(p, ["saleId", "layout", "copy"]);
+    if (o.layout !== "thermal80" && o.layout !== "a5") invalid("'layout' must be thermal80 or a5");
+    if (typeof o.copy !== "boolean") invalid("'copy' must be true or false");
+    return { saleId: str(o.saleId, "saleId", 64), layout: o.layout as "thermal80" | "a5", copy: o.copy as boolean };
+  }
+
+  /** The read model as the screen, the PDF and the print all receive it. Bigints → strings; no arithmetic. */
+  function saleReceiptDto(v: SaleReceiptView): SaleReceiptDto {
+    const cur = v.sale.total.currency;
+    return {
+      sale: toSaleDto(v.sale, invoiceNumberFor(v.sale)),
+      void: v.void ? toVoidDto(v.void) : null,
+      customerName: v.customerName,
+      advanceApplied: v.advanceAtSale
+        ? {
+            number: v.advanceAtSale.number,
+            applied: { minor: v.advanceAtSale.appliedMinor.toString(), currency: cur },
+            debtLeft: { minor: v.advanceAtSale.leftOnAccountMinor.toString(), currency: cur },
+          }
+        : null,
+    };
+  }
 
   function collectionNo(p: unknown): number {
     const o = exactObject(p, ["collectionNo"]);

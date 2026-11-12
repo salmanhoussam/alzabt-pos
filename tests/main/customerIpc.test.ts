@@ -108,7 +108,10 @@ describe("the customer channels", () => {
     // 🔴 TRANSITION (DEC-35z+, COL receipts): 96 -> 99 with getCollectionReceipt / printCollectionReceipt /
     // saveCollectionReceiptPdf — owner-only READS of a COL- document by number; they write no payment. The old value was 96.
     // 🔴 TRANSITION (OCR × Advances integration, DEC-35zz+): 99 -> 100 = the advances chain's 99 + OCR's readInvoicePhoto. Old values: 99 (advances) / 82 (OCR).
-    expect(Object.keys(CHANNELS)).toHaveLength(100);
+    // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): 100 -> 103 with getSaleReceipt / printSaleReceipt / saveSaleReceiptPdf —
+    // session READS of one till receipt by sale id (the service limits a non-owner to History's window); they write
+    // nothing. The old value was 100.
+    expect(Object.keys(CHANNELS)).toHaveLength(103);
   });
 
   // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".
@@ -152,8 +155,12 @@ describe("the customer channels", () => {
     // READS (print / PDF / view by number) and move no money — removed BY NAME, so the writers stay two.
     // Old filter: /payment|receipt/ alone.
     const colDocs = ["getCollectionReceipt","printCollectionReceipt","saveCollectionReceiptPdf"];
-    const moneyWriters = names.filter((n) => /payment|receipt/i.test(n) && !colDocs.includes(n)).sort();
+    // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): the pattern also sees the three TILL receipt channels — READS of a sale's
+    // receipt (view / print / PDF) that move no money — removed BY NAME too. Old exclusion: the COL- three only.
+    const saleReceiptDocs = ["getSaleReceipt", "printSaleReceipt", "saveSaleReceiptPdf"];
+    const moneyWriters = names.filter((n) => /payment|receipt/i.test(n) && !colDocs.includes(n) && !saleReceiptDocs.includes(n)).sort();
     for (const d of colDocs) expect(accessFor(d as never)).toBe("owner");
+    for (const d of saleReceiptDocs) expect(accessFor(d as never)).toBe("session");
     expect(moneyWriters).toEqual(["recordAllocatedReceipt", "recordCustomerPayment"]);
     expect(accessFor("recordAllocatedReceipt")).toBe("owner");
     // SELL-CREDIT: the closed, NAMED list of debt creators. Old value: none.

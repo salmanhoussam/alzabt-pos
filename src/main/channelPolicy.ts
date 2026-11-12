@@ -200,6 +200,12 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   getCollectionReceipt: "owner",
   printCollectionReceipt: "owner",
   saveCollectionReceiptPdf: "owner",
+  // TILL-PRINT (D-TP2): anyone signed in may read / print / save a till receipt THEY MAY ALREADY SEE. The
+  // channel only requires a session; SaleReceiptService re-reads the live role: the owner any sale, everyone
+  // else only a sale inside History's own window (same order, same limit). Read-only — writes nothing.
+  getSaleReceipt: "session",
+  printSaleReceipt: "session",
+  saveSaleReceiptPdf: "session",
 
   // ── Owner only ────────────────────────────────────────────────────────────────────────────────
   // Reversing money.
