@@ -201,6 +201,11 @@ export interface RefundAdvanceDraft {
   readonly amountMinor: unknown;
   readonly reason: unknown;
   readonly idempotencyKey: unknown;
+  /**
+   * DEC-35zz++ Option A: the owner's explicit "this is a NEW refund, not the earlier one again", required only
+   * when this advance already has a REF- on the same business day. Not part of the request's identity.
+   */
+  readonly confirmRepeat?: unknown;
 }
 
 export interface RefundAdvanceResult {
@@ -925,6 +930,14 @@ export class AdvanceService {
       if (amount > this.deps.advances.unusedMinor(advance.id)) {
         throw new DomainError("ADVANCE_REFUND_ABOVE_BALANCE", "The amount is above what the advance still holds");
       }
+      // 🔴 Option A (DEC-35zz++): a second REF- of the SAME advance on the SAME business day is refused unless the
+      // owner explicitly confirms it is a NEW refund — after a crash the earlier REF- already exists and its cash
+      // must not be handed over again. Checked here (service), and again inside the write lock.
+      // A refund under THIS request key is the same request (a racing twin), never an earlier one: it is answered
+      // as a duplicate inside the lock, so it is excluded here.
+      if (draft.confirmRepeat !== true && this.deps.advances.listRefunds(advance.id).some((r) => r.businessDate === this.today() && r.key !== key)) {
+        throw new DomainError("ADVANCE_REFUND_REPEAT_UNCONFIRMED", "This advance already has a refund today; confirm this is a new one");
+      }
       return { advance, amount };
     };
     check(); // everything validated BEFORE anything is written: a refused refund leaves no trace
@@ -974,6 +987,17 @@ export class AdvanceService {
     const advance = this.deps.advances.findAdvanceById(r.advanceId);
     if (!advance) throw new DomainError("LEDGER_INTEGRITY", "The refund's advance is missing");
     return { refund: r, advance, unusedMinor: this.deps.advances.unusedMinor(advance.id), duplicate };
+  }
+
+  /** The terminal's business day now (Beirut by default) — the day a refund would be dated. */
+  today(): string {
+    return businessDateOf(this.now(), this.deps.terminal.timeZone);
+  }
+
+  /** Owner (DEC-35zz++ Option A): every REF- of one business day — the «استردادات اليوم» list. Read-only. */
+  refundsOnDay(businessDate: string): AdvanceRefundRecord[] {
+    this.requireRefunder();
+    return this.deps.advances.listRefundsOnDay(businessDate);
   }
 
   /** Owner: the REF- documents of one advance (statement). */

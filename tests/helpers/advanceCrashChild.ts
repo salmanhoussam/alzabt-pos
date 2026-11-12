@@ -116,7 +116,8 @@ if (mode === "sale-run") {
   h.db.close();
   process.exit(0);
 }
-const refundDraft = (amount: bigint) => ({ advanceId: customerId, amountMinor: amount, reason: "الزبون طلب استرداد", idempotencyKey: key });
+// DEC-35zz++ Option A: env REFUND_CONFIRM_REPEAT=1 sends the owner's "new refund" confirmation (a 2nd refund of the same advance today).
+const refundDraft = (amount: bigint) => ({ advanceId: customerId, amountMinor: amount, reason: "الزبون طلب استرداد", idempotencyKey: key, ...(process.env.REFUND_CONFIRM_REPEAT === "1" ? { confirmRepeat: true } : {}) });
 if (mode === "refund-run") {
   try {
     const r = new AdvanceService(advanceDeps(h)).refund(refundDraft(BigInt(process.env.REFUND_AMOUNT ?? "400")));

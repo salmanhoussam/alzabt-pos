@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { MoneyDto, SaleDto } from "../../shared/ipcContract";
 import { fmt } from "../api";
 import { fromMoneyDto } from "../../shared/dto";
@@ -11,6 +12,7 @@ export function Receipt({
   onNewSale,
   onAccountFor = null,
   advanceApplied = null,
+  actions = null,
 }: {
   sale: SaleDto;
   onNewSale?: () => void;
@@ -18,6 +20,8 @@ export function Receipt({
   advanceApplied?: { readonly number: string; readonly applied: MoneyDto; readonly debtLeft: MoneyDto } | null;
   /** SELL-CREDIT: the customer an on-account sale was just recorded for (the sale DTO carries no name). */
   onAccountFor?: string | null;
+  /** TILL-PRINT: Print / PDF actions (LedgerReceipt), shown above «new sale». */
+  actions?: ReactNode;
 }) {
   const { t, unit } = useT();
   return (
@@ -151,6 +155,7 @@ export function Receipt({
             </bdi>
           </div>
         )}
+        {actions}
         {onNewSale && (
           <button className="btn primary big wide" data-testid="new-sale" onClick={onNewSale}>
             {t("receipt.newSale")}

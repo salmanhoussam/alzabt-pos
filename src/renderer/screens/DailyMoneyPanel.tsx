@@ -5,7 +5,9 @@
  * channel columns have anything to show and one operator's money-out sum.
  */
 import { useEffect, useState } from "react";
-import type { ChannelAmountsDto, DailyMoneyChannelDto, DailyMoneyDto, MoneyPartDto } from "../../shared/ipcContract";
+import type { AdvanceRefundDto, ChannelAmountsDto, DailyMoneyChannelDto, DailyMoneyDto, MoneyPartDto } from "../../shared/ipcContract";
+import { stamp } from "../format";
+import { RefundReceipt } from "./AdvanceRefundSheet";
 import { call, errorText, fmt, pos } from "../api";
 import { useT } from "../i18n";
 
@@ -17,6 +19,8 @@ export function DailyMoneyPanel() {
   const [today, setToday] = useState<string | undefined>(undefined);
   const [report, setReport] = useState<DailyMoneyDto | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // DEC-35zz++ Option A: a REF- opened from «استردادات اليوم» — a VIEW of a recorded refund, never a new one.
+  const [shownRefund, setShownRefund] = useState<AdvanceRefundDto | null>(null);
 
   const load = (d: string | undefined) => {
     setError(null);
@@ -146,6 +150,39 @@ export function DailyMoneyPanel() {
         <p className="error small" data-testid="dm-late-voids">
           {t("dm.lateVoids")} {report.lateVoids.map((v) => `${v.saleDate} ${m(v.total.minor)}`).join(" · ")}
         </p>
+      )}
+
+      {/* DEC-35zz++ Option A: the day's REF- documents BY NAME — after a crash this is where a refund that was
+          recorded (and whose receipt vanished) is found again, without recording a second one. */}
+      {report.refundsList.length > 0 && (
+        <section className="dm-refunds" data-testid="dm-refund-list">
+          <h3>{t("ref.todayTitle")}</h3>
+          <p className="muted small">{t("ref.todayNote")}</p>
+          <table className="dm-table">
+            <tbody>
+              {report.refundsList.map((r) => (
+                <tr key={r.id} data-testid="dm-refund-row" data-ref-number={r.number}>
+                  <td>
+                    <button className="link" onClick={() => setShownRefund(r)} data-testid="dm-refund-open">
+                      <bdi dir="ltr">{r.number}</bdi>
+                    </button>
+                  </td>
+                  <td><bdi>{r.customerName}</bdi></td>
+                  <td><bdi dir="ltr">{m(r.amount.minor)}</bdi></td>
+                  <td><bdi dir="ltr">{stamp(r.refundedAt)}</bdi></td>
+                  <td><bdi>{r.refundedByName}</bdi></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+      {shownRefund && (
+        <div className="overlay" role="dialog" aria-modal="true" data-testid="dm-refund-reprint">
+          <div className="panel customer-panel">
+            <RefundReceipt refund={shownRefund} unused={null} duplicate={false} onClose={() => setShownRefund(null)} />
+          </div>
+        </div>
       )}
 
       {report.byOperator.length > 0 && (

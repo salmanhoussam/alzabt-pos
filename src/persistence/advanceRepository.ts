@@ -460,6 +460,11 @@ export class AdvanceRepository {
     return row ? refund(row) : null;
   }
 
+  /** DEC-35zz++ Option A: every REF- of one business day, in number order (owner's «استردادات اليوم»). */
+  listRefundsOnDay(businessDate: string): AdvanceRefundRecord[] {
+    return (this.db.prepare(`${REF_SELECT} WHERE business_date = ? ORDER BY doc_no`).all(businessDate) as RefundRow[]).map(refund);
+  }
+
   listRefunds(advanceId: string): AdvanceRefundRecord[] {
     return (this.db.prepare(`${REF_SELECT} WHERE advance_id = ? ORDER BY doc_no`).all(advanceId) as RefundRow[]).map(refund);
   }

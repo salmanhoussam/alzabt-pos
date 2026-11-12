@@ -216,6 +216,9 @@ const CH = {
   printCollectionReceipt: "pos:printCollectionReceipt",
   saveCollectionReceiptPdf: "pos:saveCollectionReceiptPdf",
   readInvoicePhoto: "pos:readInvoicePhoto",
+  getSaleReceipt: "pos:getSaleReceipt",
+  printSaleReceipt: "pos:printSaleReceipt",
+  saveSaleReceiptPdf: "pos:saveSaleReceiptPdf",
 } as const satisfies typeof CHANNELS;
 
 const api: PosApi = {
@@ -502,6 +505,7 @@ const api: PosApi = {
       amountMinor: req.amountMinor,
       reason: req.reason,
       idempotencyKey: req.idempotencyKey,
+      ...(req.confirmRepeat === undefined ? {} : { confirmRepeat: req.confirmRepeat }),
     }),
   printAdvanceRefund: (req) => ipcRenderer.invoke(CH.printAdvanceRefund, { refundId: req.refundId }),
   saveAdvanceRefundPdf: (req) => ipcRenderer.invoke(CH.saveAdvanceRefundPdf, { refundId: req.refundId }),
@@ -509,6 +513,9 @@ const api: PosApi = {
   printCollectionReceipt: (req) => ipcRenderer.invoke(CH.printCollectionReceipt, { collectionNo: req.collectionNo }),
   saveCollectionReceiptPdf: (req) => ipcRenderer.invoke(CH.saveCollectionReceiptPdf, { collectionNo: req.collectionNo }),
   readInvoicePhoto: () => ipcRenderer.invoke(CH.readInvoicePhoto),
+  getSaleReceipt: (req) => ipcRenderer.invoke(CH.getSaleReceipt, { saleId: req.saleId }),
+  printSaleReceipt: (req) => ipcRenderer.invoke(CH.printSaleReceipt, { saleId: req.saleId, layout: req.layout, copy: req.copy }),
+  saveSaleReceiptPdf: (req) => ipcRenderer.invoke(CH.saveSaleReceiptPdf, { saleId: req.saleId, layout: req.layout, copy: req.copy }),
 };
 
 contextBridge.exposeInMainWorld("pos", Object.freeze(api));

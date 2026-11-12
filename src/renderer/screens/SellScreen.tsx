@@ -14,6 +14,7 @@ import { useThumbnails } from "../useThumbnails";
 import { type SellDraft, keepSellableLines } from "../sellDraft";
 import { LineMath } from "../components/LineMath";
 import { Receipt } from "./Receipt";
+import { LedgerReceipt } from "./LedgerReceipt";
 import { useT } from "../i18n";
 import {
   PAY_SCAN_MESSAGE_KEY,
@@ -702,7 +703,8 @@ export function SellScreen({
     setCompletedOnAccountFor(null);
   };
 
-  if (completed) return <Receipt sale={completed} onAccountFor={completedOnAccountFor} advanceApplied={completedAdvance} onNewSale={startNewSale} />;
+  // TILL-PRINT: the receipt is READ BACK FROM THE LEDGER by sale id — the same data History, the PDF and the print use.
+  if (completed) return <LedgerReceipt saleId={completed.id} copy={false} onNewSale={startNewSale} />;
   if (!catalog) return <div className="center muted">{error ?? t("common.loading")}</div>;
 
   return (

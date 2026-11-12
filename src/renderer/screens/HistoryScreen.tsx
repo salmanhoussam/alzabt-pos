@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { SaleDto, SaleWithVoidDto } from "../../shared/ipcContract";
 import { call, errorText, fmt, pos } from "../api";
 import { Receipt } from "./Receipt";
+import { LedgerReceipt } from "./LedgerReceipt";
 import { useT } from "../i18n";
 import { stamp } from "../format";
 import { tendersText } from "../tenders";
@@ -155,7 +156,7 @@ export function HistoryScreen({ role }: { readonly role?: string }) {
   if (open) {
     return (
       <div>
-        <button className="btn ghost" onClick={() => setOpen(null)}>
+        <button className="btn ghost" onClick={() => setOpen(null)} data-testid="history-back">
           ← {t("history.back")}
         </button>
         {open.void && (
@@ -169,7 +170,8 @@ export function HistoryScreen({ role }: { readonly role?: string }) {
             {t(notRefundKey(open.sale))}
           </p>
         )}
-        <Receipt sale={open.sale} />
+        {/* TILL-PRINT + F4: read from the ledger by sale id (customer + ADV facts of the sale); reprint marked «نسخة». */}
+        <LedgerReceipt saleId={open.sale.id} copy />
       </div>
     );
   }
@@ -251,7 +253,7 @@ export function HistoryScreen({ role }: { readonly role?: string }) {
                 </td>
                 <td>
                   <div className="actions">
-                    <button className="btn small" onClick={() => setOpen(r)}>
+                    <button className="btn small" onClick={() => setOpen(r)} data-testid="history-open">
                       {t("history.view")}
                     </button>
                     {/* 🔴 GHOST-DANGER IN A ROW. Filled danger belongs to the final confirmation

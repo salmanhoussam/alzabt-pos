@@ -210,6 +210,10 @@ describe("IPC surface", () => {
         "getCollectionReceipt",
         "printCollectionReceipt",
         "saveCollectionReceiptPdf",
+        // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): one till receipt by sale id — view / print / PDF. Old list: without them.
+        "getSaleReceipt",
+        "printSaleReceipt",
+        "saveSaleReceiptPdf",
       ].sort(),
     );
     // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
@@ -251,7 +255,9 @@ describe("IPC surface", () => {
     // 🔴 TRANSITION (DEC-35z+ COL): 96 -> 99 — getCollectionReceipt, printCollectionReceipt,
     // saveCollectionReceiptPdf, owner-classified reads. The old value was 96.
     // 🔴 TRANSITION (OCR × Advances integration, DEC-35zz+): 99 -> 100 = the advances chain's 99 + OCR's readInvoicePhoto. Old values: 99 (advances) / 82 (OCR).
-    expect(CHANNEL_NAMES).toHaveLength(100);
+    // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): 100 -> 103 — getSaleReceipt, printSaleReceipt, saveSaleReceiptPdf,
+    // session-classified reads (the service limits a non-owner to History's window). The old value was 100.
+    expect(CHANNEL_NAMES).toHaveLength(103);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.
