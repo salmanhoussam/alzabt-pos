@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../../src/renderer/api";
 import { readFailureText } from "../../src/renderer/screens/PhotoInvoiceFlow";
+import { translate } from "../../src/shared/i18n";
 
 const code = (src: string): string => src.replace(/\{\/\*[\s\S]*?\*\/\}/g, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 const FLOW = code(readFileSync("src/renderer/screens/PhotoInvoiceFlow.tsx", "utf8"));
@@ -111,10 +112,27 @@ describe("Photo Invoice UX — decisions and practical entry (findings 5, 8)", (
     expect(REVIEW).toMatch(/Math\.round\(s \* 100\)/);
     expect(REVIEW).not.toMatch(/optgroup label="مقترح/);
   });
-  it("skip / new are one-click buttons; the select keeps every option the E2E drives", () => {
-    expect(REVIEW).toMatch(/data-testid="photo-review-skip"/);
-    expect(REVIEW).toMatch(/data-testid="photo-review-new"/);
-    for (const v of ["pending", "skip", "new"]) expect(REVIEW).toContain(`<option value="${v}">`);
+  // TRANSITION (DEC-35z9, owner UAT: "choosing each row's decision from a dropdown is uncomfortable"): the <select> with
+  // pending / skip / new / every product is REMOVED. Old assertion: the select kept the options the E2E drove.
+  it("three direct decision buttons — no dropdown; each labelled in both languages; Alt+1/2/3", () => {
+    expect(REVIEW).not.toMatch(/<select/);
+    for (const id of ["photo-review-new", "photo-review-link", "photo-review-skip"]) expect(REVIEW).toContain(`data-testid="${id}"`);
+    for (const k of ["photo.decide.new", "photo.decide.link", "photo.decide.ignore"]) {
+      expect(REVIEW).toContain(`t("${k}")`);
+      expect(translate("ar", k)).toMatch(/[\u0600-\u06FF]/);
+      expect(translate("en", k)).toMatch(/^[A-Za-z ]+$/);
+    }
+    expect(translate("ar", "photo.decide.ignore")).toBe("تجاهل");
+    expect(REVIEW).toMatch(/e\.code === "Digit1"[\s\S]{0,120}"new"[\s\S]{0,160}"link"[\s\S]{0,160}"skip"/);
+    expect(REVIEW).toMatch(/aria-pressed=\{r\.decision\.kind === "new"\}/);
+  });
+  it("«ربط بصنف موجود» only OPENS a search; the link is made by clicking a result — never by the button itself", () => {
+    const decideFn = REVIEW.slice(REVIEW.indexOf("const decide = "), REVIEW.indexOf("const linkResults = "));
+    expect(decideFn).toMatch(/if \(kind === "link"\) \{\s*setLinking/);
+    expect(decideFn).not.toMatch(/kind: "link"/);
+    const option = REVIEW.slice(REVIEW.indexOf('data-testid="photo-review-link-panel"'), REVIEW.indexOf('data-testid="photo-review-link-cancel"'));
+    expect(option).toMatch(/onClick=\{\(\) => \{\s*set\(id, \(x\) => \(\{ \.\.\.x, decision: \{ kind: "link", productId: p\.id \} \}\)\);/);
+    expect(option).toMatch(/e\.key === "Escape"/);
   });
   it("a new product's sale price is never prefilled from the supplier price", () => {
     expect(REVIEW).toMatch(/value=\{saleText\[id\] \?\? ""\}/);

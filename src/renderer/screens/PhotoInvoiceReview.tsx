@@ -19,6 +19,8 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatDecimal, parseDecimal } from "../../domain/money";
+import { useT } from "../i18n";
+import { dirFor } from "../../shared/i18n";
 import {
   type ExtractedRow,
   type IssueCode,
@@ -34,7 +36,7 @@ import {
 } from "../../domain/photoInvoiceReview";
 
 const ISSUE_AR: Record<IssueCode, string> = {
-  DECISION_PENDING: "اختر: تخطٍّ، أو ربط بصنف موجود، أو صنف جديد.",
+  DECISION_PENDING: "اختر: صنف جديد، أو ربط بصنف موجود، أو تجاهل.",
   NAME_REQUIRED: "اكتب اسم الصنف.",
   QUANTITY_INVALID: "الكمية غير مقروءة أو غير صحيحة.",
   SUPPLIER_PRICE_INVALID: "سعر المورّد غير مقروء أو غير صحيح.",
@@ -117,6 +119,12 @@ export function PhotoInvoiceReview({
   const [saleText, setSaleText] = useState<Record<string, string>>({});
   const [manualCrops, setManualCrops] = useState<Record<string, string | null>>({});
   const [zoom, setZoom] = useState(1);
+  const { t, lang } = useT();
+  /** The decision row and the link search follow the OPERATOR language direction (the rest of this screen is Arabic). */
+  const uiDir = dirFor(lang);
+  /** The row whose «ربط بصنف موجود» search is open (one at a time), and each row's search text. */
+  const [linking, setLinking] = useState<string | null>(null);
+  const [linkQuery, setLinkQuery] = useState<Record<string, string>>({});
   const [focusId, setFocusId] = useState<string | null>(() => (mode === "photo-only" ? rows[0]?.extracted.id ?? null : null));
   const listRef = useRef<HTMLDivElement>(null);
   const set = (id: string, f: (r: ReviewRow) => ReviewRow) => setRows((rs) => rs.map((r) => (r.extracted.id === id ? f(r) : r)));
@@ -154,6 +162,33 @@ export function PhotoInvoiceReview({
     setRows((rs) => [...rs, ...startReview([x])]);
     setManualCrops((m) => ({ ...m, [x.id]: crop }));
     setFocusId(x.id);
+  };
+  /** One decision per click. «link» only opens the search; the link itself needs a click on a result. */
+  const decide = (id: string, kind: "new" | "link" | "skip") => {
+    if (kind === "link") {
+      setLinking((cur) => (cur === id ? null : id));
+      return;
+    }
+    setLinking((cur) => (cur === id ? null : cur));
+    if (kind === "new") set(id, (x) => (x.decision.kind === "new" ? x : decideNew(x)));
+    else set(id, (x) => ({ ...x, decision: { kind: "skip" } }));
+  };
+  /** Search results for linking: products whose name contains every typed word, best match first (max 8). */
+  const linkResults = (query: string) => {
+    const words = productNameKey(query).split(" ").filter(Boolean);
+    return [...products]
+      .map((p) => ({ p, s: similarity(query, p.name), k: productNameKey(p.name) }))
+      .filter((x) => words.length === 0 || words.every((w) => x.k.includes(w)) || x.s >= 0.5)
+      .sort((a, b) => b.s - a.s || a.p.name.localeCompare(b.p.name))
+      .slice(0, 8);
+  };
+  /** Alt+1 new · Alt+2 link (opens the search) · Alt+3 ignore — on the focused row. */
+  const rowKeys = (e: React.KeyboardEvent, id: string) => {
+    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    const k = e.code === "Digit1" || e.code === "Numpad1" ? "new" : e.code === "Digit2" || e.code === "Numpad2" ? "link" : e.code === "Digit3" || e.code === "Numpad3" ? "skip" : null;
+    if (!k) return;
+    e.preventDefault();
+    decide(id, k);
   };
   /** Enter in the last field of a row = the next row; on the LAST row it opens a new one (no mouse needed). */
   const enterNext = (e: React.KeyboardEvent, id: string) => {
@@ -230,6 +265,7 @@ export function PhotoInvoiceReview({
                 key={id}
                 className={`pir-row d-${r.decision.kind}${issues.some((i) => i.blocking) ? " has-block" : ""}`}
                 data-testid="photo-review-row"
+                onKeyDown={(e) => rowKeys(e, id)}
                 data-row={id}
                 data-decision={r.decision.kind}
                 data-warnings={(m?.warnings ?? []).join(",")}
@@ -302,40 +338,23 @@ export function PhotoInvoiceReview({
                   </div>
                 )}
 
-                <div className="pir-decide">
-                  <span className="small muted">القرار:</span>
-                  <button type="button" className={`btn small${r.decision.kind === "skip" ? " primary" : ""}`} aria-pressed={r.decision.kind === "skip"} onClick={() => set(id, (x) => ({ ...x, decision: { kind: "skip" } }))} data-testid="photo-review-skip">
-                    تخطٍّ
+                {/* DEC-35z9 (owner UAT): three direct buttons replace the dropdown. One click decides «صنف جديد» /
+                    «تجاهل»; «ربط بصنف موجود» only OPENS a search — the link is made by an explicit click on a result.
+                    The decision can be changed until «تأكيد الإضافة»; nothing is saved here. Alt+1 / Alt+2 / Alt+3. */}
+                <div className="pir-decide" dir={uiDir} role="group" aria-label={t("photo.decide.label")}>
+                  <span className="small muted">{t("photo.decide.label")}:</span>
+                  <button type="button" className={`btn small pir-choice${r.decision.kind === "new" ? " primary" : ""}`} aria-pressed={r.decision.kind === "new"} title="Alt+1" onClick={() => decide(id, "new")} data-testid="photo-review-new">
+                    {t("photo.decide.new")}
                   </button>
-                  <button type="button" className={`btn small${r.decision.kind === "new" ? " primary" : ""}`} aria-pressed={r.decision.kind === "new"} onClick={() => r.decision.kind !== "new" && set(id, decideNew)} data-testid="photo-review-new">
-                    صنف جديد
+                  <button type="button" className={`btn small pir-choice${r.decision.kind === "link" ? " primary" : linking === id ? " is-open" : ""}`} aria-pressed={r.decision.kind === "link"} aria-expanded={linking === id} title="Alt+2" onClick={() => decide(id, "link")} data-testid="photo-review-link">
+                    {t("photo.decide.link")}
                   </button>
-                  <select
-                    aria-label="ربط بصنف موجود"
-                    value={r.decision.kind === "link" ? `link:${r.decision.productId}` : r.decision.kind}
-                    data-testid="photo-review-decision"
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      if (v === "new") set(id, decideNew);
-                      else if (v === "skip") set(id, (x) => ({ ...x, decision: { kind: "skip" } }));
-                      else if (v === "pending") set(id, (x) => ({ ...x, decision: { kind: "pending" } }));
-                      else if (v.startsWith("link:")) set(id, (x) => ({ ...x, decision: { kind: "link", productId: v.slice(5) } }));
-                    }}
-                  >
-                    <option value="pending">— بلا قرار —</option>
-                    <option value="skip">تخطٍّ</option>
-                    <option value="new">صنف جديد</option>
-                    <optgroup label="ربط بصنف موجود">
-                      {products.map((p) => (
-                        <option key={p.id} value={`link:${p.id}`}>
-                          ربط: {p.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  </select>
+                  <button type="button" className={`btn small pir-choice${r.decision.kind === "skip" ? " primary" : ""}`} aria-pressed={r.decision.kind === "skip"} title="Alt+3" onClick={() => decide(id, "skip")} data-testid="photo-review-skip">
+                    {t("photo.decide.ignore")}
+                  </button>
                   {r.decision.kind === "new" && (
                     <label className="pir-sale">
-                      <span>سعر البيع</span>
+                      <span>{t("photo.salePrice")}</span>
                       <input
                         dir="ltr"
                         inputMode="decimal"
@@ -352,6 +371,52 @@ export function PhotoInvoiceReview({
                     </label>
                   )}
                 </div>
+                {linking === id && (
+                  <div className="pir-link" dir={uiDir} data-testid="photo-review-link-panel">
+                    <input
+                      dir="auto"
+                      autoFocus
+                      className="pir-link-search"
+                      placeholder={t("photo.link.search")}
+                      aria-label={t("photo.link.search")}
+                      value={linkQuery[id] ?? r.name}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setLinkQuery((q) => ({ ...q, [id]: v }));
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") {
+                          e.preventDefault();
+                          setLinking(null);
+                        }
+                      }}
+                      data-testid="photo-review-link-search"
+                    />
+                    <div className="pir-link-results" role="listbox" aria-label={t("photo.link.results")}>
+                      {linkResults(linkQuery[id] ?? r.name).map(({ p, s }) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          role="option"
+                          aria-selected={r.decision.kind === "link" && r.decision.productId === p.id}
+                          className={`btn small ghost pir-link-option${r.decision.kind === "link" && r.decision.productId === p.id ? " is-on" : ""}`}
+                          onClick={() => {
+                            set(id, (x) => ({ ...x, decision: { kind: "link", productId: p.id } }));
+                            setLinking(null);
+                          }}
+                          data-testid="photo-review-link-option"
+                        >
+                          <bdi dir="auto">{p.name}</bdi>
+                          {s > 0 && <span className="muted"> · {Math.round(s * 100)}٪</span>}
+                        </button>
+                      ))}
+                      {linkResults(linkQuery[id] ?? r.name).length === 0 && <span className="small muted" data-testid="photo-review-link-none">{t("photo.link.none")}</span>}
+                    </div>
+                    <button type="button" className="btn small ghost" onClick={() => setLinking(null)} data-testid="photo-review-link-cancel">
+                      {t("photo.link.cancel")}
+                    </button>
+                  </div>
+                )}
                 {r.decision.kind === "link" && (
                   <div className="pir-note ok small" data-testid="photo-review-linked">
                     سيُربط بالصنف الموجود «<bdi dir="auto">{nameOf.get(r.decision.productId) ?? "؟"}</bdi>» — لا تغيير على الصنف.

@@ -1112,3 +1112,12 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
   .pir-photo { border-inline-end: 0; border-bottom: 1px solid var(--border); }
   .pir-fields { grid-template-columns: 1fr 1fr; }
 }
+
+/* DEC-35z9: decision buttons + the link search (replaces the dropdown) */
+.pir-choice { min-width: 96px; }
+.pir-choice.is-open { border: 2px dashed var(--primary); } /* search open, nothing linked yet */
+.pir-choice[aria-pressed="true"] { box-shadow: inset 0 0 0 2px var(--primary-text); font-weight: 700; }
+.pir-link { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--primary); border-radius: var(--radius); padding: 8px 10px; background: var(--surface-sunken); }
+.pir-link-search { min-height: var(--control-h-small); font-size: var(--text-body); width: 100%; }
+.pir-link-results { display: flex; flex-wrap: wrap; gap: 6px; max-height: 132px; overflow-y: auto; }
+.pir-link-option.is-on { border-color: var(--primary); font-weight: 700; }
