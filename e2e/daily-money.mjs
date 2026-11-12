@@ -79,6 +79,8 @@ try {
   await testid(page, "tab-today").click();
   await testid(page, "today-net").waitFor({ timeout: 30000 });
   assert((await testid(page, "dm-panel").count()) === 0, "🔴 a cashier's Today screen shows no money panel");
+  // DEC-35zz++ #7 (display only): the LIVE role beside the name.
+  assert((await testid(page, "role-badge").getAttribute("data-role")) === "cashier" && (await testid(page, "role-badge").innerText()).trim() === "كاشير", "the header names the role: «كاشير» beside the cashier's name");
 
   // ── C · the owner reads the day ─────────────────────────────────────────────────────────────────
   await testid(page, "logout").click();
@@ -87,6 +89,7 @@ try {
   if ((await page.evaluate(() => document.documentElement.lang)) !== "ar") await testid(page, "lang-toggle").click();
   await testid(page, "tab-today").click();
   await testid(page, "dm-panel").waitFor({ timeout: 30000 });
+  assert((await testid(page, "session-name").innerText()).trim() === "Cashier One" && (await testid(page, "role-badge").getAttribute("data-role")) === "owner" && (await testid(page, "role-badge").innerText()).trim() === "مالك", "🔴 the seeded owner named «Cashier One» is labelled «مالك» — name unchanged, role shown");
   const cell = async (id) => digits(await testid(page, id).innerText());
   // Independent reads of the ledger file (minor units → 2 decimals).
   const d = (minor) => (minor / 100).toFixed(2);

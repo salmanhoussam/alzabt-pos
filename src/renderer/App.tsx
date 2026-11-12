@@ -209,9 +209,16 @@ export function App() {
             </button>
           ))}
         </nav>
-        <span className="muted" dir="auto">
+        <span className="muted" dir="auto" data-testid="session-name">
           {cashier.name}
         </span>
+        {/* DISPLAY ONLY (DEC-35zz++ #7): the LIVE role beside the name, so a seeded owner named «Cashier One» is not read
+            as a cashier. Nothing is renamed; the id and the audit history are untouched; access is decided in main. */}
+        {(cashier.role === "owner" || cashier.role === "cashier") && (
+          <span className={`role-badge role-${cashier.role}`} data-testid="role-badge" data-role={cashier.role}>
+            {t(`ops.role.${cashier.role}`)}
+          </span>
+        )}
         <button
           className="btn ghost"
           onClick={() => setLanguage(lang === "ar" ? "en" : "ar")}

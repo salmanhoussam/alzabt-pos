@@ -1025,3 +1025,8 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .receipt-advance { display: grid; grid-template-columns: 1fr auto; gap: 4px var(--space-3); margin: 8px 0 0; padding: 0 var(--space-3); }
 .receipt-advance dt { margin: 0; }
 .receipt-advance dd { margin: 0; text-align: end; font-variant-numeric: tabular-nums; }
+
+/* DEC-35zz++ #7: the live role beside the signed-in name (display only). */
+.role-badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border, #ccc); }
+.role-badge.role-owner { background: #fff4d6; border-color: #e0b84a; color: #6b4e00; }
+.role-badge.role-cashier { background: #eef3ff; border-color: #9fb5e6; color: #23407a; }
