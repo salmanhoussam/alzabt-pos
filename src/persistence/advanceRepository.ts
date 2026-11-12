@@ -431,6 +431,39 @@ export class AdvanceRepository {
     return out;
   }
 
+  // ── DEC-35z+ REF: a cash refund of an advance's unused balance (migration 19 `advance_refunds`) ──
+
+  /** Issues the next REF number. MUST run inside the transaction that inserts the refund (the trigger checks it). */
+  issueRefundNumber(): number {
+    this.db.prepare(`UPDATE document_numbers SET last_no = last_no + 1 WHERE kind = 'advance_refund'`).run();
+    const row = this.db.prepare(`SELECT last_no FROM document_numbers WHERE kind = 'advance_refund'`).get() as { last_no: bigint | number };
+    return Number(row.last_no);
+  }
+
+  insertRefund(r: AdvanceRefundRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO advance_refunds (id, doc_no, advance_id, amount_minor, method, reason, idempotency_key, request_fingerprint,
+                                      refunded_by, refunded_at, business_date)
+         VALUES (?, ?, ?, ?, 'cash', ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(r.id, r.docNo, r.advanceId, r.amountMinor, r.reason, r.key, r.fingerprint, r.refundedBy, r.refundedAt, r.businessDate);
+  }
+
+  findRefundByKey(key: string): AdvanceRefundRecord | null {
+    const row = this.db.prepare(`${REF_SELECT} WHERE idempotency_key = ?`).get(key) as RefundRow | undefined;
+    return row ? refund(row) : null;
+  }
+
+  findRefundById(id: string): AdvanceRefundRecord | null {
+    const row = this.db.prepare(`${REF_SELECT} WHERE id = ?`).get(id) as RefundRow | undefined;
+    return row ? refund(row) : null;
+  }
+
+  listRefunds(advanceId: string): AdvanceRefundRecord[] {
+    return (this.db.prepare(`${REF_SELECT} WHERE advance_id = ? ORDER BY doc_no`).all(advanceId) as RefundRow[]).map(refund);
+  }
+
   /** A debt raised by a sale that was later voided owes nothing usable: never apply money to it. */
   obligationSaleVoided(obligationId: string): boolean {
     const row = this.db
@@ -487,6 +520,55 @@ function application(r: ApplicationRow): AdvanceApplicationRecord {
     fingerprint: r.request_fingerprint,
     appliedBy: r.applied_by,
     appliedAt: r.applied_at,
+    businessDate: r.business_date,
+  };
+}
+
+/** DEC-35z+ — one REF- document: cash handed back from an advance's unused balance. Immutable. */
+export interface AdvanceRefundRecord {
+  readonly id: string;
+  readonly docNo: number;
+  readonly advanceId: string;
+  readonly amountMinor: bigint;
+  /** Always 'cash' (migration 19 CHECK): even a Whish advance is refunded in cash, never "back through Whish". */
+  readonly method: "cash";
+  readonly reason: string;
+  readonly key: string;
+  readonly fingerprint: string;
+  readonly refundedBy: string;
+  readonly refundedAt: string;
+  readonly businessDate: string;
+}
+
+interface RefundRow {
+  id: string;
+  doc_no: bigint | number;
+  advance_id: string;
+  amount_minor: bigint | number;
+  method: string;
+  reason: string;
+  idempotency_key: string;
+  request_fingerprint: string;
+  refunded_by: string;
+  refunded_at: string;
+  business_date: string;
+}
+
+const REF_SELECT = `SELECT id, doc_no, advance_id, amount_minor, method, reason, idempotency_key, request_fingerprint,
+       refunded_by, refunded_at, business_date FROM advance_refunds`;
+
+function refund(r: RefundRow): AdvanceRefundRecord {
+  return {
+    id: r.id,
+    docNo: Number(r.doc_no),
+    advanceId: r.advance_id,
+    amountMinor: typeof r.amount_minor === "bigint" ? r.amount_minor : BigInt(r.amount_minor),
+    method: "cash",
+    reason: r.reason,
+    key: r.idempotency_key,
+    fingerprint: r.request_fingerprint,
+    refundedBy: r.refunded_by,
+    refundedAt: r.refunded_at,
     businessDate: r.business_date,
   };
 }

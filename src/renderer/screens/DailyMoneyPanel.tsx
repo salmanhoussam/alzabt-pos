@@ -35,7 +35,10 @@ export function DailyMoneyPanel() {
   if (error) return <div className="card dm-panel error" data-testid="dm-error">{error}</div>;
   if (!report) return null;
 
-  const m = (minor: string) => fmt({ minor, currency: report.currency });
+  // 🔴 SIGNED (DEC-35z+ finding F3): a day's net, or a correction line, can be NEGATIVE — e.g. a Whish
+  // advance refunded in cash puts the cash column below zero. `fmt` takes only whole non-negative minor
+  // units and threw, unmounting the whole app (a blank window). The sign is shown, never dropped.
+  const m = (minor: string) => (minor.startsWith("-") ? `−${fmt({ minor: minor.slice(1), currency: report.currency })}` : fmt({ minor, currency: report.currency }));
   // Cash and Whish always; any other channel only on a day that actually has it (history).
   const parts: ChannelAmountsDto[] = [
     report.sales.received.byChannel,

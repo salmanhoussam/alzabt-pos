@@ -189,6 +189,12 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   applyAdvanceToDebt: "owner",
   // 🔴 OWNER (DEC-35x): a new sale on account paid from an advance — refused again by both services.
   sellOnAdvance: "owner",
+  // 🔴 OWNER (D-P5a FINAL, DEC-35z+): cash handed back from an advance — refused again by
+  // `AdvanceService.requireRefunder` and by the M19 trigger on `advance_refunds.refunded_by`. Its
+  // reprint/PDF is owner-only too: a REF- shows money out of the drawer by name.
+  refundAdvance: "owner",
+  printAdvanceRefund: "owner",
+  saveAdvanceRefundPdf: "owner",
 
   // ── Owner only ────────────────────────────────────────────────────────────────────────────────
   // Reversing money.

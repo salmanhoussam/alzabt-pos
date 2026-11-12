@@ -28,7 +28,8 @@ import { DailyMoneyService } from "../application/dailyMoneyService";
 import { DailyMoneyRepository } from "../persistence/dailyMoneyRepository";
 import { AdvanceRepository } from "../persistence/advanceRepository";
 import { renderAdvanceDocument } from "./advanceDocument";
-import { advanceDto, correctionDto } from "./ipcHandlers";
+import { advanceDto, correctionDto, refundDto } from "./ipcHandlers";
+import { renderRefundDocument } from "./refundDocument";
 import { PartyRepository } from "../persistence/partyRepository";
 import { LedgerRepository } from "../persistence/ledgerRepository";
 import { ReceiptRepository } from "../persistence/receiptRepository";
@@ -583,6 +584,48 @@ async function saveAdvancePdfFile(advanceId: string): Promise<SavedFile | null> 
   return { fileName: basename(path) };
 }
 
+/**
+ * DEC-35z+ — the REF- document's HTML, loaded from the ledger BY ID (owner-checked by the service).
+ * A print or PDF failure here never touches the refund: the money row committed before any window opened.
+ */
+function refundHtml(refundId: string): { html: string; number: string } {
+  if (!advanceService) throw new DomainError("NOT_AVAILABLE", "Customer advances are not available");
+  const view = advanceService.refundDocument(refundId);
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  return { html: renderRefundDocument({ refund: refundDto(view), shopName, timeZone: FIXTURE_TERMINAL.timeZone }), number: view.number };
+}
+
+async function printRefundDocument(refundId: string): Promise<"printed" | "cancelled"> {
+  const { html, number } = refundHtml(refundId);
+  const printed = await withPrintWindow(html, "refund-print", (win) =>
+    new Promise<boolean>((done) => win.webContents.print({ silent: false, printBackground: true }, (ok) => done(ok))),
+  );
+  log.info("refund-printed", { id: refundId, number, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveRefundPdfFile(refundId: string): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const { html, number } = refundHtml(refundId);
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save refund receipt PDF",
+    defaultPath: join(app.getPath("documents"), `${number}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(html, "refund-pdf", (win) =>
+    win.webContents.printToPDF({ pageSize: "A5", printBackground: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } }),
+  );
+  writeFileSync(path, pdf);
+  log.info("refund-pdf-saved", { id: refundId, number, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
 /** Native "save as" + a verified consistent snapshot of the live ledger (never a raw file copy). */
 function exportBackup(ledgerPath: string): SavedFile | null {
   if (!mainWindow || !db) return null;
@@ -1005,6 +1048,8 @@ function startTill(): void {
     dailyMoney,
     printAdvance: printAdvanceDocument,
     saveAdvancePdf: saveAdvancePdfFile,
+    printAdvanceRefund: printRefundDocument,
+    saveAdvanceRefundPdf: saveRefundPdfFile,
     pickInvoiceLogo,
     pickProductPhoto,
     printInvoice: printInvoiceDocument,

@@ -26,7 +26,7 @@ export interface AdvanceDocumentInput {
 const t = (ar: string, en: string) => `${escape(ar)} <span class="en">${escape(en)}</span>`;
 
 /** The stored instant in the terminal's zone (`2026-10-04 12:00`), or in UTC labelled as such. */
-function instantIn(iso: string, timeZone: string | undefined): string {
+export function instantIn(iso: string, timeZone: string | undefined): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   if (!timeZone) return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;

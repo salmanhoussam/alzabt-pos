@@ -13,10 +13,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { call, fmt, pos } from "../api";
 import { useT } from "../i18n";
-import type { AdvanceDto, AdvanceStatementDto, MoneyDto, PendingAdvanceDto } from "../../shared/ipcContract";
+import type { AdvanceDto, AdvanceRefundDto, AdvanceStatementDto, MoneyDto, PendingAdvanceDto } from "../../shared/ipcContract";
 import { AdvanceReceipt, advanceErrorText } from "./AdvanceSheet";
 import { AdvanceCorrectionSheet } from "./AdvanceCorrectionSheet";
 import { AdvanceApplySheet } from "./AdvanceApplySheet";
+import { AdvanceRefundSheet, RefundReceipt } from "./AdvanceRefundSheet";
 import { statementDocumentText } from "../statementDocument";
 
 export function PendingAdvances({ refreshKey, onSettled }: { refreshKey: number; onSettled: () => void }) {
@@ -130,6 +131,8 @@ export function AdvanceStatementSection({ customerId, refreshKey, onChanged }: {
   const [shown, setShown] = useState<AdvanceDto | null>(null);
   const [correcting, setCorrecting] = useState<AdvanceDto | null>(null);
   const [applying, setApplying] = useState<{ advance: AdvanceDto; unused: MoneyDto } | null>(null);
+  const [refunding, setRefunding] = useState<{ advance: AdvanceDto; unused: MoneyDto } | null>(null);
+  const [reprint, setReprint] = useState<AdvanceRefundDto | null>(null);
   const [tick, setTick] = useState(0);
   useEffect(() => {
     let live = true;
@@ -198,6 +201,21 @@ export function AdvanceStatementSection({ customerId, refreshKey, onChanged }: {
                         {t("adv.apply.open")}
                       </button>
                     )}
+                    {/* DEC-35z+ REF: hand back what is left, in cash (owner; main and the trigger decide the limits). */}
+                    {!l.correction && l.unused.minor !== "0" && (
+                      <button className="btn ghost" onClick={() => setRefunding({ advance: l.advance, unused: l.unused })} data-testid="adv-stmt-refund">
+                        {t("ref.open")}
+                      </button>
+                    )}
+                    {l.refunds.map((r) => (
+                      <span key={r.id} className="muted small adv-stmt-applied" data-testid="adv-stmt-refunded" data-ref-number={r.number}>
+                        {t("ref.refunded")}{" "}
+                        <button className="link" onClick={() => setReprint(r)} data-testid="adv-stmt-ref-open">
+                          <bdi dir="ltr">{r.number}</bdi>
+                        </button>{" "}
+                        · <bdi dir="ltr">{fmt(r.amount)}</bdi> · <bdi>{r.reason}</bdi> · <bdi dir="ltr">{r.businessDate}</bdi>
+                      </span>
+                    ))}
                     {l.applications.map((a) => (
                       <span key={a.id} className="muted small adv-stmt-applied" data-testid="adv-stmt-applied">
                         {t("adv.apply.appliedTo")} <bdi>{statementDocumentText(a.debtDocument, t)}</bdi> · <bdi dir="ltr">{fmt(a.amount)}</bdi> ·{" "}
@@ -241,6 +259,27 @@ export function AdvanceStatementSection({ customerId, refreshKey, onChanged }: {
             }
           }}
         />
+      )}
+      {refunding && (
+        <AdvanceRefundSheet
+          advance={refunding.advance}
+          unused={refunding.unused}
+          onClose={(changed) => {
+            setRefunding(null);
+            if (changed) {
+              setTick((n) => n + 1);
+              onChanged?.();
+            }
+          }}
+        />
+      )}
+      {reprint && (
+        <div className="overlay" role="dialog" aria-modal="true" data-testid="ref-reprint">
+          <div className="panel customer-panel">
+            {/* A reprint shows the SAME REF- from its immutable row; no balance (it has moved since). */}
+            <RefundReceipt refund={reprint} unused={null} duplicate={false} onClose={() => setReprint(null)} />
+          </div>
+        </div>
       )}
       {correcting && (
         <AdvanceCorrectionSheet

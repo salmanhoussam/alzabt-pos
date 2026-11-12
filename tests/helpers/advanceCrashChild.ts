@@ -20,6 +20,11 @@
  *   sale-after-commit     DEC-35y: sell on an advance, die right AFTER the commit — the reply is lost
  *   sale-run              DEC-35y: NOT a crash — sell on an advance (env SALE_AMOUNT) and print the outcome
  *                         as one JSON line; used to race two real processes on one advance
+ *   refund-inside-tx      DEC-35z+: refund 400 from the advance (3rd arg = advance id) and die INSIDE the
+ *                         transaction, AFTER the REF number was issued, BEFORE the refund row and commit
+ *   refund-after-commit   DEC-35z+: refund 400, die right AFTER the commit — the reply is lost
+ *   refund-run            DEC-35z+: NOT a crash — refund env REFUND_AMOUNT and print the outcome as one
+ *                         JSON line; used to race two real processes on one advance
  */
 import { writeSync } from "node:fs";
 import { AdvanceService } from "../../src/application/advanceService";
@@ -78,6 +83,17 @@ class DieAfterSale extends AdvanceService {
   }
 }
 
+class DieInsideRefund extends AdvanceService {
+  protected override afterRefundNumberIssued(): void {
+    die();
+  }
+}
+class DieAfterRefund extends AdvanceService {
+  protected override afterRefundCommitted(): void {
+    die();
+  }
+}
+
 class DieAfterCorrection extends AdvanceService {
   protected override afterCorrectionCommitted(): void {
     die();
@@ -100,7 +116,20 @@ if (mode === "sale-run") {
   h.db.close();
   process.exit(0);
 }
-if (mode === "sale-after-commit") new DieAfterSale(advanceDeps(h)).sellOnAdvance(saleDraft(200n));
+const refundDraft = (amount: bigint) => ({ advanceId: customerId, amountMinor: amount, reason: "الزبون طلب استرداد", idempotencyKey: key });
+if (mode === "refund-run") {
+  try {
+    const r = new AdvanceService(advanceDeps(h)).refund(refundDraft(BigInt(process.env.REFUND_AMOUNT ?? "400")));
+    writeSync(1, JSON.stringify({ ok: true, docNo: r.refund.docNo, duplicate: r.duplicate }) + String.fromCharCode(10));
+  } catch (e) {
+    writeSync(1, JSON.stringify({ ok: false, code: (e as { code?: string }).code ?? String((e as Error).message) }) + String.fromCharCode(10));
+  }
+  h.db.close();
+  process.exit(0);
+}
+if (mode === "refund-inside-tx") new DieInsideRefund(advanceDeps(h)).refund(refundDraft(400n));
+else if (mode === "refund-after-commit") new DieAfterRefund(advanceDeps(h)).refund(refundDraft(400n));
+else if (mode === "sale-after-commit") new DieAfterSale(advanceDeps(h)).sellOnAdvance(saleDraft(200n));
 else if (mode === "sale-inside-tx")
   new DieInsideSale(advanceDeps(h)).sellOnAdvance({ idempotencyKey: key, customerId: process.env.SALE_CUSTOMER ?? "", lines: [{ productId: "prod-0001", quantityMilli: 2000 }], expectedTotalMinor: 500n, advanceId: customerId, amountMinor: 200n });
 else if (mode === "apply-inside-tx") new DieInsideApply(advanceDeps(h)).applyToDebt(apply);

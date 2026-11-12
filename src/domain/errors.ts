@@ -126,6 +126,12 @@ export type DomainErrorCode =
   | "ADVANCE_APPLY_ABOVE_BALANCE"
   | "ADVANCE_APPLY_ABOVE_DEBT"
   | "ADVANCE_CORRECTED_NOT_APPLICABLE"
+  // DEC-35z+ REF — a cash refund of an advance (owner only). Its own sentences, not the application's:
+  // the refund document does not exist / the amount is above the unused balance / the advance was
+  // corrected (it has no balance; a successor, if any, is the one that holds the money).
+  | "ADVANCE_REFUND_NOT_FOUND"
+  | "ADVANCE_REFUND_ABOVE_BALANCE"
+  | "ADVANCE_CORRECTED_NOT_REFUNDABLE"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

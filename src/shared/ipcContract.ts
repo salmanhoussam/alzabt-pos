@@ -131,6 +131,9 @@ export const CHANNELS = {
   sellOnAdvance: "pos:sellOnAdvance",
   printAdvance: "pos:printAdvance",
   saveAdvancePdf: "pos:saveAdvancePdf",
+  refundAdvance: "pos:refundAdvance",
+  printAdvanceRefund: "pos:printAdvanceRefund",
+  saveAdvanceRefundPdf: "pos:saveAdvanceRefundPdf",
 } as const;
 
 export type ChannelName = keyof typeof CHANNELS;
@@ -1737,6 +1740,47 @@ export interface AdvanceStatementLineDto {
   readonly correction: AdvanceCorrectionDto | null;
   /** DEC-35x: what this advance paid, debt by debt (oldest first). Not money received. */
   readonly applications: readonly AdvanceApplicationDto[];
+  /** DEC-35z+: cash handed back from this advance, REF- by REF- (oldest first). Money OUT. */
+  readonly refunds: readonly AdvanceRefundDto[];
+}
+
+/** One REF- document as main read it from the ledger. Always cash (migration 19 CHECK). */
+export interface AdvanceRefundDto {
+  readonly id: string;
+  readonly docNo: number;
+  /** `REF-000001` — formatted in main. */
+  readonly number: string;
+  readonly advanceId: string;
+  readonly advanceNumber: string;
+  /** The ADV's own channel: a Whish ADV is still refunded in CASH; the document says so. */
+  readonly advanceChannel: AdvanceChannelDto;
+  readonly advanceReference: string | null;
+  readonly customerName: string;
+  readonly amount: MoneyDto;
+  readonly method: "cash";
+  readonly reason: string;
+  readonly refundedByName: string;
+  readonly refundedAt: string;
+  readonly businessDate: string;
+}
+
+export interface RefundAdvanceRequest {
+  readonly advanceId: string;
+  readonly amountMinor: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+export interface RefundAdvanceResponse {
+  readonly refund: AdvanceRefundDto;
+  /** The advance's balance read back AFTER the commit. */
+  readonly unused: MoneyDto;
+  /** True when this exact request had already been recorded: nothing new was written. */
+  readonly duplicate: boolean;
+}
+
+export interface AdvanceRefundIdRequest {
+  readonly refundId: string;
 }
 
 export interface AdvanceApplicationDto {
@@ -1955,4 +1999,9 @@ export interface PosApi {
   /** Main loads the ADV document from the ledger by id and owns the print / the PDF. */
   printAdvance(req: AdvanceIdRequest): Promise<IpcResult<PrintAdvanceResponse>>;
   saveAdvancePdf(req: AdvanceIdRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
+  /** Owner only (DEC-35z+): hand back part or all of an advance's unused balance, in CASH, with a reason. Money out. */
+  refundAdvance(req: RefundAdvanceRequest): Promise<IpcResult<RefundAdvanceResponse>>;
+  /** Owner only: print / save the SAME REF- document again, loaded by id. Never writes. */
+  printAdvanceRefund(req: AdvanceRefundIdRequest): Promise<IpcResult<PrintAdvanceResponse>>;
+  saveAdvanceRefundPdf(req: AdvanceRefundIdRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
 }

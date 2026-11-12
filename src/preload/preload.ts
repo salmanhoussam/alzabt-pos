@@ -209,6 +209,9 @@ const CH = {
   sellOnAdvance: "pos:sellOnAdvance",
   printAdvance: "pos:printAdvance",
   saveAdvancePdf: "pos:saveAdvancePdf",
+  refundAdvance: "pos:refundAdvance",
+  printAdvanceRefund: "pos:printAdvanceRefund",
+  saveAdvanceRefundPdf: "pos:saveAdvanceRefundPdf",
 } as const satisfies typeof CHANNELS;
 
 const api: PosApi = {
@@ -489,6 +492,15 @@ const api: PosApi = {
     }),
   printAdvance: (req) => ipcRenderer.invoke(CH.printAdvance, { advanceId: req.advanceId }),
   saveAdvancePdf: (req) => ipcRenderer.invoke(CH.saveAdvancePdf, { advanceId: req.advanceId }),
+  refundAdvance: (req) =>
+    ipcRenderer.invoke(CH.refundAdvance, {
+      advanceId: req.advanceId,
+      amountMinor: req.amountMinor,
+      reason: req.reason,
+      idempotencyKey: req.idempotencyKey,
+    }),
+  printAdvanceRefund: (req) => ipcRenderer.invoke(CH.printAdvanceRefund, { refundId: req.refundId }),
+  saveAdvanceRefundPdf: (req) => ipcRenderer.invoke(CH.saveAdvanceRefundPdf, { refundId: req.refundId }),
 };
 
 contextBridge.exposeInMainWorld("pos", Object.freeze(api));

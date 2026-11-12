@@ -38,6 +38,7 @@ import type {
   AdvanceCorrectionRecord,
   AdvanceIntent,
   AdvanceApplicationRecord,
+  AdvanceRefundRecord,
   AdvanceRecord,
   AdvanceRepository,
 } from "../persistence/advanceRepository";
@@ -193,6 +194,34 @@ export interface SellOnAdvanceResult {
 
 /** The sale key also names the application (`<key>-adv`), which must stay within 90 characters. */
 const SALE_KEY_SHAPE = /^[A-Za-z0-9-]{8,86}$/;
+
+/** DEC-35z+ — refund (part of) an advance's unused balance, in CASH, by the owner, with a reason. */
+export interface RefundAdvanceDraft {
+  readonly advanceId: unknown;
+  readonly amountMinor: unknown;
+  readonly reason: unknown;
+  readonly idempotencyKey: unknown;
+}
+
+export interface RefundAdvanceResult {
+  readonly refund: AdvanceRefundRecord;
+  readonly advance: AdvanceRecord;
+  /** Read back AFTER the commit. */
+  readonly unusedMinor: bigint;
+  readonly duplicate: boolean;
+}
+
+export interface AdvanceRefundView {
+  readonly record: AdvanceRefundRecord;
+  readonly number: string;
+  readonly advance: AdvanceView;
+  readonly refundedByName: string;
+}
+
+/** `REF-000001`: six digits, never reset, issued in order (D-P4a/b). */
+export function formatRefundNo(docNo: number): string {
+  return `REF-${String(docNo).padStart(6, "0")}`;
+}
 
 export interface ApplyAdvanceResult {
   readonly application: AdvanceApplicationRecord;
@@ -839,6 +868,139 @@ export class AdvanceService {
       const application = this.applyWithin({ advanceId: advance.id, obligationId: pair.obligation.id, amountMinor: amount, idempotencyKey: appKey }, true);
       return { sale: pair.sale, obligation: pair.obligation, application, duplicate: false };
     });
+  }
+
+  // ── DEC-35z+ REF: CASH REFUND OF AN ADVANCE'S UNUSED BALANCE ─────────────────────────────────────
+  //
+  // 🔴 MONEY OUT, CASH ONLY. One immutable `advance_refunds` row with its REF- number, in cash — even
+  // when the advance arrived by Whish (the POS never claims money went back through Whish; the
+  // original reference stays registered once, on the ADV). The ADV row is never edited.
+  //
+  // 🔴 OWNER ONLY, three times: the channel (owner-classified), this service (live role re-read), and
+  // the migration-19 trigger (against the live operator row). The same trigger refuses more than the
+  // unused balance (amount − applications − refunds); the migration-20 trigger refuses a corrected ADV.
+  //
+  // 🔴 ATOMIC + NUMBERED. The REF number and the row commit together, or neither: a failed write rolls
+  // the counter back (no gap, no reuse). A process killed before COMMIT leaves nothing.
+  //
+  // 🔴 IDEMPOTENT. The request key IS the refund's identity: a retry after a lost reply returns the
+  // SAME REF (duplicate: true); the same key with another advance / amount / reason is refused.
+  // No attempt table is needed (unlike ADV): the cash leaves the drawer AFTER the REF receipt is on
+  // screen, so a crash before that point means either nothing was recorded (atomic) or the REF exists
+  // and is listed on the advance with its reduced balance — never "money out, no record".
+
+  refund(draft: RefundAdvanceDraft): RefundAdvanceResult {
+    const actor = this.requireRefunder();
+    if (typeof draft.idempotencyKey !== "string" || !KEY_SHAPE.test(draft.idempotencyKey)) {
+      throw new DomainError("INVALID_INPUT", "A refund needs a request key");
+    }
+    const key = draft.idempotencyKey;
+    if (typeof draft.advanceId !== "string" || draft.advanceId.length === 0 || draft.advanceId.length > 100) {
+      throw new DomainError("INVALID_INPUT", "A refund needs an advance");
+    }
+    const advanceId = draft.advanceId;
+    const reason = typeof draft.reason === "string" ? draft.reason.trim() : "";
+    const fingerprint = (amount: unknown) =>
+      hash({ op: "refund-advance", advanceId, amountMinor: typeof amount === "bigint" ? amount.toString() : String(amount), reason });
+
+    // A committed key is answered BEFORE re-validating (the balance has moved since — validation alone
+    // would wrongly refuse the replay of a refund that took the whole balance).
+    const replay = (done: AdvanceRefundRecord): AdvanceRefundRecord => {
+      if (done.advanceId !== advanceId || done.fingerprint !== fingerprint(draft.amountMinor)) {
+        throw new DomainError("IDEMPOTENCY_CONFLICT", "That request key was already used for a different refund");
+      }
+      return done;
+    };
+    const done = this.deps.advances.findRefundByKey(key);
+    if (done) return this.refundResult(replay(done), true);
+    if (reason.length < 3 || reason.length > 200) throw new DomainError("INVALID_REASON", "A refund needs a reason (3 to 200 characters)");
+
+    const check = () => {
+      const advance = this.deps.advances.findAdvanceById(advanceId);
+      if (!advance) throw new DomainError("ADVANCE_NOT_FOUND", "That advance does not exist");
+      if (this.deps.advances.findCorrectionOf(advance.id)) {
+        throw new DomainError("ADVANCE_CORRECTED_NOT_REFUNDABLE", "That advance was corrected and has no balance to refund");
+      }
+      const amount = ledgerAmount(draft.amountMinor, advance.currency).minor;
+      if (amount > this.deps.advances.unusedMinor(advance.id)) {
+        throw new DomainError("ADVANCE_REFUND_ABOVE_BALANCE", "The amount is above what the advance still holds");
+      }
+      return { advance, amount };
+    };
+    check(); // everything validated BEFORE anything is written: a refused refund leaves no trace
+
+    const written = this.deps.transact((): { row: AdvanceRefundRecord; duplicate: boolean } => {
+      const live = this.requireRefunder();
+      if (live.id !== actor.id) throw new DomainError("NOT_AUTHORIZED", "The signed-in operator changed during the refund");
+      // A second process with the SAME key that waited for the lock: the refund is now there — the SAME
+      // answer as a replay (or a conflict when the details differ), never a second REF-.
+      const raced = this.deps.advances.findRefundByKey(key);
+      if (raced) return { row: replay(raced), duplicate: true };
+      const { advance, amount } = check(); // the SAME rules again, inside the write lock
+      const docNo = this.deps.advances.issueRefundNumber();
+      this.afterRefundNumberIssued();
+      this.deps.advances.insertRefund({
+        id: this.newId(),
+        docNo,
+        advanceId: advance.id,
+        amountMinor: amount,
+        method: "cash",
+        reason,
+        key,
+        fingerprint: fingerprint(amount),
+        refundedBy: live.id,
+        refundedAt: this.now().toISOString(),
+        businessDate: businessDateOf(this.now(), this.deps.terminal.timeZone),
+      });
+      const row = this.deps.advances.findRefundByKey(key);
+      if (!row) throw new DomainError("LEDGER_INTEGRITY", "The refund could not be read back");
+      return { row, duplicate: false };
+    });
+    if (!written.duplicate) this.afterRefundCommitted();
+    return this.refundResult(written.row, written.duplicate);
+  }
+
+  private requireRefunder(): AdvanceActor {
+    const actor = this.requireRecorder();
+    if (actor.role !== "owner") throw new DomainError("NOT_AUTHORIZED", "Only the owner can refund an advance");
+    return actor;
+  }
+
+  /** Crash seams for the refund (tests/helpers/advanceCrashChild.ts). Nothing in src/ overrides them. */
+  protected afterRefundNumberIssued(): void {}
+  protected afterRefundCommitted(): void {}
+
+  private refundResult(r: AdvanceRefundRecord, duplicate: boolean): RefundAdvanceResult {
+    const advance = this.deps.advances.findAdvanceById(r.advanceId);
+    if (!advance) throw new DomainError("LEDGER_INTEGRITY", "The refund's advance is missing");
+    return { refund: r, advance, unusedMinor: this.deps.advances.unusedMinor(advance.id), duplicate };
+  }
+
+  /** Owner: the REF- documents of one advance (statement). */
+  refundsOf(advanceId: string): AdvanceRefundRecord[] {
+    this.requireRefunder();
+    return this.deps.advances.listRefunds(advanceId);
+  }
+
+  /** One refund as a screen / document states it, read from the ledger. */
+  refundView(r: AdvanceRefundRecord): AdvanceRefundView {
+    const advance = this.deps.advances.findAdvanceById(r.advanceId);
+    if (!advance) throw new DomainError("LEDGER_INTEGRITY", "The refund's advance is missing");
+    return {
+      record: r,
+      number: formatRefundNo(r.docNo),
+      advance: this.view(advance),
+      refundedByName: this.deps.advances.names("", r.refundedBy).operator ?? "—",
+    };
+  }
+
+  /** One refund for its document (print / PDF / reprint). OWNER, by ID only; never writes. */
+  refundDocument(refundId: unknown): AdvanceRefundView {
+    this.requireRefunder();
+    if (typeof refundId !== "string") throw new DomainError("ADVANCE_REFUND_NOT_FOUND", "That refund does not exist");
+    const r = this.deps.advances.findRefundById(refundId);
+    if (!r) throw new DomainError("ADVANCE_REFUND_NOT_FOUND", "That refund does not exist");
+    return this.refundView(r);
   }
 
   private applicationResult(app: AdvanceApplicationRecord, duplicate: boolean): ApplyAdvanceResult {

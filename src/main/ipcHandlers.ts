@@ -29,11 +29,11 @@ import { invoiceOutcomeError } from "./invoiceOutcomeText";
 import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
 import type { LedgerService } from "../application/ledgerService";
-import type { AdvanceCorrectionView, AdvanceService, AdvanceView } from "../application/advanceService";
+import type { AdvanceCorrectionView, AdvanceRefundView, AdvanceService, AdvanceView } from "../application/advanceService";
 import type { AdvanceApplicationRecord } from "../persistence/advanceRepository";
 import type { DailyMoneyService } from "../application/dailyMoneyService";
 import { type ChannelAmounts, type DailyMoneyReport, type MoneyPart, MONEY_CHANNELS } from "../domain/dailyMoney";
-import type { AdvanceCorrectionDto, AdvanceDto, PendingAdvanceDto } from "../shared/ipcContract";
+import type { AdvanceCorrectionDto, AdvanceDto, AdvanceRefundDto, PendingAdvanceDto } from "../shared/ipcContract";
 import type { BackupRestoreActions } from "./backupRestore";
 import type { RestoreLock } from "./restoreLock";
 import type { PartyRow } from "../persistence/partyRepository";
@@ -236,6 +236,9 @@ export interface IpcHandlerOptions {
   readonly printAdvance?: (advanceId: string) => Promise<"printed" | "cancelled">;
   /** Save-as dialog + PDF of one ADV- document. Null when the operator cancelled. */
   readonly saveAdvancePdf?: (advanceId: string) => Promise<SavedFile | null>;
+  /** DEC-35z+: prints / saves one REF- document, loaded from the ledger BY ID. */
+  readonly printAdvanceRefund?: (refundId: string) => Promise<"printed" | "cancelled">;
+  readonly saveAdvanceRefundPdf?: (refundId: string) => Promise<SavedFile | null>;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -1866,6 +1869,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
             unused: { minor: l.unusedMinor.toString(), currency: l.advance.currency },
             correction: correctionDto(advances().correctionView(l.correction)),
             applications: advances().applicationsOf(l.advance.id).map(applicationDto),
+            refunds: advances().refundsOf(l.advance.id).map((r) => refundDto(advances().refundView(r))),
           })),
       };
     }),
@@ -1959,6 +1963,38 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       advances().document(id);
       if (!options.saveAdvancePdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
       const saved = await options.saveAdvancePdf(id);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
+    // ── DEC-35z+ REF: cash refund of an advance (owner) ─────────────────────────────────────────────
+    refundAdvance: wrap("refundAdvance", (p) => {
+      const o = exactObject(p, ["advanceId", "amountMinor", "reason", "idempotencyKey"]);
+      const r = advances().refund({
+        advanceId: str(o.advanceId, "advanceId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+        reason: o.reason,
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      log.info("advance-refunded", { id: r.refund.id, docNo: r.refund.docNo, advance: r.advance.id, duplicate: r.duplicate });
+      return {
+        refund: refundDto(advances().refundView(r.refund)),
+        unused: { minor: r.unusedMinor.toString(), currency: r.advance.currency },
+        duplicate: r.duplicate,
+      };
+    }),
+    // A reprint loads the SAME REF- by id and writes nothing; a print/PDF failure never touches the refund.
+    printAdvanceRefund: wrapAsync("printAdvanceRefund", async (p) => {
+      const o = exactObject(p, ["refundId"]);
+      const id = str(o.refundId, "refundId", 100);
+      advances().refundDocument(id); // exists, and the caller is the owner — before any window opens
+      if (!options.printAdvanceRefund) return { status: "unavailable" as const };
+      return { status: await options.printAdvanceRefund(id) };
+    }),
+    saveAdvanceRefundPdf: wrapAsync("saveAdvanceRefundPdf", async (p) => {
+      const o = exactObject(p, ["refundId"]);
+      const id = str(o.refundId, "refundId", 100);
+      advances().refundDocument(id);
+      if (!options.saveAdvanceRefundPdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveAdvanceRefundPdf(id);
       return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
     }),
   };
@@ -2305,6 +2341,28 @@ export function correctionDto(c: AdvanceCorrectionView | null): AdvanceCorrectio
     correctedAt: c.record.correctedAt,
     businessDate: c.record.businessDate,
     successorNumber: c.successorNumber,
+  };
+}
+
+/** One REF- document as the ledger holds it (always cash), bigints as strings. No arithmetic. */
+export function refundDto(v: AdvanceRefundView): AdvanceRefundDto {
+  const r = v.record;
+  const adv = advanceDto(v.advance);
+  return {
+    id: r.id,
+    docNo: r.docNo,
+    number: v.number,
+    advanceId: r.advanceId,
+    advanceNumber: adv.number,
+    advanceChannel: adv.channel,
+    advanceReference: adv.reference,
+    customerName: adv.customerName,
+    amount: { minor: r.amountMinor.toString(), currency: adv.amount.currency },
+    method: "cash",
+    reason: r.reason,
+    refundedByName: v.refundedByName,
+    refundedAt: r.refundedAt,
+    businessDate: r.businessDate,
   };
 }
 

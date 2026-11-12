@@ -200,6 +200,10 @@ describe("IPC surface", () => {
         "applyAdvanceToDebt",
         // 🔴 TRANSITION (DEC-35x, Apply Advance to New Sale): owner-only. Old list: without it.
         "sellOnAdvance",
+        // 🔴 TRANSITION (DEC-35z+, Cash Refund REF): owner-only money OUT + its reprint / PDF. Old list: without them.
+        "refundAdvance",
+        "printAdvanceRefund",
+        "saveAdvanceRefundPdf",
       ].sort(),
     );
     // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
@@ -236,7 +240,9 @@ describe("IPC surface", () => {
     // that writes nothing. The old value was 90.
     // 🔴 TRANSITION (DEC-35x): 91 -> 92 — applyAdvanceToDebt, owner-classified. The old value was 91.
     // 🔴 TRANSITION (DEC-35x): 92 -> 93 — sellOnAdvance, owner-classified. The old value was 92.
-    expect(CHANNEL_NAMES).toHaveLength(93);
+    // 🔴 TRANSITION (DEC-35z+): 93 -> 96 — refundAdvance, printAdvanceRefund, saveAdvanceRefundPdf, all
+    // owner-classified. The old value was 93.
+    expect(CHANNEL_NAMES).toHaveLength(96);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

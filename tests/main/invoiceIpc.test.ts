@@ -125,11 +125,14 @@ describe("the invoice channels exist and answer", () => {
         void (result as Promise<unknown>).catch(() => undefined);
       }
     }
+    // TRANSITION (DEC-35z+): + printAdvanceRefund / saveAdvanceRefundPdf (the REF- document, by id). Old list: without them.
     expect(async_.sort()).toEqual([
       "cancelPhoneSession",
       "printAdvance",
+      "printAdvanceRefund",
       "printInvoice",
       "saveAdvancePdf",
+      "saveAdvanceRefundPdf",
       "saveInvoicePdf",
       "startPhoneSession",
     ]);

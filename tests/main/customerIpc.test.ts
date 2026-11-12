@@ -102,7 +102,10 @@ describe("the customer channels", () => {
     // list in the next test. The old value was 91.
     // 🔴 TRANSITION (DEC-35x, Apply Advance to New Sale): 92 -> 93 with sellOnAdvance — owner-only; it CREATES
     // a debt (the sale on account) and settles part of it from an advance, atomically. The old value was 92.
-    expect(Object.keys(CHANNELS)).toHaveLength(93);
+    // 🔴 TRANSITION (DEC-35z+, Cash Refund REF): 93 -> 96 with refundAdvance (owner; MONEY OUT, cash, from an
+    // advance's unused balance — no debt created or settled) and its owner-only reprint/PDF pair
+    // printAdvanceRefund / saveAdvanceRefundPdf (read by id, write nothing). The old value was 93.
+    expect(Object.keys(CHANNELS)).toHaveLength(96);
   });
 
   // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".
@@ -172,6 +175,11 @@ describe("the customer channels", () => {
         "saveAdvancePdf",
         // TRANSITION (DEC-35x): a new sale on account paid from an advance. Old list: without it.
         "sellOnAdvance",
+        // TRANSITION (DEC-35z+): the owner's CASH refund of an advance's unused balance, and its
+        // reprint / PDF. Old list: without these three.
+        "refundAdvance",
+        "printAdvanceRefund",
+        "saveAdvanceRefundPdf",
       ].sort(),
     );
     // The three that MOVE money: record and finish (owner + cashier, decision D1 — the cashier takes
@@ -181,6 +189,10 @@ describe("the customer channels", () => {
     expect(accessFor("correctAdvance")).toBe("owner");
     expect(accessFor("getAdvanceStatement")).toBe("owner");
     expect(accessFor("applyAdvanceToDebt")).toBe("owner");
+    // DEC-35z+: the one channel that takes money OUT of the drawer for a customer, and its documents — OWNER.
+    expect(accessFor("refundAdvance")).toBe("owner");
+    expect(accessFor("printAdvanceRefund")).toBe("owner");
+    expect(accessFor("saveAdvanceRefundPdf")).toBe("owner");
   });
 
   it("🔴 every channel is classified, and the customer ones carry the intended level", () => {
