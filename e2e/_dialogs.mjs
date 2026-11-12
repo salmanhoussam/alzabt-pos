@@ -38,12 +38,54 @@ export function windowTitlesOf(pid) {
   const ps = `${ENUM}
 [W]::Of(${pid}) | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_)) }`;
   try {
-    return execFileSync("powershell", ["-NoProfile", "-Command", ps], { encoding: "utf8" })
+    const titles = execFileSync("powershell", ["-NoProfile", "-Command", ps], { encoding: "utf8" })
       .split(/\r?\n/)
       .filter(Boolean)
       .map((b) => Buffer.from(b.trim(), "base64").toString("utf8"));
-  } catch {
+    if (titles.length === 0) readStats.empty += 1;
+    else readStats.ok += 1;
+    return titles;
+  } catch (err) {
+    readStats.failed += 1;
+    readStats.lastError = String(err && err.message ? err.message : err).slice(0, 300);
     return [];
+  }
+}
+
+/**
+ * DEC-35zz+ investigation (evidence only): how each read went. A FAILED PowerShell read used to look
+ * exactly like "no window at all", which is the one thing a missing-notice investigation must tell apart.
+ */
+export const readStats = { ok: 0, empty: 0, failed: 0, lastError: null };
+
+/**
+ * DEC-35zz+ investigation (evidence only): who holds the desktop right now — the foreground window's
+ * process and title — and how long ago the LAST REAL keyboard/mouse input reached Windows. A notice
+ * answered by a person (or by keystrokes aimed at another window) shows up here; the test sends none.
+ */
+export function desktopProbe() {
+  if (!WINDOWS) return null;
+  const ps = `
+Add-Type @"
+using System; using System.Text; using System.Runtime.InteropServices;
+public static class D {
+  [StructLayout(LayoutKind.Sequential)] public struct L { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref L l);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  public static string Probe() { var l = new L(); l.cbSize = (uint)Marshal.SizeOf(l); GetLastInputInfo(ref l);
+    uint idle = (uint)Environment.TickCount - l.dwTime; var h = GetForegroundWindow(); uint p; GetWindowThreadProcessId(h, out p);
+    var sb = new StringBuilder(512); GetWindowText(h, sb, 512);
+    return idle + "|" + p + "|" + Convert.ToBase64String(Encoding.UTF8.GetBytes(sb.ToString())); }
+}
+"@
+[D]::Probe()`;
+  try {
+    const [idle, pid, title] = execFileSync("powershell", ["-NoProfile", "-Command", ps], { encoding: "utf8" }).trim().split("|");
+    return { at: Date.now(), idleMs: Number(idle), foregroundPid: Number(pid), foregroundTitle: Buffer.from(title ?? "", "base64").toString("utf8") };
+  } catch (err) {
+    return { at: Date.now(), error: String(err && err.message ? err.message : err).slice(0, 300) };
   }
 }
 
@@ -53,13 +95,16 @@ export function windowTitlesOf(pid) {
  */
 export async function waitForTitle(pid, title, timeoutMs) {
   const t0 = Date.now();
+  const before = { ...readStats };
+  const reads = () => ({ ok: readStats.ok - before.ok, empty: readStats.empty - before.empty, failed: readStats.failed - before.failed, lastError: readStats.lastError });
   let titles = [];
   while (Date.now() - t0 <= timeoutMs) {
     titles = windowTitlesOf(pid) ?? [];
-    if (titles.includes(title)) return { found: true, ms: Date.now() - t0, titles };
+    if (titles.includes(title)) return { found: true, ms: Date.now() - t0, titles, reads: reads() };
     await new Promise((r) => setTimeout(r, 250));
   }
-  return { found: false, ms: Date.now() - t0, titles };
+  // Evidence only (the verdict and the timeout are unchanged): what the desktop looked like when the wait gave up.
+  return { found: false, ms: Date.now() - t0, titles, reads: reads(), desktop: desktopProbe() };
 }
 
 /** The error-box titles in `titles` that the caller did not explicitly expect. */
