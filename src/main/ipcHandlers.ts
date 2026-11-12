@@ -218,7 +218,8 @@ export interface IpcHandlerOptions {
    * PHOTO-INVOICE-TO-ITEMS: main shows the picker and reads the photo OFFLINE; null = cancelled.
    * Absent (tests, headless) answers "unavailable". It never writes anything.
    */
-  readonly readInvoicePhoto?: () => Promise<{
+  /** `photo-only` (handwritten invoices): show the photo for manual entry, no OCR. */
+  readonly readInvoicePhoto?: (mode: "read" | "photo-only") => Promise<{
     readonly lines: readonly PositionedLine[];
     readonly ms: number;
     readonly preview: string | null;
@@ -2066,16 +2067,32 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
     }),
     readInvoicePhoto: wrapAsync("readInvoicePhoto", async (p) => {
-      noPayload(p);
+      // OCR-REVIEW-UX: an optional { mode } — absent = "read" (unchanged); "photo-only" = the photo beside manual rows.
+      let mode: "read" | "photo-only" = "read";
+      if (p !== undefined && p !== null) {
+        const o = objectWithOptional(p, [], ["mode"]);
+        if ("mode" in o && o.mode !== "read" && o.mode !== "photo-only") invalid("'mode' must be read or photo-only");
+        if (o.mode === "photo-only") mode = "photo-only";
+      }
       if (!options.readInvoicePhoto) return { status: "unavailable" as const };
-      const reading = await options.readInvoicePhoto();
+      let reading: Awaited<ReturnType<NonNullable<IpcHandlerOptions["readInvoicePhoto"]>>>;
+      try {
+        reading = await options.readInvoicePhoto(mode);
+      } catch (e) {
+        // DEC-35zzzz: a REFUSED reading (not an image, OCR failed) is logged here with its code and the engine's
+        // short reason — the screen shows only a bilingual sentence and the code. Unexpected faults are logged by
+        // wrapAsync as ipc-internal-error. Never the invoice's text.
+        if (e instanceof DomainError) log.warn("invoice-photo-refused", { mode, code: e.code, detail: e.message.slice(0, 200) });
+        throw e;
+      }
       if (reading === null) return { status: "cancelled" as const };
       const currency = service.getCatalog().currency;
       const exponent = currency === "LBP" ? 0 : 2;
       const r = rowsFromPositioned(reading.lines, exponent);
-      log.info("invoice-photo-read", { rows: r.rows.length, unexplained: r.unexplained.length, ms: reading.ms });
+      log.info("invoice-photo-read", { mode, rows: r.rows.length, unexplained: r.unexplained.length, ms: reading.ms });
       return {
         status: "read" as const,
+        mode,
         currency,
         rows: r.rows.map((x) => ({
           id: x.id,

@@ -3,6 +3,7 @@
  * the repository). It returns candidate rows and writes NOTHING; access = the product-create capability.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DomainError } from "../../src/domain/errors";
 import { accessFor } from "../../src/main/channelPolicy";
 import { createIpcHandlers } from "../../src/main/ipcHandlers";
 import type { IpcResult, ReadInvoicePhotoResponse } from "../../src/shared/ipcContract";
@@ -44,6 +45,52 @@ describe("readInvoicePhoto", () => {
     expect(r.data.rows).toEqual([expect.objectContaining({ relation: "R1", quantityMilli: 12000, supplierPriceMinor: "75", lineTotalMinor: "900" })]);
     expect(r.data.unexplained).toEqual([{ text: "سطر غامض 21.00 63.00", y: 150, crop: "data:image/jpeg;base64,AAAA" }]);
     expect(r.data.rows[0]).toMatchObject({ y: 100, crop: "data:image/jpeg;base64,AAAA", readings: 1 });
+    expect(footprint()).toBe(before);
+  });
+
+  // OCR-REVIEW-UX (handwritten invoices): an optional { mode }. Absent = "read" (unchanged); "photo-only" reaches the
+  // reader as such (main shows the photo and runs NO OCR); anything else is refused BEFORE any picker opens.
+  it("mode: absent = read, photo-only is passed through and echoed, nothing written; a wrong mode is refused unread", async () => {
+    const before = footprint();
+    const seen: string[] = [];
+    const handlers = createIpcHandlers(h.service, {
+      readInvoicePhoto: async (mode) => {
+        seen.push(mode);
+        return { lines: [], ms: 3, preview: "data:image/jpeg;base64,AAAA", crop: () => null };
+      },
+    });
+    const plain = (await handlers.readInvoicePhoto(undefined)) as IpcResult<ReadInvoicePhotoResponse>;
+    const photo = (await handlers.readInvoicePhoto({ mode: "photo-only" })) as IpcResult<ReadInvoicePhotoResponse>;
+    const explicit = (await handlers.readInvoicePhoto({ mode: "read" })) as IpcResult<ReadInvoicePhotoResponse>;
+    expect(seen).toEqual(["read", "photo-only", "read"]);
+    if (!plain.ok || !photo.ok || !explicit.ok) throw new Error("refused");
+    expect(plain.data).toMatchObject({ status: "read", mode: "read" });
+    expect(photo.data).toMatchObject({ status: "read", mode: "photo-only", rows: [], unexplained: [], preview: "data:image/jpeg;base64,AAAA" });
+    for (const bad of [{ mode: "ocr" }, { mode: true }, { mode: "photo-only", path: "C:/x.jpg" }, "photo-only"]) {
+      const r = (await handlers.readInvoicePhoto(bad)) as IpcResult<unknown>;
+      expect(r.ok).toBe(false);
+    }
+    expect(seen).toHaveLength(3); // no refused request ever reached the picker
+    expect(footprint()).toBe(before);
+  });
+
+  // DEC-35zzzz: a REFUSED reading is logged in main (code + the engine's short reason, never the invoice text) and
+  // still answered as a refusal with its code — the screen turns the code into a bilingual sentence.
+  it("a refused reading is logged with its code and still refused; nothing written", async () => {
+    const before = footprint();
+    const logged: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+    const logger = { info() {}, error() {}, warn: (event: string, fields?: Record<string, unknown>) => void logged.push({ event, fields }), file: null };
+    const handlers = createIpcHandlers(h.service, {
+      logger,
+      readInvoicePhoto: async () => {
+        throw new DomainError("OCR_FAILED", "Invoice reading failed: worker timed out");
+      },
+    });
+    const r = (await handlers.readInvoicePhoto({ mode: "read" })) as IpcResult<unknown>;
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("OCR_FAILED");
+    expect(logged).toEqual([{ event: "invoice-photo-refused", fields: { mode: "read", code: "OCR_FAILED", detail: "Invoice reading failed: worker timed out" } }]);
     expect(footprint()).toBe(before);
   });
 

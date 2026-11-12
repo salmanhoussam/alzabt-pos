@@ -80,6 +80,9 @@ try {
   await testid(page, "photo-flow-error").waitFor({ timeout: 30000 });
   const failText = (await testid(page, "photo-flow-error").innerText()).trim();
   assert(failText.includes("ليس صورة"), `🔴 a non-image is refused ON SCREEN in Arabic («${failText}»)`);
+  // OCR-REVIEW-UX #7: the same refusal in English on its OWN line — never one mixed sentence.
+  const failLines = await testid(page, "photo-flow-error").locator("p").allInnerTexts();
+  assert(failLines.length === 2 && /[\u0600-\u06FF]/.test(failLines[0]) && !/[A-Za-z]{3,}/.test(failLines[0].replace(/\b(JPG|PNG)\b/g, "")) && failLines[1].includes("not a readable image"), `🔴 two lines: Arabic, then English (${JSON.stringify(failLines)})`);
   assert((await testid(page, "photo-flow-pick").innerText()).includes("إعادة المحاولة"), "retry is offered");
   assert(await page.evaluate(() => typeof window.pos.getSettings === "function"), "the POS is still alive (renderer + bridge)");
   assert(Number(productsBefore()) === productsAtStart, "nothing was written");
@@ -145,6 +148,94 @@ try {
   assert(await testid(page, "photo-review-finish").isDisabled(), "🔴 and the review cannot finish while it would duplicate");
   await page.screenshot({ path: SHOTS + "PHOTO-duplicate-blocked.png", fullPage: true });
   assert(q("SELECT count(*) AS n FROM catalog_products WHERE name_ar = ?", name + " (اختبار)")[0].n === 1, "still exactly one product");
+
+  // ── OCR-REVIEW-UX #1–#3: MEASURED on the live window, not inferred from CSS ─────────────────────────────
+  const layout = await page.evaluate(() => {
+    const flow = document.querySelector('[data-testid="photo-flow"] .panel.photo-flow');
+    const r = flow.getBoundingClientRect();
+    const scrollers = [...flow.querySelectorAll("*")]
+      .filter((el) => {
+        const s = getComputedStyle(el);
+        return /(auto|scroll)/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 1;
+      })
+      .map((el) => el.className || el.tagName);
+    const fin = document.querySelector('[data-testid="photo-review-finish"]').getBoundingClientRect();
+    const photo = document.querySelector('[data-testid="photo-review-preview"]').getBoundingClientRect();
+    const list = document.querySelector('[data-testid="photo-review-table"]').getBoundingClientRect();
+    const ov = flow.parentElement; // the overlay itself must not scroll either (98vw + its padding once did)
+    return { vw: innerWidth, vh: innerHeight, w: r.width, h: r.height, overlayScrolls: ov.scrollWidth > ov.clientWidth + 1 || ov.scrollHeight > ov.clientHeight + 1, pageScrolls: document.documentElement.scrollWidth > innerWidth + 1, panelScrolls: flow.scrollHeight > flow.clientHeight + 1, scrollers, finVisible: fin.bottom <= innerHeight && fin.top >= 0, side: photo.right <= list.left + 1 || list.right <= photo.left + 1 };
+  });
+  console.log("layout", JSON.stringify(layout));
+  assert(layout.w >= Math.min(1680, layout.vw - 32) - 2 && layout.h >= layout.vh - 34, `#1 the window uses the desktop (${Math.round(layout.w)}×${Math.round(layout.h)} of ${layout.vw}×${layout.vh})`);
+  assert(!layout.overlayScrolls && !layout.pageScrolls, `#2 neither the overlay nor the page scrolls (overlay ${layout.overlayScrolls}, page ${layout.pageScrolls})`);
+  assert(!layout.panelScrolls && layout.scrollers.every((c) => String(c).includes("pir-rows")), `#2 at most ONE scroller, the row list (${JSON.stringify(layout.scrollers)})`);
+  assert(layout.finVisible, "#2 «إنهاء المراجعة» stays in view without scrolling the window");
+  assert(layout.side, "#3 the photo is BESIDE the rows");
+  await page.screenshot({ path: SHOTS + "PHOTO-UX-review-layout.png" });
+  await page.locator(".pir-foot").getByText("إلغاء").click();
+  await testid(page, "photo-flow").waitFor({ state: "detached", timeout: 10000 });
+
+  // ── OCR-REVIEW-UX #8: a HANDWRITTEN invoice — the photo beside rows typed by hand; NO OCR; Enter = next row ──
+  const atHand = Number(productsBefore());
+  await testid(page, "photo-invoice").click();
+  await testid(page, "photo-flow").waitFor({ timeout: 15000 });
+  const h0 = Date.now();
+  await testid(page, "photo-flow-handwritten").click();
+  await page.locator('[data-testid="photo-review"][data-mode="photo-only"]').waitFor({ timeout: 15000 });
+  const openMs = Date.now() - h0;
+  assert(openMs < 10000, `the photo opens without OCR (${openMs} ms)`);
+  assert((await testid(page, "photo-review-row").count()) === 1 && (await testid(page, "photo-review-preview").count()) === 1, "one empty row, beside the photo");
+  assert((await page.evaluate(() => document.activeElement?.getAttribute("data-testid"))) === "photo-review-name", "the cursor is already in the first name");
+  const HAND = [
+    { name: "يدوي تجريبي ١ 10mm", qty: "4", cost: "2.50", total: "10.00", sale: "3.75" },
+    { name: "Hand test 2 خرطوم", qty: "2", cost: "6", total: "12", sale: "8.50" },
+  ];
+  for (let i = 0; i < HAND.length; i++) {
+    const r = HAND[i];
+    const row = testid(page, "photo-review-row").nth(i);
+    await page.keyboard.type(r.name);
+    await row.locator('[data-testid="photo-review-qty"]').fill(r.qty);
+    await row.locator('[data-testid="photo-review-cost"]').fill(r.cost);
+    await row.locator('[data-testid="photo-review-total"]').fill(r.total);
+    await row.locator('[data-testid="photo-review-new"]').click();
+    assert((await row.locator('[data-testid="photo-review-sale-price"]').inputValue()) === "", `row ${i + 1}: the sale price starts EMPTY`);
+    await row.locator('[data-testid="photo-review-sale-price"]').fill(r.sale);
+    await row.locator('[data-testid="photo-review-sale-price"]').press("Enter");
+    await page.waitForFunction((n) => document.querySelectorAll('[data-testid="photo-review-row"]').length === n, i + 2);
+    assert((await page.evaluate(() => document.activeElement?.closest("[data-row]")?.getAttribute("data-row") === document.querySelectorAll('[data-testid="photo-review-row"]')[document.querySelectorAll('[data-testid="photo-review-row"]').length - 1].getAttribute("data-row") && document.activeElement?.getAttribute("data-testid") === "photo-review-name")), `row ${i + 1}: Enter opened the next row with the cursor in its name`);
+  }
+  // the third line on the paper is an item the shop already has: the suggestion links it in ONE click
+  const third = testid(page, "photo-review-row").nth(2);
+  await page.keyboard.type("صنف قائم أ");
+  await third.locator('[data-testid="photo-review-qty"]').fill("3");
+  await third.locator('[data-testid="photo-review-cost"]').fill("2");
+  await third.locator('[data-testid="photo-review-total"]').fill("6");
+  assert((await third.locator('[data-testid="photo-review-suggest"]').count()) >= 1, "#5 a visible suggestion with its match share");
+  assert((await third.locator('[data-testid="photo-review-suggest"]').first().innerText()).includes("٪"), "#5 the suggestion shows its match share");
+  await third.locator('[data-testid="photo-review-suggest"]', { hasText: "صنف قائم أ" }).click();
+  assert((await third.getAttribute("data-decision")) === "link" && (await third.locator('[data-testid="photo-review-linked"]').innerText()).includes("صنف قائم أ"), "#5 linked by name, «no change to the product» said");
+  assert((await testid(page, "photo-review-pending").innerText()) === "0", "header: nothing left without a decision");
+  assert((await testid(page, "photo-review-kept").innerText()).includes("28.00"), `header: kept total to compare with the paper (${await testid(page, "photo-review-kept").innerText()})`);
+  assert(Number(productsBefore()) === atHand, "🔴 nothing written while typing");
+  await page.screenshot({ path: SHOTS + "PHOTO-UX-handwritten.png" });
+  await testid(page, "photo-review-finish").click();
+  await testid(page, "photo-flow-confirm").waitFor({ timeout: 15000 });
+  const confirmText = await testid(page, "photo-flow-confirm").innerText();
+  assert((await testid(page, "photo-flow-confirm-new").locator("tbody tr").count()) === 2 && (await testid(page, "photo-flow-confirm-link").locator("tbody tr").count()) === 1, "#6 the confirmation is a clean table: 2 new, 1 linked");
+  assert(!confirmText.includes("قرأ البرنامج") && !confirmText.includes("(إدخال يدوي)"), "#6 no engine text on the confirmation");
+  assert(Number(productsBefore()) === atHand, "🔴 nothing written at the confirmation step");
+  await page.screenshot({ path: SHOTS + "PHOTO-UX-confirm.png" });
+  await testid(page, "photo-flow-write").click();
+  await testid(page, "photo-flow-result").waitFor({ timeout: 15000 });
+  const handMs = Date.now() - h0;
+  assert((await testid(page, "photo-flow-result").innerText()).includes("أُضيف 2"), "the result: 2 added, 1 linked");
+  const handRows = q("SELECT name_ar, selling_price_minor AS p, sku, barcode FROM catalog_products WHERE name_ar IN (?, ?) ORDER BY name_ar", HAND[0].name, HAND[1].name);
+  assert(handRows.length === 2 && Number(productsBefore()) === atHand + 2, "exactly the two typed products were created");
+  assert(handRows.map((r) => Number(r.p)).sort((a, b) => a - b).join() === "375,850", `🔴 their SALE prices are the typed ones (${handRows.map((r) => r.p)}), never the supplier cost`);
+  assert(handRows.every((r) => r.sku === null && r.barcode === null), "no SKU / barcode invented");
+  assert(q("SELECT count(*) AS n FROM catalog_products WHERE name_ar = ?", "صنف قائم أ")[0].n === 1, "🔴 the linked product was NOT duplicated");
+  console.log(`handwritten 3-line invoice by keyboard, open→written: ${handMs} ms (machine time, not a human measure)`);
+  await page.getByText("إغلاق").last().click();
 } finally {
   await app.close();
 }

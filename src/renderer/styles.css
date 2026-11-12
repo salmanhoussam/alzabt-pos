@@ -1030,3 +1030,80 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .role-badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border, #ccc); }
 .role-badge.role-owner { background: #fff4d6; border-color: #e0b84a; color: #6b4e00; }
 .role-badge.role-cashier { background: #eef3ff; border-color: #9fb5e6; color: #23407a; }
+
+/* ── OCR-REVIEW-UX (2026-11-12): Photo Invoice window — desktop width, ONE scroller per step ───────────────────
+   The flow used to be a .panel (520px cap, overflow) holding a second .panel plus a photo pane that scrolled on
+   its own: three scroll containers and squeezed rows. Now: a fixed-height window; the row list is the only
+   scroller in the review; the photo pane scrolls only when zoomed in. */
+.overlay > .panel.photo-flow { width: min(1680px, calc(100vw - 32px)); max-width: calc(100vw - 32px); height: calc(100vh - 32px); max-height: calc(100vh - 32px);
+  padding: 0; gap: 0; overflow: hidden; display: flex; flex-direction: column; }
+.photo-flow-step { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; min-height: 0; flex: 1; }
+.photo-flow-body { flex: 1; min-height: 0; flex-direction: column; }
+.photo-flow-starts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.photo-flow-start { text-align: start; display: flex; flex-direction: column; gap: 6px; padding: 16px; min-height: 96px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); cursor: pointer; font: inherit; }
+.photo-flow-start.primary { border-color: var(--primary); border-width: 2px; }
+.photo-flow-start:hover:not(:disabled) { background: var(--surface-sunken); }
+.photo-flow-start:disabled { opacity: 0.6; cursor: default; }
+.photo-flow-start:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
+.error.bilingual { font-weight: 600; background: var(--status-danger); border-radius: var(--radius); padding: 10px 14px; }
+.error.bilingual p { margin: 0; }
+.error.bilingual p + p { margin-top: 4px; font-weight: 500; }
+.pir-none { margin: 12px 24px 0; }
+
+.photo-review { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(320px, 40%) 1fr; }
+.photo-review.no-photo { grid-template-columns: 1fr; }
+.pir-photo { display: flex; flex-direction: column; min-height: 0; border-inline-end: 1px solid var(--border); background: var(--surface-sunken); }
+.pir-photo-tools { display: flex; gap: 6px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.pir-photo-tools > span { margin-inline-end: auto; }
+.pir-photo-view { flex: 1; min-height: 0; overflow: auto; }
+.pir-photo-view img { display: block; max-width: none; }
+.pir-photo-view.fit { overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.pir-photo-view.fit img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.pir-main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.pir-head { padding: 14px 20px 10px; border-bottom: 1px solid var(--border); }
+.pir-head h2 { margin: 0 0 4px; }
+.pir-head p { margin: 0 0 8px; }
+.pir-counts { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: var(--text-small); }
+.pir-count-warn b { color: var(--status-warning-text); }
+.pir-count-bad b { color: var(--danger); }
+.pir-rows { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 20px; display: flex; flex-direction: column; gap: 12px; }
+.pir-row { border: 1px solid var(--border); border-inline-start: 5px solid var(--border); border-radius: var(--radius);
+  padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; background: var(--surface); }
+.pir-row.d-pending { border-inline-start-color: var(--status-warning-text); }
+.pir-row.d-new, .pir-row.d-link { border-inline-start-color: var(--status-success-text); }
+.pir-row.d-skip { opacity: 0.7; }
+.pir-row.has-block:not(.d-pending) { border-inline-start-color: var(--danger); }
+.pir-row-top { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.pir-no { font-weight: 700; min-width: 2ch; }
+.pir-tag { font-size: var(--text-small); background: var(--surface-sunken); border-radius: 6px; padding: 1px 8px; }
+.pir-raw { overflow-wrap: anywhere; }
+.pir-crop { width: 100%; max-height: 110px; object-fit: contain; object-position: center; display: block;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface-sunken); }
+.pir-fields { display: grid; grid-template-columns: minmax(240px, 3fr) repeat(3, minmax(96px, 1fr)); gap: 10px; }
+.pir-fields label { display: flex; flex-direction: column; gap: 3px; font-size: var(--text-small); min-width: 0; }
+.pir-fields input, .pir-sale input { width: 100%; min-height: var(--control-h-small); font-size: var(--text-body); }
+/* own class: the app-wide .num (end-aligned, !important) belongs to receipts/history, not to these inputs */
+.pir-num { font-variant-numeric: tabular-nums; }
+.pir-decide { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.pir-decide select { min-height: var(--control-h-small); max-width: 320px; }
+.pir-sale { display: flex; flex-direction: column; gap: 3px; font-size: var(--text-small); min-width: 0; width: 140px; }
+.pir-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pir-note { border-radius: 6px; padding: 4px 10px; }
+.pir-note.warn { background: var(--status-warning); color: var(--status-warning-text); }
+.pir-note.bad { background: var(--status-danger); color: var(--status-danger-text); font-weight: 600; }
+.pir-note.ok { background: var(--status-success); color: var(--status-success-text); }
+.pir-unexplained { border: 1px dashed var(--border); border-radius: var(--radius); padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.pir-unexplained-line { display: flex; flex-direction: column; gap: 4px; }
+.pir-foot { display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--border); background: var(--surface); }
+.pir-spacer { flex: 1; }
+.pf-table { width: 100%; border-collapse: collapse; }
+.pf-table caption { text-align: start; font-weight: 700; padding: 6px 0; }
+.pf-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: start; }
+.pf-table th { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: start; background: var(--thead); font-size: var(--text-small); }
+.pf-table td.pf-num { width: 22%; font-variant-numeric: tabular-nums; } /* the cell follows the header (start side); only the digits run left-to-right (bdi) */
+@media (max-width: 900px) {
+  .photo-review { grid-template-columns: 1fr; grid-template-rows: 38% 1fr; }
+  .pir-photo { border-inline-end: 0; border-bottom: 1px solid var(--border); }
+  .pir-fields { grid-template-columns: 1fr 1fr; }
+}
