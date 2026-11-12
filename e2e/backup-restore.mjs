@@ -30,7 +30,7 @@
  */
 import { _electron as electron } from "playwright-core";
 import { E2E_PIN, signIn } from "./_signin.mjs";
-import { RESTORED_TITLES, unexpectedErrors, waitForTitle, windowTitlesOf } from "./_dialogs.mjs";
+import { RESTORED_TITLES, unexpectedErrors, waitForTitle, windowTitlesOf, desktopProbe } from "./_dialogs.mjs";
 import { createOwned, endOwned, identifyStartedNear, stillRunning } from "./_owned.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -704,6 +704,9 @@ try {
       // Evidence, not a relaxation: what the APP says it did with the notice, beside what the test saw.
       const noticeEvents = diagEvents().filter((e) => e.pid === resumedPid && String(e.event).startsWith("restore-notice"));
       fact("resumedNoticeEvents", noticeEvents);
+      // DEC-35zz+ investigation (evidence only): the desktop when the wait ended — the foreground window and the
+      // time of the last REAL keyboard/mouse input (probe.at − idleMs), to compare with restore-notice-closed.
+      fact("resumedNoticeDesktop", desktopProbe());
       check(seen.found, "E · the resumed restore shows the 'restored' notice", { ...seen, noticeEvents });
       check(unexpectedErrors(seen.titles).length === 0, "E · 🔴 no error box is open after the resumed restore", seen);
     }

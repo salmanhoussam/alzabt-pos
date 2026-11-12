@@ -1150,10 +1150,23 @@ function startTill(): void {
     win.once("ready-to-show", () => {
       // Diagnostics only (DEC-35y review): WHEN the notice was handed to Windows and when it was closed,
       // so a test that does not see it can tell "never shown" from "shown late" or "not enumerated".
-      diag("restore-notice-shown", { kind: restore.kind });
+      // DEC-35zz+ investigation (diagnostics only, opt-in): the window's state when the box is handed over and
+      // when it returns, which button answered it, and every hide / blur / minimize / close of the main
+      // window while it is open — so "who closed the notice" is answered from evidence, not guessed.
+      const winState = () => (win.isDestroyed() ? { destroyed: true } : { visible: win.isVisible(), focused: win.isFocused(), minimized: win.isMinimized() });
+      diag("restore-notice-shown", { kind: restore.kind, ...winState() });
+      const watch = ["blur", "focus", "hide", "show", "minimize", "restore", "close"] as const;
+      const listeners = watch.map((ev) => {
+        const fn = () => diag(`restore-notice-window-${ev}`, { kind: restore.kind });
+        win.on(ev as "blur", fn);
+        return [ev, fn] as const;
+      });
       void dialog
         .showMessageBox(win, { type: restore.kind === "restored" ? "info" : "warning", title: notice.title, message: notice.title, detail: notice.body, buttons: ["OK"], noLink: true })
-        .then(() => diag("restore-notice-closed", { kind: restore.kind }));
+        .then((r) => {
+          diag("restore-notice-closed", { kind: restore.kind, response: r.response, ...winState() });
+          if (!win.isDestroyed()) for (const [ev, fn] of listeners) win.removeListener(ev as "blur", fn);
+        });
     });
   }
 
