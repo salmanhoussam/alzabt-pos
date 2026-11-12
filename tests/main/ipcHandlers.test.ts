@@ -176,6 +176,8 @@ describe("IPC surface", () => {
         "pickInvoiceLogo",
         "printInvoice",
         "saveInvoicePdf",
+        // TRANSITION (PHOTO-INVOICE-TO-ITEMS): takes NO path — main runs the picker. Old list: without it.
+        "readInvoicePhoto",
         "startPhoneSession",
         "cancelPhoneSession",
         "phoneSessionState",
@@ -248,7 +250,8 @@ describe("IPC surface", () => {
     // owner-classified. The old value was 93.
     // 🔴 TRANSITION (DEC-35z+ COL): 96 -> 99 — getCollectionReceipt, printCollectionReceipt,
     // saveCollectionReceiptPdf, owner-classified reads. The old value was 96.
-    expect(CHANNEL_NAMES).toHaveLength(99);
+    // 🔴 TRANSITION (OCR × Advances integration, DEC-35zz+): 99 -> 100 = the advances chain's 99 + OCR's readInvoicePhoto. Old values: 99 (advances) / 82 (OCR).
+    expect(CHANNEL_NAMES).toHaveLength(100);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

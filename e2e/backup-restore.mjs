@@ -345,7 +345,8 @@ try {
     // TRANSITION (DEC-35x): 92 -> 93 (sellOnAdvance — owner). The old value was 92.
     // TRANSITION (DEC-35z+ REF): 93 -> 96 (refundAdvance, printAdvanceRefund, saveAdvanceRefundPdf — owner). The old value was 93.
     // TRANSITION (DEC-35z+ COL): 96 -> 99 (the three COL- document channels — owner). The old value was 96.
-    check(keys.length === 99, "window.pos exposes exactly 99 business methods", { got: keys.length });
+    // TRANSITION (OCR × Advances integration, DEC-35zz+): 99 -> 100 = the advances chain's 99 + OCR's readInvoicePhoto. Old values: 99 (advances) / 82 (OCR).
+    check(keys.length === 100, "window.pos exposes exactly 100 business methods", { got: keys.length });
     for (const k of ["exportFullBackup", "inspectRestoreBackup", "applyRestore"]) check(keys.includes(k), `window.pos has ${k}`);
     // settings.json is written only once a language is CHOSEN; choose one, so the package has it.
     await ok(page, "setTerminalLanguage", { language: "ar" });

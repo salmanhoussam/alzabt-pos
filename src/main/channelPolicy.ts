@@ -213,6 +213,9 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // fails, and this entry is the renderer-facing half of the same rule rather than the whole of
   // it. Editing an EXISTING product stays an owner act: a price edit is not a creation.
   createProduct: "create-products",
+  // PHOTO-INVOICE-TO-ITEMS: the same people who may add products may read an invoice photo to
+  // prepare them. It WRITES NOTHING; every product is still created through createProduct.
+  readInvoicePhoto: "create-products",
   updateProduct: "owner",
   setProductActive: "owner",
   // Replaces or exports the whole price list.

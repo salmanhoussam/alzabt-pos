@@ -126,6 +126,8 @@ describe("the invoice channels exist and answer", () => {
       }
     }
     // TRANSITION (DEC-35z+): + printAdvanceRefund / saveAdvanceRefundPdf (the REF- document, by id). Old list: without them.
+    // TRANSITION (PHOTO-INVOICE-TO-ITEMS): readInvoicePhoto is async for the print channels' reason — a
+    // native dialog and an OCR run. Old list: without it. (OCR × Advances integration: both lists united, sorted.)
     expect(async_.sort()).toEqual([
       "cancelPhoneSession",
       "printAdvance",
@@ -133,6 +135,7 @@ describe("the invoice channels exist and answer", () => {
       // TRANSITION (DEC-35z+ COL): + printCollectionReceipt / saveCollectionReceiptPdf. Old list: without them.
       "printCollectionReceipt",
       "printInvoice",
+      "readInvoicePhoto",
       "saveAdvancePdf",
       "saveAdvanceRefundPdf",
       "saveCollectionReceiptPdf",

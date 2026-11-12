@@ -137,6 +137,7 @@ export const CHANNELS = {
   getCollectionReceipt: "pos:getCollectionReceipt",
   printCollectionReceipt: "pos:printCollectionReceipt",
   saveCollectionReceiptPdf: "pos:saveCollectionReceiptPdf",
+  readInvoicePhoto: "pos:readInvoicePhoto",
 } as const;
 
 export type ChannelName = keyof typeof CHANNELS;
@@ -1873,6 +1874,40 @@ export interface CorrectAdvanceResponse {
 export type PrintAdvanceResponse = { readonly status: "printed" | "cancelled" | "unavailable" };
 export type SaveAdvancePdfResponse = { readonly status: "cancelled" } | { readonly status: "saved"; readonly fileName: string };
 
+// ── PHOTO-INVOICE-TO-ITEMS (offline OCR) ─────────────────────────────────────────────────────────
+/** One candidate row read from a supplier invoice photo. Money as minor-unit strings; nothing decided. */
+export interface InvoicePhotoRowDto {
+  readonly id: string;
+  readonly rawText: string;
+  readonly name: string;
+  readonly quantityMilli: number | null;
+  readonly supplierPriceMinor: string | null;
+  readonly lineTotalMinor: string | null;
+  readonly arithmeticOk: boolean;
+  /** R1 qty×price · R2 discount · R3 boxes · R4 pack — an explanation, never a proof. */
+  readonly relation: "R1" | "R2" | "R3" | "R4";
+  readonly discountPercent: number | null;
+  /** DEC-35v: where this row sits on the ORIGINAL photo, and a crop of that strip (JPEG data URL). */
+  readonly y: number;
+  readonly crop: string | null;
+  readonly readings: number;
+  readonly alternativeNames: readonly string[];
+  readonly warnings: ReadonlyArray<"CONFLICT" | "SINGLE_READING" | "NOT_PLAIN_ARITHMETIC">;
+}
+export type ReadInvoicePhotoResponse =
+  | { readonly status: "cancelled" }
+  | { readonly status: "unavailable" }
+  | {
+      readonly status: "read";
+      readonly currency: string;
+      readonly rows: readonly InvoicePhotoRowDto[];
+      /** Lines with amounts that no relation explained: for manual entry from the photo (with their crop). */
+      readonly unexplained: ReadonlyArray<{ readonly text: string; readonly y: number; readonly crop: string | null }>;
+      readonly ms: number;
+      /** The photo itself (JPEG data URL) shown beside the rows. */
+      readonly preview: string | null;
+    };
+
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
   listCashiers(): Promise<IpcResult<CashierDto[]>>;
@@ -2045,4 +2080,6 @@ export interface PosApi {
   /** Owner only: print / save the SAME COL- again, loaded by number. Records no payment. */
   printCollectionReceipt(req: CollectionNoRequest): Promise<IpcResult<PrintAdvanceResponse>>;
   saveCollectionReceiptPdf(req: CollectionNoRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
+  /** Main shows the picker, reads the photo OFFLINE and returns candidate rows. Writes nothing. */
+  readInvoicePhoto(): Promise<IpcResult<ReadInvoicePhotoResponse>>;
 }

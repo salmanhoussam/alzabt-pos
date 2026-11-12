@@ -34,6 +34,8 @@ import type { AdvanceApplicationRecord } from "../persistence/advanceRepository"
 import type { DailyMoneyService } from "../application/dailyMoneyService";
 import { type ChannelAmounts, type DailyMoneyReport, type MoneyPart, MONEY_CHANNELS } from "../domain/dailyMoney";
 import type { AdvanceCorrectionDto, AdvanceDto, AdvanceRefundDto, CollectionDocumentDto, PendingAdvanceDto } from "../shared/ipcContract";
+import { rowsFromPositioned } from "../domain/invoiceOcrRows";
+import type { PositionedLine } from "../domain/ocrLayout";
 import type { BackupRestoreActions } from "./backupRestore";
 import type { RestoreLock } from "./restoreLock";
 import type { PartyRow } from "../persistence/partyRepository";
@@ -211,6 +213,16 @@ export interface IpcHandlerOptions {
    * BARE FILE NAME; the renderer never sees or supplies a path.
    */
   readonly pickInvoiceLogo?: () => string | null;
+  /**
+   * PHOTO-INVOICE-TO-ITEMS: main shows the picker and reads the photo OFFLINE; null = cancelled.
+   * Absent (tests, headless) answers "unavailable". It never writes anything.
+   */
+  readonly readInvoicePhoto?: () => Promise<{
+    readonly lines: readonly PositionedLine[];
+    readonly ms: number;
+    readonly preview: string | null;
+    readonly crop: (y: number, h: number) => string | null;
+  } | null>;
   /**
    * Native photo picker for a product. Main shows the dialog, reads the file and NORMALIZES it
    * (decode, re-encode, bound the dimensions), then returns the bytes it produced — so the only
@@ -2020,6 +2032,39 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       if (!options.saveAdvanceRefundPdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
       const saved = await options.saveAdvanceRefundPdf(id);
       return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
+    readInvoicePhoto: wrapAsync("readInvoicePhoto", async (p) => {
+      noPayload(p);
+      if (!options.readInvoicePhoto) return { status: "unavailable" as const };
+      const reading = await options.readInvoicePhoto();
+      if (reading === null) return { status: "cancelled" as const };
+      const currency = service.getCatalog().currency;
+      const exponent = currency === "LBP" ? 0 : 2;
+      const r = rowsFromPositioned(reading.lines, exponent);
+      log.info("invoice-photo-read", { rows: r.rows.length, unexplained: r.unexplained.length, ms: reading.ms });
+      return {
+        status: "read" as const,
+        currency,
+        rows: r.rows.map((x) => ({
+          id: x.id,
+          rawText: x.rawText,
+          name: x.name,
+          quantityMilli: x.quantityMilli,
+          supplierPriceMinor: x.supplierPriceMinor === null ? null : x.supplierPriceMinor.toString(),
+          lineTotalMinor: x.lineTotalMinor === null ? null : x.lineTotalMinor.toString(),
+          arithmeticOk: x.arithmeticOk,
+          relation: x.relation,
+          discountPercent: x.discountPercent,
+          y: x.y,
+          crop: reading.crop(x.y, x.h),
+          readings: x.readings,
+          alternativeNames: x.alternativeNames,
+          warnings: x.warnings,
+        })),
+        unexplained: r.unexplained.map((u) => ({ text: u.text, y: u.y, crop: reading.crop(u.y, u.h) })),
+        ms: reading.ms,
+        preview: reading.preview,
+      };
     }),
   };
 

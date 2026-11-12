@@ -60,6 +60,7 @@ import { OperatorService } from "../application/operatorService";
 import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
 import { toInvoiceViewDto } from "../shared/dto";
+import { readInvoiceImage } from "./invoiceOcr";
 import { renderInvoiceDocument } from "./invoiceDocument";
 import {
   type InvoiceIssuerLogo,
@@ -1093,6 +1094,17 @@ function startTill(): void {
     printCollectionReceipt: printCollectionDocument,
     saveCollectionReceiptPdf: saveCollectionPdfFile,
     pickInvoiceLogo,
+    // PHOTO-INVOICE-TO-ITEMS: picker + OFFLINE OCR in main; returns lines only, writes nothing.
+    readInvoicePhoto: async () => {
+      if (!mainWindow) return null;
+      const picked = dialog.showOpenDialogSync(mainWindow, {
+        title: "Choose a supplier invoice photo",
+        properties: ["openFile"],
+        filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png"] }],
+      });
+      if (!picked?.[0]) return null;
+      return readInvoiceImage(picked[0], userData);
+    },
     pickProductPhoto,
     printInvoice: printInvoiceDocument,
     saveInvoicePdf: saveInvoicePdfFile,

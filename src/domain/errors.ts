@@ -134,6 +134,9 @@ export type DomainErrorCode =
   | "ADVANCE_CORRECTED_NOT_REFUNDABLE"
   // DEC-35z+ COL — a COL- receipt asked for by number that does not exist (never "issued" by a print).
   | "COLLECTION_DOCUMENT_NOT_FOUND"
+  // PHOTO-INVOICE-TO-ITEMS (DEC-35u): the offline reading of an invoice photo failed. Its own code: the fix is
+  // "try again or enter the items by hand", and the POS keeps running.
+  | "OCR_FAILED"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

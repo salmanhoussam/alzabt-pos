@@ -107,7 +107,8 @@ describe("the customer channels", () => {
     // printAdvanceRefund / saveAdvanceRefundPdf (read by id, write nothing). The old value was 93.
     // 🔴 TRANSITION (DEC-35z+, COL receipts): 96 -> 99 with getCollectionReceipt / printCollectionReceipt /
     // saveCollectionReceiptPdf — owner-only READS of a COL- document by number; they write no payment. The old value was 96.
-    expect(Object.keys(CHANNELS)).toHaveLength(99);
+    // 🔴 TRANSITION (OCR × Advances integration, DEC-35zz+): 99 -> 100 = the advances chain's 99 + OCR's readInvoicePhoto. Old values: 99 (advances) / 82 (OCR).
+    expect(Object.keys(CHANNELS)).toHaveLength(100);
   });
 
   // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".
