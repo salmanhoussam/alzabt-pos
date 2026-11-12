@@ -1932,6 +1932,8 @@ export type ReadInvoicePhotoResponse =
   | { readonly status: "unavailable" }
   | {
       readonly status: "read";
+      /** "photo-only": no OCR ran (handwritten invoice) — rows are typed by hand beside the photo. */
+      readonly mode: "read" | "photo-only";
       readonly currency: string;
       readonly rows: readonly InvoicePhotoRowDto[];
       /** Lines with amounts that no relation explained: for manual entry from the photo (with their crop). */
@@ -2114,7 +2116,7 @@ export interface PosApi {
   printCollectionReceipt(req: CollectionNoRequest): Promise<IpcResult<PrintAdvanceResponse>>;
   saveCollectionReceiptPdf(req: CollectionNoRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
   /** Main shows the picker, reads the photo OFFLINE and returns candidate rows. Writes nothing. */
-  readInvoicePhoto(): Promise<IpcResult<ReadInvoicePhotoResponse>>;
+  readInvoicePhoto(req?: { readonly mode: "read" | "photo-only" }): Promise<IpcResult<ReadInvoicePhotoResponse>>;
   /** TILL-PRINT: one till receipt from the ledger (owner: any sale; others: what History shows them). Read-only. */
   getSaleReceipt(req: SaleIdRequest): Promise<IpcResult<SaleReceiptDto>>;
   printSaleReceipt(req: PrintSaleReceiptRequest): Promise<IpcResult<PrintSaleReceiptResponse>>;

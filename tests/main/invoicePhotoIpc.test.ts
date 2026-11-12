@@ -47,6 +47,32 @@ describe("readInvoicePhoto", () => {
     expect(footprint()).toBe(before);
   });
 
+  // OCR-REVIEW-UX (handwritten invoices): an optional { mode }. Absent = "read" (unchanged); "photo-only" reaches the
+  // reader as such (main shows the photo and runs NO OCR); anything else is refused BEFORE any picker opens.
+  it("mode: absent = read, photo-only is passed through and echoed, nothing written; a wrong mode is refused unread", async () => {
+    const before = footprint();
+    const seen: string[] = [];
+    const handlers = createIpcHandlers(h.service, {
+      readInvoicePhoto: async (mode) => {
+        seen.push(mode);
+        return { lines: [], ms: 3, preview: "data:image/jpeg;base64,AAAA", crop: () => null };
+      },
+    });
+    const plain = (await handlers.readInvoicePhoto(undefined)) as IpcResult<ReadInvoicePhotoResponse>;
+    const photo = (await handlers.readInvoicePhoto({ mode: "photo-only" })) as IpcResult<ReadInvoicePhotoResponse>;
+    const explicit = (await handlers.readInvoicePhoto({ mode: "read" })) as IpcResult<ReadInvoicePhotoResponse>;
+    expect(seen).toEqual(["read", "photo-only", "read"]);
+    if (!plain.ok || !photo.ok || !explicit.ok) throw new Error("refused");
+    expect(plain.data).toMatchObject({ status: "read", mode: "read" });
+    expect(photo.data).toMatchObject({ status: "read", mode: "photo-only", rows: [], unexplained: [], preview: "data:image/jpeg;base64,AAAA" });
+    for (const bad of [{ mode: "ocr" }, { mode: true }, { mode: "photo-only", path: "C:/x.jpg" }, "photo-only"]) {
+      const r = (await handlers.readInvoicePhoto(bad)) as IpcResult<unknown>;
+      expect(r.ok).toBe(false);
+    }
+    expect(seen).toHaveLength(3); // no refused request ever reached the picker
+    expect(footprint()).toBe(before);
+  });
+
   it("cancelled picker → cancelled; no reader wired → unavailable; a payload is refused", async () => {
     const cancelled = await createIpcHandlers(h.service, { readInvoicePhoto: async () => null }).readInvoicePhoto(undefined);
     expect(cancelled).toEqual({ ok: true, data: { status: "cancelled" } });

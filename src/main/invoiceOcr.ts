@@ -111,6 +111,19 @@ function straightened(path: string): { png: Buffer; skew: number } | null {
 }
 
 
+/**
+ * OCR-REVIEW-UX (handwritten invoices): the photo ONLY — checked to be an image and shown beside rows the operator
+ * types by hand. No OCR runs, nothing is read from it, nothing is written. Same preview size as a reading.
+ */
+export function loadInvoicePhoto(path: string): OcrReading {
+  const t0 = performance.now();
+  const photo = nativeImage.createFromPath(path);
+  if (photo.isEmpty()) throw new DomainError("INVALID_INPUT", "That file is not a readable image");
+  const { width } = photo.getSize();
+  const preview = `data:image/jpeg;base64,${(width > 1400 ? photo.resize({ width: 1400 }) : photo).toJPEG(72).toString("base64")}`;
+  return { lines: [], ms: Math.round(performance.now() - t0), skewDegrees: 0, preview, crop: () => null };
+}
+
 /** Reads one invoice photo: the photo as taken, then a straightened copy. */
 export async function readInvoiceImage(path: string, userData: string): Promise<OcrReading> {
   const t0 = performance.now();
