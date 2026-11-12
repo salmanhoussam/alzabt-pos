@@ -1080,7 +1080,9 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .pir-raw { overflow-wrap: anywhere; }
 .pir-crop { width: 100%; max-height: 110px; object-fit: contain; object-position: center; display: block;
   border: 1px solid var(--border); border-radius: 6px; background: var(--surface-sunken); }
-.pir-fields { display: grid; grid-template-columns: minmax(240px, 3fr) repeat(3, minmax(96px, 1fr)); gap: 10px; }
+/* minimums sum to 160 + 3×72 + 3×10 = 406px: fits the row column of a 1024-wide window (measured: the old 240/96
+   minimums needed 558px and clipped «المجموع» at 1024×768) */
+.pir-fields { display: grid; grid-template-columns: minmax(160px, 3fr) repeat(3, minmax(72px, 1fr)); gap: 10px; align-items: end; }
 .pir-fields label { display: flex; flex-direction: column; gap: 3px; font-size: var(--text-small); min-width: 0; }
 .pir-fields input, .pir-sale input { width: 100%; min-height: var(--control-h-small); font-size: var(--text-body); }
 /* own class: the app-wide .num (end-aligned, !important) belongs to receipts/history, not to these inputs */
@@ -1102,6 +1104,9 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .pf-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: start; }
 .pf-table th { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: start; background: var(--thead); font-size: var(--text-small); }
 .pf-table td.pf-num { width: 22%; font-variant-numeric: tabular-nums; } /* the cell follows the header (start side); only the digits run left-to-right (bdi) */
+@media (max-width: 1150px) {
+  .photo-review { grid-template-columns: minmax(260px, 34%) 1fr; }
+}
 @media (max-width: 900px) {
   .photo-review { grid-template-columns: 1fr; grid-template-rows: 38% 1fr; }
   .pir-photo { border-inline-end: 0; border-bottom: 1px solid var(--border); }
