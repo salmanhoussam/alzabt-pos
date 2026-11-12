@@ -132,6 +132,10 @@ export type DomainErrorCode =
   | "ADVANCE_REFUND_NOT_FOUND"
   | "ADVANCE_REFUND_ABOVE_BALANCE"
   | "ADVANCE_CORRECTED_NOT_REFUNDABLE"
+  // DEC-35zz++ REF Option A — a SECOND refund of the same advance on the same business day needs the owner's
+  // explicit "this is a NEW refund, not the earlier one again". Its own sentence: the fix is to look at the
+  // earlier REF- (already recorded; its cash must not be handed over twice), not to retry.
+  | "ADVANCE_REFUND_REPEAT_UNCONFIRMED"
   // DEC-35z+ COL — a COL- receipt asked for by number that does not exist (never "issued" by a print).
   | "COLLECTION_DOCUMENT_NOT_FOUND"
   // PHOTO-INVOICE-TO-ITEMS (DEC-35u): the offline reading of an invoice photo failed. Its own code: the fix is

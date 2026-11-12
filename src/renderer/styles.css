@@ -1002,6 +1002,9 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .adv-correct fieldset { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; border: 1px solid var(--border); padding: 10px; }
 .adv-correct fieldset label { display: inline-flex; align-items: center; gap: 6px; }
 .adv-correct input[type="radio"], .adv-correct input[type="checkbox"] { width: auto; height: auto; margin: 0; }
+/* DEC-35zz++ REF Option A: the «new refund» confirmation is a normal checkbox beside its sentence, not a 48px field. */
+.ref-today label.collect-confirm-funds { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; }
+.ref-today label.collect-confirm-funds > input[type="checkbox"] { flex: none; width: auto; height: auto; min-height: 0; margin: 3px 0 0; padding: 0; }
 .adv-correct select { width: 100%; }
 
 /* DAILY MONEY IN / OUT (DEC-35x) — owner only, under Today's Sales. One scroll at most: the table's own. */

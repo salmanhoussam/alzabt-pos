@@ -103,8 +103,10 @@ const advance = (customerId: string, minor: bigint, channel: "cash" | "whish" = 
   adv.acknowledge(k);
   return r.record;
 };
-const refund = (advanceId: string, amountMinor: bigint, reason = "الزبون طلب استرداد الباقي", idempotencyKey = newKey()) =>
-  adv.refund({ advanceId, amountMinor, reason, idempotencyKey });
+const refund = (advanceId: string, amountMinor: bigint, reason = "الزبون طلب استرداد الباقي", idempotencyKey = newKey(), confirmRepeat?: boolean) =>
+  adv.refund({ advanceId, amountMinor, reason, idempotencyKey, ...(confirmRepeat === undefined ? {} : { confirmRepeat }) });
+/** TRANSITION (DEC-35zz++ Option A): a 2nd+ refund of the SAME advance on the SAME day now needs confirmRepeat; old: none. */
+const again = (advanceId: string, amountMinor: bigint, reason?: string) => refund(advanceId, amountMinor, reason, newKey(), true);
 const advRow = (id: string) => h.db.prepare("SELECT * FROM customer_advances WHERE id = ?").get(id);
 
 describe("REF — the happy paths", () => {
@@ -129,13 +131,14 @@ describe("REF — the happy paths", () => {
     const c = customer("زبون جزئي");
     const a = advance(c.id, 1000n);
     expect(refund(a.id, 300n).unusedMinor).toBe(700n);
-    expect(refund(a.id, 300n).unusedMinor).toBe(400n); // the SAME amount twice is two genuine refunds (two keys)
+    // TRANSITION (DEC-35zz++ Option A): a 2nd+ refund of the SAME advance on the SAME day now needs confirmRepeat; old: none.
+    expect(again(a.id, 300n).unusedMinor).toBe(400n); // the SAME amount twice is two genuine refunds (two keys)
     const fp = footprint();
-    expect(codeOf(() => refund(a.id, 401n))).toBe("ADVANCE_REFUND_ABOVE_BALANCE");
+    expect(codeOf(() => again(a.id, 401n))).toBe("ADVANCE_REFUND_ABOVE_BALANCE");
     expect(footprint()).toEqual(fp);
-    const last = refund(a.id, 400n);
+    const last = again(a.id, 400n);
     expect([last.unusedMinor, last.refund.docNo]).toEqual([0n, 3]);
-    expect(codeOf(() => refund(a.id, 1n))).toBe("ADVANCE_REFUND_ABOVE_BALANCE");
+    expect(codeOf(() => again(a.id, 1n))).toBe("ADVANCE_REFUND_ABOVE_BALANCE");
     expect(h.db.prepare("SELECT doc_no AS n, amount_minor AS m FROM advance_refunds ORDER BY doc_no").all()).toEqual([
       { n: 1n, m: 300n },
       { n: 2n, m: 300n },
@@ -311,7 +314,7 @@ describe("Daily Money — an independent CASH OUT; nothing else moves", () => {
     h.service.createCustomerCreditSale({ idempotencyKey: newKey(), customerId: c.id, lines: [{ productId: "prod-0001", quantityMilli: 2000 }], expectedTotalMinor: 500n });
     const before = dm.day(DAY);
     refund(a.id, 1200n);
-    refund(a.id, 300n);
+    again(a.id, 300n); // TRANSITION (DEC-35zz++ Option A): a 2nd+ refund of the SAME advance on the SAME day now needs confirmRepeat; old: none.
     const after = dm.day(DAY);
     expect(after.moneyIn).toEqual(before.moneyIn);
     expect(after.sales).toEqual(before.sales);
@@ -346,7 +349,7 @@ describe("statement, document, print/PDF and reprint", () => {
     const c = customer("زبون الكشف");
     const a = advance(c.id, 1000n);
     refund(a.id, 300n, "سبب أول");
-    refund(a.id, 200n, "سبب ثاني");
+    again(a.id, 200n, "سبب ثاني"); // TRANSITION (DEC-35zz++ Option A): a 2nd+ refund of the SAME advance on the SAME day now needs confirmRepeat; old: none.
     const s = ok<AdvanceStatementDto>(ipc.getAdvanceStatement({ customerId: c.id }));
     expect(s.lines[0]!.unused.minor).toBe("500");
     expect(s.lines[0]!.refunds.map((r) => [r.number, r.amount.minor, r.reason, r.refundedByName, r.method])).toEqual([
@@ -424,7 +427,7 @@ describe("🔴 backup / restore and ledger integrity", () => {
     const c = customer("زبون النسخة");
     const a = advance(c.id, 1000n);
     refund(a.id, 300n);
-    refund(a.id, 200n);
+    again(a.id, 200n); // TRANSITION (DEC-35zz++ Option A): a 2nd+ refund of the SAME advance on the SAME day now needs confirmRepeat; old: none.
     const dest = join(t.dir, "refund-backup.sqlite");
     snapshotDatabase(h.db, dest);
     const rows = h.db.prepare("SELECT * FROM advance_refunds ORDER BY doc_no").all();
@@ -434,7 +437,7 @@ describe("🔴 backup / restore and ledger integrity", () => {
     expect(h.db.prepare("SELECT * FROM advance_refunds ORDER BY doc_no").all()).toEqual(rows);
     expect(refNo()).toBe(2);
     expect(adv.statement(c.id)[0]!.unusedMinor).toBe(500n);
-    const next = refund(a.id, 500n);
+    const next = again(a.id, 500n);
     expect([next.refund.docNo, next.unusedMinor]).toEqual([3, 0n]);
     expect(h.db.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
     expect(h.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);

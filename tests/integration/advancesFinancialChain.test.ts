@@ -298,7 +298,7 @@ describe("advances × REF × COL — one connected story on one real ledger", ()
     h.db.close();
     const run = (key: string) =>
       new Promise<{ ok: boolean; code?: string }>((resolve, reject) => {
-        const p = spawn(process.execPath, ["--import", "tsx", CHILD, "refund-run", t.dbPath, S.adv2, key], { env: { ...process.env, REFUND_AMOUNT: "1500" } });
+        const p = spawn(process.execPath, ["--import", "tsx", CHILD, "refund-run", t.dbPath, S.adv2, key], { env: { ...process.env, REFUND_AMOUNT: "1500", REFUND_CONFIRM_REPEAT: "1" } }); // TRANSITION (DEC-35zz++ Option A): a 2nd+ refund of the SAME advance on the SAME day now needs confirmRepeat; old: none.
         let s = "";
         p.stdout.on("data", (d) => (s += d));
         p.on("error", reject);
@@ -321,7 +321,8 @@ describe("advances × REF × COL — one connected story on one real ledger", ()
     wire(dest);
     expect(footprint()).toBe(fp);
     invariants("11-restored");
-    expect(adv.refund({ advanceId: S.adv2, amountMinor: 500n, reason: "إغلاق", idempotencyKey: newKey() }).refund.docNo).toBe(5);
+    // TRANSITION (DEC-35zz++ Option A): a 2nd+ refund of the SAME advance on the SAME day now needs confirmRepeat; old: none.
+    expect(adv.refund({ advanceId: S.adv2, amountMinor: 500n, reason: "إغلاق", idempotencyKey: newKey(), confirmRepeat: true }).refund.docNo).toBe(5);
     expect(ok<RecordPaymentResponse>(ipc.recordCustomerPayment({ customerId: S.A, obligationId: S.d4, idempotencyKey: newKey(), amountMinor: "400", method: "cash" } as never)).collection!.number).toBe("COL-000004");
     invariants("11-continued");
     h.db.close();

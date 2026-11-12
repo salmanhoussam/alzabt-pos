@@ -264,6 +264,7 @@ export function AdvanceStatementSection({ customerId, refreshKey, onChanged }: {
         <AdvanceRefundSheet
           advance={refunding.advance}
           unused={refunding.unused}
+          todayRefunds={data?.lines.find((l) => l.advance.id === refunding.advance.id)?.refunds.filter((r) => r.businessDate === data.today) ?? []}
           onClose={(changed) => {
             setRefunding(null);
             if (changed) {

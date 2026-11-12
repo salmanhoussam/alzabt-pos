@@ -168,6 +168,14 @@ try {
   await testid("adv-stmt-refund").click();
   await testid("ref-sheet").waitFor({ timeout: 15000 });
   assert((await testid("ref-amount-input").inputValue()) === "6.00", "the sheet now offers the 6.00 left");
+  // ── DEC-35zz++ Option A: a SECOND refund of the same advance TODAY names the earlier one and needs «new refund» ──
+  await testid("ref-reason-input").fill("إغلاق الرصيد");
+  const todayItems = await page.locator('[data-testid="ref-today-item"]').evaluateAll((els) => els.map((e) => e.getAttribute("data-ref-number")));
+  assert(JSON.stringify(todayItems) === JSON.stringify(["REF-000001"]), `Option A: the sheet names today's earlier REF-000001 before another refund (${JSON.stringify(todayItems)})`);
+  assert((await testid("ref-review-open").isDisabled()) === true, "🔴 Option A: no review until the owner confirms it is a NEW refund");
+  await page.screenshot({ path: SHOTS + "REF-today-warning-arabic.png" });
+  await testid("ref-repeat-confirm").check();
+  assert((await testid("ref-review-open").isEnabled()) === true, "Option A: confirmed → the review opens");
   await testid("ref-amount-input").fill("6.01");
   await testid("ref-reason-input").fill("إغلاق الرصيد");
   await testid("ref-review-open").click();
@@ -224,6 +232,19 @@ try {
   assert(digits(await testid("dm-net-whish").innerText()) === "20.00" && !(await testid("dm-net-whish").innerText()).includes("−"), "panel: net Whish +20.00 (the Whish money stayed in Whish)");
   await testid("dm-panel").scrollIntoViewIfNeeded();
   await page.screenshot({ path: SHOTS + "REF-daily-money-arabic.png" });
+  // ── DEC-35zz++ Option A: «استردادات اليوم» — each REF- by name; opening one is a VIEW, never a new refund ──
+  const listed = await page.locator('[data-testid="dm-refund-row"]').evaluateAll((els) => els.map((e) => e.getAttribute("data-ref-number")));
+  assert(JSON.stringify(listed) === JSON.stringify(["REF-000001", "REF-000002", "REF-000003"]), `Option A: «استردادات اليوم» lists the three REF- of today (${JSON.stringify(listed)})`);
+  const firstRow = (await page.locator('[data-testid="dm-refund-row"]').first().innerText()).replace(/\s+/g, " ");
+  assert(firstRow.includes(A) && firstRow.includes("4.00") && firstRow.includes("Cashier One"), `Option A: each row names the customer, the amount and who refunded («${firstRow}»)`);
+  const refsBeforeView = n("SELECT count(*) FROM advance_refunds");
+  await testid("dm-refund-open").first().click();
+  await testid("dm-refund-reprint").waitFor({ timeout: 15000 });
+  assert((await field("ref-number")) === "REF-000001" && (await testid("ref-reprint-note").count()) === 1, "Option A: the REF- opens as a VIEW, with «do not hand the cash over again»");
+  await testid("dm-refund-list").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: SHOTS + "REF-today-list-reprint-arabic.png" });
+  await testid("ref-receipt-close").click();
+  assert(n("SELECT count(*) FROM advance_refunds") === refsBeforeView && refNo() === 3, "🔴 opening a REF- from the list wrote NOTHING");
 
   // ── G · lost reply; cashier ───────────────────────────────────────────────────────────────────
   const lost = await page.evaluate(async () => {

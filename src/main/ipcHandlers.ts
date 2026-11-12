@@ -1885,6 +1885,8 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       const customerId = str(o.customerId, "customerId", 100);
       return {
         customerId,
+        // DEC-35zz++ Option A: the business day, so the screen can name an earlier REF- of TODAY before another one.
+        today: advances().today(),
         lines: advances()
           .statement(customerId)
           .map((l) => ({
@@ -1943,7 +1945,10 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     getDailyMoney: wrap("getDailyMoney", (p) => {
       const o = objectWithOptional(p, [], ["date"]);
       if (!options.dailyMoney) throw new DomainError("NOT_AVAILABLE", "The day's money is not available on this terminal");
-      return dailyMoneyDto(options.dailyMoney.day("date" in o ? o.date : undefined));
+      const report = dailyMoneyDto(options.dailyMoney.day("date" in o ? o.date : undefined));
+      // DEC-35zz++ Option A: the day's REF- documents, by name — not only their total (owner-only, like the report).
+      const refundsList = options.advances ? options.advances.refundsOnDay(report.date).map((r) => refundDto(options.advances!.refundView(r))) : [];
+      return { ...report, refundsList };
     }),
     correctAdvance: wrap("correctAdvance", (p) => {
       const o = objectWithOptional(
@@ -1990,12 +1995,14 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     }),
     // ── DEC-35z+ REF: cash refund of an advance (owner) ─────────────────────────────────────────────
     refundAdvance: wrap("refundAdvance", (p) => {
-      const o = exactObject(p, ["advanceId", "amountMinor", "reason", "idempotencyKey"]);
+      const o = objectWithOptional(p, ["advanceId", "amountMinor", "reason", "idempotencyKey"], ["confirmRepeat"]);
+      if ("confirmRepeat" in o && typeof o.confirmRepeat !== "boolean") invalid("'confirmRepeat' must be true or false");
       const r = advances().refund({
         advanceId: str(o.advanceId, "advanceId", 100),
         amountMinor: parseMinor(o.amountMinor),
         reason: o.reason,
         idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+        confirmRepeat: o.confirmRepeat,
       });
       log.info("advance-refunded", { id: r.refund.id, docNo: r.refund.docNo, advance: r.advance.id, duplicate: r.duplicate });
       return {

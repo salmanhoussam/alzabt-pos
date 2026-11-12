@@ -502,6 +502,7 @@ const api: PosApi = {
       amountMinor: req.amountMinor,
       reason: req.reason,
       idempotencyKey: req.idempotencyKey,
+      ...(req.confirmRepeat === undefined ? {} : { confirmRepeat: req.confirmRepeat }),
     }),
   printAdvanceRefund: (req) => ipcRenderer.invoke(CH.printAdvanceRefund, { refundId: req.refundId }),
   saveAdvanceRefundPdf: (req) => ipcRenderer.invoke(CH.saveAdvanceRefundPdf, { refundId: req.refundId }),

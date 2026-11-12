@@ -411,6 +411,8 @@ export interface DailyMoneyDto {
   readonly correctionsBy: ReadonlyArray<{ readonly operatorId: string; readonly operatorName: string; readonly count: number }>;
   /** Voids dated today for a sale of another day (foreign data). Not applied to any day's money. */
   readonly lateVoids: ReadonlyArray<{ readonly saleId: string; readonly saleDate: string; readonly total: MoneyDto }>;
+  /** DEC-35zz++ Option A: the day's REF- documents (customer, amount, time, by) — «استردادات اليوم». */
+  readonly refundsList: readonly AdvanceRefundDto[];
 }
 
 export interface LoginRequest {
@@ -1806,6 +1808,8 @@ export interface RefundAdvanceRequest {
   readonly amountMinor: string;
   readonly reason: string;
   readonly idempotencyKey: string;
+  /** DEC-35zz++ Option A: required (true) only when this advance already has a REF- today. */
+  readonly confirmRepeat?: boolean;
 }
 
 export interface RefundAdvanceResponse {
@@ -1848,6 +1852,8 @@ export interface ApplyAdvanceResponse {
 
 export interface AdvanceStatementDto {
   readonly customerId: string;
+  /** DEC-35zz++: the terminal's business day (to name an earlier REF- of today). */
+  readonly today: string;
   readonly lines: readonly AdvanceStatementLineDto[];
 }
 

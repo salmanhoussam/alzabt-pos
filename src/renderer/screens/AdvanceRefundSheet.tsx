@@ -24,7 +24,7 @@ import { formatDecimal, money } from "../../domain/money";
 /** Codes that PROVE nothing was written: the owner may edit and try again. */
 const REFUSALS = new Set([
   "INVALID_INPUT", "INVALID_AMOUNT", "NOT_EXACT", "MONEY_OUT_OF_RANGE", "INVALID_REASON", "NOT_AUTHORIZED", "NOT_LOGGED_IN",
-  "IDEMPOTENCY_CONFLICT", "ADVANCE_NOT_FOUND", "ADVANCE_REFUND_ABOVE_BALANCE", "ADVANCE_CORRECTED_NOT_REFUNDABLE",
+  "IDEMPOTENCY_CONFLICT", "ADVANCE_NOT_FOUND", "ADVANCE_REFUND_ABOVE_BALANCE", "ADVANCE_CORRECTED_NOT_REFUNDABLE", "ADVANCE_REFUND_REPEAT_UNCONFIRMED",
 ]);
 
 /** The REF- receipt, from the ledger's own DTO. Used right after the refund AND for every reprint. */
@@ -57,7 +57,8 @@ export function RefundReceipt({
     <div className="card receipt adv-receipt" data-testid="ref-receipt" data-ref-number={refund.number}>
       <div className="receipt-ok">
         <span className="receipt-check" aria-hidden="true">✓</span>
-        <h2>{t("ref.done")}</h2>
+        {/* A reprint (no balance read back) is titled as what it is: a refund ALREADY recorded. */}
+        <h2>{t(unused === null ? "ref.recordedTitle" : "ref.done")}</h2>
       </div>
       {duplicate && (
         <p className="warn" data-testid="ref-duplicate">
@@ -110,6 +111,13 @@ export function RefundReceipt({
           </>
         )}
       </dl>
+      {/* DEC-35zz++ Option A: a REPRINT (no balance read back) is a view of a refund ALREADY recorded — the cash
+          was handed over at the time, and showing this receipt again is never a reason to hand it over again. */}
+      {unused === null && (
+        <p className="warn" data-testid="ref-reprint-note">
+          {t("ref.reprintNote")}
+        </p>
+      )}
       {refund.advanceChannel === "whish" && (
         <p className="warn" data-testid="ref-whish-note">
           {t("ref.whishNote")}
@@ -156,11 +164,25 @@ export function RefundReceipt({
   );
 }
 
-export function AdvanceRefundSheet({ advance, unused, onClose }: { advance: AdvanceDto; unused: MoneyDto; onClose: (changed: boolean) => void }) {
+export function AdvanceRefundSheet({
+  advance,
+  unused,
+  todayRefunds = [],
+  onClose,
+}: {
+  advance: AdvanceDto;
+  unused: MoneyDto;
+  /** DEC-35zz++ Option A: this advance's REF- documents of TODAY (an earlier one may be a crash survivor). */
+  todayRefunds?: readonly AdvanceRefundDto[];
+  onClose: (changed: boolean) => void;
+}) {
   const { t } = useT();
   // Prefilled with the whole balance — a real, editable value: what the owner sees is what is sent.
   const [amountText, setAmountText] = useState(() => formatDecimal(money(BigInt(unused.minor), unused.currency)));
   const [reason, setReason] = useState("");
+  // Option A: required — and sent to main, which refuses a same-day second refund without it.
+  const [repeatConfirmed, setRepeatConfirmed] = useState(false);
+  const repeat = todayRefunds.length > 0;
   const [key, setKey] = useState(newIdempotencyKey);
   const [reviewing, setReviewing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -173,7 +195,7 @@ export function AdvanceRefundSheet({ advance, unused, onClose }: { advance: Adva
 
   const amountMinor = amountText.trim() === "" ? null : minorOf(amountText, unused.currency);
   const reasonOk = reason.trim().length >= 3 && reason.trim().length <= 200;
-  const valid = amountMinor !== null && amountMinor > 0n && reasonOk;
+  const valid = amountMinor !== null && amountMinor > 0n && reasonOk && (!repeat || repeatConfirmed);
 
   const edit = () => {
     setKey(newIdempotencyKey());
@@ -188,7 +210,15 @@ export function AdvanceRefundSheet({ advance, unused, onClose }: { advance: Adva
     setError(null);
     try {
       setDone(
-        await call(pos().refundAdvance({ advanceId: advance.id, amountMinor: amountMinor.toString(), reason: reason.trim(), idempotencyKey: key })),
+        await call(
+          pos().refundAdvance({
+            advanceId: advance.id,
+            amountMinor: amountMinor.toString(),
+            reason: reason.trim(),
+            idempotencyKey: key,
+            ...(repeat ? { confirmRepeat: repeatConfirmed } : {}),
+          }),
+        ),
       );
       setUncertain(false);
     } catch (err) {
@@ -223,6 +253,33 @@ export function AdvanceRefundSheet({ advance, unused, onClose }: { advance: Adva
                 <p className="warn" data-testid="ref-sheet-whish-note">
                   {t("ref.whishNote")}
                 </p>
+              )}
+              {repeat && (
+                /* Option A: name the earlier REF- of today BEFORE another one — after a crash it is the most likely
+                   explanation for "the receipt vanished", and its cash must not be handed over twice. */
+                <div className="card warn ref-today" data-testid="ref-today-warning">
+                  <p>
+                    <strong>{t("ref.todayWarning")}</strong>
+                  </p>
+                  <ul>
+                    {todayRefunds.map((r) => (
+                      <li key={r.id} data-testid="ref-today-item" data-ref-number={r.number}>
+                        <bdi dir="ltr">{r.number}</bdi> · <bdi dir="ltr">{fmt(r.amount)}</bdi> · <bdi dir="ltr">{stamp(r.refundedAt)}</bdi> ·{" "}
+                        <bdi>{r.refundedByName}</bdi>
+                      </li>
+                    ))}
+                  </ul>
+                  <label className="collect-confirm-funds">
+                    <input
+                      type="checkbox"
+                      checked={repeatConfirmed}
+                      disabled={busy || reviewing || uncertain}
+                      onChange={(e) => (setRepeatConfirmed(e.target.checked), edit())}
+                      data-testid="ref-repeat-confirm"
+                    />{" "}
+                    {t("ref.repeatConfirm")}
+                  </label>
+                </div>
               )}
               <fieldset disabled={uncertain || busy || reviewing}>
                 <label>
