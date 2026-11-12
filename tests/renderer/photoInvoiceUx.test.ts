@@ -41,6 +41,13 @@ describe("Photo Invoice UX — layout (findings 1–3)", () => {
     expect(rule(".photo-review")).toMatch(/grid-template-columns: minmax\(320px, 40%\) 1fr/);
     expect(CSS).toMatch(/@media \(max-width: 900px\)[\s\S]*\.photo-review \{ grid-template-columns: 1fr;/);
   });
+  it("the row fields fit a 1024-wide window: their minimum widths sum to ≤ 420px (old 240/96 needed 558px)", () => {
+    const m = rule(".pir-fields").match(/minmax\((\d+)px, 3fr\) repeat\(3, minmax\((\d+)px, 1fr\)\); gap: (\d+)px/);
+    expect(m).not.toBeNull();
+    const [name = NaN, num = NaN, gap = NaN] = m!.slice(1).map(Number);
+    expect(name + 3 * num + 3 * gap).toBeLessThanOrEqual(420);
+    expect(CSS).toMatch(/@media \(max-width: 1150px\) \{\n  \.photo-review \{ grid-template-columns: minmax\(260px, 34%\) 1fr; \}/);
+  });
   it("warnings and issues have a visible style (the old `warn` class had none)", () => {
     expect(rule(".pir-note.warn")).toMatch(/background: var\(--status-warning\)/);
     expect(rule(".pir-note.bad")).toMatch(/background: var\(--status-danger\)/);

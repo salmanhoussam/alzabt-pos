@@ -172,6 +172,32 @@ try {
   assert(layout.finVisible, "#2 «إنهاء المراجعة» stays in view without scrolling the window");
   assert(layout.side, "#3 the photo is BESIDE the rows");
   await page.screenshot({ path: SHOTS + "PHOTO-UX-review-layout.png" });
+  // DEC-35zzzz: the smallest usual Windows window. Measured defect before the fix: «المجموع» clipped and every card
+  // scrolling sideways at 1024×768. Every field of the first cards must sit fully inside its card.
+  const size0 = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentSize());
+  await app.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows()[0];
+    w.unmaximize();
+    w.setContentSize(1024, 768);
+  });
+  await page.waitForFunction(() => innerWidth === 1024);
+  const at1024 = await page.evaluate(() => {
+    const bad = [];
+    for (const card of [...document.querySelectorAll('[data-testid="photo-review-row"]')].slice(0, 3)) {
+      const c = card.getBoundingClientRect();
+      for (const el of card.querySelectorAll("input, select")) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && (r.left < c.left - 1 || r.right > c.right + 1 || r.width < 60)) bad.push(el.getAttribute("data-testid") ?? el.tagName);
+      }
+      if (card.scrollWidth > card.clientWidth + 1) bad.push("card-scrolls-sideways");
+    }
+    const ov = document.querySelector('[data-testid="photo-flow"]');
+    if (ov.scrollWidth > ov.clientWidth + 1) bad.push("overlay-scrolls");
+    return bad;
+  });
+  assert(at1024.length === 0, `1024×768: every field inside its card, nothing scrolls sideways (${at1024.join(", ")})`);
+  await page.screenshot({ path: SHOTS + "PHOTO-UX-review-1024.png" });
+  await app.evaluate(({ BrowserWindow }, [w, h]) => BrowserWindow.getAllWindows()[0].setContentSize(w, h), size0);
   await page.locator(".pir-foot").getByText("إلغاء").click();
   await testid(page, "photo-flow").waitFor({ state: "detached", timeout: 10000 });
 
