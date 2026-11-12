@@ -130,6 +130,7 @@ const statementOf = (customerId: string): CustomerStatementDto => {
         receipt: null,
         // TRANSITION (DEC-35x): a settlement paid from an advance names it; none here. Old shape: without the field.
         advance: null,
+        collection: null,
       })),
     })),
     balances: [...s.balances.entries()]

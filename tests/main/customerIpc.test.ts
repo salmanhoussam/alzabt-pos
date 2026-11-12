@@ -105,7 +105,9 @@ describe("the customer channels", () => {
     // 🔴 TRANSITION (DEC-35z+, Cash Refund REF): 93 -> 96 with refundAdvance (owner; MONEY OUT, cash, from an
     // advance's unused balance — no debt created or settled) and its owner-only reprint/PDF pair
     // printAdvanceRefund / saveAdvanceRefundPdf (read by id, write nothing). The old value was 93.
-    expect(Object.keys(CHANNELS)).toHaveLength(96);
+    // 🔴 TRANSITION (DEC-35z+, COL receipts): 96 -> 99 with getCollectionReceipt / printCollectionReceipt /
+    // saveCollectionReceiptPdf — owner-only READS of a COL- document by number; they write no payment. The old value was 96.
+    expect(Object.keys(CHANNELS)).toHaveLength(99);
   });
 
   // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".
@@ -145,7 +147,12 @@ describe("the customer channels", () => {
     // 🔴 TRANSITION (M17B-S1): "exactly one money writer" became a CLOSED, NAMED list of exactly two.
     // The new one shares one real external receipt across debts; it is owner-only and cannot post a
     // debt. A third money-moving channel must come here and be named — never matched by a pattern.
-    const moneyWriters = names.filter((n) => /payment|receipt/i.test(n)).sort();
+    // 🔴 TRANSITION (DEC-35z+ COL): the pattern now also sees the three COL- document channels, which are
+    // READS (print / PDF / view by number) and move no money — removed BY NAME, so the writers stay two.
+    // Old filter: /payment|receipt/ alone.
+    const colDocs = ["getCollectionReceipt","printCollectionReceipt","saveCollectionReceiptPdf"];
+    const moneyWriters = names.filter((n) => /payment|receipt/i.test(n) && !colDocs.includes(n)).sort();
+    for (const d of colDocs) expect(accessFor(d as never)).toBe("owner");
     expect(moneyWriters).toEqual(["recordAllocatedReceipt", "recordCustomerPayment"]);
     expect(accessFor("recordAllocatedReceipt")).toBe("owner");
     // SELL-CREDIT: the closed, NAMED list of debt creators. Old value: none.

@@ -85,6 +85,8 @@ const METHOD_LABEL: Record<PaymentMethod, string> = {
 };
 
 import { AdvanceStatementSection } from "./AdvancePanels";
+import { CollectionReceipt } from "./CollectionReceipt";
+import type { CollectionDocumentDto as ColDoc } from "../../shared/ipcContract";
 
 interface Props {
   readonly customerId: string;
@@ -128,6 +130,15 @@ export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
   const [payError, setPayError] = useState<string | null>(null);
   const [blocked, setBlocked] = useState(false);
   const [notice, setNotice] = useState<"done" | "duplicate" | "receipt" | null>(null);
+  // DEC-35z+ COL: the COL- receipt on screen (right after a payment, or a reprint from the statement).
+  const [colShown, setColShown] = useState<{ doc: ColDoc; duplicate: boolean } | null>(null);
+  const [colError, setColError] = useState<string | null>(null);
+  const openCollection = (docNo: number) => {
+    setColError(null);
+    call(pos().getCollectionReceipt({ collectionNo: docNo }))
+      .then((doc) => setColShown({ doc, duplicate: false }))
+      .catch((e: unknown) => setColError(errorText(e)));
+  };
   /** M17B-S1: whether the "one payment for several debts" form is open. */
   const [receiptOpen, setReceiptOpen] = useState(false);
   const [receiptBusy, setReceiptBusy] = useState(false);
@@ -248,6 +259,7 @@ export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
       // commit, so nothing here subtracts a payment from a balance.
       setStatement(result.statement);
       setNotice(result.duplicate ? "duplicate" : "done");
+      if (result.collection) setColShown({ doc: result.collection, duplicate: result.duplicate });
       setPayingId(null);
       setAmountText("");
       setAttemptKey(newIdempotencyKey());
@@ -355,6 +367,7 @@ export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
       const result = await call(pos().recordAllocatedReceipt(request));
       setStatement(result.statement);
       setNotice("receipt");
+      if (result.collection) setColShown({ doc: result.collection, duplicate: result.duplicate });
     } catch (err) {
       setPayError(collectErrorText(err));
       // The failure may have followed a COMMIT: ask the ledger, and if exactly this receipt is in it say so.
@@ -480,6 +493,13 @@ export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
         </div>
       )}
 
+      {colError && (
+        <p className="error" data-testid="col-error">
+          {colError}
+        </p>
+      )}
+      {colShown && <CollectionReceipt doc={colShown.doc} duplicate={colShown.duplicate} onClose={() => setColShown(null)} />}
+
       {notice !== null && (
         /* 🔴 "ALREADY RECORDED" IS NOT "RECORDED AGAIN". A replayed key returns the committed
            payment, and the owner is told the money was taken ONCE — never that a second one
@@ -518,9 +538,10 @@ export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
                   openFormWithPrefill(obligationId, prefill);
                 }}
                 onAskLedger={askLedgerAboutReceipt}
-                onRecorded={(next, duplicate) => {
+                onRecorded={(next, duplicate, collection) => {
                   setStatement(next);
                   setNotice(duplicate ? "duplicate" : "receipt");
+                  if (collection) setColShown({ doc: collection, duplicate });
                   setReceiptOpen(false);
                 }}
               />
@@ -608,7 +629,20 @@ export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
                           )}
                           <span className="muted small">
                             <bdi dir="ltr">{s.settledAt.slice(0, 10)}</bdi>
-                          </span>
+                          </span>{" "}
+                          {s.collection !== null ? (
+                            /* DEC-35z+ COL: the receipt of the money behind this row — open / reprint, writes nothing. */
+                            <button className="link" type="button" onClick={() => openCollection(s.collection!.docNo)} data-testid="statement-settlement-col" data-col={s.collection.number}>
+                              <bdi dir="ltr">{s.collection.number}</bdi>
+                            </button>
+                          ) : (
+                            s.advance === null && (
+                              /* History before COL: never numbered retroactively; said so, not hidden. */
+                              <span className="muted small" data-testid="statement-settlement-col-none">
+                                {t("col.none")}
+                              </span>
+                            )
+                          )}
                         </li>
                       ))}
                     </ul>

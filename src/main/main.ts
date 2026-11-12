@@ -30,6 +30,8 @@ import { AdvanceRepository } from "../persistence/advanceRepository";
 import { renderAdvanceDocument } from "./advanceDocument";
 import { advanceDto, correctionDto, refundDto } from "./ipcHandlers";
 import { renderRefundDocument } from "./refundDocument";
+import { renderCollectionDocument } from "./collectionDocument";
+import type { CollectionDocumentDto } from "../shared/ipcContract";
 import { PartyRepository } from "../persistence/partyRepository";
 import { LedgerRepository } from "../persistence/ledgerRepository";
 import { ReceiptRepository } from "../persistence/receiptRepository";
@@ -626,6 +628,44 @@ async function saveRefundPdfFile(refundId: string): Promise<SavedFile | null> {
   return { fileName: basename(path) };
 }
 
+/**
+ * DEC-35z+ COL — the COL- document's HTML from the DTO the IPC handler read from the ledger BY NUMBER
+ * (owner-checked there). Printing records nothing; a print/PDF failure never touches the payment.
+ */
+function collectionHtml(doc: CollectionDocumentDto): string {
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  return renderCollectionDocument({ doc, shopName, timeZone: FIXTURE_TERMINAL.timeZone });
+}
+
+async function printCollectionDocument(doc: CollectionDocumentDto): Promise<"printed" | "cancelled"> {
+  const printed = await withPrintWindow(collectionHtml(doc), "collection-print", (win) =>
+    new Promise<boolean>((done) => win.webContents.print({ silent: false, printBackground: true }, (ok) => done(ok))),
+  );
+  log.info("collection-printed", { number: doc.number, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveCollectionPdfFile(doc: CollectionDocumentDto): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save collection receipt PDF",
+    defaultPath: join(app.getPath("documents"), `${doc.number}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(collectionHtml(doc), "collection-pdf", (win) =>
+    win.webContents.printToPDF({ pageSize: "A5", printBackground: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } }),
+  );
+  writeFileSync(path, pdf);
+  log.info("collection-pdf-saved", { number: doc.number, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
 /** Native "save as" + a verified consistent snapshot of the live ledger (never a raw file copy). */
 function exportBackup(ledgerPath: string): SavedFile | null {
   if (!mainWindow || !db) return null;
@@ -1050,6 +1090,8 @@ function startTill(): void {
     saveAdvancePdf: saveAdvancePdfFile,
     printAdvanceRefund: printRefundDocument,
     saveAdvanceRefundPdf: saveRefundPdfFile,
+    printCollectionReceipt: printCollectionDocument,
+    saveCollectionReceiptPdf: saveCollectionPdfFile,
     pickInvoiceLogo,
     pickProductPhoto,
     printInvoice: printInvoiceDocument,

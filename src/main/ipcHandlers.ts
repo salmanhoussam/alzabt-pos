@@ -28,12 +28,12 @@ import { saleOutcomeError } from "./saleOutcomeText";
 import { invoiceOutcomeError } from "./invoiceOutcomeText";
 import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
-import type { LedgerService } from "../application/ledgerService";
+import { type LedgerService, formatCollectionNo } from "../application/ledgerService";
 import type { AdvanceCorrectionView, AdvanceRefundView, AdvanceService, AdvanceView } from "../application/advanceService";
 import type { AdvanceApplicationRecord } from "../persistence/advanceRepository";
 import type { DailyMoneyService } from "../application/dailyMoneyService";
 import { type ChannelAmounts, type DailyMoneyReport, type MoneyPart, MONEY_CHANNELS } from "../domain/dailyMoney";
-import type { AdvanceCorrectionDto, AdvanceDto, AdvanceRefundDto, PendingAdvanceDto } from "../shared/ipcContract";
+import type { AdvanceCorrectionDto, AdvanceDto, AdvanceRefundDto, CollectionDocumentDto, PendingAdvanceDto } from "../shared/ipcContract";
 import type { BackupRestoreActions } from "./backupRestore";
 import type { RestoreLock } from "./restoreLock";
 import type { PartyRow } from "../persistence/partyRepository";
@@ -239,6 +239,9 @@ export interface IpcHandlerOptions {
   /** DEC-35z+: prints / saves one REF- document, loaded from the ledger BY ID. */
   readonly printAdvanceRefund?: (refundId: string) => Promise<"printed" | "cancelled">;
   readonly saveAdvanceRefundPdf?: (refundId: string) => Promise<SavedFile | null>;
+  /** DEC-35z+ COL: prints / saves one COL- document. The DTO is built HERE from the ledger by number. */
+  readonly printCollectionReceipt?: (doc: CollectionDocumentDto) => Promise<"printed" | "cancelled">;
+  readonly saveCollectionReceiptPdf?: (doc: CollectionDocumentDto) => Promise<SavedFile | null>;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -1285,8 +1288,14 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           fundsConfirmed: result.record.fundsConfirmed,
           settledAt: result.record.settledAt,
         } as const;
-        log.info("customer-payment-recorded", { id: result.record.id, duplicate: result.duplicate });
-        return { settlement, duplicate: result.duplicate, statement: dto };
+        const colNo = ledger().collectionNoOfSettlement(result.record.id);
+        log.info("customer-payment-recorded", { id: result.record.id, duplicate: result.duplicate, col: colNo });
+        return {
+          settlement: { ...settlement, collection: colNo === null ? null : { docNo: colNo, number: formatCollectionNo(colNo) } },
+          collection: colNo === null ? null : collectionDto(colNo),
+          duplicate: result.duplicate,
+          statement: dto,
+        };
       },
       (p) => paymentFailureTruth(ledger(), p, operatorLanguage()),
     ),
@@ -1338,7 +1347,8 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           allocations,
         });
         const dto = toStatementDto(party, ledger().statementFor(customerId));
-        log.info("allocated-receipt-recorded", { id: result.receipt.id, duplicate: result.duplicate });
+        const rcptNo = ledger().collectionNoOfReceipt(result.receipt.id);
+        log.info("allocated-receipt-recorded", { id: result.receipt.id, duplicate: result.duplicate, col: rcptNo });
         return {
           receipt: {
             id: result.receipt.id,
@@ -1348,6 +1358,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
             allocationCount: result.receipt.allocationCount,
             receivedAt: result.receipt.receivedAt,
           },
+          collection: rcptNo === null ? null : collectionDto(rcptNo),
           duplicate: result.duplicate,
           statement: dto,
         };
@@ -1981,6 +1992,19 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         duplicate: r.duplicate,
       };
     }),
+    // ── DEC-35z+ COL: the COL- document of a collection / receipt (owner, read-only) ──────────────────
+    getCollectionReceipt: wrap("getCollectionReceipt", (p) => collectionDto(collectionNo(p))),
+    printCollectionReceipt: wrapAsync("printCollectionReceipt", async (p) => {
+      const doc = collectionDto(collectionNo(p)); // exists, and the caller is the owner — before any window opens
+      if (!options.printCollectionReceipt) return { status: "unavailable" as const };
+      return { status: await options.printCollectionReceipt(doc) };
+    }),
+    saveCollectionReceiptPdf: wrapAsync("saveCollectionReceiptPdf", async (p) => {
+      const doc = collectionDto(collectionNo(p));
+      if (!options.saveCollectionReceiptPdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveCollectionReceiptPdf(doc);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
     // A reprint loads the SAME REF- by id and writes nothing; a print/PDF failure never touches the refund.
     printAdvanceRefund: wrapAsync("printAdvanceRefund", async (p) => {
       const o = exactObject(p, ["refundId"]);
@@ -1998,6 +2022,36 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
     }),
   };
+
+  function collectionNo(p: unknown): number {
+    const o = exactObject(p, ["collectionNo"]);
+    if (typeof o.collectionNo !== "number" || !Number.isSafeInteger(o.collectionNo) || o.collectionNo <= 0) invalid("'collectionNo' must be a positive whole number");
+    return o.collectionNo as number;
+  }
+
+  /** One COL- document, from the ledger, named by each debt's own document. No arithmetic. */
+  function collectionDto(docNo: number): CollectionDocumentDto {
+    const v = ledger().collectionDocument(docNo);
+    const channel: CollectionDocumentDto["channel"] =
+      v.method === "cash" ? "cash" : v.method === "external" ? (v.provider === "bank_transfer" ? "bank_transfer" : "whish") : v.method === "card" ? "card" : "other";
+    return {
+      docNo: v.docNo,
+      number: formatCollectionNo(v.docNo),
+      customerId: v.customerId,
+      customerName: v.customerName,
+      total: { minor: v.totalMinor.toString(), currency: v.currency },
+      channel,
+      reference: v.reference,
+      lines: v.lines.map((l) => ({
+        obligationId: l.obligation.id,
+        debtDocument: statementDocument(l.obligation),
+        amount: { minor: l.amountMinor.toString(), currency: v.currency },
+      })),
+      receivedByName: v.receivedByName,
+      receivedAt: v.receivedAt,
+      businessDate: v.businessDate,
+    };
+  }
 
   /** One application, named by the debt's own document — the same words the debt statement uses. */
   function applicationDto(a: AdvanceApplicationRecord) {
@@ -2128,6 +2182,8 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     // Migration 18: which settlements are SHARES of a receipt (display only; a share is not money).
     const shares = ledger().receiptsOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)));
     // DEC-35x: which settlements were paid FROM an advance (display only; not money of that day).
+    // DEC-35z+ COL: the COL- behind each settlement (own, or its receipt's). Display only.
+    const colNos = ledger().collectionNumbersOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)));
     const fromAdvance = options.advances
       ? options.advances.advancesOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)))
       : new Map<string, { advanceId: string; number: string }>();
@@ -2187,6 +2243,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
                 }
               : null)(shares.get(st.id)),
           advance: fromAdvance.get(st.id) ?? null,
+          collection: ((n) => (n === undefined ? null : { docNo: n, number: formatCollectionNo(n) }))(colNos.get(st.id)),
         })),
       })),
       // One entry per currency, in a stable order so the screen does not reshuffle between reads.

@@ -130,9 +130,12 @@ describe("the invoice channels exist and answer", () => {
       "cancelPhoneSession",
       "printAdvance",
       "printAdvanceRefund",
+      // TRANSITION (DEC-35z+ COL): + printCollectionReceipt / saveCollectionReceiptPdf. Old list: without them.
+      "printCollectionReceipt",
       "printInvoice",
       "saveAdvancePdf",
       "saveAdvanceRefundPdf",
+      "saveCollectionReceiptPdf",
       "saveInvoicePdf",
       "startPhoneSession",
     ]);

@@ -195,6 +195,11 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   refundAdvance: "owner",
   printAdvanceRefund: "owner",
   saveAdvanceRefundPdf: "owner",
+  // 🔴 OWNER (DEC-35z+ COL): a collection is owner-only today, so its COL- document is too — no new
+  // right for the cashier. Read by number; never records a payment. Refused again by LedgerService.requireOwner.
+  getCollectionReceipt: "owner",
+  printCollectionReceipt: "owner",
+  saveCollectionReceiptPdf: "owner",
 
   // ── Owner only ────────────────────────────────────────────────────────────────────────────────
   // Reversing money.

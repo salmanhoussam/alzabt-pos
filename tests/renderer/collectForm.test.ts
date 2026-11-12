@@ -158,7 +158,9 @@ describe("the words and the contract", () => {
     const used = Object.keys(CHANNELS).filter((c) => STATEMENT.includes(`pos().${c}(`));
     // 🔴 TRANSITION with M17B-S1: "exactly one money-writing channel" is now a CLOSED, NAMED list of two.
     // The second shares one real external receipt across debts; it is not reachable from anywhere else.
-    expect(used.sort()).toEqual(["getCustomerStatement", "recordAllocatedReceipt", "recordCustomerPayment"]);
+    // 🔴 TRANSITION (DEC-35z+ COL): + getCollectionReceipt — a READ of a COL- document by number (reprint from
+    // a statement row); it writes no money. The money writers stay exactly the two. Old list: without it.
+    expect(used.sort()).toEqual(["getCollectionReceipt", "getCustomerStatement", "recordAllocatedReceipt", "recordCustomerPayment"]);
   });
 });
 

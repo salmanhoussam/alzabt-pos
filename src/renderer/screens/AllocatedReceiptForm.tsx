@@ -34,7 +34,7 @@ import { formatDecimal, money } from "../../domain/money";
 import { type ReceiptReconciliation, allocationState, leftText, minorOf, oldestFirstShares, openDebtsOf, sharableCurrencies } from "./receiptAllocation";
 import { useT } from "../i18n";
 import { statementDocumentText } from "../statementDocument";
-import type { AllocatedReceiptRequest, CustomerStatementDto, StatementObligationDto } from "../../shared/ipcContract";
+import type { AllocatedReceiptRequest, CustomerStatementDto, StatementObligationDto, CollectionDocumentDto } from "../../shared/ipcContract";
 
 /** The two outcomes after which a second recording must NOT be offered (same as a collection). */
 const UNSAFE_TO_RETRY: ReadonlySet<string> = new Set(["PAYMENT_RECORDED", "PAYMENT_STATUS_UNKNOWN"]);
@@ -47,7 +47,8 @@ interface Props {
   readonly customerId: string;
   readonly statement: CustomerStatementDto;
   /** The statement main recomputed after the commit; the parent swaps it in whole. */
-  readonly onRecorded: (statement: CustomerStatementDto, duplicate: boolean) => void;
+  /** DEC-35z+ COL: `collection` is the transfer's COL- document when main returned it (null when only the ledger answered). */
+  readonly onRecorded: (statement: CustomerStatementDto, duplicate: boolean, collection?: CollectionDocumentDto | null) => void;
   readonly onClose: () => void;
   /**
    * ACC-3: the whole total lands on ONE debt, which a shared receipt cannot record. The parent closes
@@ -159,7 +160,7 @@ export function AllocatedReceiptForm({ customerId, statement, onRecorded, onClos
     setError(null);
     try {
       const result = await call(pos().recordAllocatedReceipt(request));
-      onRecorded(result.statement, result.duplicate);
+      onRecorded(result.statement, result.duplicate, result.collection);
     } catch (err) {
       setError(errorFor(err));
       // 🔴 THE KEY IS NOT REGENERATED: retrying the same payment replays the same key.

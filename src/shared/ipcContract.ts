@@ -134,6 +134,9 @@ export const CHANNELS = {
   refundAdvance: "pos:refundAdvance",
   printAdvanceRefund: "pos:printAdvanceRefund",
   saveAdvanceRefundPdf: "pos:saveAdvanceRefundPdf",
+  getCollectionReceipt: "pos:getCollectionReceipt",
+  printCollectionReceipt: "pos:printCollectionReceipt",
+  saveCollectionReceiptPdf: "pos:saveCollectionReceiptPdf",
 } as const;
 
 export type ChannelName = keyof typeof CHANNELS;
@@ -933,6 +936,35 @@ export interface StatementSettlementDto {
    * (the money arrived as the ADV-), so the screen names the advance instead of a payment channel.
    */
   readonly advance: { readonly advanceId: string; readonly number: string } | null;
+  /**
+   * DEC-35z+ COL. The COL- receipt behind this money: the settlement's own (a direct collection) or its
+   * receipt's (a share of one transfer). NULL for an advance application, and for every collection
+   * recorded before COL existed — history is never numbered retroactively.
+   */
+  readonly collection: { readonly docNo: number; readonly number: string } | null;
+}
+
+/** DEC-35z+ COL — one COL- document as main read it from the ledger. Every figure is the ledger's own. */
+export interface CollectionDocumentDto {
+  readonly docNo: number;
+  /** `COL-000001` — formatted in main. */
+  readonly number: string;
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly total: MoneyDto;
+  /** Where the money came in. A NEW collection is cash or whish (P3); history may carry another. */
+  readonly channel: "cash" | "whish" | "bank_transfer" | "card" | "other";
+  /** The ORIGINAL reference (Whish), registered once with the payment; never re-registered by a document. */
+  readonly reference: string | null;
+  /** The debt(s) this money paid, each by its own document. */
+  readonly lines: ReadonlyArray<{ readonly obligationId: string; readonly debtDocument: StatementDocumentDto; readonly amount: MoneyDto }>;
+  readonly receivedByName: string;
+  readonly receivedAt: string;
+  readonly businessDate: string;
+}
+
+export interface CollectionNoRequest {
+  readonly collectionNo: number;
 }
 
 /** The receipt a settlement is a share of (migration 18). Display only; the amount is the WHOLE receipt. */
@@ -1147,6 +1179,8 @@ export interface PendingReceiptDto {
 
 export interface AllocatedReceiptResponse {
   readonly receipt: ReceiptDto;
+  /** DEC-35z+ COL: the ONE COL- document of this transfer (the same one on a replay). */
+  readonly collection: CollectionDocumentDto | null;
   readonly duplicate: boolean;
   readonly statement: CustomerStatementDto;
 }
@@ -1164,6 +1198,8 @@ export interface AllocatedReceiptResponse {
  */
 export interface RecordPaymentResponse {
   readonly settlement: StatementSettlementDto;
+  /** DEC-35z+ COL: the COL- document of this collection (the same one on a replay; null only for history). */
+  readonly collection: CollectionDocumentDto | null;
   readonly duplicate: boolean;
   readonly statement: CustomerStatementDto;
 }
@@ -2004,4 +2040,9 @@ export interface PosApi {
   /** Owner only: print / save the SAME REF- document again, loaded by id. Never writes. */
   printAdvanceRefund(req: AdvanceRefundIdRequest): Promise<IpcResult<PrintAdvanceResponse>>;
   saveAdvanceRefundPdf(req: AdvanceRefundIdRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
+  /** Owner only (DEC-35z+ COL): one COL- document, read from the ledger. Never writes. */
+  getCollectionReceipt(req: CollectionNoRequest): Promise<IpcResult<CollectionDocumentDto>>;
+  /** Owner only: print / save the SAME COL- again, loaded by number. Records no payment. */
+  printCollectionReceipt(req: CollectionNoRequest): Promise<IpcResult<PrintAdvanceResponse>>;
+  saveCollectionReceiptPdf(req: CollectionNoRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
 }
