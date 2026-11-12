@@ -2075,7 +2075,16 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         if (o.mode === "photo-only") mode = "photo-only";
       }
       if (!options.readInvoicePhoto) return { status: "unavailable" as const };
-      const reading = await options.readInvoicePhoto(mode);
+      let reading: Awaited<ReturnType<NonNullable<IpcHandlerOptions["readInvoicePhoto"]>>>;
+      try {
+        reading = await options.readInvoicePhoto(mode);
+      } catch (e) {
+        // DEC-35zzzz: a REFUSED reading (not an image, OCR failed) is logged here with its code and the engine's
+        // short reason — the screen shows only a bilingual sentence and the code. Unexpected faults are logged by
+        // wrapAsync as ipc-internal-error. Never the invoice's text.
+        if (e instanceof DomainError) log.warn("invoice-photo-refused", { mode, code: e.code, detail: e.message.slice(0, 200) });
+        throw e;
+      }
       if (reading === null) return { status: "cancelled" as const };
       const currency = service.getCatalog().currency;
       const exponent = currency === "LBP" ? 0 : 2;

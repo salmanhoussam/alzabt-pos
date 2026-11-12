@@ -36,8 +36,15 @@ export function readFailureText(e: unknown): Bilingual {
   if (code === "OCR_FAILED") return { ar: "تعذّرت قراءة الصورة على هذا الجهاز. جرّب صورة أوضح، أو أدخل الأصناف يدوياً بجانب الصورة.", en: "The photo could not be read on this computer. Try a clearer photo, or type the items beside the photo." };
   if (code === "INVALID_INPUT") return { ar: "هذا الملف ليس صورة قابلة للقراءة. اختر صورة JPG أو PNG.", en: "This file is not a readable image. Choose a JPG or PNG photo." };
   if (code === "NOT_AVAILABLE") return { ar: "القراءة غير متاحة على هذا الجهاز. أدخل الأصناف يدوياً.", en: "Reading is not available on this computer. Enter the items by hand." };
-  const t = errorText(e);
-  return { ar: t, en: "" };
+  if (code === "NOT_AUTHORIZED" || code === "NOT_LOGGED_IN") return { ar: "هذا الحساب لا يملك صلاحية إضافة الأصناف من صورة فاتورة.", en: "This account may not add products from an invoice photo." };
+  // GENERIC (DEC-35zzzz): any other failure — both languages, the error CODE as a reference for support, and
+  // nothing else: never the message, a stack or anything read from the supplier's paper. The technical detail is
+  // in the main-process log (`invoice-photo-refused` / `ipc-internal-error`).
+  const ref = /^[A-Z][A-Z0-9_]{0,39}$/.test(code) ? code : "UNEXPECTED";
+  return {
+    ar: `تعذّر إكمال العملية على صورة الفاتورة. جرّب مرة أخرى، أو أدخل الأصناف يدوياً. (رمز الخطأ: ${ref})`,
+    en: `The invoice photo could not be processed. Try again, or enter the items by hand. (error code: ${ref})`,
+  };
 }
 
 function BilingualText({ text, testid }: { text: Bilingual; testid?: string }) {

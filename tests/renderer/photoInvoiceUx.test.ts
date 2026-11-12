@@ -74,6 +74,25 @@ describe("Photo Invoice UX — text (findings 4, 6, 7)", () => {
       expect(t.en).toMatch(/^[\x20-\x7E]+$/);
     }
     expect(readFailureText(new ApiError("INVALID_INPUT", "x")).ar).toContain("ليس صورة");
+    // DEC-35zzzz: the GENERIC fallback used to put errorText() under the Arabic line and leave English EMPTY.
+    const secret = "Error: boom at C:\\Users\\x\\main.js:12 — شركة النور مورّد 4471";
+    for (const e of [new ApiError("INTERNAL", secret), new ApiError("SOMETHING_NEW", secret), new Error(secret), "not an error", new ApiError("bad code!", secret)]) {
+      const g = readFailureText(e);
+      expect(g.ar).toMatch(/[\u0600-\u06FF]/);
+      expect(g.en.length).toBeGreaterThan(20);
+      expect(g.en).toMatch(/^[\x20-\x7E]+$/);
+      expect(g.ar + g.en).not.toContain("boom");
+      expect(g.ar + g.en).not.toContain("main.js");
+      expect(g.ar + g.en).not.toContain("النور");
+      expect(g.ar).toMatch(/رمز الخطأ: [A-Z_]+\)/);
+      expect(g.en).toMatch(/error code: [A-Z_]+\)/);
+    }
+    expect(readFailureText(new ApiError("INTERNAL", "x")).en).toContain("error code: INTERNAL");
+    expect(readFailureText(new Error("x")).en).toContain("error code: UNEXPECTED");
+    expect(readFailureText(new ApiError("bad code!", "x")).en).toContain("error code: UNEXPECTED"); // a code is shown only if it looks like one
+    // a permission refusal is not a "could not be processed"
+    expect(readFailureText(new ApiError("NOT_AUTHORIZED", "x"))).toEqual({ ar: "هذا الحساب لا يملك صلاحية إضافة الأصناف من صورة فاتورة.", en: "This account may not add products from an invoice photo." });
+
     expect(FLOW).toMatch(/<p dir="rtl" lang="ar">/);
     expect(FLOW).toMatch(/<p dir="ltr" lang="en">/);
   });

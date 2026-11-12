@@ -3,6 +3,7 @@
  * the repository). It returns candidate rows and writes NOTHING; access = the product-create capability.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DomainError } from "../../src/domain/errors";
 import { accessFor } from "../../src/main/channelPolicy";
 import { createIpcHandlers } from "../../src/main/ipcHandlers";
 import type { IpcResult, ReadInvoicePhotoResponse } from "../../src/shared/ipcContract";
@@ -70,6 +71,26 @@ describe("readInvoicePhoto", () => {
       expect(r.ok).toBe(false);
     }
     expect(seen).toHaveLength(3); // no refused request ever reached the picker
+    expect(footprint()).toBe(before);
+  });
+
+  // DEC-35zzzz: a REFUSED reading is logged in main (code + the engine's short reason, never the invoice text) and
+  // still answered as a refusal with its code — the screen turns the code into a bilingual sentence.
+  it("a refused reading is logged with its code and still refused; nothing written", async () => {
+    const before = footprint();
+    const logged: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+    const logger = { info() {}, error() {}, warn: (event: string, fields?: Record<string, unknown>) => void logged.push({ event, fields }), file: null };
+    const handlers = createIpcHandlers(h.service, {
+      logger,
+      readInvoicePhoto: async () => {
+        throw new DomainError("OCR_FAILED", "Invoice reading failed: worker timed out");
+      },
+    });
+    const r = (await handlers.readInvoicePhoto({ mode: "read" })) as IpcResult<unknown>;
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe("OCR_FAILED");
+    expect(logged).toEqual([{ event: "invoice-photo-refused", fields: { mode: "read", code: "OCR_FAILED", detail: "Invoice reading failed: worker timed out" } }]);
     expect(footprint()).toBe(before);
   });
 
