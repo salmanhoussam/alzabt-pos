@@ -128,6 +128,9 @@ const statementOf = (customerId: string): CustomerStatementDto => {
         settledAt: st.settledAt,
         // TRANSITION with migration 18: null unless the row is a share of a receipt (none here).
         receipt: null,
+        // TRANSITION (DEC-35x): a settlement paid from an advance names it; none here. Old shape: without the field.
+        advance: null,
+        collection: null,
       })),
     })),
     balances: [...s.balances.entries()]

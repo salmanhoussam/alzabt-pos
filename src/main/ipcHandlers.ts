@@ -28,7 +28,14 @@ import { saleOutcomeError } from "./saleOutcomeText";
 import { invoiceOutcomeError } from "./invoiceOutcomeText";
 import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
-import type { LedgerService } from "../application/ledgerService";
+import { type LedgerService, formatCollectionNo } from "../application/ledgerService";
+import type { AdvanceCorrectionView, AdvanceRefundView, AdvanceService, AdvanceView } from "../application/advanceService";
+import type { AdvanceApplicationRecord } from "../persistence/advanceRepository";
+import type { DailyMoneyService } from "../application/dailyMoneyService";
+import { type ChannelAmounts, type DailyMoneyReport, type MoneyPart, MONEY_CHANNELS } from "../domain/dailyMoney";
+import type { AdvanceCorrectionDto, AdvanceDto, AdvanceRefundDto, CollectionDocumentDto, PendingAdvanceDto } from "../shared/ipcContract";
+import { rowsFromPositioned } from "../domain/invoiceOcrRows";
+import type { PositionedLine } from "../domain/ocrLayout";
 import type { BackupRestoreActions } from "./backupRestore";
 import type { RestoreLock } from "./restoreLock";
 import type { PartyRow } from "../persistence/partyRepository";
@@ -207,6 +214,16 @@ export interface IpcHandlerOptions {
    */
   readonly pickInvoiceLogo?: () => string | null;
   /**
+   * PHOTO-INVOICE-TO-ITEMS: main shows the picker and reads the photo OFFLINE; null = cancelled.
+   * Absent (tests, headless) answers "unavailable". It never writes anything.
+   */
+  readonly readInvoicePhoto?: () => Promise<{
+    readonly lines: readonly PositionedLine[];
+    readonly ms: number;
+    readonly preview: string | null;
+    readonly crop: (y: number, h: number) => string | null;
+  } | null>;
+  /**
    * Native photo picker for a product. Main shows the dialog, reads the file and NORMALIZES it
    * (decode, re-encode, bound the dimensions), then returns the bytes it produced — so the only
    * thing that crosses the IPC bridge in the other direction is a product id.
@@ -223,6 +240,20 @@ export interface IpcHandlerOptions {
   readonly parties?: PartyService;
   /** S3B: the read-only statement source. Absent on a terminal without the ledger. */
   readonly ledger?: LedgerService;
+  /** Customer advances (migration 20). Absent means every advance channel answers NOT_AVAILABLE. */
+  readonly advances?: AdvanceService;
+  /** DAILY MONEY IN / OUT (owner, read-only). Absent means the channel answers NOT_AVAILABLE. */
+  readonly dailyMoney?: DailyMoneyService;
+  /** Prints one ADV- document. Main loads it from the ledger BY ID; no markup crosses the bridge. */
+  readonly printAdvance?: (advanceId: string) => Promise<"printed" | "cancelled">;
+  /** Save-as dialog + PDF of one ADV- document. Null when the operator cancelled. */
+  readonly saveAdvancePdf?: (advanceId: string) => Promise<SavedFile | null>;
+  /** DEC-35z+: prints / saves one REF- document, loaded from the ledger BY ID. */
+  readonly printAdvanceRefund?: (refundId: string) => Promise<"printed" | "cancelled">;
+  readonly saveAdvanceRefundPdf?: (refundId: string) => Promise<SavedFile | null>;
+  /** DEC-35z+ COL: prints / saves one COL- document. The DTO is built HERE from the ledger by number. */
+  readonly printCollectionReceipt?: (doc: CollectionDocumentDto) => Promise<"printed" | "cancelled">;
+  readonly saveCollectionReceiptPdf?: (doc: CollectionDocumentDto) => Promise<SavedFile | null>;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -1269,8 +1300,14 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           fundsConfirmed: result.record.fundsConfirmed,
           settledAt: result.record.settledAt,
         } as const;
-        log.info("customer-payment-recorded", { id: result.record.id, duplicate: result.duplicate });
-        return { settlement, duplicate: result.duplicate, statement: dto };
+        const colNo = ledger().collectionNoOfSettlement(result.record.id);
+        log.info("customer-payment-recorded", { id: result.record.id, duplicate: result.duplicate, col: colNo });
+        return {
+          settlement: { ...settlement, collection: colNo === null ? null : { docNo: colNo, number: formatCollectionNo(colNo) } },
+          collection: colNo === null ? null : collectionDto(colNo),
+          duplicate: result.duplicate,
+          statement: dto,
+        };
       },
       (p) => paymentFailureTruth(ledger(), p, operatorLanguage()),
     ),
@@ -1322,7 +1359,8 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           allocations,
         });
         const dto = toStatementDto(party, ledger().statementFor(customerId));
-        log.info("allocated-receipt-recorded", { id: result.receipt.id, duplicate: result.duplicate });
+        const rcptNo = ledger().collectionNoOfReceipt(result.receipt.id);
+        log.info("allocated-receipt-recorded", { id: result.receipt.id, duplicate: result.duplicate, col: rcptNo });
         return {
           receipt: {
             id: result.receipt.id,
@@ -1332,6 +1370,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
             allocationCount: result.receipt.allocationCount,
             receivedAt: result.receipt.receivedAt,
           },
+          collection: rcptNo === null ? null : collectionDto(rcptNo),
           duplicate: result.duplicate,
           statement: dto,
         };
@@ -1786,7 +1825,337 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         ? { status: "saved" as const, fileName: saved.fileName, logoMissing: saved.logoMissing, logoUnverified: saved.logoUnverified }
         : { status: "cancelled" as const };
     }),
+
+    // ── Customer advances (migration 20) ───────────────────────────────────────────────────────
+    // Every rule lives in `AdvanceService` and in the database triggers; these handlers validate the
+    // payload's SHAPE, call the service once, and map bigints to strings. No arithmetic here.
+    recordAdvance: wrap("recordAdvance", (p) => {
+      const o = objectWithOptional(p, ["customerId", "amountMinor", "channel", "idempotencyKey"], ["reference", "fundsConfirmed"]);
+      if (o.reference !== undefined && o.reference !== null && typeof o.reference !== "string") invalid("'reference' must be text or null");
+      if (o.fundsConfirmed !== undefined && typeof o.fundsConfirmed !== "boolean") invalid("'fundsConfirmed' must be true or false");
+      const r = advances().record({
+        customerId: str(o.customerId, "customerId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+        channel: o.channel,
+        reference: o.reference,
+        fundsConfirmed: o.fundsConfirmed,
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      log.info("advance-recorded", { id: r.record.id, docNo: r.record.docNo, duplicate: r.duplicate });
+      return { advance: advanceDto(advances().view(r.record)), duplicate: r.duplicate };
+    }),
+    pendingAdvances: wrap("pendingAdvances", (p) => {
+      noPayload(p);
+      return advances()
+        .pending()
+        .map((x): PendingAdvanceDto => {
+          if (x.status === "recorded") return { status: "recorded", key: x.key, advance: advanceDto(advances().view(x.advance)) };
+          if (x.status === "unknown") return { status: "unknown", key: x.key, createdAt: x.createdAt };
+          return {
+            status: x.status,
+            key: x.key,
+            customerId: x.intent.customerId,
+            customerName: advances().customerName(x.intent.customerId),
+            amount: { minor: x.intent.amountMinor.toString(), currency: x.intent.currency },
+            channel: x.intent.channel,
+            reference: x.intent.reference,
+            createdAt: x.createdAt,
+          };
+        });
+    }),
+    finishAdvance: wrap("finishAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey"]);
+      const r = advances().finish(str(o.idempotencyKey, "idempotencyKey", 100));
+      log.info("advance-finished", { id: r.record.id, docNo: r.record.docNo, duplicate: r.duplicate });
+      return { advance: advanceDto(advances().view(r.record)), duplicate: r.duplicate };
+    }),
+    closeAdvance: wrap("closeAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey"]);
+      advances().close(str(o.idempotencyKey, "idempotencyKey", 100));
+      log.info("advance-closed-not-received", { key: o.idempotencyKey });
+      return null;
+    }),
+    acknowledgeAdvance: wrap("acknowledgeAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey"]);
+      advances().acknowledge(str(o.idempotencyKey, "idempotencyKey", 100));
+      return null;
+    }),
+    getAdvanceStatement: wrap("getAdvanceStatement", (p) => {
+      const o = exactObject(p, ["customerId"]);
+      const customerId = str(o.customerId, "customerId", 100);
+      return {
+        customerId,
+        lines: advances()
+          .statement(customerId)
+          .map((l) => ({
+            advance: advanceDto(advances().view(l.advance)),
+            unused: { minor: l.unusedMinor.toString(), currency: l.advance.currency },
+            correction: correctionDto(advances().correctionView(l.correction)),
+            applications: advances().applicationsOf(l.advance.id).map(applicationDto),
+            refunds: advances().refundsOf(l.advance.id).map((r) => refundDto(advances().refundView(r))),
+          })),
+      };
+    }),
+    applyAdvanceToDebt: wrap("applyAdvanceToDebt", (p) => {
+      const o = exactObject(p, ["advanceId", "obligationId", "amountMinor", "idempotencyKey"]);
+      const r = advances().applyToDebt({
+        advanceId: str(o.advanceId, "advanceId", 100),
+        obligationId: str(o.obligationId, "obligationId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      return {
+        application: applicationDto(r.application),
+        advanceNumber: advances().view(r.advance).number,
+        unused: { minor: r.unusedMinor.toString(), currency: r.advance.currency },
+        debtOutstanding: { minor: r.debtOutstandingMinor.toString(), currency: r.advance.currency },
+        duplicate: r.duplicate,
+      };
+    }),
+    sellOnAdvance: wrap("sellOnAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey", "lines", "expectedTotalMinor", "customerId", "advanceId", "amountMinor"]);
+      const r = advances().sellOnAdvance({
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+        lines: saleLinesOf(o.lines),
+        expectedTotalMinor: parseMinor(o.expectedTotalMinor),
+        customerId: str(o.customerId, "customerId", 100),
+        advanceId: str(o.advanceId, "advanceId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+      });
+      if (!r.duplicate) {
+        try {
+          options.afterSale?.();
+        } catch (err) {
+          log.warn("after-sale-hook-failed", { error: err });
+        }
+      }
+      const cur = r.sale.total.currency;
+      return {
+        sale: toSaleDto(r.sale, invoiceNumberFor(r.sale)),
+        obligationId: r.obligation.id,
+        advanceNumber: advances().view(r.application.advance).number,
+        applied: { minor: r.application.application.amountMinor.toString(), currency: cur },
+        unused: { minor: r.application.unusedMinor.toString(), currency: cur },
+        debtOutstanding: { minor: r.application.debtOutstandingMinor.toString(), currency: cur },
+        duplicate: r.duplicate,
+      };
+    }),
+    getDailyMoney: wrap("getDailyMoney", (p) => {
+      const o = objectWithOptional(p, [], ["date"]);
+      if (!options.dailyMoney) throw new DomainError("NOT_AVAILABLE", "The day's money is not available on this terminal");
+      return dailyMoneyDto(options.dailyMoney.day("date" in o ? o.date : undefined));
+    }),
+    correctAdvance: wrap("correctAdvance", (p) => {
+      const o = objectWithOptional(
+        p,
+        ["advanceId", "kind", "reason", "idempotencyKey"],
+        ["confirmNotReceived", "customerId", "amountMinor", "channel", "reference", "fundsConfirmed"],
+      );
+      const r = advances().correct({
+        advanceId: str(o.advanceId, "advanceId", 100),
+        kind: o.kind,
+        reason: o.reason,
+        confirmNotReceived: o.confirmNotReceived,
+        customerId: o.customerId,
+        amountMinor: o.amountMinor === undefined ? undefined : parseMinor(o.amountMinor),
+        channel: o.channel,
+        reference: o.reference,
+        fundsConfirmed: o.fundsConfirmed,
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      log.info("advance-corrected", { advance: r.original.id, kind: r.correction.kind, successor: r.successor?.id ?? null, duplicate: r.duplicate });
+      const correction = correctionDto(advances().correctionView(r.correction));
+      if (!correction) throw new DomainError("LEDGER_INTEGRITY", "A correction could not be read back");
+      return {
+        original: advanceDto(advances().view(r.original)),
+        successor: r.successor ? advanceDto(advances().view(r.successor)) : null,
+        correction,
+        duplicate: r.duplicate,
+      };
+    }),
+    printAdvance: wrapAsync("printAdvance", async (p) => {
+      const o = exactObject(p, ["advanceId"]);
+      const id = str(o.advanceId, "advanceId", 100);
+      advances().document(id); // exists, and the caller may record advances — before any window opens
+      if (!options.printAdvance) return { status: "unavailable" as const };
+      return { status: await options.printAdvance(id) };
+    }),
+    saveAdvancePdf: wrapAsync("saveAdvancePdf", async (p) => {
+      const o = exactObject(p, ["advanceId"]);
+      const id = str(o.advanceId, "advanceId", 100);
+      advances().document(id);
+      if (!options.saveAdvancePdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveAdvancePdf(id);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
+    // ── DEC-35z+ REF: cash refund of an advance (owner) ─────────────────────────────────────────────
+    refundAdvance: wrap("refundAdvance", (p) => {
+      const o = exactObject(p, ["advanceId", "amountMinor", "reason", "idempotencyKey"]);
+      const r = advances().refund({
+        advanceId: str(o.advanceId, "advanceId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+        reason: o.reason,
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      log.info("advance-refunded", { id: r.refund.id, docNo: r.refund.docNo, advance: r.advance.id, duplicate: r.duplicate });
+      return {
+        refund: refundDto(advances().refundView(r.refund)),
+        unused: { minor: r.unusedMinor.toString(), currency: r.advance.currency },
+        duplicate: r.duplicate,
+      };
+    }),
+    // ── DEC-35z+ COL: the COL- document of a collection / receipt (owner, read-only) ──────────────────
+    getCollectionReceipt: wrap("getCollectionReceipt", (p) => collectionDto(collectionNo(p))),
+    printCollectionReceipt: wrapAsync("printCollectionReceipt", async (p) => {
+      const doc = collectionDto(collectionNo(p)); // exists, and the caller is the owner — before any window opens
+      if (!options.printCollectionReceipt) return { status: "unavailable" as const };
+      return { status: await options.printCollectionReceipt(doc) };
+    }),
+    saveCollectionReceiptPdf: wrapAsync("saveCollectionReceiptPdf", async (p) => {
+      const doc = collectionDto(collectionNo(p));
+      if (!options.saveCollectionReceiptPdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveCollectionReceiptPdf(doc);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
+    // A reprint loads the SAME REF- by id and writes nothing; a print/PDF failure never touches the refund.
+    printAdvanceRefund: wrapAsync("printAdvanceRefund", async (p) => {
+      const o = exactObject(p, ["refundId"]);
+      const id = str(o.refundId, "refundId", 100);
+      advances().refundDocument(id); // exists, and the caller is the owner — before any window opens
+      if (!options.printAdvanceRefund) return { status: "unavailable" as const };
+      return { status: await options.printAdvanceRefund(id) };
+    }),
+    saveAdvanceRefundPdf: wrapAsync("saveAdvanceRefundPdf", async (p) => {
+      const o = exactObject(p, ["refundId"]);
+      const id = str(o.refundId, "refundId", 100);
+      advances().refundDocument(id);
+      if (!options.saveAdvanceRefundPdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveAdvanceRefundPdf(id);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
+    readInvoicePhoto: wrapAsync("readInvoicePhoto", async (p) => {
+      noPayload(p);
+      if (!options.readInvoicePhoto) return { status: "unavailable" as const };
+      const reading = await options.readInvoicePhoto();
+      if (reading === null) return { status: "cancelled" as const };
+      const currency = service.getCatalog().currency;
+      const exponent = currency === "LBP" ? 0 : 2;
+      const r = rowsFromPositioned(reading.lines, exponent);
+      log.info("invoice-photo-read", { rows: r.rows.length, unexplained: r.unexplained.length, ms: reading.ms });
+      return {
+        status: "read" as const,
+        currency,
+        rows: r.rows.map((x) => ({
+          id: x.id,
+          rawText: x.rawText,
+          name: x.name,
+          quantityMilli: x.quantityMilli,
+          supplierPriceMinor: x.supplierPriceMinor === null ? null : x.supplierPriceMinor.toString(),
+          lineTotalMinor: x.lineTotalMinor === null ? null : x.lineTotalMinor.toString(),
+          arithmeticOk: x.arithmeticOk,
+          relation: x.relation,
+          discountPercent: x.discountPercent,
+          y: x.y,
+          crop: reading.crop(x.y, x.h),
+          readings: x.readings,
+          alternativeNames: x.alternativeNames,
+          warnings: x.warnings,
+        })),
+        unexplained: r.unexplained.map((u) => ({ text: u.text, y: u.y, crop: reading.crop(u.y, u.h) })),
+        ms: reading.ms,
+        preview: reading.preview,
+      };
+    }),
   };
+
+  function collectionNo(p: unknown): number {
+    const o = exactObject(p, ["collectionNo"]);
+    if (typeof o.collectionNo !== "number" || !Number.isSafeInteger(o.collectionNo) || o.collectionNo <= 0) invalid("'collectionNo' must be a positive whole number");
+    return o.collectionNo as number;
+  }
+
+  /** One COL- document, from the ledger, named by each debt's own document. No arithmetic. */
+  function collectionDto(docNo: number): CollectionDocumentDto {
+    const v = ledger().collectionDocument(docNo);
+    const channel: CollectionDocumentDto["channel"] =
+      v.method === "cash" ? "cash" : v.method === "external" ? (v.provider === "bank_transfer" ? "bank_transfer" : "whish") : v.method === "card" ? "card" : "other";
+    return {
+      docNo: v.docNo,
+      number: formatCollectionNo(v.docNo),
+      customerId: v.customerId,
+      customerName: v.customerName,
+      total: { minor: v.totalMinor.toString(), currency: v.currency },
+      channel,
+      reference: v.reference,
+      lines: v.lines.map((l) => ({
+        obligationId: l.obligation.id,
+        debtDocument: statementDocument(l.obligation),
+        amount: { minor: l.amountMinor.toString(), currency: v.currency },
+      })),
+      receivedByName: v.receivedByName,
+      receivedAt: v.receivedAt,
+      businessDate: v.businessDate,
+    };
+  }
+
+  /** One application, named by the debt's own document — the same words the debt statement uses. */
+  function applicationDto(a: AdvanceApplicationRecord) {
+    const debt = advances().debtOf(a.obligationId);
+    return {
+      id: a.id,
+      obligationId: a.obligationId,
+      debtDocument: debt ? statementDocument(debt) : ({ kind: "unresolved" } as const),
+      amount: { minor: a.amountMinor.toString(), currency: a.currency },
+      appliedAt: a.appliedAt,
+      appliedByName: advances().operatorName(a.appliedBy),
+    };
+  }
+
+  function dailyMoneyDto(r: DailyMoneyReport) {
+    const ch = (m: ChannelAmounts) => Object.fromEntries(MONEY_CHANNELS.map((c) => [c, m[c].toString()])) as Record<(typeof MONEY_CHANNELS)[number], string>;
+    const m = (v: bigint) => ({ minor: v.toString(), currency: r.currency });
+    const part = (x: MoneyPart) => ({ count: x.count, byChannel: ch(x.byChannel), total: m(x.totalMinor) });
+    return {
+      date: r.date,
+      currency: r.currency,
+      sales: {
+        count: r.sales.count,
+        voidedCount: r.sales.voidedCount,
+        revenue: m(r.sales.revenueMinor),
+        voidedTotal: m(r.sales.voidedTotalMinor),
+        onAccount: m(r.sales.onAccountMinor),
+        received: part(r.sales.received),
+        voidedReceived: part(r.sales.voidedReceived),
+      },
+      collections: part(r.collections),
+      advances: part(r.advances),
+      corrections: part(r.corrections),
+      moneyIn: part(r.moneyIn),
+      refunds: part(r.refunds),
+      supplierPayments: part(r.supplierPayments),
+      moneyOut: part(r.moneyOut),
+      net: { byChannel: ch(r.net.byChannel), total: m(r.net.totalMinor) },
+      advanceApplied: part(r.advanceApplied),
+      byOperator: r.byOperator.map((o) => ({
+        operatorId: o.operatorId,
+        operatorName: o.operatorName,
+        sales: ch(o.sales),
+        voidedSales: ch(o.voidedSales),
+        collections: ch(o.collections),
+        advances: ch(o.advances),
+        corrections: ch(o.corrections),
+        moneyIn: ch(o.moneyIn),
+        moneyOut: ch(o.moneyOut),
+      })),
+      correctionsBy: r.correctionsBy.map((c) => ({ ...c })),
+      lateVoids: r.lateVoids.map((v) => ({ saleId: v.saleId, saleDate: v.saleDate, total: { minor: v.totalMinor.toString(), currency: v.currency } })),
+    };
+  }
+
+  function advances(): AdvanceService {
+    if (!options.advances) throw new DomainError("NOT_AVAILABLE", "Customer advances are not available on this terminal");
+    return options.advances;
+  }
 
   // ── Shapes used by the invoice channels only ─────────────────────────────────────────────────
 
@@ -1857,6 +2226,12 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   function toStatementDto(customer: PartyRow, s: ReturnType<LedgerService["statementFor"]>): CustomerStatementDto {
     // Migration 18: which settlements are SHARES of a receipt (display only; a share is not money).
     const shares = ledger().receiptsOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)));
+    // DEC-35x: which settlements were paid FROM an advance (display only; not money of that day).
+    // DEC-35z+ COL: the COL- behind each settlement (own, or its receipt's). Display only.
+    const colNos = ledger().collectionNumbersOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)));
+    const fromAdvance = options.advances
+      ? options.advances.advancesOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)))
+      : new Map<string, { advanceId: string; number: string }>();
     return {
       customer: toCustomerDto(customer),
       // ACC-2: built HERE, so every channel that returns a statement (read, and the refreshed one
@@ -1912,6 +2287,8 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
                   total: { minor: r.amountMinor.toString(), currency: r.currency },
                 }
               : null)(shares.get(st.id)),
+          advance: fromAdvance.get(st.id) ?? null,
+          collection: ((n) => (n === undefined ? null : { docNo: n, number: formatCollectionNo(n) }))(colNos.get(st.id)),
         })),
       })),
       // One entry per currency, in a stable order so the screen does not reshuffle between reads.
@@ -2034,6 +2411,61 @@ export function syncHandlers(
     };
   }
   return out;
+}
+
+/** An advance as the ledger holds it, bigints as strings. No arithmetic. */
+export function advanceDto(v: AdvanceView): AdvanceDto {
+  const a = v.record;
+  return {
+    id: a.id,
+    docNo: a.docNo,
+    number: v.number,
+    customerId: a.customerId,
+    customerName: v.customerName,
+    amount: { minor: a.amountMinor.toString(), currency: a.currency },
+    channel: a.method === "external" ? "whish" : "cash",
+    reference: a.reference,
+    receivedByName: v.receivedByName,
+    receivedAt: a.receivedAt,
+    businessDate: a.businessDate,
+    origin: a.origin ?? "receipt",
+    correctsNumber: v.correctsNumber,
+  };
+}
+
+export function correctionDto(c: AdvanceCorrectionView | null): AdvanceCorrectionDto | null {
+  if (!c) return null;
+  return {
+    kind: c.record.kind,
+    reason: c.record.reason,
+    fundsNotReceived: c.record.fundsNotReceived,
+    correctedByName: c.correctedByName,
+    correctedAt: c.record.correctedAt,
+    businessDate: c.record.businessDate,
+    successorNumber: c.successorNumber,
+  };
+}
+
+/** One REF- document as the ledger holds it (always cash), bigints as strings. No arithmetic. */
+export function refundDto(v: AdvanceRefundView): AdvanceRefundDto {
+  const r = v.record;
+  const adv = advanceDto(v.advance);
+  return {
+    id: r.id,
+    docNo: r.docNo,
+    number: v.number,
+    advanceId: r.advanceId,
+    advanceNumber: adv.number,
+    advanceChannel: adv.channel,
+    advanceReference: adv.reference,
+    customerName: adv.customerName,
+    amount: { minor: r.amountMinor.toString(), currency: adv.amount.currency },
+    method: "cash",
+    reason: r.reason,
+    refundedByName: v.refundedByName,
+    refundedAt: r.refundedAt,
+    businessDate: r.businessDate,
+  };
 }
 
 /** Every handler maps to exactly one fixed channel string. */

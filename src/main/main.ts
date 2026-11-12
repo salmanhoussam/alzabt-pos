@@ -23,6 +23,15 @@ import { makeInvoiceCreditPort } from "../application/invoiceCreditPort";
 import { InvoiceService } from "../application/invoiceService";
 import { PartyService } from "../application/partyService";
 import { LedgerService } from "../application/ledgerService";
+import { AdvanceService } from "../application/advanceService";
+import { DailyMoneyService } from "../application/dailyMoneyService";
+import { DailyMoneyRepository } from "../persistence/dailyMoneyRepository";
+import { AdvanceRepository } from "../persistence/advanceRepository";
+import { renderAdvanceDocument } from "./advanceDocument";
+import { advanceDto, correctionDto, refundDto } from "./ipcHandlers";
+import { renderRefundDocument } from "./refundDocument";
+import { renderCollectionDocument } from "./collectionDocument";
+import type { CollectionDocumentDto } from "../shared/ipcContract";
 import { PartyRepository } from "../persistence/partyRepository";
 import { LedgerRepository } from "../persistence/ledgerRepository";
 import { ReceiptRepository } from "../persistence/receiptRepository";
@@ -51,6 +60,7 @@ import { OperatorService } from "../application/operatorService";
 import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
 import { toInvoiceViewDto } from "../shared/dto";
+import { readInvoiceImage } from "./invoiceOcr";
 import { renderInvoiceDocument } from "./invoiceDocument";
 import {
   type InvoiceIssuerLogo,
@@ -80,6 +90,7 @@ let db: Db | null = null;
 let invoices: InvoiceService | null = null;
 let parties: PartyService | null = null;
 let ledgerService: LedgerService | null = null;
+let advanceService: AdvanceService | null = null;
 let log: Logger = nullLogger;
 
 /**
@@ -512,6 +523,150 @@ async function saveInvoicePdfFile(
   return { fileName: basename(path), logoMissing, logoUnverified };
 }
 
+/**
+ * The ADV- document's HTML, loaded from the ledger BY ID (same rules as the invoice: the renderer
+ * never supplies markup). The shop name is read best-effort; without a profile the receipt still
+ * prints, with the title alone.
+ */
+function advanceHtml(advanceId: string): { html: string; number: string } {
+  if (!advanceService) throw new DomainError("NOT_AVAILABLE", "Customer advances are not available");
+  const doc = advanceService.document(advanceId);
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  const html = renderAdvanceDocument({
+    advance: advanceDto(doc.advance),
+    correction: correctionDto(doc.correction),
+    shopName,
+    timeZone: FIXTURE_TERMINAL.timeZone,
+  });
+  return { html, number: doc.advance.number };
+}
+
+async function withPrintWindow<T>(html: string, name: string, fn: (win: BrowserWindow) => Promise<T>): Promise<T> {
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
+  });
+  const staged = stagePrintable(html, name);
+  try {
+    await win.loadURL(staged.url);
+    return await fn(win);
+  } finally {
+    win.destroy();
+    staged.cleanup();
+  }
+}
+
+async function printAdvanceDocument(advanceId: string): Promise<"printed" | "cancelled"> {
+  const { html, number } = advanceHtml(advanceId);
+  const printed = await withPrintWindow(html, "advance-print", (win) =>
+    new Promise<boolean>((done) => win.webContents.print({ silent: false, printBackground: true }, (ok) => done(ok))),
+  );
+  log.info("advance-printed", { id: advanceId, number, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveAdvancePdfFile(advanceId: string): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const { html, number } = advanceHtml(advanceId);
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save advance receipt PDF",
+    defaultPath: join(app.getPath("documents"), `${number}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(html, "advance-pdf", (win) =>
+    win.webContents.printToPDF({ pageSize: "A5", printBackground: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } }),
+  );
+  writeFileSync(path, pdf);
+  log.info("advance-pdf-saved", { id: advanceId, number, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
+/**
+ * DEC-35z+ — the REF- document's HTML, loaded from the ledger BY ID (owner-checked by the service).
+ * A print or PDF failure here never touches the refund: the money row committed before any window opened.
+ */
+function refundHtml(refundId: string): { html: string; number: string } {
+  if (!advanceService) throw new DomainError("NOT_AVAILABLE", "Customer advances are not available");
+  const view = advanceService.refundDocument(refundId);
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  return { html: renderRefundDocument({ refund: refundDto(view), shopName, timeZone: FIXTURE_TERMINAL.timeZone }), number: view.number };
+}
+
+async function printRefundDocument(refundId: string): Promise<"printed" | "cancelled"> {
+  const { html, number } = refundHtml(refundId);
+  const printed = await withPrintWindow(html, "refund-print", (win) =>
+    new Promise<boolean>((done) => win.webContents.print({ silent: false, printBackground: true }, (ok) => done(ok))),
+  );
+  log.info("refund-printed", { id: refundId, number, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveRefundPdfFile(refundId: string): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const { html, number } = refundHtml(refundId);
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save refund receipt PDF",
+    defaultPath: join(app.getPath("documents"), `${number}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(html, "refund-pdf", (win) =>
+    win.webContents.printToPDF({ pageSize: "A5", printBackground: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } }),
+  );
+  writeFileSync(path, pdf);
+  log.info("refund-pdf-saved", { id: refundId, number, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
+/**
+ * DEC-35z+ COL — the COL- document's HTML from the DTO the IPC handler read from the ledger BY NUMBER
+ * (owner-checked there). Printing records nothing; a print/PDF failure never touches the payment.
+ */
+function collectionHtml(doc: CollectionDocumentDto): string {
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  return renderCollectionDocument({ doc, shopName, timeZone: FIXTURE_TERMINAL.timeZone });
+}
+
+async function printCollectionDocument(doc: CollectionDocumentDto): Promise<"printed" | "cancelled"> {
+  const printed = await withPrintWindow(collectionHtml(doc), "collection-print", (win) =>
+    new Promise<boolean>((done) => win.webContents.print({ silent: false, printBackground: true }, (ok) => done(ok))),
+  );
+  log.info("collection-printed", { number: doc.number, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveCollectionPdfFile(doc: CollectionDocumentDto): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save collection receipt PDF",
+    defaultPath: join(app.getPath("documents"), `${doc.number}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(collectionHtml(doc), "collection-pdf", (win) =>
+    win.webContents.printToPDF({ pageSize: "A5", printBackground: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } }),
+  );
+  writeFileSync(path, pdf);
+  log.info("collection-pdf-saved", { number: doc.number, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
 /** Native "save as" + a verified consistent snapshot of the live ledger (never a raw file copy). */
 function exportBackup(ledgerPath: string): SavedFile | null {
   if (!mainWindow || !db) return null;
@@ -882,6 +1037,42 @@ function startTill(): void {
   });
   creditSaleServices = { parties, ledger: ledgerService };
 
+  // Customer advances (migration 20): the SAME connection, the SAME transaction provider and the
+  // SAME live actor as the ledger above. The service owns who may record (owner + cashier) and who
+  // may correct (owner); the triggers enforce both again.
+  advanceService = new AdvanceService({
+    advances: new AdvanceRepository(db),
+    ledger: new LedgerRepository(db),
+    parties: new PartyRepository(db),
+    actor: () => {
+      const cashier = service.currentCashier();
+      if (!cashier) return null;
+      const role = service.currentRole();
+      return role === null ? null : { id: cashier.id, name: cashier.name, role };
+    },
+    transact: (fn) => {
+      if (!db) throw new Error("ledger is not open");
+      restoreLock.assertOpen();
+      return db.transaction(fn).immediate();
+    },
+    terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
+    // DEC-35x: the till's own owner-only credit sale, run inside the advance transaction.
+    creditSale: (input) => service.createCustomerCreditSale(input),
+  });
+
+  // DAILY MONEY IN / OUT (DEC-35x): read-only, the SAME connection and the SAME live actor. No
+  // transaction provider — it never writes.
+  const dailyMoney = new DailyMoneyService({
+    repository: new DailyMoneyRepository(db),
+    actor: () => {
+      const cashier = service.currentCashier();
+      if (!cashier) return null;
+      const role = service.currentRole();
+      return role === null ? null : { id: cashier.id, role };
+    },
+    terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
+  });
+
   // The phone bridge reads this through its getter when a session starts.
   posService = service;
 
@@ -894,7 +1085,26 @@ function startTill(): void {
     invoices,
     parties,
     ledger: ledgerService,
+    advances: advanceService,
+    dailyMoney,
+    printAdvance: printAdvanceDocument,
+    saveAdvancePdf: saveAdvancePdfFile,
+    printAdvanceRefund: printRefundDocument,
+    saveAdvanceRefundPdf: saveRefundPdfFile,
+    printCollectionReceipt: printCollectionDocument,
+    saveCollectionReceiptPdf: saveCollectionPdfFile,
     pickInvoiceLogo,
+    // PHOTO-INVOICE-TO-ITEMS: picker + OFFLINE OCR in main; returns lines only, writes nothing.
+    readInvoicePhoto: async () => {
+      if (!mainWindow) return null;
+      const picked = dialog.showOpenDialogSync(mainWindow, {
+        title: "Choose a supplier invoice photo",
+        properties: ["openFile"],
+        filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png"] }],
+      });
+      if (!picked?.[0]) return null;
+      return readInvoiceImage(picked[0], userData);
+    },
     pickProductPhoto,
     printInvoice: printInvoiceDocument,
     saveInvoicePdf: saveInvoicePdfFile,
@@ -950,7 +1160,25 @@ function startTill(): void {
   if (notice) {
     const win = mainWindow;
     win.once("ready-to-show", () => {
-      void dialog.showMessageBox(win, { type: restore.kind === "restored" ? "info" : "warning", title: notice.title, message: notice.title, detail: notice.body, buttons: ["OK"], noLink: true });
+      // Diagnostics only (DEC-35y review): WHEN the notice was handed to Windows and when it was closed,
+      // so a test that does not see it can tell "never shown" from "shown late" or "not enumerated".
+      // DEC-35zz+ investigation (diagnostics only, opt-in): the window's state when the box is handed over and
+      // when it returns, which button answered it, and every hide / blur / minimize / close of the main
+      // window while it is open — so "who closed the notice" is answered from evidence, not guessed.
+      const winState = () => (win.isDestroyed() ? { destroyed: true } : { visible: win.isVisible(), focused: win.isFocused(), minimized: win.isMinimized() });
+      diag("restore-notice-shown", { kind: restore.kind, ...winState() });
+      const watch = ["blur", "focus", "hide", "show", "minimize", "restore", "close"] as const;
+      const listeners = watch.map((ev) => {
+        const fn = () => diag(`restore-notice-window-${ev}`, { kind: restore.kind });
+        win.on(ev as "blur", fn);
+        return [ev, fn] as const;
+      });
+      void dialog
+        .showMessageBox(win, { type: restore.kind === "restored" ? "info" : "warning", title: notice.title, message: notice.title, detail: notice.body, buttons: ["OK"], noLink: true })
+        .then((r) => {
+          diag("restore-notice-closed", { kind: restore.kind, response: r.response, ...winState() });
+          if (!win.isDestroyed()) for (const [ev, fn] of listeners) win.removeListener(ev as "blur", fn);
+        });
     });
   }
 

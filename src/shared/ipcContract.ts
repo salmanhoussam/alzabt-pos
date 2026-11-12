@@ -119,6 +119,25 @@ export const CHANNELS = {
   pickInvoiceLogo: "pos:pickInvoiceLogo",
   printInvoice: "pos:printInvoice",
   saveInvoicePdf: "pos:saveInvoicePdf",
+  recordAdvance: "pos:recordAdvance",
+  pendingAdvances: "pos:pendingAdvances",
+  finishAdvance: "pos:finishAdvance",
+  closeAdvance: "pos:closeAdvance",
+  acknowledgeAdvance: "pos:acknowledgeAdvance",
+  getAdvanceStatement: "pos:getAdvanceStatement",
+  getDailyMoney: "pos:getDailyMoney",
+  correctAdvance: "pos:correctAdvance",
+  applyAdvanceToDebt: "pos:applyAdvanceToDebt",
+  sellOnAdvance: "pos:sellOnAdvance",
+  printAdvance: "pos:printAdvance",
+  saveAdvancePdf: "pos:saveAdvancePdf",
+  refundAdvance: "pos:refundAdvance",
+  printAdvanceRefund: "pos:printAdvanceRefund",
+  saveAdvanceRefundPdf: "pos:saveAdvanceRefundPdf",
+  getCollectionReceipt: "pos:getCollectionReceipt",
+  printCollectionReceipt: "pos:printCollectionReceipt",
+  saveCollectionReceiptPdf: "pos:saveCollectionReceiptPdf",
+  readInvoicePhoto: "pos:readInvoicePhoto",
 } as const;
 
 export type ChannelName = keyof typeof CHANNELS;
@@ -343,6 +362,57 @@ export interface TodaySalesDto {
   readonly netSales: MoneyDto;
 }
 
+/** DAILY MONEY IN / OUT — one channel's amounts (minor units, as text). Cash and Whish are always present. */
+export type DailyMoneyChannelDto = "cash" | "whish" | "bank_transfer" | "external" | "card" | "other" | "unspecified";
+export type ChannelAmountsDto = Readonly<Record<DailyMoneyChannelDto, string>>;
+
+export interface MoneyPartDto {
+  readonly count: number;
+  readonly byChannel: ChannelAmountsDto;
+  readonly total: MoneyDto;
+}
+
+export interface DailyMoneyOperatorDto {
+  readonly operatorId: string;
+  readonly operatorName: string;
+  readonly sales: ChannelAmountsDto;
+  readonly voidedSales: ChannelAmountsDto;
+  readonly collections: ChannelAmountsDto;
+  readonly advances: ChannelAmountsDto;
+  readonly corrections: ChannelAmountsDto;
+  readonly moneyIn: ChannelAmountsDto;
+  readonly moneyOut: ChannelAmountsDto;
+}
+
+/** Owner only. Every figure is folded by main from immutable ledger rows of that business day. */
+export interface DailyMoneyDto {
+  readonly date: string;
+  readonly currency: string;
+  readonly sales: {
+    readonly count: number;
+    readonly voidedCount: number;
+    readonly revenue: MoneyDto;
+    readonly voidedTotal: MoneyDto;
+    readonly onAccount: MoneyDto;
+    readonly received: MoneyPartDto;
+    readonly voidedReceived: MoneyPartDto;
+  };
+  readonly collections: MoneyPartDto;
+  readonly advances: MoneyPartDto;
+  readonly corrections: MoneyPartDto;
+  readonly moneyIn: MoneyPartDto;
+  readonly refunds: MoneyPartDto;
+  readonly supplierPayments: MoneyPartDto;
+  readonly moneyOut: MoneyPartDto;
+  readonly net: { readonly byChannel: ChannelAmountsDto; readonly total: MoneyDto };
+  readonly advanceApplied: MoneyPartDto;
+  readonly byOperator: readonly DailyMoneyOperatorDto[];
+  /** Who RECORDED the day's corrections — audit only; the money stays with the original receiver. */
+  readonly correctionsBy: ReadonlyArray<{ readonly operatorId: string; readonly operatorName: string; readonly count: number }>;
+  /** Voids dated today for a sale of another day (foreign data). Not applied to any day's money. */
+  readonly lateVoids: ReadonlyArray<{ readonly saleId: string; readonly saleDate: string; readonly total: MoneyDto }>;
+}
+
 export interface LoginRequest {
   readonly cashierId: string;
   readonly pin: string;
@@ -399,6 +469,28 @@ export interface CreateCustomerCreditSaleResponse {
   readonly sale: SaleDto;
   /** The receivable posted with the sale, in the same transaction. */
   readonly obligationId: string;
+  readonly duplicate: boolean;
+}
+
+/** DEC-35x — a NEW sale on the customer's account, paid (part or all) from that customer's advance. Owner only. */
+export interface SellOnAdvanceRequest {
+  readonly idempotencyKey: string;
+  readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
+  readonly expectedTotalMinor: string;
+  readonly customerId: string;
+  readonly advanceId: string;
+  /** How much of the advance pays this sale; the rest of the total stays the customer's debt. */
+  readonly amountMinor: string;
+}
+
+export interface SellOnAdvanceResponse {
+  readonly sale: SaleDto;
+  readonly obligationId: string;
+  readonly advanceNumber: string;
+  /** Read back AFTER the commit. */
+  readonly applied: MoneyDto;
+  readonly unused: MoneyDto;
+  readonly debtOutstanding: MoneyDto;
   readonly duplicate: boolean;
 }
 
@@ -840,6 +932,40 @@ export interface StatementSettlementDto {
    * is never additional money. Null for every direct collection and every historical row.
    */
   readonly receipt: StatementReceiptDto | null;
+  /**
+   * DEC-35x. Set when this row was paid FROM a customer advance: it is NOT money received that day
+   * (the money arrived as the ADV-), so the screen names the advance instead of a payment channel.
+   */
+  readonly advance: { readonly advanceId: string; readonly number: string } | null;
+  /**
+   * DEC-35z+ COL. The COL- receipt behind this money: the settlement's own (a direct collection) or its
+   * receipt's (a share of one transfer). NULL for an advance application, and for every collection
+   * recorded before COL existed — history is never numbered retroactively.
+   */
+  readonly collection: { readonly docNo: number; readonly number: string } | null;
+}
+
+/** DEC-35z+ COL — one COL- document as main read it from the ledger. Every figure is the ledger's own. */
+export interface CollectionDocumentDto {
+  readonly docNo: number;
+  /** `COL-000001` — formatted in main. */
+  readonly number: string;
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly total: MoneyDto;
+  /** Where the money came in. A NEW collection is cash or whish (P3); history may carry another. */
+  readonly channel: "cash" | "whish" | "bank_transfer" | "card" | "other";
+  /** The ORIGINAL reference (Whish), registered once with the payment; never re-registered by a document. */
+  readonly reference: string | null;
+  /** The debt(s) this money paid, each by its own document. */
+  readonly lines: ReadonlyArray<{ readonly obligationId: string; readonly debtDocument: StatementDocumentDto; readonly amount: MoneyDto }>;
+  readonly receivedByName: string;
+  readonly receivedAt: string;
+  readonly businessDate: string;
+}
+
+export interface CollectionNoRequest {
+  readonly collectionNo: number;
 }
 
 /** The receipt a settlement is a share of (migration 18). Display only; the amount is the WHOLE receipt. */
@@ -1054,6 +1180,8 @@ export interface PendingReceiptDto {
 
 export interface AllocatedReceiptResponse {
   readonly receipt: ReceiptDto;
+  /** DEC-35z+ COL: the ONE COL- document of this transfer (the same one on a replay). */
+  readonly collection: CollectionDocumentDto | null;
   readonly duplicate: boolean;
   readonly statement: CustomerStatementDto;
 }
@@ -1071,6 +1199,8 @@ export interface AllocatedReceiptResponse {
  */
 export interface RecordPaymentResponse {
   readonly settlement: StatementSettlementDto;
+  /** DEC-35z+ COL: the COL- document of this collection (the same one on a replay; null only for history). */
+  readonly collection: CollectionDocumentDto | null;
   readonly duplicate: boolean;
   readonly statement: CustomerStatementDto;
 }
@@ -1566,6 +1696,218 @@ export type SaveInvoicePdfResponse =
   | { readonly status: "cancelled" }
   | { readonly status: "saved"; readonly fileName: string; readonly logoMissing?: boolean; readonly logoUnverified?: boolean };
 
+// ── Customer advances (migration 20: ADV-RECORD-CASH-WHISH + G2 correction) ──────────────────────
+
+/** A NEW receipt of money is Cash or Whish Money only (P3 / DEC-35). */
+export type AdvanceChannelDto = "cash" | "whish";
+
+/** One ADV- document as main read it from the ledger. Every figure is the ledger's own. */
+export interface AdvanceDto {
+  readonly id: string;
+  readonly docNo: number;
+  /** `ADV-000001` — formatted in main, never by the renderer. */
+  readonly number: string;
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly amount: MoneyDto;
+  readonly channel: AdvanceChannelDto;
+  readonly reference: string | null;
+  /** WHO really received the money (for a correction: copied from the original). */
+  readonly receivedByName: string;
+  readonly receivedAt: string;
+  readonly businessDate: string;
+  /** 'correction' = a restatement of `correctsNumber`, NOT a new receipt of money. */
+  readonly origin: "receipt" | "correction";
+  readonly correctsNumber: string | null;
+}
+
+export interface RecordAdvanceRequest {
+  readonly customerId: string;
+  readonly amountMinor: string;
+  readonly channel: AdvanceChannelDto;
+  readonly reference?: string | null;
+  readonly fundsConfirmed?: boolean;
+  readonly idempotencyKey: string;
+}
+
+export interface RecordAdvanceResponse {
+  readonly advance: AdvanceDto;
+  /** True when this exact request had already been recorded: nothing new was written. */
+  readonly duplicate: boolean;
+}
+
+/** An advance whose outcome the operator has not seen yet — answered from the ledger, never guessed. */
+export type PendingAdvanceDto =
+  | { readonly status: "recorded"; readonly key: string; readonly advance: AdvanceDto }
+  | {
+      readonly status: "open" | "closed";
+      readonly key: string;
+      readonly customerId: string;
+      readonly customerName: string;
+      readonly amount: MoneyDto;
+      readonly channel: AdvanceChannelDto;
+      readonly reference: string | null;
+      readonly createdAt: string;
+    }
+  | { readonly status: "unknown"; readonly key: string; readonly createdAt: string };
+
+export interface AdvanceKeyRequest {
+  readonly idempotencyKey: string;
+}
+
+export interface AdvanceIdRequest {
+  readonly advanceId: string;
+}
+
+export interface AdvanceCorrectionDto {
+  readonly kind: "not_received" | "replaced";
+  readonly reason: string;
+  readonly fundsNotReceived: boolean;
+  readonly correctedByName: string;
+  readonly correctedAt: string;
+  readonly businessDate: string;
+  /** For 'replaced': the successor's ADV number. */
+  readonly successorNumber: string | null;
+}
+
+export interface AdvanceStatementLineDto {
+  readonly advance: AdvanceDto;
+  /** The live, applicable balance — 0 once corrected. Never netted against debt (D2). */
+  readonly unused: MoneyDto;
+  readonly correction: AdvanceCorrectionDto | null;
+  /** DEC-35x: what this advance paid, debt by debt (oldest first). Not money received. */
+  readonly applications: readonly AdvanceApplicationDto[];
+  /** DEC-35z+: cash handed back from this advance, REF- by REF- (oldest first). Money OUT. */
+  readonly refunds: readonly AdvanceRefundDto[];
+}
+
+/** One REF- document as main read it from the ledger. Always cash (migration 19 CHECK). */
+export interface AdvanceRefundDto {
+  readonly id: string;
+  readonly docNo: number;
+  /** `REF-000001` — formatted in main. */
+  readonly number: string;
+  readonly advanceId: string;
+  readonly advanceNumber: string;
+  /** The ADV's own channel: a Whish ADV is still refunded in CASH; the document says so. */
+  readonly advanceChannel: AdvanceChannelDto;
+  readonly advanceReference: string | null;
+  readonly customerName: string;
+  readonly amount: MoneyDto;
+  readonly method: "cash";
+  readonly reason: string;
+  readonly refundedByName: string;
+  readonly refundedAt: string;
+  readonly businessDate: string;
+}
+
+export interface RefundAdvanceRequest {
+  readonly advanceId: string;
+  readonly amountMinor: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+}
+
+export interface RefundAdvanceResponse {
+  readonly refund: AdvanceRefundDto;
+  /** The advance's balance read back AFTER the commit. */
+  readonly unused: MoneyDto;
+  /** True when this exact request had already been recorded: nothing new was written. */
+  readonly duplicate: boolean;
+}
+
+export interface AdvanceRefundIdRequest {
+  readonly refundId: string;
+}
+
+export interface AdvanceApplicationDto {
+  readonly id: string;
+  readonly obligationId: string;
+  /** The debt's own document (receipt number / invoice / manual reference), as the debt statement shows it. */
+  readonly debtDocument: StatementDocumentDto;
+  readonly amount: MoneyDto;
+  readonly appliedAt: string;
+  readonly appliedByName: string;
+}
+
+export interface ApplyAdvanceRequest {
+  readonly advanceId: string;
+  readonly obligationId: string;
+  readonly amountMinor: string;
+  readonly idempotencyKey: string;
+}
+
+export interface ApplyAdvanceResponse {
+  readonly application: AdvanceApplicationDto;
+  readonly advanceNumber: string;
+  /** Read back AFTER the commit. */
+  readonly unused: MoneyDto;
+  readonly debtOutstanding: MoneyDto;
+  readonly duplicate: boolean;
+}
+
+export interface AdvanceStatementDto {
+  readonly customerId: string;
+  readonly lines: readonly AdvanceStatementLineDto[];
+}
+
+export interface CorrectAdvanceRequest {
+  readonly advanceId: string;
+  readonly kind: "not_received" | "replaced";
+  readonly reason: string;
+  readonly confirmNotReceived?: boolean;
+  readonly customerId?: string;
+  readonly amountMinor?: string;
+  readonly channel?: AdvanceChannelDto;
+  readonly reference?: string | null;
+  readonly fundsConfirmed?: boolean;
+  readonly idempotencyKey: string;
+}
+
+export interface CorrectAdvanceResponse {
+  readonly original: AdvanceDto;
+  readonly successor: AdvanceDto | null;
+  readonly correction: AdvanceCorrectionDto;
+  readonly duplicate: boolean;
+}
+
+export type PrintAdvanceResponse = { readonly status: "printed" | "cancelled" | "unavailable" };
+export type SaveAdvancePdfResponse = { readonly status: "cancelled" } | { readonly status: "saved"; readonly fileName: string };
+
+// ── PHOTO-INVOICE-TO-ITEMS (offline OCR) ─────────────────────────────────────────────────────────
+/** One candidate row read from a supplier invoice photo. Money as minor-unit strings; nothing decided. */
+export interface InvoicePhotoRowDto {
+  readonly id: string;
+  readonly rawText: string;
+  readonly name: string;
+  readonly quantityMilli: number | null;
+  readonly supplierPriceMinor: string | null;
+  readonly lineTotalMinor: string | null;
+  readonly arithmeticOk: boolean;
+  /** R1 qty×price · R2 discount · R3 boxes · R4 pack — an explanation, never a proof. */
+  readonly relation: "R1" | "R2" | "R3" | "R4";
+  readonly discountPercent: number | null;
+  /** DEC-35v: where this row sits on the ORIGINAL photo, and a crop of that strip (JPEG data URL). */
+  readonly y: number;
+  readonly crop: string | null;
+  readonly readings: number;
+  readonly alternativeNames: readonly string[];
+  readonly warnings: ReadonlyArray<"CONFLICT" | "SINGLE_READING" | "NOT_PLAIN_ARITHMETIC">;
+}
+export type ReadInvoicePhotoResponse =
+  | { readonly status: "cancelled" }
+  | { readonly status: "unavailable" }
+  | {
+      readonly status: "read";
+      readonly currency: string;
+      readonly rows: readonly InvoicePhotoRowDto[];
+      /** Lines with amounts that no relation explained: for manual entry from the photo (with their crop). */
+      readonly unexplained: ReadonlyArray<{ readonly text: string; readonly y: number; readonly crop: string | null }>;
+      readonly ms: number;
+      /** The photo itself (JPEG data URL) shown beside the rows. */
+      readonly preview: string | null;
+    };
+
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
   listCashiers(): Promise<IpcResult<CashierDto[]>>;
@@ -1703,4 +2045,41 @@ export interface PosApi {
   /** The renderer sends an INVOICE ID. Main loads the frozen invoice and owns the print. */
   printInvoice(req: InvoiceIdRequest): Promise<IpcResult<PrintInvoiceResponse>>;
   saveInvoicePdf(req: InvoiceIdRequest): Promise<IpcResult<SaveInvoicePdfResponse>>;
+
+  // ── Customer advances (migration 20) ─────────────────────────────────────────────────────────
+  /** Owner OR cashier (D1). Crash-safe: intent, then ADV number + advance + resolution. */
+  recordAdvance(req: RecordAdvanceRequest): Promise<IpcResult<RecordAdvanceResponse>>;
+  /** Every advance whose outcome was not yet seen, answered from the ledger. */
+  pendingAdvances(): Promise<IpcResult<PendingAdvanceDto[]>>;
+  /** Finish an OPEN advance under its ORIGINAL key (the money really was received). */
+  finishAdvance(req: AdvanceKeyRequest): Promise<IpcResult<RecordAdvanceResponse>>;
+  /** Close an OPEN advance as NOT received (its creator or the owner). Final. */
+  closeAdvance(req: AdvanceKeyRequest): Promise<IpcResult<null>>;
+  /** The operator has SEEN the outcome. */
+  acknowledgeAdvance(req: AdvanceKeyRequest): Promise<IpcResult<null>>;
+  /** Owner only: a customer's advances with balances and corrections (separate from debt). */
+  getAdvanceStatement(req: { readonly customerId: string }): Promise<IpcResult<AdvanceStatementDto>>;
+  /** Owner only (DEC-35x): pay part or all of ONE existing debt from the SAME customer's advance. Not new money. */
+  applyAdvanceToDebt(req: ApplyAdvanceRequest): Promise<IpcResult<ApplyAdvanceResponse>>;
+  /** Owner only (DEC-35x): a new sale on account + its advance application, atomically. Not new money. */
+  sellOnAdvance(req: SellOnAdvanceRequest): Promise<IpcResult<SellOnAdvanceResponse>>;
+  /** Owner only: one business day's money in / out (date absent = today). Read-only. */
+  getDailyMoney(req: { readonly date?: string }): Promise<IpcResult<DailyMoneyDto>>;
+  /** Owner only (G2): not received, or replaced by a corrected restatement. */
+  correctAdvance(req: CorrectAdvanceRequest): Promise<IpcResult<CorrectAdvanceResponse>>;
+  /** Main loads the ADV document from the ledger by id and owns the print / the PDF. */
+  printAdvance(req: AdvanceIdRequest): Promise<IpcResult<PrintAdvanceResponse>>;
+  saveAdvancePdf(req: AdvanceIdRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
+  /** Owner only (DEC-35z+): hand back part or all of an advance's unused balance, in CASH, with a reason. Money out. */
+  refundAdvance(req: RefundAdvanceRequest): Promise<IpcResult<RefundAdvanceResponse>>;
+  /** Owner only: print / save the SAME REF- document again, loaded by id. Never writes. */
+  printAdvanceRefund(req: AdvanceRefundIdRequest): Promise<IpcResult<PrintAdvanceResponse>>;
+  saveAdvanceRefundPdf(req: AdvanceRefundIdRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
+  /** Owner only (DEC-35z+ COL): one COL- document, read from the ledger. Never writes. */
+  getCollectionReceipt(req: CollectionNoRequest): Promise<IpcResult<CollectionDocumentDto>>;
+  /** Owner only: print / save the SAME COL- again, loaded by number. Records no payment. */
+  printCollectionReceipt(req: CollectionNoRequest): Promise<IpcResult<PrintAdvanceResponse>>;
+  saveCollectionReceiptPdf(req: CollectionNoRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
+  /** Main shows the picker, reads the photo OFFLINE and returns candidate rows. Writes nothing. */
+  readInvoicePhoto(): Promise<IpcResult<ReadInvoicePhotoResponse>>;
 }

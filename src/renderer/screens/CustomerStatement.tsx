@@ -84,11 +84,19 @@ const METHOD_LABEL: Record<PaymentMethod, string> = {
   other: "pay.other",
 };
 
+import { AdvanceStatementSection } from "./AdvancePanels";
+import { CollectionReceipt } from "./CollectionReceipt";
+import type { CollectionDocumentDto as ColDoc } from "../../shared/ipcContract";
+
 interface Props {
   readonly customerId: string;
+  /** Migration 20: bumps when an advance was recorded/settled, so the advances section re-reads. */
+  readonly advanceRefresh?: number;
 }
 
-export function CustomerStatement({ customerId }: Props) {
+export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
+  // DEC-35x: an advance applied to a debt changes THIS statement too — re-read it from main.
+  const [reload, setReload] = useState(0);
   const { t } = useT();
   /** Own sentences for this slice's refusals (own codes, so the refusal-audit rules are untouched). */
   const collectErrorText = (err: unknown): string => {
@@ -122,6 +130,15 @@ export function CustomerStatement({ customerId }: Props) {
   const [payError, setPayError] = useState<string | null>(null);
   const [blocked, setBlocked] = useState(false);
   const [notice, setNotice] = useState<"done" | "duplicate" | "receipt" | null>(null);
+  // DEC-35z+ COL: the COL- receipt on screen (right after a payment, or a reprint from the statement).
+  const [colShown, setColShown] = useState<{ doc: ColDoc; duplicate: boolean } | null>(null);
+  const [colError, setColError] = useState<string | null>(null);
+  const openCollection = (docNo: number) => {
+    setColError(null);
+    call(pos().getCollectionReceipt({ collectionNo: docNo }))
+      .then((doc) => setColShown({ doc, duplicate: false }))
+      .catch((e: unknown) => setColError(errorText(e)));
+  };
   /** M17B-S1: whether the "one payment for several debts" form is open. */
   const [receiptOpen, setReceiptOpen] = useState(false);
   const [receiptBusy, setReceiptBusy] = useState(false);
@@ -242,6 +259,7 @@ export function CustomerStatement({ customerId }: Props) {
       // commit, so nothing here subtracts a payment from a balance.
       setStatement(result.statement);
       setNotice(result.duplicate ? "duplicate" : "done");
+      if (result.collection) setColShown({ doc: result.collection, duplicate: result.duplicate });
       setPayingId(null);
       setAmountText("");
       setAttemptKey(newIdempotencyKey());
@@ -349,6 +367,7 @@ export function CustomerStatement({ customerId }: Props) {
       const result = await call(pos().recordAllocatedReceipt(request));
       setStatement(result.statement);
       setNotice("receipt");
+      if (result.collection) setColShown({ doc: result.collection, duplicate: result.duplicate });
     } catch (err) {
       setPayError(collectErrorText(err));
       // The failure may have followed a COMMIT: ask the ledger, and if exactly this receipt is in it say so.
@@ -379,7 +398,7 @@ export function CustomerStatement({ customerId }: Props) {
     return () => {
       live = false;
     };
-  }, [customerId]);
+  }, [customerId, reload]);
 
   if (error !== null) {
     return (
@@ -474,6 +493,13 @@ export function CustomerStatement({ customerId }: Props) {
         </div>
       )}
 
+      {colError && (
+        <p className="error" data-testid="col-error">
+          {colError}
+        </p>
+      )}
+      {colShown && <CollectionReceipt doc={colShown.doc} duplicate={colShown.duplicate} onClose={() => setColShown(null)} />}
+
       {notice !== null && (
         /* 🔴 "ALREADY RECORDED" IS NOT "RECORDED AGAIN". A replayed key returns the committed
            payment, and the owner is told the money was taken ONCE — never that a second one
@@ -512,9 +538,10 @@ export function CustomerStatement({ customerId }: Props) {
                   openFormWithPrefill(obligationId, prefill);
                 }}
                 onAskLedger={askLedgerAboutReceipt}
-                onRecorded={(next, duplicate) => {
+                onRecorded={(next, duplicate, collection) => {
                   setStatement(next);
                   setNotice(duplicate ? "duplicate" : "receipt");
+                  if (collection) setColShown({ doc: collection, duplicate });
                   setReceiptOpen(false);
                 }}
               />
@@ -577,9 +604,16 @@ export function CustomerStatement({ customerId }: Props) {
                       {o.settlements.map((s) => (
                         <li key={s.id} data-testid="statement-settlement">
                           <bdi dir="ltr">{fmt(s.amount)}</bdi>{" "}
-                          <span className="muted small" data-testid="statement-settlement-method" data-method={s.method} data-provider={s.provider ?? ""}>
-                            {t(`statement.channel.${s.provider ?? s.method}`)}
-                          </span>{" "}
+                          {s.advance !== null ? (
+                            /* DEC-35x: paid FROM an advance — not money received that day, so no channel is named. */
+                            <span className="muted small" data-testid="statement-settlement-advance" data-advance={s.advance.number}>
+                              {t("statement.fromAdvance")} <bdi dir="ltr">{s.advance.number}</bdi>
+                            </span>
+                          ) : (
+                            <span className="muted small" data-testid="statement-settlement-method" data-method={s.method} data-provider={s.provider ?? ""}>
+                              {t(`statement.channel.${s.provider ?? s.method}`)}
+                            </span>
+                          )}{" "}
                           {s.reference !== null && (
                             <span className="muted small" data-testid="statement-settlement-reference">
                               <bdi dir="ltr">{s.reference}</bdi>{" "}
@@ -595,7 +629,20 @@ export function CustomerStatement({ customerId }: Props) {
                           )}
                           <span className="muted small">
                             <bdi dir="ltr">{s.settledAt.slice(0, 10)}</bdi>
-                          </span>
+                          </span>{" "}
+                          {s.collection !== null ? (
+                            /* DEC-35z+ COL: the receipt of the money behind this row — open / reprint, writes nothing. */
+                            <button className="link" type="button" onClick={() => openCollection(s.collection!.docNo)} data-testid="statement-settlement-col" data-col={s.collection.number}>
+                              <bdi dir="ltr">{s.collection.number}</bdi>
+                            </button>
+                          ) : (
+                            s.advance === null && (
+                              /* History before COL: never numbered retroactively; said so, not hidden. */
+                              <span className="muted small" data-testid="statement-settlement-col-none">
+                                {t("col.none")}
+                              </span>
+                            )
+                          )}
                         </li>
                       ))}
                     </ul>
@@ -821,6 +868,9 @@ export function CustomerStatement({ customerId }: Props) {
           </ul>
         )}
       </section>
+      {/* Migration 20 — the customer's ADVANCES, inside the statement (they are its figures, owner
+          only) but in their OWN section: never netted against the debt above (owner decision D2). */}
+      <AdvanceStatementSection customerId={customerId} refreshKey={advanceRefresh} onChanged={() => setReload((n) => n + 1)} />
     </section>
   );
 }

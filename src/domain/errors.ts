@@ -103,6 +103,40 @@ export type DomainErrorCode =
   // INV-PAY-METHOD (owner, 2026-11-09) — an invoice marked (part-)paid must say, at issue, how the money
   // arrived (cash, or Whish with its evidence). Its own sentence: the fix is "choose a method".
   | "INVOICE_PAYMENT_METHOD_REQUIRED"
+  // Migration 20 (DEC-35r) — an earlier advance for this customer was started and its outcome has not
+  // been settled (finished under its own key, or closed as not received). Its own sentence: the fix is
+  // "resolve the pending advance", which is not the collection's sentence.
+  | "ADVANCE_UNRESOLVED"
+  // Migration 20 G2 (DEC-35s) — correcting a mistaken advance. Each its own sentence and its own fix:
+  // the advance does not exist / was already corrected / is already used (apply or refund) / the
+  // corrected amount is ABOVE what was recorded (the extra of one transfer cannot reuse its reference:
+  // owner review, never a second receipt).
+  | "ADVANCE_NOT_FOUND"
+  | "ADVANCE_ALREADY_CORRECTED"
+  | "ADVANCE_IN_USE"
+  | "ADVANCE_CORRECTION_ABOVE_ORIGINAL"
+  // DEC-35x — APPLY AN ADVANCE TO AN EXISTING DEBT (owner only). Each its own sentence and its own fix:
+  // the debt does not exist / belongs to another customer / owes nothing (settled, or its sale voided) /
+  // is in another currency / the amount is above the advance's unused balance / above what the debt
+  // still owes / the advance was corrected (its successor, if any, is the one to apply).
+  | "ADVANCE_DEBT_NOT_FOUND"
+  | "ADVANCE_DEBT_OTHER_CUSTOMER"
+  | "ADVANCE_DEBT_NOT_OPEN"
+  | "ADVANCE_DEBT_CURRENCY"
+  | "ADVANCE_APPLY_ABOVE_BALANCE"
+  | "ADVANCE_APPLY_ABOVE_DEBT"
+  | "ADVANCE_CORRECTED_NOT_APPLICABLE"
+  // DEC-35z+ REF — a cash refund of an advance (owner only). Its own sentences, not the application's:
+  // the refund document does not exist / the amount is above the unused balance / the advance was
+  // corrected (it has no balance; a successor, if any, is the one that holds the money).
+  | "ADVANCE_REFUND_NOT_FOUND"
+  | "ADVANCE_REFUND_ABOVE_BALANCE"
+  | "ADVANCE_CORRECTED_NOT_REFUNDABLE"
+  // DEC-35z+ COL — a COL- receipt asked for by number that does not exist (never "issued" by a print).
+  | "COLLECTION_DOCUMENT_NOT_FOUND"
+  // PHOTO-INVOICE-TO-ITEMS (DEC-35u): the offline reading of an invoice photo failed. Its own code: the fix is
+  // "try again or enter the items by hand", and the POS keeps running.
+  | "OCR_FAILED"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,

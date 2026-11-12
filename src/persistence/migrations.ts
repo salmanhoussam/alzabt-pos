@@ -2694,4 +2694,183 @@ BEGIN SELECT RAISE(ABORT, 'ledger: a refund cannot be deleted'); END;
 DROP TABLE m19_assert;
 `,
   },
+  {
+    version: 20,
+    name: "advance_safety_attempts_voids",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 20 — customer-advance SAFETY (owner approval DEC-35r, 2026-11-11). Additive only: no
+    // existing row is read, changed or deleted (no writer of `customer_advances` has ever shipped).
+    //
+    // Two parts, ONE migration (owner: no migration 21): G1 the durable intent, G2 the audited correction.
+    // The two ALTERs add columns to `customer_advances`; every existing row gets origin = 'receipt' and
+    // no link, which is exactly what it is. No existing row is changed in any other way.
+    //
+    // G1 — a cash advance is never recorded twice because a reply was lost. The same shape migration 17
+    // gave collections (`collection_attempts` cannot be reused: its `obligation_id` is NOT NULL and an
+    // advance has no obligation), plus an ACKNOWLEDGEMENT, because the dangerous case for a cash advance
+    // is the lost RESPONSE: the money row committed but the receipt never reached the screen.
+    //   Tx1  the intent (key, customer, amount, channel, reference, confirmation, fingerprint) commits
+    //        BEFORE any money row can exist;
+    //   Tx2  the ADV number, the advance and the attempt's resolution commit together;
+    //   UI   the receipt is shown, then the attempt is acknowledged.
+    // An attempt that is open, or recorded but not acknowledged, is answered from the ledger after a
+    // crash — never from "same customer, same amount, same day".
+    //
+    // G2 — correcting a mistaken advance (owner approval of the corrected design, DEC-35s). Owner only,
+    // only while the advance is fully unused, one immutable correction per advance, never an edit:
+    //   not_received  the money was never received: the advance's balance becomes 0, with the owner's
+    //                 explicit declaration and reason; no fake refund, no REF document.
+    //   replaced      the money WAS received but recorded wrongly (wrong customer, Cash ↔ Whish, a
+    //                 mistyped reference, an amount recorded HIGHER than received): a successor advance
+    //                 (origin = 'correction') carries the right details, a new ADV number, and COPIES who
+    //                 received the money and when. It is not a receipt of money: the daily report shows,
+    //                 on the correction date, − the original + the successor per method (0 for a pure
+    //                 re-link); the same Whish reference is never registered twice.
+    // ORDER IS THE SAFETY: the correction row is written FIRST and the successor's trigger requires it,
+    // so a successor can never exist beside a still-live original (two balances for one payment); a
+    // 'replaced' correction whose successor never arrives fails at COMMIT (deferred foreign key).
+    // A corrected advance can never be applied or refunded (trigger), so one payment has ONE balance.
+    // An amount HIGHER than recorded is refused: the extra of the same transfer cannot reuse its
+    // reference — that case needs the owner's review outside this mechanism.
+    sql: `
+ALTER TABLE customer_advances ADD COLUMN origin TEXT NOT NULL DEFAULT 'receipt'
+  CHECK (origin IN ('receipt', 'correction'));
+ALTER TABLE customer_advances ADD COLUMN corrects_advance_id TEXT REFERENCES customer_advances (id);
+CREATE INDEX customer_advances_corrects ON customer_advances (corrects_advance_id) WHERE corrects_advance_id IS NOT NULL;
+
+CREATE TABLE advance_attempts (
+  idempotency_key     TEXT    PRIMARY KEY CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  customer_id         TEXT    NOT NULL REFERENCES parties (id),
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  amount_minor        INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  channel             TEXT    NOT NULL CHECK (channel IN ('cash', 'whish')),
+  reference           TEXT    CHECK (reference IS NULL OR (length(reference) BETWEEN 1 AND 64 AND reference = trim(reference))),
+  funds_confirmed     INTEGER CHECK (funds_confirmed IS NULL OR funds_confirmed = 1),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  created_by          TEXT    NOT NULL REFERENCES operators (id),
+  created_at          TEXT    NOT NULL CHECK (created_at GLOB
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  resolved_at         TEXT,
+  resolution          TEXT    CHECK (resolution IS NULL OR resolution IN ('recorded', 'not_recorded')),
+  acknowledged_at     TEXT,
+  CHECK ((resolved_at IS NULL) = (resolution IS NULL)),
+  CHECK (acknowledged_at IS NULL OR resolution IS NOT NULL),
+  CHECK ((channel = 'cash' AND reference IS NULL AND funds_confirmed IS NULL)
+      OR (channel = 'whish' AND reference IS NOT NULL AND funds_confirmed = 1))
+) STRICT;
+CREATE INDEX advance_attempts_pending ON advance_attempts (created_at) WHERE acknowledged_at IS NULL;
+
+-- Only the resolution and the acknowledgement may be written, each exactly once; the intent is frozen.
+CREATE TRIGGER advance_attempts_frozen BEFORE UPDATE ON advance_attempts
+WHEN NEW.idempotency_key IS NOT OLD.idempotency_key OR NEW.customer_id IS NOT OLD.customer_id
+  OR NEW.currency IS NOT OLD.currency OR NEW.amount_minor IS NOT OLD.amount_minor
+  OR NEW.channel IS NOT OLD.channel OR NEW.reference IS NOT OLD.reference
+  OR NEW.funds_confirmed IS NOT OLD.funds_confirmed OR NEW.request_fingerprint IS NOT OLD.request_fingerprint
+  OR NEW.created_by IS NOT OLD.created_by OR NEW.created_at IS NOT OLD.created_at
+  OR (OLD.resolution IS NOT NULL AND (NEW.resolution IS NOT OLD.resolution OR NEW.resolved_at IS NOT OLD.resolved_at))
+  OR (OLD.acknowledged_at IS NOT NULL AND NEW.acknowledged_at IS NOT OLD.acknowledged_at)
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance attempt can only be resolved once and acknowledged once'); END;
+CREATE TRIGGER advance_attempts_no_delete BEFORE DELETE ON advance_attempts
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance attempt cannot be deleted'); END;
+
+-- The resolution must tell the truth about the ledger.
+CREATE TRIGGER advance_attempts_resolution_truth BEFORE UPDATE ON advance_attempts
+WHEN OLD.resolution IS NULL AND (
+       (NEW.resolution = 'recorded' AND NOT EXISTS (SELECT 1 FROM customer_advances
+            WHERE idempotency_key = NEW.idempotency_key AND request_fingerprint = NEW.request_fingerprint))
+    OR (NEW.resolution = 'not_recorded' AND EXISTS (SELECT 1 FROM customer_advances
+            WHERE idempotency_key = NEW.idempotency_key)))
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance attempt resolution must match the ledger'); END;
+
+-- 🔴 BACKSTOPS ON THE MONEY ROW ITSELF. From this migration on, no advance exists without the intent
+-- that preceded it (same key, same fingerprint, still open), and a key closed as NOT recorded can
+-- never be resurrected by a late retry.
+CREATE TRIGGER customer_advances_needs_open_attempt BEFORE INSERT ON customer_advances
+WHEN NEW.origin = 'receipt' AND NOT EXISTS (SELECT 1 FROM advance_attempts
+                 WHERE idempotency_key = NEW.idempotency_key
+                   AND request_fingerprint = NEW.request_fingerprint
+                   AND customer_id = NEW.customer_id AND currency = NEW.currency
+                   AND amount_minor = NEW.amount_minor AND resolution IS NULL)
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance needs its open, identical attempt'); END;
+CREATE TRIGGER customer_advances_receipt_has_no_link BEFORE INSERT ON customer_advances
+WHEN NEW.origin = 'receipt' AND NEW.corrects_advance_id IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'ledger: only a correction advance may name the advance it corrects'); END;
+
+-- ── G2: the audited correction ─────────────────────────────────────────────────────────────────
+CREATE TABLE advance_corrections (
+  id                   TEXT    PRIMARY KEY,
+  advance_id           TEXT    NOT NULL UNIQUE REFERENCES customer_advances (id),
+  kind                 TEXT    NOT NULL CHECK (kind IN ('not_received', 'replaced')),
+  successor_advance_id TEXT    UNIQUE REFERENCES customer_advances (id) DEFERRABLE INITIALLY DEFERRED,
+  funds_not_received   INTEGER CHECK (funds_not_received IS NULL OR funds_not_received = 1),
+  reason               TEXT    NOT NULL CHECK (length(trim(reason)) BETWEEN 3 AND 200),
+  corrected_by         TEXT    NOT NULL REFERENCES operators (id),
+  corrected_at         TEXT    NOT NULL CHECK (corrected_at GLOB
+                         '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date        TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  idempotency_key      TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint  TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  CHECK ((kind = 'not_received' AND successor_advance_id IS NULL AND funds_not_received = 1)
+      OR (kind = 'replaced' AND successor_advance_id IS NOT NULL))
+) STRICT;
+CREATE INDEX advance_corrections_day ON advance_corrections (business_date);
+
+CREATE TRIGGER advance_corrections_owner_only BEFORE INSERT ON advance_corrections
+WHEN NOT EXISTS (SELECT 1 FROM operators WHERE id = NEW.corrected_by AND role = 'owner' AND is_active = 1)
+BEGIN SELECT RAISE(ABORT, 'ledger: only the owner can correct an advance'); END;
+CREATE TRIGGER advance_corrections_once BEFORE INSERT ON advance_corrections
+WHEN EXISTS (SELECT 1 FROM advance_corrections WHERE advance_id = NEW.advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: that advance is already corrected'); END;
+CREATE TRIGGER advance_corrections_unused_only BEFORE INSERT ON advance_corrections
+WHEN NOT EXISTS (SELECT 1 FROM customer_advances WHERE id = NEW.advance_id)
+  OR EXISTS (SELECT 1 FROM advance_applications WHERE advance_id = NEW.advance_id)
+  OR EXISTS (SELECT 1 FROM advance_refunds WHERE advance_id = NEW.advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: only an existing, fully unused advance can be corrected'); END;
+CREATE TRIGGER advance_corrections_successor_issued_with_it BEFORE INSERT ON advance_corrections
+WHEN NEW.kind = 'replaced' AND EXISTS (SELECT 1 FROM customer_advances WHERE id = NEW.successor_advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a correction''s successor must be issued with it'); END;
+CREATE TRIGGER advance_corrections_immutable_update BEFORE UPDATE ON advance_corrections
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance correction is immutable'); END;
+CREATE TRIGGER advance_corrections_immutable_delete BEFORE DELETE ON advance_corrections
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance correction cannot be deleted'); END;
+
+-- A successor exists ONLY under its own correction, and only as a faithful re-statement of the same
+-- received money: same currency, never more, less only with the declared not-received difference,
+-- the original receiver and moment copied, Cash or Whish, and something actually changed.
+CREATE TRIGGER customer_advances_correction_shape BEFORE INSERT ON customer_advances
+WHEN NEW.origin = 'correction' AND NOT EXISTS (
+  SELECT 1 FROM advance_corrections AS c JOIN customer_advances AS o ON o.id = c.advance_id
+  WHERE c.advance_id = NEW.corrects_advance_id AND c.kind = 'replaced' AND c.successor_advance_id = NEW.id
+    AND c.idempotency_key = NEW.idempotency_key AND c.request_fingerprint = NEW.request_fingerprint
+    AND o.currency = NEW.currency AND NEW.amount_minor <= o.amount_minor
+    AND (NEW.amount_minor < o.amount_minor) = (c.funds_not_received IS 1)
+    AND NEW.received_by = o.received_by AND NEW.received_at = o.received_at AND NEW.business_date = o.business_date
+    AND (NEW.method = 'cash' OR (NEW.method = 'external' AND NEW.provider = 'whish'))
+    AND NOT (NEW.customer_id = o.customer_id AND NEW.amount_minor = o.amount_minor
+             AND NEW.method = o.method AND NEW.reference IS o.reference))
+BEGIN SELECT RAISE(ABORT, 'ledger: a correction advance must restate its original under its own correction'); END;
+
+-- The registry (migration 19), re-created: a successor carrying its original's SAME reference registers
+-- nothing (the original keeps it); a different reference registers once, and a taken one is refused.
+DROP TRIGGER customer_advances_register_reference;
+CREATE TRIGGER customer_advances_register_reference AFTER INSERT ON customer_advances
+WHEN NEW.reference IS NOT NULL
+ AND NOT (NEW.origin = 'correction' AND EXISTS (
+       SELECT 1 FROM customer_advances AS o
+       WHERE o.id = NEW.corrects_advance_id AND o.provider IS NEW.provider AND o.reference IS NOT NULL
+         AND ${M19_REF_KEY("o.reference")} = ${M19_REF_KEY("NEW.reference")}))
+BEGIN
+  INSERT INTO external_references (provider, ref_key, ref_display, owner_kind, owner_id, legacy, registered_at)
+  VALUES (NEW.provider, ${M19_REF_KEY("NEW.reference")}, NEW.reference, 'advance', NEW.id, 0, NEW.received_at);
+END;
+
+-- One payment, one balance: a corrected advance can never be applied or refunded.
+CREATE TRIGGER advance_applications_not_corrected BEFORE INSERT ON advance_applications
+WHEN EXISTS (SELECT 1 FROM advance_corrections WHERE advance_id = NEW.advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a corrected advance has no balance to apply'); END;
+CREATE TRIGGER advance_refunds_not_corrected BEFORE INSERT ON advance_refunds
+WHEN EXISTS (SELECT 1 FROM advance_corrections WHERE advance_id = NEW.advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a corrected advance has no balance to refund'); END;
+`,
+  },
 ];

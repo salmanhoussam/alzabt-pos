@@ -129,6 +129,29 @@ export interface SettlementDraft {
 }
 
 /** What a caller gets back. `duplicate` distinguishes a retry from a fresh posting. */
+/** DEC-35z+ COL — one COL- document, read from the ledger. No arithmetic beyond what the rows say. */
+export interface CollectionDocumentView {
+  readonly docNo: number;
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly receivedByName: string;
+  readonly currency: string;
+  readonly totalMinor: bigint;
+  readonly method: SettlementMethod;
+  readonly provider: SettlementProvider | null;
+  readonly reference: string | null;
+  readonly receivedBy: string;
+  readonly receivedAt: string;
+  readonly businessDate: string;
+  /** The debt(s) this money paid — one for a direct collection, every share for a receipt. */
+  readonly lines: ReadonlyArray<{ readonly obligation: ObligationRecord; readonly amountMinor: bigint }>;
+}
+
+/** `COL-000001`: six digits, never reset, issued in order with the money (D-P4a/b). */
+export function formatCollectionNo(docNo: number): string {
+  return `COL-${String(docNo).padStart(6, "0")}`;
+}
+
 export interface PostResult<T> {
   readonly record: T;
   readonly duplicate: boolean;
@@ -467,6 +490,82 @@ export class LedgerService {
    * a TEST can stand in for a pre-DEC-35 build when seeding history (tests/helpers/preDec35.ts); nothing in
    * src/ overrides it — a source test proves that.
    */
+  /** Crash seam INSIDE the money transaction, right after the COL number was issued (tests only). */
+  protected afterCollectionNumberIssued(): void {}
+
+  /** DEC-35z+ COL: the COL number of a direct collection, or null (history, or not a collection). */
+  collectionNoOfSettlement(settlementId: string): number | null {
+    this.requireOwner();
+    return this.deps.ledger.collectionNoOfSettlement(settlementId);
+  }
+
+  /** DEC-35z+ COL: the COL number of a shared receipt, or null (history). */
+  collectionNoOfReceipt(receiptId: string): number | null {
+    this.requireOwner();
+    return this.deps.ledger.collectionNoOfReceipt(receiptId);
+  }
+
+  /** Statement display: settlement id → COL number (its own, or its receipt's). */
+  collectionNumbersOfSettlements(settlementIds: ReadonlyArray<string>): Map<string, number> {
+    this.requireOwner();
+    return this.deps.ledger.collectionNumbersOfSettlements(settlementIds);
+  }
+
+  /**
+   * One COL- document as the ledger holds it (print / PDF / reprint). OWNER — the same gate as every
+   * collection — and READ-ONLY: it never writes a payment, a document or a reference.
+   */
+  collectionDocument(docNo: unknown): CollectionDocumentView {
+    this.requireOwner();
+    if (typeof docNo !== "number" || !Number.isSafeInteger(docNo) || docNo <= 0) {
+      throw new DomainError("COLLECTION_DOCUMENT_NOT_FOUND", "That collection receipt does not exist");
+    }
+    const doc = this.deps.ledger.findCollectionDocument(docNo);
+    if (!doc) throw new DomainError("COLLECTION_DOCUMENT_NOT_FOUND", "That collection receipt does not exist");
+    if (doc.settlementId) {
+      const st = this.deps.ledger.findSettlementById(doc.settlementId);
+      const ob = st ? this.deps.ledger.findObligationById(st.obligationId) : null;
+      if (!st || !ob) throw new DomainError("LEDGER_INTEGRITY", "A collection document lost its payment");
+      return {
+        docNo,
+        customerId: ob.partyId,
+        customerName: this.deps.parties.findById(ob.partyId)?.display_name ?? "—",
+        receivedByName: this.deps.ledger.operatorName(st.settledBy) ?? "—",
+        currency: st.currency,
+        totalMinor: st.amountMinor,
+        method: st.method,
+        provider: st.provider,
+        reference: st.reference,
+        receivedBy: st.settledBy,
+        receivedAt: st.settledAt,
+        businessDate: st.businessDate,
+        lines: [{ obligation: ob, amountMinor: st.amountMinor }],
+      };
+    }
+    const r = doc.receiptId ? this.deps.receipts?.findById(doc.receiptId) : null;
+    if (!r || !this.deps.receipts) throw new DomainError("LEDGER_INTEGRITY", "A collection document lost its receipt");
+    const lines = this.deps.receipts.listAllocations(r.id).map((a) => {
+      const ob = this.deps.ledger.findObligationById(a.obligationId);
+      if (!ob) throw new DomainError("LEDGER_INTEGRITY", "A receipt share lost its debt");
+      return { obligation: ob, amountMinor: a.amountMinor };
+    });
+    return {
+      docNo,
+      customerId: r.customerId,
+      customerName: this.deps.parties.findById(r.customerId)?.display_name ?? "—",
+      receivedByName: this.deps.ledger.operatorName(r.receivedBy) ?? "—",
+      currency: r.currency,
+      totalMinor: r.amountMinor,
+      method: "external",
+      provider: r.provider,
+      reference: r.reference,
+      receivedBy: r.receivedBy,
+      receivedAt: r.receivedAt,
+      businessDate: r.businessDate,
+      lines,
+    };
+  }
+
   protected assertAcceptedNewCollection(method: SettlementMethod, provider: SettlementProvider | null): void {
     assertAcceptedNewCollection(method, provider);
   }
@@ -787,6 +886,14 @@ export class LedgerService {
         businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
       };
       this.deps.ledger.insertSettlement({ ...record, requestFingerprint: fingerprint });
+      // 🔴 DEC-35z+ COL: money RECEIVED from a customer gets its COL- number in THIS transaction — the
+      // number and the money commit together or neither does (no gap, no orphan document, no payment
+      // without its document). A supplier payment (payable) is money OUT and gets none.
+      if (obligation.direction === "receivable") {
+        const docNo = this.deps.ledger.issueCollectionNumber();
+        this.afterCollectionNumberIssued();
+        this.deps.ledger.insertCollectionDocument({ docNo, settlementId: record.id, receiptId: null });
+      }
       // The settlement and the closing of its attempt are ONE transaction: an attempt is never open
       // for a payment that committed.
       this.deps.ledger.resolveAttempt(key, "recorded", instant);
@@ -1147,6 +1254,10 @@ export class LedgerService {
         receivedAt: instant.toISOString(),
         businessDate: day,
       });
+      // 🔴 DEC-35z+ COL: ONE document for the ONE real transfer — never one per debt it was shared across.
+      const docNo = this.deps.ledger.issueCollectionNumber();
+      this.afterCollectionNumberIssued();
+      this.deps.ledger.insertCollectionDocument({ docNo, settlementId: null, receiptId });
       repo.resolveAttempt(p.key, "recorded", instant);
       const stored = repo.findByKey(p.key);
       if (!stored || !repo.receiptIntegrity(receiptId).ok) {

@@ -673,24 +673,36 @@ describe("posted history cannot be rewritten", () => {
       // lookup) and the collection-attempt bookkeeping (insert / find / list-open / resolve-once —
       // a trigger lets an attempt be closed exactly once and nothing else about it change). Still
       // no mutator of an obligation or a settlement beyond the two inserts.
+      // TRANSITION (DEC-35z+ COL): the COL- documents (migration 19 `collection_documents`). READS (by number,
+      // by settlement / receipt, per statement row; a settlement by id; an operator's display name) and ONE
+      // insert-only write plus the forward-only counter step, both inside the money transaction. The
+      // document table is immutable by trigger; nothing here updates or deletes a payment. Old inventory: without these.
+      "collectionNoOfReceipt",
+      "collectionNoOfSettlement",
+      "collectionNumbersOfSettlements",
       "collectionTotals",
       "findAttempt",
+      "findCollectionDocument",
       "findObligationById",
       "findObligationBySource",
       // TRANSITION (ACC-3, HIST-CURRENT-BALANCE): one more READ — the debts posted by a page of sales,
       // in one SELECT. It mutates nothing; the UPDATE/DELETE checks below still hold for the whole file.
       "findSaleObligations",
+      "findSettlementById",
       "findSettlementByIdempotencyKey",
       "findSettlementByProviderReference",
       "insertAttempt",
+      "insertCollectionDocument",
       "insertObligation",
       "insertSettlement",
       // TRANSITION (P2): one more READ — is a provider reference already in migration 19's registry,
       // by the triggers' own key. It mutates nothing. Old inventory: without `isReferenceRegistered`.
       "isReferenceRegistered",
+      "issueCollectionNumber",
       "listObligations",
       "listOpenAttempts",
       "listSettlements",
+      "operatorName",
       "resolveAttempt",
       "settledTotal",
     ]);

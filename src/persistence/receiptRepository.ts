@@ -213,6 +213,11 @@ export class ReceiptRepository {
     return row ? { receipt: this.toReceipt(row), fingerprint: row.request_fingerprint } : null;
   }
 
+  findById(id: string): ReceiptRecord | null {
+    const row = this.db.prepare(`SELECT ${R_COLS} FROM receipts WHERE id = ?`).get(id) as ReceiptRow | undefined;
+    return row ? this.toReceipt(row) : null;
+  }
+
   findByProviderReference(provider: string, reference: string): ReceiptRecord | null {
     const row = this.db.prepare(`SELECT ${R_COLS} FROM receipts WHERE provider = ? AND reference = ?`).get(provider, reference) as
       | ReceiptRow

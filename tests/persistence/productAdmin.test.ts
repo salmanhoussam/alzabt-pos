@@ -89,6 +89,8 @@ describe("schema is unchanged by this feature", () => {
       // Migration 18 adds only external-receipt tables and one nullable settlement link.
       [18, "external_receipt_allocation"],
       [19, "payment_model_tenders_references_advances"], // TRANSITION: the registry ended at 18 before migration 19
+      // Migration 20 adds only the advance intent and the audited advance correction (G1 + G2); no product table.
+      [20, "advance_safety_attempts_voids"], // TRANSITION: the registry ended at 19 before migration 20
     ]);
   });
 

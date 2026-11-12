@@ -1,4 +1,4 @@
-import type { SaleDto } from "../../shared/ipcContract";
+import type { MoneyDto, SaleDto } from "../../shared/ipcContract";
 import { fmt } from "../api";
 import { fromMoneyDto } from "../../shared/dto";
 import { LineMath } from "../components/LineMath";
@@ -10,9 +10,12 @@ export function Receipt({
   sale,
   onNewSale,
   onAccountFor = null,
+  advanceApplied = null,
 }: {
   sale: SaleDto;
   onNewSale?: () => void;
+  /** DEC-35x: part of this on-account sale was paid from an advance (read back from main). Not new money. */
+  advanceApplied?: { readonly number: string; readonly applied: MoneyDto; readonly debtLeft: MoneyDto } | null;
   /** SELL-CREDIT: the customer an on-account sale was just recorded for (the sale DTO carries no name). */
   onAccountFor?: string | null;
 }) {
@@ -62,12 +65,34 @@ export function Receipt({
             so an Arabic till showed "cash" — the same leak as PENDING in the review queue. */}
         {/* SELL-CREDIT: an unpaid till sale is a debt on a customer's account — never "paid by …". */}
         {sale.sourceType === "pos" && sale.paymentStatus === "unpaid" ? (
+          <>
           <div className="receipt-paid" data-testid="receipt-on-account">
             <span className="muted small">{t("receipt.onAccount")}</span>
             {onAccountFor !== null && onAccountFor !== undefined && <bdi data-testid="receipt-on-account-customer">{onAccountFor}</bdi>}
-            <span className="muted small">{t("receipt.balanceDue")}</span>
-            <strong data-testid="receipt-balance-due"><bdi dir="ltr">{fmt(sale.balanceDue)}</bdi></strong>
+            {/* DEC-35z: after an advance paid part or all of the sale, the sale total is NOT the amount due —
+                so the generic "amount due" line is not shown at all on this path. */}
+            {!advanceApplied && (
+              <>
+                <span className="muted small">{t("receipt.balanceDue")}</span>
+                <strong data-testid="receipt-balance-due"><bdi dir="ltr">{fmt(sale.balanceDue)}</bdi></strong>
+              </>
+            )}
           </div>
+          {advanceApplied && (
+            /* Three facts, each named: what was sold, what the advance paid, what the customer still owes
+               (main's read-back after the commit — never computed here). */
+            <dl className="receipt-advance" data-testid="receipt-advance-applied" data-advance={advanceApplied.number}>
+              <dt>{t("receipt.saleTotal")}</dt>
+              <dd data-testid="receipt-sale-total"><bdi dir="ltr">{fmt(sale.total)}</bdi></dd>
+              <dt>
+                {t("receipt.paidFromAdvance")} <bdi dir="ltr">{advanceApplied.number}</bdi>
+              </dt>
+              <dd data-testid="receipt-advance-paid"><bdi dir="ltr">{fmt(advanceApplied.applied)}</bdi></dd>
+              <dt>{t("receipt.leftOnAccount")}</dt>
+              <dd data-testid="receipt-debt-left"><strong><bdi dir="ltr">{fmt(advanceApplied.debtLeft)}</bdi></strong></dd>
+            </dl>
+          )}
+          </>
         ) : sale.tenders && sale.tenders.length >= 2 ? (
           /* SELL-SPLIT-CASH-WHISH: one line per part — its method, its amount and, for Whish, its
              reference — never a single "paid by" for money that arrived two ways. */

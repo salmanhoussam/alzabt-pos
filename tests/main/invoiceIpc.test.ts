@@ -104,7 +104,10 @@ describe("the invoice channels exist and answer", () => {
   // The list stays EXHAUSTIVE and pinned by name rather than counted: a channel that becomes async
   // by accident is a caller somewhere receiving a Promise it treats as a value, and `syncHandlers`
   // throwing is how that gets caught.
-  it("printInvoice, saveInvoicePdf and the two phone-session channels are the ONLY asynchronous channels", () => {
+  // TRANSITION (migration 20, ADV-RECORD): the list above was four. `printAdvance` and
+  // `saveAdvancePdf` join it for the invoice's own reason — they open an offscreen window and await
+  // the print dialog / printToPDF — so the list is now six, still pinned by name.
+  it("the invoice + advance print/PDF channels and the two phone-session channels are the ONLY asynchronous channels", () => {
     // `syncHandlers` assumes exactly this. Asserting it keeps that assumption honest rather than
     // leaving a cast that would quietly hand a Promise to a caller expecting a result.
     const handlers = createIpcHandlers(h.service, { invoices: h.invoices });
@@ -122,9 +125,20 @@ describe("the invoice channels exist and answer", () => {
         void (result as Promise<unknown>).catch(() => undefined);
       }
     }
+    // TRANSITION (DEC-35z+): + printAdvanceRefund / saveAdvanceRefundPdf (the REF- document, by id). Old list: without them.
+    // TRANSITION (PHOTO-INVOICE-TO-ITEMS): readInvoicePhoto is async for the print channels' reason — a
+    // native dialog and an OCR run. Old list: without it. (OCR × Advances integration: both lists united, sorted.)
     expect(async_.sort()).toEqual([
       "cancelPhoneSession",
+      "printAdvance",
+      "printAdvanceRefund",
+      // TRANSITION (DEC-35z+ COL): + printCollectionReceipt / saveCollectionReceiptPdf. Old list: without them.
+      "printCollectionReceipt",
       "printInvoice",
+      "readInvoicePhoto",
+      "saveAdvancePdf",
+      "saveAdvanceRefundPdf",
+      "saveCollectionReceiptPdf",
       "saveInvoicePdf",
       "startPhoneSession",
     ]);

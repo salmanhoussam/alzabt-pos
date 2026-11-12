@@ -8,7 +8,7 @@ import { formatDecimal, parseDecimal } from "../../domain/money";
 import { formatQuantity, parseQuantity } from "../../domain/quantity";
 import type { PaymentMethod } from "../../domain/sale";
 import { fromCatalogDto } from "../../shared/dto";
-import type { AdminProductDto, CategoryDto, SaleDto } from "../../shared/ipcContract";
+import type { AdminProductDto, AdvanceStatementLineDto, CategoryDto, MoneyDto, SaleDto } from "../../shared/ipcContract";
 import { ApiError, call, errorText, newIdempotencyKey, pos } from "../api";
 import { useThumbnails } from "../useThumbnails";
 import { type SellDraft, keepSellableLines } from "../sellDraft";
@@ -476,11 +476,34 @@ export function SellScreen({
 
   /** SELL-CREDIT: the customer an on-account sale was recorded for, shown on its receipt (the DTO carries no name). */
   const [completedOnAccountFor, setCompletedOnAccountFor] = useState<string | null>(null);
+  /** DEC-35x: the advance part of the sale just recorded on an advance (read back from main). */
+  const [completedAdvance, setCompletedAdvance] = useState<{ number: string; applied: MoneyDto; debtLeft: MoneyDto } | null>(null);
+  /** DEC-35x: the chosen customer's usable advances (owner only; read from main, never computed here). */
+  const [usableAdvances, setUsableAdvances] = useState<readonly AdvanceStatementLineDto[]>([]);
+  /** Whose advances were last READ (a test and a screen reader can tell "none" from "not read yet"). */
+  const [advancesFor, setAdvancesFor] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    setUsableAdvances([]);
+    setAdvancesFor(null);
+    if (role !== "owner" || customer === null) return;
+    call(pos().getAdvanceStatement({ customerId: customer.id }))
+      .then((s) => {
+        if (!live) return;
+        setUsableAdvances(s.lines.filter((l) => l.correction === null && l.unused.minor !== "0"));
+        setAdvancesFor(customer.id);
+      })
+      .catch(() => live && setUsableAdvances([]));
+    return () => {
+      live = false;
+    };
+  }, [role, customer]);
 
   /** One end for every recorded sale: the receipt, an empty till, a fresh key — also straight to App. */
-  const finishSale = (sale: SaleDto, onAccountFor: string | null) => {
+  const finishSale = (sale: SaleDto, onAccountFor: string | null, advance: { number: string; applied: MoneyDto; debtLeft: MoneyDto } | null = null) => {
     setCompleted(sale);
     setCompletedOnAccountFor(onAccountFor);
+    setCompletedAdvance(advance);
     setCart([]);
     setCustomer(null);
     setPaying(false);
@@ -534,6 +557,37 @@ export function SellScreen({
           ? (PARTIAL_ERROR_KEY[e.code] ?? (down?.whish !== undefined ? WHISH_ERROR_KEY[e.code] : undefined))
           : undefined;
       setError(own ? t(own) : errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * DEC-35x — APPLY AN ADVANCE TO THIS NEW SALE (owner): the sale goes on the customer's account and the
+   * advance pays min(its unused balance, the total) of it, in ONE transaction in main. No cash or Whish is
+   * taken; whatever the advance does not cover stays a debt. The same checkout key as the cart: a double
+   * click or a lost reply replays the same request, never a second sale.
+   */
+  const payOnAdvance = async (line: AdvanceStatementLineDto) => {
+    if (!priced || busy || customer === null) return;
+    const unused = BigInt(line.unused.minor);
+    const amount = unused < priced.total.minor ? unused : priced.total.minor;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await call(
+        pos().sellOnAdvance({
+          idempotencyKey: attemptKey,
+          lines: cart.map((l) => ({ productId: l.productId, quantityMilli: l.quantityMilli })),
+          expectedTotalMinor: priced.total.minor.toString(),
+          customerId: customer.id,
+          advanceId: line.advance.id,
+          amountMinor: amount.toString(),
+        }),
+      );
+      finishSale(r.sale, customer.displayName, { number: r.advanceNumber, applied: r.applied, debtLeft: r.debtOutstanding });
+    } catch (e) {
+      setError(e instanceof ApiError && t(`adv.err.${e.code}`) !== `adv.err.${e.code}` ? t(`adv.err.${e.code}`) : errorText(e));
     } finally {
       setBusy(false);
     }
@@ -648,7 +702,7 @@ export function SellScreen({
     setCompletedOnAccountFor(null);
   };
 
-  if (completed) return <Receipt sale={completed} onAccountFor={completedOnAccountFor} onNewSale={startNewSale} />;
+  if (completed) return <Receipt sale={completed} onAccountFor={completedOnAccountFor} advanceApplied={completedAdvance} onNewSale={startNewSale} />;
   if (!catalog) return <div className="center muted">{error ?? t("common.loading")}</div>;
 
   return (
@@ -1412,7 +1466,7 @@ export function SellScreen({
               </div>
             )}
             {!whishOpen && !splitOpen && role === "owner" && (
-              <div className="on-account" data-testid="on-account">
+              <div className="on-account" data-testid="on-account" data-advances-for={advancesFor ?? ""}>
                 {/* SELL-PARTIAL-DEBT: optionally, part of the total received NOW. Empty = the whole total on
                     the account (unchanged). Typed = one accepted method for that part, the rest a debt. */}
                 <label className="field">
@@ -1447,6 +1501,22 @@ export function SellScreen({
                     {t("pay.onAccount")}
                   </button>
                 )}
+                {/* DEC-35x: the customer holds an advance — the sale can be paid from it (no new money). */}
+                {partial.kind === "none" &&
+                  priced !== null &&
+                  usableAdvances.map((l) => (
+                    <button
+                      key={l.advance.id}
+                      className="btn big"
+                      disabled={busy || customer === null}
+                      data-testid="pay-on-advance"
+                      data-advance={l.advance.number}
+                      onKeyDown={refuseEnterActivation}
+                      onClick={() => void payOnAdvance(l)}
+                    >
+                      {t("pay.onAdvance")} <bdi dir="ltr">{l.advance.number}</bdi> · {t("adv.stmt.balance")} <bdi dir="ltr">{money(BigInt(l.unused.minor))}</bdi>
+                    </button>
+                  ))}
                 {(partial.kind === "invalid" || partial.kind === "notLess") && (
                   <p className="error small" role="status" data-testid="pay-partial-note" data-kind={partial.kind}>
                     {t(partial.kind === "invalid" ? "pay.partial.invalid" : "pay.partial.notLess")}

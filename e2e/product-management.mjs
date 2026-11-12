@@ -292,7 +292,8 @@ await app.close();
     // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
     // 🔴 TRANSITION 17 -> 18 with migration 18 (external_receipt_allocation). The old value was 17.
     // 🔴 TRANSITION 18 -> 19 with migration 19 (payment_model_tenders_references_advances). The old value was 18.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 19, "the installed app's ledger is at schema v19");
+    // 🔴 TRANSITION 19 -> 20 with migration 20 (advance_safety_attempts_voids). The old value was 19.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 20, "the installed app's ledger is at schema v20");
 
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
     const types = rows.map((r) => r.event_type);

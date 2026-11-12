@@ -167,6 +167,39 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   searchInvoices: "session",
   printInvoice: "session",
   saveInvoicePdf: "session",
+  // Customer advances (migration 20, owner decision D1): the OWNER and the CASHIER record an
+  // advance and print its receipt. The service re-reads the live role and refuses an admin.
+  // Printing takes an advance ID only; main loads the document from the ledger.
+  recordAdvance: "session",
+  pendingAdvances: "session",
+  finishAdvance: "session",
+  closeAdvance: "session",
+  acknowledgeAdvance: "session",
+  printAdvance: "session",
+  saveAdvancePdf: "session",
+  // 🔴 OWNER: what a customer holds (like a statement) and every correction. Refused again by
+  // `AdvanceService.requireOwner` / the trigger on `advance_corrections.corrected_by`.
+  getAdvanceStatement: "owner",
+  correctAdvance: "owner",
+  // 🔴 OWNER: the day's money per channel and per operator (DEC-35x). A cashier keeps Today's Sales.
+  // Refused again by `DailyMoneyService.day`, which re-reads the live role.
+  getDailyMoney: "owner",
+  // 🔴 OWNER (D3): apply an advance to an existing debt — refused again by `AdvanceService.requireOwner`
+  // and by the M19 trigger on `advance_applications.applied_by`.
+  applyAdvanceToDebt: "owner",
+  // 🔴 OWNER (DEC-35x): a new sale on account paid from an advance — refused again by both services.
+  sellOnAdvance: "owner",
+  // 🔴 OWNER (D-P5a FINAL, DEC-35z+): cash handed back from an advance — refused again by
+  // `AdvanceService.requireRefunder` and by the M19 trigger on `advance_refunds.refunded_by`. Its
+  // reprint/PDF is owner-only too: a REF- shows money out of the drawer by name.
+  refundAdvance: "owner",
+  printAdvanceRefund: "owner",
+  saveAdvanceRefundPdf: "owner",
+  // 🔴 OWNER (DEC-35z+ COL): a collection is owner-only today, so its COL- document is too — no new
+  // right for the cashier. Read by number; never records a payment. Refused again by LedgerService.requireOwner.
+  getCollectionReceipt: "owner",
+  printCollectionReceipt: "owner",
+  saveCollectionReceiptPdf: "owner",
 
   // ── Owner only ────────────────────────────────────────────────────────────────────────────────
   // Reversing money.
@@ -180,6 +213,9 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // fails, and this entry is the renderer-facing half of the same rule rather than the whole of
   // it. Editing an EXISTING product stays an owner act: a price edit is not a creation.
   createProduct: "create-products",
+  // PHOTO-INVOICE-TO-ITEMS: the same people who may add products may read an invoice photo to
+  // prepare them. It WRITES NOTHING; every product is still created through createProduct.
+  readInvoicePhoto: "create-products",
   updateProduct: "owner",
   setProductActive: "owner",
   // Replaces or exports the whole price list.

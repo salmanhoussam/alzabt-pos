@@ -986,3 +986,39 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
   .products-cards .product-name-alt, .products-cards .product-sku { font-size: 12px; }
   .products-cards .product-price { font-size: 17px; }
 }
+
+/* ── Customer advances (migration 20) ── */
+.receipt.adv-receipt { width: auto; max-width: 560px; }
+.adv-receipt-fields { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 12px 0; }
+.adv-receipt-fields dt { color: var(--muted, #666); }
+.adv-receipt-fields dd { margin: 0; font-weight: 600; }
+.adv-statement .statement-table { width: 100%; border-collapse: collapse; }
+.adv-statement .statement-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.adv-pending { margin: 12px 16px; border: 2px solid var(--warn, #b26b00); }
+.adv-pending li { padding: 6px 0; }
+.adv-pending li .btn { margin-inline-start: 8px; }
+
+/* G2 correction sheet: choices inline, controls their natural size (the global input rule stretches them). */
+.adv-correct fieldset { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; border: 1px solid var(--border); padding: 10px; }
+.adv-correct fieldset label { display: inline-flex; align-items: center; gap: 6px; }
+.adv-correct input[type="radio"], .adv-correct input[type="checkbox"] { width: auto; height: auto; margin: 0; }
+.adv-correct select { width: 100%; }
+
+/* DAILY MONEY IN / OUT (DEC-35x) — owner only, under Today's Sales. One scroll at most: the table's own. */
+.dm-panel { margin-top: 16px; width: 100%; max-width: 780px; display: flex; flex-direction: column; gap: 10px; }
+.dm-head { display: flex; align-items: center; gap: 12px; }
+.dm-head h2 { margin: 0; font-size: 1.1rem; flex: 1; }
+.dm-scroll { overflow-x: auto; }
+.dm-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.dm-table th, .dm-table td { padding: 6px 10px; border-bottom: 1px solid var(--line, #e3e3e3); text-align: end; white-space: nowrap; }
+.dm-table th[scope="row"] { text-align: start; font-weight: 500; }
+.dm-table .dm-sum th, .dm-table .dm-sum td { font-weight: 700; }
+.dm-table .dm-net th, .dm-table .dm-net td { font-weight: 800; border-top: 2px solid currentColor; }
+.dm-table .dm-correction td { font-style: italic; }
+.dm-table thead th:first-child { text-align: start; }
+/* DEC-35x: applications listed under their advance. */
+.adv-stmt-applied { display: block; }
+/* DEC-35x: the advance part of an on-account sale, on its own full line under the amount due. */
+.receipt-advance { display: grid; grid-template-columns: 1fr auto; gap: 4px var(--space-3); margin: 8px 0 0; padding: 0 var(--space-3); }
+.receipt-advance dt { margin: 0; }
+.receipt-advance dd { margin: 0; text-align: end; font-variant-numeric: tabular-nums; }

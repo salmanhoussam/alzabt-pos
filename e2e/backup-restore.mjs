@@ -30,7 +30,7 @@
  */
 import { _electron as electron } from "playwright-core";
 import { E2E_PIN, signIn } from "./_signin.mjs";
-import { RESTORED_TITLES, unexpectedErrors, waitForTitle, windowTitlesOf } from "./_dialogs.mjs";
+import { RESTORED_TITLES, unexpectedErrors, waitForTitle, windowTitlesOf, desktopProbe } from "./_dialogs.mjs";
 import { createOwned, endOwned, identifyStartedNear, stillRunning } from "./_owned.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -91,7 +91,12 @@ const shaFile = (p) => sha(readFileSync(p));
 // ── Evidence: written after EVERY assertion, so a failure never loses what was measured ─────────
 const evidence = { startedAt: new Date().toISOString(), platform: process.platform, packaged: Boolean(PACKAGED), checks: [], facts: {} };
 const EVIDENCE = join(SHOTS, "P4-backup-restore-evidence.json");
-const persist = () => writeFileSync(EVIDENCE, JSON.stringify(evidence, null, 2));
+// DEC-35y review: a rerun must never overwrite the FIRST run's proof — every run also keeps its own copy.
+const RUN_TAG = new Date().toISOString().replace(/[:.]/g, "-");
+const persist = () => {
+  writeFileSync(EVIDENCE, JSON.stringify(evidence, null, 2));
+  writeFileSync(join(SHOTS, `P4-backup-restore-evidence.${RUN_TAG}.json`), JSON.stringify(evidence, null, 2));
+};
 const fact = (k, v) => {
   evidence.facts[k] = v;
   persist();
@@ -215,6 +220,7 @@ function desktopShot(name) {
     "-Command",
     `Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $bmp.Save('${out.replace(/'/g, "''")}',[System.Drawing.Imaging.ImageFormat]::Png)`,
   ]);
+  copyFileSync(out, join(SHOTS, `${name}.${RUN_TAG}.png`));
   fact(`screenshot:${name}`, `${name}.png`);
 }
 
@@ -334,7 +340,13 @@ try {
     const keys = await page.evaluate(() => Object.keys(window.pos).sort());
     // TRANSITION SELL-CREDIT: 79 -> 80 (createCustomerCreditSale, owner-only). The old value was 79.
     // TRANSITION SELL-SPLIT-CASH-WHISH: 80 -> 81 (createSplitSale, same permission as createSale). The old value was 80.
-    check(keys.length === 81, "window.pos exposes exactly 81 business methods", { got: keys.length });
+    // TRANSITION (migration 20, customer advances): 81 -> 90 (the nine advance channels). The old value was 81.
+    // TRANSITION (DEC-35x): 90 -> 92 (getDailyMoney — owner read; applyAdvanceToDebt — owner). The old value was 90.
+    // TRANSITION (DEC-35x): 92 -> 93 (sellOnAdvance — owner). The old value was 92.
+    // TRANSITION (DEC-35z+ REF): 93 -> 96 (refundAdvance, printAdvanceRefund, saveAdvanceRefundPdf — owner). The old value was 93.
+    // TRANSITION (DEC-35z+ COL): 96 -> 99 (the three COL- document channels — owner). The old value was 96.
+    // TRANSITION (OCR × Advances integration, DEC-35zz+): 99 -> 100 = the advances chain's 99 + OCR's readInvoicePhoto. Old values: 99 (advances) / 82 (OCR).
+    check(keys.length === 100, "window.pos exposes exactly 100 business methods", { got: keys.length });
     for (const k of ["exportFullBackup", "inspectRestoreBackup", "applyRestore"]) check(keys.includes(k), `window.pos has ${k}`);
     // settings.json is written only once a language is CHOSEN; choose one, so the package has it.
     await ok(page, "setTerminalLanguage", { language: "ar" });
@@ -687,9 +699,16 @@ try {
     const { app, page } = await launch(D);
     await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 60000 });
     if (WINDOWS) {
-      const seen = await waitForTitle(await app.evaluate(() => process.pid), RESTORED_AR, NOTICE_TIMEOUT_MS);
+      const resumedPid = await app.evaluate(() => process.pid);
+      const seen = await waitForTitle(resumedPid, RESTORED_AR, NOTICE_TIMEOUT_MS);
       desktopShot("P4-E1-resumed-notice");
-      check(seen.found, "E · the resumed restore shows the 'restored' notice", seen);
+      // Evidence, not a relaxation: what the APP says it did with the notice, beside what the test saw.
+      const noticeEvents = diagEvents().filter((e) => e.pid === resumedPid && String(e.event).startsWith("restore-notice"));
+      fact("resumedNoticeEvents", noticeEvents);
+      // DEC-35zz+ investigation (evidence only): the desktop when the wait ended — the foreground window and the
+      // time of the last REAL keyboard/mouse input (probe.at − idleMs), to compare with restore-notice-closed.
+      fact("resumedNoticeDesktop", desktopProbe());
+      check(seen.found, "E · the resumed restore shows the 'restored' notice", { ...seen, noticeEvents });
       check(unexpectedErrors(seen.titles).length === 0, "E · 🔴 no error box is open after the resumed restore", seen);
     }
     await app.close();

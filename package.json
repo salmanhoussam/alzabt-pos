@@ -21,7 +21,10 @@
     "pdf:samples": "tsx scripts/invoice-pdf-samples.ts invoice-pdf-samples"
   },
   "dependencies": {
+    "@tesseract.js-data/ara": "1.0.0",
+    "@tesseract.js-data/eng": "1.0.0",
     "better-sqlite3": "^13.0.3",
+    "tesseract.js": "5.1.1",
     "zxing-wasm": "3.1.5"
   },
   "devDependencies": {
@@ -65,5 +68,8 @@
       "artifactName": "Alzabt-POS-Setup-${version}.${ext}"
     },
     "publish": null
+  },
+  "overrides": {
+    "wasm-feature-detect": "1.6.1"
   }
 }
