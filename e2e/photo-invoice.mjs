@@ -253,6 +253,33 @@ try {
   await third.locator('[data-testid="photo-review-link-search"]').fill("قائم ب");
   await third.locator('[data-testid="photo-review-link-option"]', { hasText: "صنف قائم ب" }).click();
   assert((await third.getAttribute("data-decision")) === "link" && (await third.locator('[data-testid="photo-review-linked"]').innerText()).includes("صنف قائم ب"), "a click on a search result links (ب)");
+  // R-1 (found 2026-11-13, pre-existing in 97b9b99): re-choosing «صنف جديد» never shows a stale sale price. The field
+  // starts EMPTY again (never the old price, never the supplier cost) and the row is blocked until a price is typed.
+  const sale = () => third.locator('[data-testid="photo-review-sale-price"]').inputValue();
+  const saleRequired = async () => (await third.locator('[data-issue="SALE_PRICE_REQUIRED"]').count()) === 1;
+  await third.locator('[data-testid="photo-review-new"]').click();
+  assert((await third.getAttribute("data-decision")) === "new" && (await third.locator('[data-testid="photo-review-linked"]').count()) === 0, "R-1: link → «صنف جديد» unlinks");
+  assert((await sale()) === "" && (await saleRequired()), "R-1: link → new: sale price EMPTY (not the cost 2) and required");
+  await third.locator('[data-testid="photo-review-sale-price"]').fill("4.5");
+  assert(!(await saleRequired()), "R-1: a typed sale price satisfies the row");
+  await third.locator('[data-testid="photo-review-link"]').click();
+  await third.locator('[data-testid="photo-review-link-cancel"]').click();
+  assert((await third.getAttribute("data-decision")) === "new" && (await sale()) === "4.5" && !(await saleRequired()), "R-1: opening then cancelling the link search keeps «new» and its typed price");
+  await third.locator('[data-testid="photo-review-skip"]').click();
+  assert((await third.getAttribute("data-decision")) === "skip", "R-1: new → ignore (button)");
+  await third.locator('[data-testid="photo-review-new"]').click();
+  assert((await sale()) === "" && (await saleRequired()), "🔴 R-1: new → ignore → new (buttons): the old price 4.5 is NOT shown or restored; the price is required again");
+  await third.locator('[data-testid="photo-review-sale-price"]').fill("7");
+  await third.locator('[data-testid="photo-review-qty"]').focus();
+  await page.keyboard.press("Alt+3");
+  assert((await third.getAttribute("data-decision")) === "skip", "R-1: Alt+3 ignores");
+  await page.keyboard.press("Alt+1");
+  assert((await third.getAttribute("data-decision")) === "new" && (await sale()) === "" && (await saleRequired()), "🔴 R-1: new → ignore → new (Alt+3 / Alt+1): the price field is EMPTY and required again");
+  await third.locator('[data-testid="photo-review-sale-price"]').fill("8");
+  await third.locator('[data-testid="photo-review-qty"]').focus();
+  await page.keyboard.press("Alt+1");
+  assert((await third.getAttribute("data-decision")) === "new" && (await sale()) === "8" && !(await saleRequired()), "R-1: Alt+1 on a row already «new» keeps its typed price");
+  assert(Number(productsBefore()) === atHand, "🔴 R-1: nothing written while switching decisions");
   await third.locator('[data-testid="photo-review-link"]').click();
   await third.locator('[data-testid="photo-review-link-search"]').fill("قائم أ");
   await third.locator('[data-testid="photo-review-link-option"]', { hasText: "صنف قائم أ" }).click();

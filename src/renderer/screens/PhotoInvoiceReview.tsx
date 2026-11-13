@@ -170,8 +170,19 @@ export function PhotoInvoiceReview({
       return;
     }
     setLinking((cur) => (cur === id ? null : cur));
-    if (kind === "new") set(id, (x) => (x.decision.kind === "new" ? x : decideNew(x)));
-    else set(id, (x) => ({ ...x, decision: { kind: "skip" } }));
+    if (kind === "new") {
+      // R-1: entering «صنف جديد» from another decision starts with an EMPTY sale price. decideNew() resets the price to
+      // null, so a sale text kept from an earlier «new» would SHOW a price the decision does not hold (blocked as
+      // «سعر البيع مطلوب» beside a filled field). The old price is never restored: the merchant types it again.
+      if (rows.find((r) => r.extracted.id === id)?.decision.kind !== "new") {
+        setSaleText((s) => {
+          const next = { ...s };
+          delete next[id];
+          return next;
+        });
+      }
+      set(id, (x) => (x.decision.kind === "new" ? x : decideNew(x)));
+    } else set(id, (x) => ({ ...x, decision: { kind: "skip" } }));
   };
   /** Search results for linking: products whose name contains every typed word, best match first (max 8). */
   const linkResults = (query: string) => {

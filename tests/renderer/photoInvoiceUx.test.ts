@@ -138,6 +138,15 @@ describe("Photo Invoice UX — decisions and practical entry (findings 5, 8)", (
     expect(REVIEW).toMatch(/value=\{saleText\[id\] \?\? ""\}/);
     expect(REVIEW).not.toMatch(/saleText[^;\n]*supplierPrice/);
   });
+  // R-1 (2026-11-13): New → price → Ignore → New showed the OLD price while the decision held none (blocked as required).
+  it("R-1: entering «صنف جديد» from another decision clears the row's sale text — never restores the old price", () => {
+    const decideFn = REVIEW.slice(REVIEW.indexOf("const decide = "), REVIEW.indexOf("const linkResults = "));
+    expect(decideFn).toMatch(/if \(kind === "new"\) \{[\s\S]*?decision\.kind !== "new"\) \{\s*setSaleText\(\(s\) => \{[\s\S]*?delete next\[id\];/);
+    expect(decideFn).toMatch(/decideNew\(x\)/);
+    // the only writers of the sale text: that clear, and the merchant typing into the field
+    expect(REVIEW.match(/setSaleText\(/g)?.length).toBe(2);
+    expect(REVIEW).toMatch(/setSaleText\(\(s\) => \(\{ \.\.\.s, \[id\]: text \}\)\)/);
+  });
   it("handwritten: a photo-only start, one empty row with the cursor in it, Enter opens the next row", () => {
     expect(FLOW).toMatch(/data-testid="photo-flow-handwritten"/);
     expect(FLOW).toMatch(/readInvoicePhoto\(mode === "read" \? undefined : \{ mode \}\)/);
