@@ -1,6 +1,6 @@
-; This candidate must not be compiled into an installer before independent review.
-; Removing this line is permitted only in a separately verified disposable build environment.
-!error "TRIAL NSIS LIFECYCLE NOT APPROVED: installer compilation is blocked"
+; TEST ONLY trial installer. The former compile barrier was removed in the dedicated barrier-removal commit,
+; after one independent review and its fixes. The build itself is still restricted to the single authorized
+; GitHub-hosted run (scripts/trial-build-candidate.cjs requireReady), never a local or merchant machine.
 
 ; electron-builder's optional LogSet macro changes $INSTDIR before the trial
 ; guards. Refuse that builder mode even after the ordinary barrier is reviewed.
@@ -25,7 +25,7 @@
   ${endif}
 !macroend
 !macro customCheckAppRunning
-  Abort "TRIAL lifecycle is not approved; no process will be terminated."
+  ; Non-terminating: refuse while a trial process exists; never kill anything.
   !insertmacro trialRefuseRunning
 !macroend
 

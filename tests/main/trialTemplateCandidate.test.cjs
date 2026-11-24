@@ -36,10 +36,15 @@ test('rejects changed, unknown and already-transformed template bytes', () => {
   assert.throws(() => candidate.transform('multiUser.nsh', Buffer.concat([source('multiUser.nsh'), Buffer.from(' ')])), /Unrecognized/);
 });
 
-test('source keeps compile and process barriers and candidate fresh-only checks', () => {
+// TRANSITION (barrier removal): this test asserted the compile barrier and the unconditional process Abort while
+// the lifecycle was unreviewed. After the independent review and its fixes, the spec is: NO compile barrier, and a
+// NON-TERMINATING process check (refuse while a trial process exists, never kill) — plus every fresh-only guard.
+test('source has no compile barrier, a non-terminating process check and the fresh-only checks', () => {
   const include = fs.readFileSync(path.resolve(__dirname, '../../build/trial-installer.nsh'), 'utf8');
-  assert.match(include, /^!error "TRIAL NSIS LIFECYCLE NOT APPROVED/m);
-  assert.match(include, /!macro customCheckAppRunning\s+Abort/);
+  assert.doesNotMatch(include, /^!error "TRIAL NSIS LIFECYCLE NOT APPROVED/m);
+  assert.doesNotMatch(include, /Abort "TRIAL lifecycle is not approved/);
+  assert.match(include, /!macro customCheckAppRunning\s+;[^\n]*\n\s*!insertmacro trialRefuseRunning\s+!macroend/);
+  assert.doesNotMatch(include, /KillProcess|taskkill|Stop-Process/i);
   assert.match(include, /\$\{if\} \$\{isForceRun\}[\s\S]*?Abort "TRIAL refuses automatic launch\."/);
   assert.match(include, /!ifdef ENABLE_LOGGING_ELECTRON_BUILDER[\s\S]*?!error "TRIAL refuses electron-builder pre-guard installer logging"/);
   for (const key of ['INSTALL_REGISTRY_KEY', 'UNINSTALL_REGISTRY_KEY', 'UNINSTALL_REGISTRY_KEY_2']) {

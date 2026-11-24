@@ -35,11 +35,6 @@ jobs:
           if (git status --porcelain --untracked-files=all) { throw 'Checkout must be clean' }
           Write-Host "Source $env:GITHUB_SHA; image $env:ImageOS $env:ImageVersion"
           git rev-parse 'HEAD^{tree}'
-      # BARRIER — removed only in the final, independently reviewed barrier-removal commit, together with the
-      # NSIS !error / customCheckAppRunning Abort and the lifecycle's uninstall stop.
-      - name: Stop until the installed lifecycle has passed independent review
-        run: |
-          throw 'BLOCKED: barrier-removal commit not yet reviewed'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'

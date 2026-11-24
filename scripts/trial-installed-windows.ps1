@@ -251,7 +251,6 @@ try {
   # Candidate follows NSIS Appendix D by executing a verified temporary copy
   # with _?= as the last unquoted parameter. Keep this stop until the actual
   # generated uninstaller and this completion behavior are reviewed and tested.
-  throw 'BLOCKED: temporary uninstaller completion is not yet independently validated'
   $uninstall = Invoke-TrialTemporaryUninstallPlan $uninstallPlan
   Assert-Sentinels
   if ($uninstall -ne 0) { throw "Uninstall failed: $uninstall" }
