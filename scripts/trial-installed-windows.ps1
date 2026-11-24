@@ -194,6 +194,13 @@ try {
   # financial transaction, close, reopen, totals re-checked (e2e/trial-runtime-smoke.mjs --installed-local).
   # The hosted synthetic-runner path stays covered by tests/main/trialBootstrap.test.ts; it is not launched here.
   $env:APPDATA = $roaming
+  # The smoke helper requires the hosted-runner markers even in local mode (e2e/trial-smoke-env.mjs) and then
+  # strips them from the APP's environment, so the app is exercised through its local-account gate. They are set
+  # explicitly because this -Credential child does not reliably inherit them; the supervisor verified the runner.
+  $env:GITHUB_ACTIONS = 'true'
+  $env:RUNNER_ENVIRONMENT = 'github-hosted'
+  $env:ALZABT_SYNTHETIC_RUNNER_ONLY = '1'
+  $env:RUNNER_TEMP = Join-Path $WorkRoot 'evidence'
   & $NodeExe e2e/trial-runtime-smoke.mjs --installed-local
   if ($LASTEXITCODE -ne 0) { throw "Installed local-account app smoke failed: $LASTEXITCODE" }
   $localProfile = Join-Path $roaming 'Alzabt POS TRIAL Test Data'
