@@ -70,6 +70,7 @@
       "runAfterFinish": false,
       "guid": "d12ac5c3-1e6f-4ff5-a3e9-1fa742309a2e",
       "allowElevation": false,
+      "packElevateHelper": false,
       "createDesktopShortcut": false,
       "createStartMenuShortcut": false
     },

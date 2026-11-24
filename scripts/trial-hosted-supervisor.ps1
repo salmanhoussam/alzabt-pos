@@ -21,6 +21,8 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hoste
     -not $env:GITHUB_WORKSPACE -or -not [Environment]::Is64BitProcess) {
   throw 'Disposable 64-bit GitHub-hosted Windows runner required'
 }
+# PowerShell 7 reaches the LocalAccounts cmdlets through Windows PowerShell compatibility; load it explicitly.
+Import-Module Microsoft.PowerShell.LocalAccounts -UseWindowsPowerShell -WarningAction SilentlyContinue
 $user = 'alzabt-test'
 $work = 'C:\alzabt-trial-work'
 if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) { throw "Fresh runner required: local user $user exists" }
@@ -77,8 +79,7 @@ $password = ConvertTo-SecureString ('Tt9!' + [Convert]::ToBase64String($bytes)) 
 $bytes = $null
 New-LocalUser -Name $user -Password $password -AccountNeverExpires -PasswordNeverExpires -Description 'Disposable Alzabt POS TEST ONLY account' | Out-Null
 try { Add-LocalGroupMember -Group 'Users' -Member $user -ErrorAction Stop } catch { if ($_.Exception.Message -notmatch 'already a member') { throw } }
-$admins = @(Get-LocalGroupMember -Group 'Administrators' | ForEach-Object { $_.Name })
-if ($admins -match "\\$user$") { throw "$user must not be an administrator" }
+# Never added to Administrators; the child itself refuses any administrator or elevated token (whoami SIDs).
 
 # The trial account may READ the artifacts, the checked-out workspace (scripts, node_modules) and Node;
 # it may WRITE only its own evidence directory. It cannot write the runner's profile (default ACLs).
@@ -103,12 +104,15 @@ $stderr = Join-Path $EvidenceDir 'lifecycle-stderr.txt'
 Write-Host "Running the installed lifecycle as $env:COMPUTERNAME\$user (installer $installerHash)"
 $child = Start-Process -FilePath $pwsh -ArgumentList $argList -Credential $credential -LoadUserProfile `
   -WorkingDirectory $env:GITHUB_WORKSPACE -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+# Cache the process handle now; without it ExitCode can read as $null after the child exits.
+$null = $child.Handle
 if (-not $child.WaitForExit(45 * 60 * 1000)) {
   # Only the retained child instance is ever stopped — never by name.
   try { $child.Kill($true) } catch [InvalidOperationException] { }
   throw 'Installed lifecycle timed out'
 }
 $lifecycleExit = $child.ExitCode
+if ($lifecycleExit -isnot [int]) { throw 'Installed lifecycle exit code could not be read' }
 Get-Content -LiteralPath $stdout, $stderr -ErrorAction SilentlyContinue | Write-Host
 Copy-Item -Path (Join-Path $childEvidence '*') -Destination $EvidenceDir -Recurse -ErrorAction SilentlyContinue
 Write-Host "Installed lifecycle exit code: $lifecycleExit"

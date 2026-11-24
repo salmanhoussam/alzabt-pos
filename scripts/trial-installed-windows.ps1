@@ -44,7 +44,20 @@ if ('S-1-5-32-544' -in $groupSids -or @($groupSids | Where-Object { $_ -match '^
 
 $local = [Environment]::GetFolderPath('LocalApplicationData')
 $roaming = [Environment]::GetFolderPath('ApplicationData')
-if (-not [IO.Path]::IsPathFullyQualified($local) -or -not [IO.Path]::IsPathFullyQualified($roaming)) { throw 'Missing shell folders' }
+$userProfile = [Environment]::GetFolderPath('UserProfile')
+if (-not [IO.Path]::IsPathFullyQualified($local) -or -not [IO.Path]::IsPathFullyQualified($roaming) -or
+    -not [IO.Path]::IsPathFullyQualified($userProfile)) { throw 'Missing shell folders' }
+# A -Credential child can inherit the RUNNER account's environment block. Re-derive every per-user location from
+# THIS token's shell folders (long paths, no 8.3 names) so nothing below, nor node/Electron, uses the runner's.
+$userTemp = Join-Path $local 'Temp'
+New-Item -ItemType Directory -Path $userTemp -Force | Out-Null
+$env:USERPROFILE = $userProfile
+$env:LOCALAPPDATA = $local
+$env:APPDATA = $roaming
+$env:TEMP = $userTemp
+$env:TMP = $userTemp
+$probe = Join-Path $userTemp ('alzabt-trial-write-' + [Guid]::NewGuid().ToString('N'))
+[IO.File]::WriteAllText($probe, 'probe'); Remove-Item -LiteralPath $probe
 $installDir = Join-Path $local 'Programs\alzabt-pos-trial'
 $productionInstall = Join-Path $local 'Programs\Alzabt POS'
 $productionProfile = Join-Path $roaming 'Alzabt POS'
@@ -185,7 +198,21 @@ try {
   # installed file itself. The uninstaller hash was recorded during install;
   # it is an accidental-replacement check, not independent provenance proof.
   $recordedUninstaller = Get-ItemPropertyValue -LiteralPath $trialAppKey -Name TrialUninstallerSHA256 -ErrorAction Stop
-  $verificationJson = & $NodeExe scripts/trial-verify-installed.cjs $installDir $manifest $recordedUninstaller
+  # The installer wrote a 128-hex proof = SHA-256(reg export app key) + SHA-256(reg export uninstall key)
+  # (build/trial-installer.nsh, customInstall: FileWrite "$R6$R7"). Recompute it the same way, so the verifier
+  # binds the installed proof file to the CURRENT trial registration.
+  $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
+  $proofParts = foreach ($key in @('HKCU\Software\d12ac5c3-1e6f-4ff5-a3e9-1fa742309a2e',
+      'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\d12ac5c3-1e6f-4ff5-a3e9-1fa742309a2e')) {
+    $export = Join-Path $userTemp ('alzabt-trial-reg-' + [Guid]::NewGuid().ToString('N') + '.reg')
+    & $regExe export $key $export /y /reg:64 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Cannot export trial registry key: $key" }
+    (Get-FileHash -LiteralPath $export -Algorithm SHA256).Hash.ToLowerInvariant()
+    Remove-Item -LiteralPath $export
+  }
+  $registryProof = ($proofParts -join '')
+  if ($registryProof -cnotmatch '^[a-f0-9]{128}$') { throw 'Cannot compute the expected registry proof' }
+  $verificationJson = & $NodeExe scripts/trial-verify-installed.cjs $installDir $manifest $recordedUninstaller $registryProof
   if ($LASTEXITCODE -ne 0) { throw 'Installed trial differs from its prepackaged payload' }
   $verification = ($verificationJson | Out-String | ConvertFrom-Json)
   if ($verification.executableSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Missing build-bound executable hash' }
@@ -219,7 +246,7 @@ try {
   if ($uninstallers.Count -ne 1) { throw 'Expected exactly one trial uninstaller in the fixed trial directory' }
   . ./scripts/trial-temporary-uninstall.ps1
   $uninstallPlan = New-TrialTemporaryUninstallPlan -InstallDirectory $installDir -ExpectedLocalAppData $local `
-    -InstalledUninstaller $uninstallers[0].FullName -TempRoot $env:TEMP `
+    -InstalledUninstaller $uninstallers[0].FullName -TempRoot $userTemp `
     -ExpectedUninstallerSha256 $verification.uninstallerSha256
   # Candidate follows NSIS Appendix D by executing a verified temporary copy
   # with _?= as the last unquoted parameter. Keep this stop until the actual
