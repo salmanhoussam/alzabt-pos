@@ -104,6 +104,10 @@ $stderr = Join-Path $EvidenceDir 'lifecycle-stderr.txt'
 Write-Host "Running the installed lifecycle as $env:COMPUTERNAME\$user (installer $installerHash)"
 $child = Start-Process -FilePath $pwsh -ArgumentList $argList -Credential $credential -LoadUserProfile `
   -WorkingDirectory $env:GITHUB_WORKSPACE -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+# The child belongs to another account; its default DACL grants that user and SYSTEM, not Administrators.
+# Enable this elevated runner's SeDebugPrivilege so the handle below can be opened. If it still cannot be
+# opened, the next line throws and the run fails closed (no lifecycle result is ever assumed).
+try { [System.Diagnostics.Process]::EnterDebugMode() } catch { Write-Host "EnterDebugMode unavailable: $($_.Exception.Message)" }
 # Cache the process handle now; without it ExitCode can read as $null after the child exits.
 $null = $child.Handle
 if (-not $child.WaitForExit(45 * 60 * 1000)) {
