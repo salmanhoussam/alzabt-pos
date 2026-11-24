@@ -42,20 +42,25 @@ if ('S-1-5-32-544' -in $groupSids -or @($groupSids | Where-Object { $_ -match '^
   throw 'Administrator or elevated token refused'
 }
 
+# A -Credential child inherits the RUNNER account's environment block, and known folders expand with that
+# %USERPROFILE% (hosted run 45497204656 got C:\Users\runneradmin\AppData\Local). Resolve the profile from
+# the token SID via ProfileList + the loaded hive, set the per-user environment, and only then require every
+# known folder to equal the resolved path. Nothing below, nor node/Electron, may use the runner's locations.
+. ./scripts/trial-user-profile.ps1
+Write-Host "Inherited USERPROFILE before correction: $env:USERPROFILE"
+$facts = Get-TrialUserProfileFacts -Sid $userRow[0].Sid
+$resolved = Resolve-TrialUserProfile -Sid $userRow[0].Sid -UserName 'alzabt-test' -ProfileImagePath $facts.ProfileImagePath `
+  -ProfilesDirectory $facts.ProfilesDirectory -HiveLoaded $facts.HiveLoaded -ProfileExists $facts.ProfileExists
+Set-TrialUserEnvironment $resolved
+$userProfile = [Environment]::GetFolderPath('UserProfile')
 $local = [Environment]::GetFolderPath('LocalApplicationData')
 $roaming = [Environment]::GetFolderPath('ApplicationData')
-$userProfile = [Environment]::GetFolderPath('UserProfile')
-if (-not [IO.Path]::IsPathFullyQualified($local) -or -not [IO.Path]::IsPathFullyQualified($roaming) -or
-    -not [IO.Path]::IsPathFullyQualified($userProfile)) { throw 'Missing shell folders' }
-# A -Credential child can inherit the RUNNER account's environment block. Re-derive every per-user location from
-# THIS token's shell folders (long paths, no 8.3 names) so nothing below, nor node/Electron, uses the runner's.
-$userTemp = Join-Path $local 'Temp'
+Assert-TrialKnownFolders -Resolved $resolved -UserProfile $userProfile -Local $local -Roaming $roaming
+$local = $resolved.Local
+$roaming = $resolved.Roaming
+$userTemp = $resolved.Temp
 New-Item -ItemType Directory -Path $userTemp -Force | Out-Null
-$env:USERPROFILE = $userProfile
-$env:LOCALAPPDATA = $local
-$env:APPDATA = $roaming
-$env:TEMP = $userTemp
-$env:TMP = $userTemp
+Write-Host "Test-user profile $($resolved.Profile) (SID $($userRow[0].Sid)); LOCALAPPDATA $local; TEMP $userTemp"
 $probe = Join-Path $userTemp ('alzabt-trial-write-' + [Guid]::NewGuid().ToString('N'))
 [IO.File]::WriteAllText($probe, 'probe'); Remove-Item -LiteralPath $probe
 $installDir = Join-Path $local 'Programs\alzabt-pos-trial'

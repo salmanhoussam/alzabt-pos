@@ -11,7 +11,7 @@ const { applyToLocalBuilder } = require('./trial-template-candidate.cjs');
 const { inventory, makeInclude } = require('./trial-owned-payload.cjs');
 
 const digest = (data) => crypto.createHash('sha256').update(data).digest('hex');
-const REF = 'refs/heads/codex/functional-trial-installer-20261124-r2';
+const REF = 'refs/heads/codex/functional-trial-installer-20261124-r3';
 
 function requireReady({ platform, env, source, head, status }) {
   if (platform !== 'win32' || env.GITHUB_ACTIONS !== 'true' || env.RUNNER_ENVIRONMENT !== 'github-hosted' ||
