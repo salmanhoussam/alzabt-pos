@@ -52,9 +52,14 @@ $facts = Get-TrialUserProfileFacts -Sid $userRow[0].Sid
 $resolved = Resolve-TrialUserProfile -Sid $userRow[0].Sid -UserName 'alzabt-test' -ProfileImagePath $facts.ProfileImagePath `
   -ProfilesDirectory $facts.ProfilesDirectory -HiveLoaded $facts.HiveLoaded -ProfileExists $facts.ProfileExists
 Set-TrialUserEnvironment $resolved
-$userProfile = [Environment]::GetFolderPath('UserProfile')
-$local = [Environment]::GetFolderPath('LocalApplicationData')
-$roaming = [Environment]::GetFolderPath('ApplicationData')
+# Query the known folders in a FRESH process that inherits the corrected environment: that is exactly what
+# node, Electron and the smoke see, and it avoids any per-process shell-folder cache in this pwsh.
+$windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$folders = @(& $windowsPowerShell -NoProfile -NonInteractive -Command `
+  "[Environment]::GetFolderPath('UserProfile'); [Environment]::GetFolderPath('LocalApplicationData'); [Environment]::GetFolderPath('ApplicationData')")
+if ($LASTEXITCODE -ne 0 -or $folders.Count -ne 3) { throw 'Cannot query known folders in a fresh process' }
+$userProfile, $local, $roaming = $folders
+Write-Host "Fresh-process known folders: $($folders -join '; ')"
 Assert-TrialKnownFolders -Resolved $resolved -UserProfile $userProfile -Local $local -Roaming $roaming
 $local = $resolved.Local
 $roaming = $resolved.Roaming

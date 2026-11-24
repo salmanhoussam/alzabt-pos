@@ -12,7 +12,8 @@ function Get-TrialUserProfileFacts {
   $listRoot = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
   $entry = Join-Path $listRoot $Sid
   if (-not (Test-Path -LiteralPath $entry)) { throw "No Windows profile is registered for $Sid" }
-  # Get-ItemProperty expands REG_EXPAND_SZ with machine-wide variables only (%SystemDrive%).
+  # Get-ItemProperty expands REG_EXPAND_SZ with this process's environment; these values use only %SystemDrive%,
+  # which is machine-wide, and the result is then validated below (directly under ProfilesDirectory, own leaf).
   $imagePath = (Get-ItemProperty -LiteralPath $entry -Name ProfileImagePath).ProfileImagePath
   $profilesDirectory = (Get-ItemProperty -LiteralPath $listRoot -Name ProfilesDirectory).ProfilesDirectory
   [pscustomobject]@{
