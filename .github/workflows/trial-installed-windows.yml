@@ -2,14 +2,14 @@ name: TEST ONLY installed trial validation
 
 on:
   push:
-    branches: [codex/functional-trial-installer-20261124]
+    branches: [codex/functional-trial-installer-20261124-r2]
 
 permissions:
   contents: read
 
 jobs:
   installed-trial:
-    if: github.repository == 'salmanhoussam/alzabt-pos' && github.ref == 'refs/heads/codex/functional-trial-installer-20261124' && github.event.created == true && github.event.forced == false && github.event.deleted == false && github.run_attempt == 1
+    if: github.repository == 'salmanhoussam/alzabt-pos' && github.ref == 'refs/heads/codex/functional-trial-installer-20261124-r2' && github.event.created == true && github.event.forced == false && github.event.deleted == false && github.run_attempt == 1
     runs-on: windows-2022
     timeout-minutes: 60
     defaults:

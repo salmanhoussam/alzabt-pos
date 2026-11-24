@@ -78,7 +78,9 @@ $profileSentinel = Join-Path $productionProfile 'sentinel.sqlite'
 [IO.File]::WriteAllText($installSentinel, 'SYNTHETIC PRODUCTION INSTALL SENTINEL')
 [IO.File]::WriteAllText($profileSentinel, 'SYNTHETIC PRODUCTION PROFILE SENTINEL')
 foreach ($keyPath in @($productionKey, $productionAppKey, $productionGuidUninstallKey)) {
-  New-Item -Path $keyPath | Out-Null
+  # A brand-new profile may lack the Uninstall parent; each leaf was proven absent above, so -Force only
+  # creates missing parents (same defect as the supervisor in run 45491441362).
+  New-Item -Path $keyPath -Force | Out-Null
   New-ItemProperty -Path $keyPath -Name Sentinel -Value 'synthetic-production-registry-sentinel' -PropertyType String | Out-Null
 }
 $installHash = (Get-FileHash -LiteralPath $installSentinel -Algorithm SHA256).Hash

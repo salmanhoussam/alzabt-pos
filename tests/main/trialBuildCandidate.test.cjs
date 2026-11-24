@@ -10,7 +10,7 @@ const { expected } = require('../../scripts/trial-template-candidate.cjs');
 const sha = 'a'.repeat(40);
 const approved = () => ({ platform: 'win32', head: sha, status: '', source: '; synthetic reviewed source\n', env: {
   GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', GITHUB_EVENT_NAME: 'push',
-  GITHUB_REPOSITORY: 'salmanhoussam/alzabt-pos', GITHUB_REF: 'refs/heads/codex/functional-trial-installer-20261124', GITHUB_SHA: sha,
+  GITHUB_REPOSITORY: 'salmanhoussam/alzabt-pos', GITHUB_REF: 'refs/heads/codex/functional-trial-installer-20261124-r2', GITHUB_SHA: sha,
 } });
 
 test('refuses the active compile and process barriers and mismatched source', () => {

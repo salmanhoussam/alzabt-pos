@@ -43,7 +43,9 @@ foreach ($p in @($runnerProfile, $runnerInstall, $runnerKey, $runnerTrialDir, $r
 New-Item -ItemType Directory -Path $runnerProfile, $runnerInstall | Out-Null
 [IO.File]::WriteAllText((Join-Path $runnerProfile 'alzabt-pos-ledger.sqlite'), 'SYNTHETIC RUNNER-ACCOUNT PRODUCTION LEDGER SENTINEL')
 [IO.File]::WriteAllText((Join-Path $runnerInstall 'Alzabt POS.exe'), 'SYNTHETIC RUNNER-ACCOUNT PRODUCTION EXE SENTINEL')
-New-Item -Path $runnerKey | Out-Null
+# A fresh hosted profile may not have the Uninstall parent key yet; the leaf was proven absent above,
+# so -Force only creates missing parents (run 45491441362 failed here).
+New-Item -Path $runnerKey -Force | Out-Null
 New-ItemProperty -Path $runnerKey -Name Sentinel -Value 'synthetic-runner-production-key' -PropertyType String | Out-Null
 function Get-RunnerSentinelState {
   $files = @(Get-ChildItem -LiteralPath $runnerProfile, $runnerInstall -Recurse -Force | Sort-Object FullName |

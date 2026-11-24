@@ -10,7 +10,7 @@ Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
     $env:RUNNER_OS -ne 'Windows' -or $env:GITHUB_EVENT_NAME -ne 'push' -or
     $env:GITHUB_REPOSITORY -ne 'salmanhoussam/alzabt-pos' -or
-    $env:GITHUB_REF -ne 'refs/heads/codex/functional-trial-installer-20261124' -or
+    $env:GITHUB_REF -ne 'refs/heads/codex/functional-trial-installer-20261124-r2' -or
     $env:GITHUB_SHA -cnotmatch '^[a-f0-9]{40}$' -or -not $env:RUNNER_TEMP) {
   throw 'Disposable hosted trial branch required'
 }
