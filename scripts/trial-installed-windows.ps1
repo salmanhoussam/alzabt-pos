@@ -1,8 +1,21 @@
+# Launched ONLY by scripts/trial-hosted-supervisor.ps1 under the disposable local alzabt-test account.
+# Inputs are explicit parameters: a process started with -Credential does not reliably inherit the
+# runner's environment, so nothing here depends on GITHUB_* or RUNNER_* variables.
+param(
+  [Parameter(Mandatory)][string] $ArtifactDir,
+  [Parameter(Mandatory)][string] $InstallerSha256,
+  [Parameter(Mandatory)][string] $ManifestSha256,
+  [Parameter(Mandatory)][string] $NodeExe,
+  [Parameter(Mandatory)][string] $WorkRoot
+)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows' -or -not $env:RUNNER_TEMP) {
-  throw 'Disposable hosted Windows runner required'
+# The supervisor writes this marker (Administrators/SYSTEM-only writable) after verifying the hosted runner.
+$marker = Join-Path $WorkRoot 'supervisor.marker'
+if (-not [IO.Path]::IsPathFullyQualified($WorkRoot) -or -not (Test-Path -LiteralPath $marker -PathType Leaf) -or
+    -not [IO.Path]::IsPathFullyQualified($NodeExe) -or -not (Test-Path -LiteralPath $NodeExe -PathType Leaf)) {
+  throw 'Disposable hosted runner supervisor required'
 }
 if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitProcess) { throw '64-bit Windows and PowerShell required for the NSIS registry view' }
 if ((Select-String -Quiet -Path 'build/trial-installer.nsh' -Pattern '^!error ')) {
@@ -40,14 +53,13 @@ $productionAppKey = 'HKCU:\Software\069d885f-7fe3-5e70-89af-9c43433003b5'
 $productionGuidUninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\069d885f-7fe3-5e70-89af-9c43433003b5'
 $trialKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\d12ac5c3-1e6f-4ff5-a3e9-1fa742309a2e'
 $trialAppKey = 'HKCU:\Software\d12ac5c3-1e6f-4ff5-a3e9-1fa742309a2e'
-$syntheticRoot = Join-Path $env:RUNNER_TEMP 'alzabt-trial-appdata'
-foreach ($path in @($installDir, $productionInstall, $productionProfile, $syntheticRoot, $productionKey, $productionAppKey, $productionGuidUninstallKey, $trialKey, $trialAppKey)) {
+foreach ($path in @($installDir, $productionInstall, $productionProfile, $productionKey, $productionAppKey, $productionGuidUninstallKey, $trialKey, $trialAppKey)) {
   if (Test-Path -LiteralPath $path) { throw "Fresh runner required; already exists: $path" }
 }
 
 # These are synthetic, newly created sentinels only. Nothing is removed afterward;
 # the disposable VM owns cleanup. Hashes are compared after the whole lifecycle.
-New-Item -ItemType Directory -Path $productionInstall, $productionProfile, $syntheticRoot | Out-Null
+New-Item -ItemType Directory -Path $productionInstall, $productionProfile | Out-Null
 $installSentinel = Join-Path $productionInstall 'sentinel.txt'
 $profileSentinel = Join-Path $productionProfile 'sentinel.sqlite'
 [IO.File]::WriteAllText($installSentinel, 'SYNTHETIC PRODUCTION INSTALL SENTINEL')
@@ -142,9 +154,9 @@ try {
   # dedicated ACL-restricted directory accessible to the disposable user, and
   # pass the runner's pre-transfer hashes. Never build in a runner-owned checkout
   # as the standard user or infer isolation from per-user installation alone.
-  $artifactRoot = $env:ALZABT_TRIAL_ARTIFACT_DIR
-  $expectedInstallerHash = $env:ALZABT_TRIAL_EXPECTED_INSTALLER_SHA256
-  $expectedManifestHash = $env:ALZABT_TRIAL_EXPECTED_MANIFEST_SHA256
+  $artifactRoot = $ArtifactDir
+  $expectedInstallerHash = $InstallerSha256
+  $expectedManifestHash = $ManifestSha256
   if (-not $artifactRoot -or -not [IO.Path]::IsPathFullyQualified($artifactRoot) -or
       $expectedInstallerHash -cnotmatch '^[a-f0-9]{64}$' -or $expectedManifestHash -cnotmatch '^[a-f0-9]{64}$') {
     throw 'Restricted artifact directory and runner-recorded hashes are required'
@@ -173,27 +185,21 @@ try {
   # installed file itself. The uninstaller hash was recorded during install;
   # it is an accidental-replacement check, not independent provenance proof.
   $recordedUninstaller = Get-ItemPropertyValue -LiteralPath $trialAppKey -Name TrialUninstallerSHA256 -ErrorAction Stop
-  $verificationJson = & node scripts/trial-verify-installed.cjs $installDir $manifest $recordedUninstaller
+  $verificationJson = & $NodeExe scripts/trial-verify-installed.cjs $installDir $manifest $recordedUninstaller
   if ($LASTEXITCODE -ne 0) { throw 'Installed trial differs from its prepackaged payload' }
   $verification = ($verificationJson | Out-String | ConvertFrom-Json)
   if ($verification.executableSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Missing build-bound executable hash' }
   $env:ALZABT_TRIAL_INSTALLED_EXE_SHA256 = $verification.executableSha256
-  $env:ALZABT_SYNTHETIC_RUNNER_ONLY = '1'
-  # Launch the real installed app once with all runner flags removed from its
-  # environment so its local-account gate is exercised. Then exercise the
-  # separately preserved hosted synthetic-runner path with another profile.
+  # Launch the real installed app under this standard account through its LOCAL-account gate: one synthetic
+  # financial transaction, close, reopen, totals re-checked (e2e/trial-runtime-smoke.mjs --installed-local).
+  # The hosted synthetic-runner path stays covered by tests/main/trialBootstrap.test.ts; it is not launched here.
   $env:APPDATA = $roaming
-  node e2e/trial-runtime-smoke.mjs --installed-local
-  if ($LASTEXITCODE -ne 0) { throw 'Installed local-account app smoke failed' }
+  & $NodeExe e2e/trial-runtime-smoke.mjs --installed-local
+  if ($LASTEXITCODE -ne 0) { throw "Installed local-account app smoke failed: $LASTEXITCODE" }
   $localProfile = Join-Path $roaming 'Alzabt POS TRIAL Test Data'
   $localLedger = Join-Path $localProfile 'alzabt-pos-trial-only-ledger.sqlite'
+  if (-not (Test-Path -LiteralPath $localLedger -PathType Leaf)) { throw 'Trial ledger missing after the smoke' }
   $localLedgerHash = (Get-FileHash -LiteralPath $localLedger -Algorithm SHA256).Hash
-  $env:APPDATA = $syntheticRoot
-  node e2e/trial-runtime-smoke.mjs --installed
-  if ($LASTEXITCODE -ne 0) { throw 'Installed app smoke failed' }
-  $profile = Join-Path $syntheticRoot 'Alzabt POS TRIAL Test Data'
-  $ledger = Join-Path $profile 'alzabt-pos-trial-only-ledger.sqlite'
-  $ledgerHash = (Get-FileHash -LiteralPath $ledger -Algorithm SHA256).Hash
   $before = Get-ChildItem -LiteralPath $installDir -Recurse -File | Sort-Object FullName | Get-FileHash -Algorithm SHA256 | ConvertTo-Json -Compress
   $trialRegistryBefore = Get-RegistryTreeHash $trialRegistryPath
   $trialAppRegistryBefore = Get-RegistryTreeHash $trialAppRegistryPath
@@ -217,7 +223,6 @@ try {
   if ($uninstall -ne 0) { throw "Uninstall failed: $uninstall" }
   if ((Test-Path -LiteralPath $installDir) -or (Test-Path -LiteralPath $trialKey) -or (Test-Path -LiteralPath $trialAppKey)) { throw 'Trial installation or registry key remains' }
   if (-not (Test-Path -LiteralPath $localLedger) -or (Get-FileHash -LiteralPath $localLedger -Algorithm SHA256).Hash -ne $localLedgerHash) { throw 'Local trial userData was not retained' }
-  if (-not (Test-Path -LiteralPath $ledger) -or (Get-FileHash -LiteralPath $ledger -Algorithm SHA256).Hash -ne $ledgerHash) { throw 'Trial userData was not retained' }
   Write-Host 'Installed trial lifecycle passed. Backup and restore remain blocked by trial policy.'
 } finally {
   Assert-Sentinels

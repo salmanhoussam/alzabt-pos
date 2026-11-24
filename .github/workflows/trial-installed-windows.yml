@@ -35,9 +35,11 @@ jobs:
           if (git status --porcelain --untracked-files=all) { throw 'Checkout must be clean' }
           Write-Host "Source $env:GITHUB_SHA; image $env:ImageOS $env:ImageVersion"
           git rev-parse 'HEAD^{tree}'
-      - name: Stop until the complete installed lifecycle is reviewed
+      # BARRIER — removed only in the final, independently reviewed barrier-removal commit, together with the
+      # NSIS !error / customCheckAppRunning Abort and the lifecycle's uninstall stop.
+      - name: Stop until the installed lifecycle has passed independent review
         run: |
-          throw 'BLOCKED: standard-user orchestration and safe uninstaller completion require implementation and review'
+          throw 'BLOCKED: barrier-removal commit not yet reviewed'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
@@ -47,17 +49,21 @@ jobs:
         run: |
           npm.cmd run typecheck
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npx.cmd vitest run tests/main/trialBootstrap.test.ts tests/main/trialIsolation.test.ts tests/main/trialLocalGate.test.ts --maxWorkers=1 --no-file-parallelism
+          npx.cmd vitest run tests/main/trialBootstrap.test.ts tests/main/trialIsolation.test.ts tests/main/trialLocalGate.test.ts tests/main/trialAccountPolicy.test.ts tests/main/trialPhoneLoopback.test.ts tests/application/invoiceM21Identity.test.ts tests/application/invoiceConfirmationBoundary.test.ts tests/main/phoneInvoiceStaging.test.ts --maxWorkers=1 --no-file-parallelism
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Stop until standard-user sentinels are established before build
-        run: |
-          throw 'BLOCKED: create and hash protected sentinels under a disposable standard user before building'
+          node --test tests/main/trialBuildCandidate.test.cjs tests/main/trialOwnedPayload.test.cjs tests/main/trialTemplateCandidate.test.cjs tests/main/trialVerifyInstalled.test.cjs tests/main/trialSmokeEnv.test.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/main/trialTemporaryUninstallPlan.test.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build source
         run: |
           $env:ALZABT_BUILD_SHA = $env:GITHUB_SHA
           npm.cmd run build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npx.cmd electron-rebuild --force --which-module better-sqlite3
+          # npmRebuild is false in the trial build config, so the Electron ABI rebuild of better-sqlite3 is explicit
+          # here — through electron-builder's own install-app-deps (pinned by package-lock.json), never an unpinned
+          # npx download.
+          npx.cmd --no-install electron-builder install-app-deps
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build the guarded TEST ONLY installer as the runner
         id: trial-build
@@ -71,17 +77,13 @@ jobs:
           "installer_sha256=$installerHash" >> $env:GITHUB_OUTPUT
           "manifest_sha256=$manifestHash" >> $env:GITHUB_OUTPUT
           Write-Host "Built installer SHA-256 $installerHash; manifest SHA-256 $manifestHash"
-      - name: Stop until restricted artifact transfer and standard-user launch are implemented
+      # Runs as the runner account: plants second-account sentinels, creates the disposable STANDARD user
+      # alzabt-test, transfers only the bound installer + manifest (hash-checked), runs
+      # scripts/trial-installed-windows.ps1 AS alzabt-test and propagates its exact exit code.
+      - name: Installed lifecycle as a disposable standard user, with sentinels
         run: |
-          throw 'BLOCKED: transfer only the bound installer and manifest into an ACL-restricted location and launch the lifecycle with the disposable user profile'
-      - name: Installer lifecycle and sentinels
-        env:
-          ALZABT_TRIAL_EXPECTED_INSTALLER_SHA256: ${{ steps.trial-build.outputs.installer_sha256 }}
-          ALZABT_TRIAL_EXPECTED_MANIFEST_SHA256: ${{ steps.trial-build.outputs.manifest_sha256 }}
-        run: |
-          $transcript = Join-Path $env:RUNNER_TEMP 'alzabt-trial-evidence/lifecycle.txt'
-          Start-Transcript -LiteralPath $transcript | Out-Null
-          try { ./scripts/trial-installed-windows.ps1 } finally { Stop-Transcript | Out-Null }
+          $evidence = Join-Path $env:RUNNER_TEMP 'alzabt-trial-evidence'
+          ./scripts/trial-hosted-supervisor.ps1 -Installer (Join-Path $PWD 'release/Alzabt-POS-TRIAL-TEST-ONLY-Setup-0.1.1.exe') -Manifest (Join-Path $PWD 'release/trial-payload-manifest.json') -EvidenceDir $evidence
       - name: Upload synthetic run evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
