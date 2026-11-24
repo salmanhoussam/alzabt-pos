@@ -12,14 +12,61 @@
 import { DomainError } from "../domain/errors";
 import { money } from "../domain/money";
 import type {
+  ExternalPaymentEvidence,
   PaymentMethod,
   PaymentStatus,
   SaleLineRecord,
   SaleRecord,
+  SaleTender,
   SaleSourceType,
   VoidRecord,
 } from "../domain/sale";
 import type { Db } from "./db";
+
+/**
+ * P1 · PAYMENT RECORDS (owner, 2026-11-07; payment model v3 on migration 19).
+ *
+ * A NEW sale paid by ONE method that needs no external evidence — cash, card or "other" — is written
+ * with ONE `sale_tenders` row carrying that method and the amount paid, in the SAME transaction, and
+ * the sale row seals it (`tender_count = 1`; the migration's `sales_tender_seal` trigger refuses any
+ * mismatch). `payment_method` stays exactly as before, so every screen, receipt, report and statement
+ * reads the same values: this slice changes what is RECORDED, not what the merchant sees.
+ *
+ * Deliberately NO tender (legacy shape, `tender_count = 0`) for:
+ *  - nothing paid (a customer-credit sale, an unpaid invoice) — there is no payment to record;
+ *  - an invoice sale — it captures no method today (`payment_method` NULL), and none is invented;
+ *  - an `external` till sale WITHOUT evidence — migration 19 requires provider, reference and funds
+ *    confirmation on an external tender, and inventing them is forbidden.
+ * Historic sales are never touched (migration 19 already kept them at `tender_count = 0`).
+ *
+ * P2 (owner, 2026-11-07): an `external` till sale WITH evidence — today only Whish Money, its reference
+ * and the operator's explicit "the money arrived" — gets ONE `external` tender carrying the provider,
+ * the reference and `funds_confirmed = 1`, written in the same transaction. The tender's own trigger
+ * registers the reference in `external_references`, whose unique key refuses the same Whish reference
+ * a second time anywhere in the ledger (collection, receipt, sale or advance) — the whole sale rolls back.
+ *
+ * TRANSITION · INV-PAY-METHOD (owner, 2026-11-09): an INVOICE sale whose issue recorded HOW the paid
+ * amount arrived (cash, or Whish with its evidence) gets that ONE tender too, by the same rule. The
+ * "invoice sale → no tender" bullet above stays true for every invoice issued WITHOUT a method — every
+ * historic invoice and every unpaid one — because their `payment_method` is NULL and nothing is invented.
+ * Old condition: `sourceType !== "pos"` returned null before the method was even read.
+ */
+export type SingleTender =
+  | { readonly method: "cash" | "card" | "other"; readonly amountMinor: bigint }
+  | { readonly method: "external"; readonly amountMinor: bigint; readonly provider: "whish"; readonly reference: string };
+
+export function singleTenderFor(
+  header: Pick<NewSaleHeader, "paymentMethod" | "paidMinor" | "sourceType"> & Partial<Pick<NewSaleHeader, "externalPayment">>,
+): SingleTender | null {
+  if ((header.sourceType !== "pos" && header.sourceType !== "invoice") || header.paidMinor <= 0n) return null;
+  const m = header.paymentMethod;
+  if (m === "cash" || m === "card" || m === "other") return { method: m, amountMinor: header.paidMinor };
+  const e = header.externalPayment;
+  if (m === "external" && e && e.provider === "whish" && e.fundsConfirmed === true && e.reference.length > 0) {
+    return { method: "external", amountMinor: header.paidMinor, provider: "whish", reference: e.reference };
+  }
+  return null;
+}
 
 export interface NewSaleHeader {
   readonly id: string;
@@ -43,9 +90,31 @@ export interface NewSaleHeader {
   readonly paymentStatus: PaymentStatus;
   /** Null for an invoice with no captured method or a fully unpaid customer-credit POS sale. */
   readonly paymentMethod: PaymentMethod | null;
+  /**
+   * P2: the evidence of an `external` till payment (Whish Money only). The service sets it only after
+   * the operator typed a reference and explicitly confirmed the money arrived; absent otherwise.
+   */
+  readonly externalPayment?: { readonly provider: "whish"; readonly reference: string; readonly fundsConfirmed: true } | null;
+  /**
+   * SELL-SPLIT-CASH-WHISH (owner, 2026-11-09): a sale paid by TWO OR MORE tenders (today: cash + Whish
+   * Money, the full total, no debt). `paymentMethod` is then NULL — migration 19 requires it — and these
+   * rows ARE the record of how the money arrived, written in `seq` order and sealed by the sale row
+   * (`sales_tender_seal`: their count and their sum must equal `tender_count` and `paid_minor`).
+   * Absent → the single-tender rule above, unchanged.
+   */
+  readonly tenders?: ReadonlyArray<SingleTender> | null;
   readonly businessDate: string;
   readonly completedAt: string;
   readonly createdAt: string;
+}
+
+/** SELL-SPLIT-CASH-WHISH: one recorded tender of a multi-tender sale, as read back. */
+export interface SaleTenderRecord {
+  readonly seq: number;
+  readonly method: PaymentMethod;
+  readonly amountMinor: bigint;
+  readonly provider: "whish" | "bank_transfer" | null;
+  readonly reference: string | null;
 }
 
 export interface NewSaleLine {
@@ -89,6 +158,8 @@ interface SaleRow {
   business_date: string;
   completed_at: string;
   created_at: string;
+  /** Migration 19. Read with `SELECT *`; absent only on a row built by hand in a test. */
+  tender_count?: bigint;
 }
 
 interface LineRow {
@@ -142,7 +213,25 @@ export class SaleRepository {
       throw new DomainError("NOT_AVAILABLE", "Atomic sale posting requires an active database transaction");
     }
     const receiptNumber = this.nextReceiptNumber();
-    this.insertSaleHeader(header, receiptNumber, lines.length);
+    // P1: the tender goes in FIRST (its sale_id is a deferred foreign key); the sale row then seals it.
+    // SELL-SPLIT-CASH-WHISH: with two or more tenders, each goes in, in order, and the sale seals them all.
+    const many = header.tenders ?? null;
+    if (many !== null && many.length >= 2) {
+      if (header.paymentMethod !== null) {
+        throw new DomainError("LEDGER_INTEGRITY", "A sale paid by several tenders carries no single method");
+      }
+      many.forEach((tender, i) => this.insertTender(header.id, i + 1, tender));
+      this.insertSaleHeader(header, receiptNumber, lines.length, many.length);
+      for (const line of lines) this.insertSaleLine(header.id, line);
+      this.verifySale(header.id);
+      return receiptNumber;
+    }
+    if (many !== null && many.length > 0) {
+      throw new DomainError("LEDGER_INTEGRITY", "A multi-tender sale needs at least two tenders");
+    }
+    const tender = singleTenderFor(header);
+    if (tender) this.insertTender(header.id, 1, tender);
+    this.insertSaleHeader(header, receiptNumber, lines.length, tender ? 1 : 0);
     for (const line of lines) this.insertSaleLine(header.id, line);
     this.verifySale(header.id);
     return receiptNumber;
@@ -192,21 +281,39 @@ export class SaleRepository {
     return toSafeNumber(row.n, "receipt number");
   }
 
-  protected insertSaleHeader(header: NewSaleHeader, receiptNumber: number, lineCount: number): void {
+  protected insertTender(saleId: string, seq: number, tender: SingleTender): void {
+    const external = tender.method === "external";
+    this.db
+      .prepare(
+        `INSERT INTO sale_tenders (sale_id, seq, method, provider, reference, funds_confirmed, amount_minor)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        saleId,
+        seq,
+        tender.method,
+        external ? tender.provider : null,
+        external ? tender.reference : null,
+        external ? 1 : null,
+        tender.amountMinor,
+      );
+  }
+
+  protected insertSaleHeader(header: NewSaleHeader, receiptNumber: number, lineCount: number, tenderCount = 0): void {
     this.db
       .prepare(
         `INSERT INTO sales (id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
                             customer_id, customer_name_snapshot,
                             cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor,
                             paid_minor, balance_due_minor, payment_status, payment_method, line_count,
-                            business_date, completed_at, created_at)
+                            business_date, completed_at, created_at, tender_count)
          VALUES (@id, @receiptNumber, @idempotencyKey, @requestFingerprint, @sourceType, @invoiceId,
                  @customerId, @customerNameSnapshot,
                  @cashierId, @cashierName, @currency, @subtotalMinor, @taxMinor, @totalMinor,
                  @paidMinor, @balanceDueMinor, @paymentStatus, @paymentMethod, @lineCount,
-                 @businessDate, @completedAt, @createdAt)`,
+                 @businessDate, @completedAt, @createdAt, @tenderCount)`,
       )
-      .run({ ...header, receiptNumber, lineCount });
+      .run({ ...header, receiptNumber, lineCount, tenderCount });
   }
 
   protected insertSaleLine(saleId: string, line: NewSaleLine): void {
@@ -254,6 +361,17 @@ export class SaleRepository {
     ) {
       throw new DomainError("LEDGER_INTEGRITY", `Sale ${saleId} does not add up; transaction rolled back`);
     }
+    // P1: a sale's payment records add up to exactly what it says was paid (the migration's seal trigger
+    // checks this at insert; this re-reads it before COMMIT, so a fault anywhere still rolls back).
+    const t = this.db
+      .prepare(
+        `SELECT s.tender_count AS declared, s.paid_minor AS paid, count(t.seq) AS n, coalesce(sum(t.amount_minor), 0) AS total
+           FROM sales s LEFT JOIN sale_tenders t ON t.sale_id = s.id WHERE s.id = ? GROUP BY s.id`,
+      )
+      .get(saleId) as { declared: bigint; paid: bigint; n: bigint; total: bigint } | undefined;
+    if (!t || t.n !== t.declared || (t.declared > 0n && t.total !== t.paid)) {
+      throw new DomainError("LEDGER_INTEGRITY", `Sale ${saleId} payment records do not add up; transaction rolled back`);
+    }
   }
 
   // ── Reads ─────────────────────────────────────────────────────────────────────────────────────
@@ -290,6 +408,25 @@ export class SaleRepository {
     return rows.map((r) => this.hydrate(r));
   }
 
+  /**
+   * SELL-CUSTOMER-LINK (ACC-2): the PAID till sales linked to one customer, oldest first.
+   *
+   * 🔴 ONLY `source_type = 'pos' AND payment_status = 'paid'`. A credit sale is shown once, as its
+   * obligation, so it is excluded here — listing it twice would make one sale look like two
+   * activities. Invoice sales carry no customer id (M14). No index on `customer_id` exists; at a
+   * shop's volume this is a scan of one table (measured cost recorded with the slice, not guessed).
+   */
+  listPaidSalesForCustomer(customerId: string): SaleRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM sales
+          WHERE customer_id = ? AND source_type = 'pos' AND payment_status = 'paid'
+          ORDER BY completed_at, receipt_number`,
+      )
+      .all(customerId) as SaleRow[];
+    return rows.map((r) => this.hydrate(r));
+  }
+
   listVoidsForSales(saleIds: ReadonlyArray<string>): Map<string, VoidRecord> {
     const out = new Map<string, VoidRecord>();
     const stmt = this.db.prepare("SELECT * FROM voids WHERE sale_id = ?");
@@ -310,6 +447,38 @@ export class SaleRepository {
       )
       .all(businessDate) as Array<{ currency: string; total_minor: bigint; voided: bigint }>;
     return rows.map((r) => ({ currency: r.currency, totalMinor: r.total_minor, voided: r.voided === 1n }));
+  }
+
+  /** P2: the provider + reference on an external sale's ONE tender; null for any other sale. */
+  private externalPaymentOf(row: SaleRow): ExternalPaymentEvidence | null {
+    if (row.payment_method !== "external") return null;
+    const t = this.db
+      .prepare("SELECT provider, reference FROM sale_tenders WHERE sale_id = ? AND seq = 1 AND method = 'external'")
+      .get(row.id) as { provider: "whish" | "bank_transfer" | null; reference: string | null } | undefined;
+    return t && t.provider && t.reference ? { provider: t.provider, reference: t.reference } : null;
+  }
+
+  /**
+   * SELL-SPLIT-CASH-WHISH: `{ tenders }` for a sale sealed with two or more tenders, `{}` otherwise —
+   * so every single-tender, legacy or unpaid sale keeps EXACTLY its previous record shape.
+   */
+  private multiTendersOf(row: SaleRow): { tenders?: SaleTender[] } {
+    if (row.tender_count === undefined || row.tender_count < 2n) return {};
+    const rows = this.db
+      .prepare("SELECT seq, method, amount_minor, provider, reference FROM sale_tenders WHERE sale_id = ? ORDER BY seq")
+      .all(row.id) as Array<{ seq: bigint; method: PaymentMethod; amount_minor: bigint; provider: "whish" | "bank_transfer" | null; reference: string | null }>;
+    if (rows.length !== Number(row.tender_count)) {
+      throw new DomainError("LEDGER_INTEGRITY", `Sale ${row.id} has ${rows.length} of ${row.tender_count} tenders`);
+    }
+    return {
+      tenders: rows.map((t) => ({
+        seq: toSafeNumber(t.seq, "tender seq"),
+        method: t.method,
+        amount: money(t.amount_minor, row.currency),
+        provider: t.provider,
+        reference: t.reference,
+      })),
+    };
   }
 
   private hydrate(row: SaleRow): SaleRecord {
@@ -351,6 +520,8 @@ export class SaleRepository {
       balanceDue: money(row.balance_due_minor, row.currency),
       paymentStatus: row.payment_status,
       paymentMethod: row.payment_method,
+      externalPayment: this.externalPaymentOf(row),
+      ...this.multiTendersOf(row),
       businessDate: row.business_date,
       completedAt: row.completed_at,
       createdAt: row.created_at,

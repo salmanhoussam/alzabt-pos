@@ -117,9 +117,10 @@ describe("the form — source-level guarantees", () => {
     expect(FORM_CODE).not.toMatch(/reference\s*\+|`\$\{reference\}|reference\.concat|-\$\{/);
     expect(FORM_CODE).toContain("reference: reference.trim()");
   });
-  it("only Whish and bank transfer can be chosen; no cash, card or other", () => {
+  it("only Whish can be chosen; no cash, card, other — and, since P3, no bank transfer", () => {
+    // TRANSITION (P3, DEC-35): bank transfer is no longer offered for a NEW shared receipt. Old: whish + bank_transfer.
     expect(FORM_CODE).toContain('value="whish"');
-    expect(FORM_CODE).toContain('value="bank_transfer"');
+    expect(FORM_CODE).not.toContain('value="bank_transfer"');
     expect(FORM_CODE).not.toMatch(/value="(cash|card|other)"/);
   });
   it("🔴 Confirm needs exact completion; every field and Cancel are locked while blocked or busy; Confirm vanishes when blocked", () => {
@@ -153,7 +154,8 @@ describe("the form — source-level guarantees", () => {
   });
   it("early refusals are in the owner's language and need the reference and the funds confirmation", () => {
     expect(FORM_CODE).toContain('t("collect.referenceRequired")');
-    expect(FORM_CODE).toContain('t("collect.confirmRequired")');
+    // TRANSITION (QW-COLLECT-LAYOUT): was t("collect.confirmRequired"); the one explanation is collect.confirmMissing.
+    expect(FORM_CODE).toContain('t("collect.confirmMissing")');
     expect(FORM_CODE).toContain('type="checkbox"');
     expect(FORM_CODE).toContain("checked={confirmed}"); // starts unchecked: useState(false)
     expect(FORM_CODE).toContain("useState(false)");

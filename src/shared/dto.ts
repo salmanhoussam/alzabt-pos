@@ -3,7 +3,7 @@ import type { Catalog, Product } from "../domain/catalog";
 import { DomainError } from "../domain/errors";
 import { type Money, money } from "../domain/money";
 import type { TodaySalesReport } from "../domain/report";
-import type { SaleRecord, VoidRecord } from "../domain/sale";
+import type { PaymentMethod, SaleRecord, VoidRecord } from "../domain/sale";
 import type { AdminProductRow } from "../persistence/catalogRepository";
 import type { CategoryRow } from "../persistence/categoryRepository";
 import type { ProductImageMeta } from "../persistence/productImageRepository";
@@ -56,14 +56,17 @@ export function toProductDto(p: Product): ProductDto {
     id: p.id,
     sku: p.sku,
     name: p.name,
+    ...(p.nameAr !== undefined ? { nameAr: p.nameAr } : {}),
+    ...(p.nameEn !== undefined ? { nameEn: p.nameEn } : {}),
     price: toMoneyDto(p.price),
     baseUnit: p.baseUnit,
     priceNeedsReview: p.priceNeedsReview,
+    barcode: p.barcode,
   };
 }
 
 export function toCatalogDto(c: Catalog): CatalogDto {
-  return { currency: c.currency, products: c.products.map(toProductDto) };
+  return { currency: c.currency, products: c.products.map(toProductDto), inactiveBarcodes: [...c.inactiveBarcodes], demo: c.demo === true };
 }
 
 /** Rebuilds a usable Catalog in the renderer (for display totals only — main always reprices). */
@@ -72,11 +75,20 @@ export function fromCatalogDto(dto: CatalogDto): Catalog {
     id: p.id,
     sku: p.sku,
     name: p.name,
+    ...(p.nameAr !== undefined ? { nameAr: p.nameAr } : {}),
+    ...(p.nameEn !== undefined ? { nameEn: p.nameEn } : {}),
     price: fromMoneyDto(p.price),
     baseUnit: p.baseUnit,
     priceNeedsReview: p.priceNeedsReview,
+    barcode: p.barcode,
   }));
-  return { currency: dto.currency, products, byId: new Map(products.map((p) => [p.id, p])) };
+  return {
+    currency: dto.currency,
+    products,
+    byId: new Map(products.map((p) => [p.id, p])),
+    inactiveBarcodes: new Set(dto.inactiveBarcodes),
+    demo: dto.demo === true,
+  };
 }
 
 /**
@@ -100,6 +112,19 @@ export function toSaleDto(s: SaleRecord, invoiceNumber: number | null = null): S
     balanceDue: toMoneyDto(s.balanceDue),
     paymentStatus: s.paymentStatus,
     paymentMethod: s.paymentMethod,
+    ...(s.externalPayment ? { externalPayment: { provider: s.externalPayment.provider, reference: s.externalPayment.reference } } : {}),
+    // SELL-SPLIT-CASH-WHISH: only on a multi-tender sale, so every other DTO keeps its exact shape.
+    ...(s.tenders && s.tenders.length >= 2
+      ? {
+          tenders: s.tenders.map((t) => ({
+            seq: t.seq,
+            method: t.method,
+            amount: toMoneyDto(t.amount),
+            provider: t.provider,
+            reference: t.reference,
+          })),
+        }
+      : {}),
     businessDate: s.businessDate,
     completedAt: s.completedAt,
     lines: s.lines.map((l) => ({
@@ -329,9 +354,11 @@ export function toInvoiceDto(row: InvoiceRow): InvoiceDto {
 export function toInvoiceViewDto(view: {
   readonly invoice: InvoiceRow;
   readonly lines: ReadonlyArray<InvoiceLineRow>;
+  readonly payment?: { readonly method: PaymentMethod; readonly provider: "whish" | "bank_transfer" | null; readonly reference: string | null };
 }): InvoiceViewDto {
   return {
-    invoice: toInvoiceDto(view.invoice),
+    // INV-PAY-METHOD: `payment` only when the service found one, so every other DTO keeps its shape.
+    invoice: view.payment ? { ...toInvoiceDto(view.invoice), payment: { ...view.payment } } : toInvoiceDto(view.invoice),
     lines: view.lines.map((l) => toInvoiceLineDto(l, view.invoice.currency)),
   };
 }

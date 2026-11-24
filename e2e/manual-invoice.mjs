@@ -299,7 +299,9 @@ await app.close();
   // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
   // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
   // 🔴 TRANSITION 17 -> 18 with migration 18 (external_receipt_allocation). The old value was 17.
-  assert(f.schema === 18, `the ledger is at schema v18 (got ${f.schema})`);
+  // 🔴 TRANSITION 18 -> 19 with migration 19 (payment_model_tenders_references_advances). The old value was 18.
+  // 🔴 TRANSITION 19 -> 20 with migration 20 (advance_safety_attempts_voids). The old value was 19.
+  assert(f.schema === 20, `the ledger is at schema v20 (got ${f.schema})`);
   assert(f.invoices === 0 && f.invoiceLines === 0 && f.reconciliation === 0, "no invoice exists yet");
   assert(count("company_profile") === 1, "exactly one company_profile row, however many saves happened");
   assert(Number(one("SELECT next_invoice_number AS n FROM company_profile").n) === 61, "the sequence starts at 61 as configured");
@@ -393,11 +395,26 @@ assert((await textOf(page, "sheet-words")).includes("("), "the amount in words i
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 4 · Finalize — explicit, confirmed, and the number appears only afterwards
 // ════════════════════════════════════════════════════════════════════════════════════════════════
+// TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): 96.15 of 496.15 is paid, so the 400.00 left must go
+// on a customer's account. Old flow: finalize was clicked on an unlinked draft and the 400.00 stayed
+// untracked. Now the owner picks the account through the ordinary finder and ticks "issue on account".
+await testid(page, "account-choose").click();
+await testid(page, "customer-finder").waitFor({ timeout: 30000 });
+await testid(page, "customer-new").click();
+await testid(page, "customer-field-name").fill("زبون الفاتورة اليدوية");
+await testid(page, "customer-save").click();
+await testid(page, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
+await testid(page, "account-issue").check();
 await testid(page, "finalize").click();
 await page.waitForSelector('[data-testid="finalize-confirm"]');
 const confirmText = await textOf(page, "finalize-confirm");
 assert(confirmText.includes("496.15") && confirmText.includes("400.00"), "the confirmation shows the real figures");
 await page.screenshot({ path: SHOTS + "I4-finalize-confirm.png" });
+// TRANSITION (INV-PAY-METHOD, 2026-11-09): 96.15 is marked paid, so the confirmation now asks HOW it was
+// received and cannot issue until it is answered. Old flow: finalize-confirm-yes was clicked directly.
+assert((await page.locator('[data-testid="confirm-pay"]').count()) === 1, "INV-PAY-METHOD: the confirmation asks how the paid 96.15 was received");
+assert(await page.locator('[data-testid="finalize-confirm-yes"]').isDisabled(), "INV-PAY-METHOD: …and cannot issue before it is answered");
+await testid(page, "confirm-pay-cash").click();
 await testid(page, "finalize-confirm-yes").click();
 
 await page.waitForSelector('[data-testid="finalized-notice"]');
@@ -456,9 +473,11 @@ await app.close();
   assert(f.salePaid === 9615, `the sale's paid amount is the invoice's 96.15 (got ${f.salePaid})`);
   assert(f.saleBalance === 40000, `and its balance due is 400.00 (got ${f.saleBalance})`);
   assert(f.salePaid + f.saleBalance === f.saleTotal, "paid + balance = total, on the sale itself");
-  // No payment method was invented, even though money really was received: the invoice records
-  // the AMOUNT, and never how it arrived.
-  assert(f.methodlessSales === 1, "and it records NO payment method");
+  // TRANSITION (INV-PAY-METHOD, 2026-11-09): this said "No payment method was invented … the invoice
+  // records the AMOUNT, and never how it arrived" and asserted methodlessSales === 1 (old value: 1).
+  // The 96.15 is now issued with cash, chosen in the confirmation above — still nothing invented: the
+  // method is the one the operator gave, and it is the sale's ONE tender for exactly the paid amount.
+  assert(f.methodlessSales === 0, "and it records the payment method the operator chose (cash), never an invented one");
   // 🔴 THE HALF OF THE OLD BOUNDARY THAT STILL HOLDS: a sale is not a stock movement.
   assert(f.voids === 0, "and no void");
   assert(f.voids === 0, "and no void");
@@ -717,7 +736,9 @@ await app.close();
   // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
   // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
   // 🔴 TRANSITION 17 -> 18 with migration 18 (external_receipt_allocation). The old value was 17.
-  assert(f.schema === 18 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v18");
+  // 🔴 TRANSITION 18 -> 19 with migration 19 (payment_model_tenders_references_advances). The old value was 18.
+  // 🔴 TRANSITION 19 -> 20 with migration 20 (advance_safety_attempts_voids). The old value was 19.
+  assert(f.schema === 20 && f.integrity === "ok" && f.foreignKeys === "[]", "the ledger is sound at v20");
   assert(f.invoices === 1 && f.invoiceLines === 4, "the invoice and its lines survived the restart");
   assert(f.highestNumber === 61, "the invoice number is unchanged");
   assert(f.reconciliation === 4, "every reconciliation row survived");

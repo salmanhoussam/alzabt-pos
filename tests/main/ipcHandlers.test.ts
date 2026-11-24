@@ -96,8 +96,14 @@ describe("IPC surface", () => {
         // TRANSITION with M17B-S1: one more name in the closed list — owner-only, shares ONE real external receipt.
         "recordAllocatedReceipt",
         "recordCustomerPayment",
+        // TRANSITION (SELL-CREDIT, owner 2026-11-08): one more name — owner-only, the till's ONE way to
+        // create a customer debt (a whole sale on account). Old list: without it.
+        "createCustomerCreditSale",
         "createCategory",
         "createSale",
+        // TRANSITION (SELL-SPLIT-CASH-WHISH, 2026-11-09): one more name — a sale paid in full by cash +
+        // Whish, same permission as createSale, never a debt. Old list: without it.
+        "createSplitSale",
         "currentCashier",
         "exportBackup",
         "exportCatalog",
@@ -170,6 +176,8 @@ describe("IPC surface", () => {
         "pickInvoiceLogo",
         "printInvoice",
         "saveInvoicePdf",
+        // TRANSITION (PHOTO-INVOICE-TO-ITEMS): takes NO path — main runs the picker. Old list: without it.
+        "readInvoicePhoto",
         "startPhoneSession",
         "cancelPhoneSession",
         "phoneSessionState",
@@ -178,6 +186,34 @@ describe("IPC surface", () => {
         "exportFullBackup",
         "inspectRestoreBackup",
         "applyRestore",
+        // 🔴 TRANSITION (migration 20): the nine customer-advance channels. Old list: without them.
+        "recordAdvance",
+        "pendingAdvances",
+        "finishAdvance",
+        "closeAdvance",
+        "acknowledgeAdvance",
+        "getAdvanceStatement",
+        "correctAdvance",
+        "printAdvance",
+        "saveAdvancePdf",
+        // 🔴 TRANSITION (DEC-35x, Daily Money In/Out): the owner-only, read-only day report. Old list: without it.
+        "getDailyMoney",
+        // 🔴 TRANSITION (DEC-35x, Apply Advance to Existing Debt): owner-only. Old list: without it.
+        "applyAdvanceToDebt",
+        // 🔴 TRANSITION (DEC-35x, Apply Advance to New Sale): owner-only. Old list: without it.
+        "sellOnAdvance",
+        // 🔴 TRANSITION (DEC-35z+, Cash Refund REF): owner-only money OUT + its reprint / PDF. Old list: without them.
+        "refundAdvance",
+        "printAdvanceRefund",
+        "saveAdvanceRefundPdf",
+        // 🔴 TRANSITION (DEC-35z+, COL receipts): owner-only reads of a COL- document. Old list: without them.
+        "getCollectionReceipt",
+        "printCollectionReceipt",
+        "saveCollectionReceiptPdf",
+        // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): one till receipt by sale id — view / print / PDF. Old list: without them.
+        "getSaleReceipt",
+        "printSaleReceipt",
+        "saveSaleReceiptPdf",
       ].sort(),
     );
     // 45 -> 46 (addInvoiceLines) -> 53 (operator accounts, migration 8) -> 63 (Product Master,
@@ -205,7 +241,23 @@ describe("IPC surface", () => {
     // 🔴 TRANSITION — SEVENTY-SIX to SEVENTY-NINE with Track 2 phase 3 (full backup and restore).
     // The three added: exportFullBackup, inspectRestoreBackup, applyRestore — owner-only, and
     // refused again by PosService.assertOwner. The old value was 76.
-    expect(CHANNEL_NAMES).toHaveLength(79);
+    // 🔴 TRANSITION (SELL-CREDIT): 79 -> 80 — createCustomerCreditSale, owner-only, the till's ONE way to
+    // create a customer debt. The old value was 79.
+    // 🔴 TRANSITION (SELL-SPLIT-CASH-WHISH): 80 -> 81 — createSplitSale. The old value was 80.
+    // 🔴 TRANSITION (migration 20, customer advances): 81 -> 90 — the nine advance channels named in
+    // the list above. The old value was 81.
+    // 🔴 TRANSITION (DEC-35x, Daily Money In/Out): 90 -> 91 — getDailyMoney, an owner-classified READ
+    // that writes nothing. The old value was 90.
+    // 🔴 TRANSITION (DEC-35x): 91 -> 92 — applyAdvanceToDebt, owner-classified. The old value was 91.
+    // 🔴 TRANSITION (DEC-35x): 92 -> 93 — sellOnAdvance, owner-classified. The old value was 92.
+    // 🔴 TRANSITION (DEC-35z+): 93 -> 96 — refundAdvance, printAdvanceRefund, saveAdvanceRefundPdf, all
+    // owner-classified. The old value was 93.
+    // 🔴 TRANSITION (DEC-35z+ COL): 96 -> 99 — getCollectionReceipt, printCollectionReceipt,
+    // saveCollectionReceiptPdf, owner-classified reads. The old value was 96.
+    // 🔴 TRANSITION (OCR × Advances integration, DEC-35zz+): 99 -> 100 = the advances chain's 99 + OCR's readInvoicePhoto. Old values: 99 (advances) / 82 (OCR).
+    // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): 100 -> 103 — getSaleReceipt, printSaleReceipt, saveSaleReceiptPdf,
+    // session-classified reads (the service limits a non-owner to History's window). The old value was 100.
+    expect(CHANNEL_NAMES).toHaveLength(103);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

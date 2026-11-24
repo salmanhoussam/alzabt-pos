@@ -130,6 +130,8 @@ const CH = {
   currentCashier: "pos:currentCashier",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
+  createCustomerCreditSale: "pos:createCustomerCreditSale",
+  createSplitSale: "pos:createSplitSale",
   voidSale: "pos:voidSale",
   getTodaySales: "pos:getTodaySales",
   getSaleHistory: "pos:getSaleHistory",
@@ -195,6 +197,30 @@ const CH = {
   pickInvoiceLogo: "pos:pickInvoiceLogo",
   printInvoice: "pos:printInvoice",
   saveInvoicePdf: "pos:saveInvoicePdf",
+  recordAdvance: "pos:recordAdvance",
+  pendingAdvances: "pos:pendingAdvances",
+  finishAdvance: "pos:finishAdvance",
+  closeAdvance: "pos:closeAdvance",
+  acknowledgeAdvance: "pos:acknowledgeAdvance",
+  getAdvanceStatement: "pos:getAdvanceStatement",
+  getDailyMoney: "pos:getDailyMoney",
+  correctAdvance: "pos:correctAdvance",
+  applyAdvanceToDebt: "pos:applyAdvanceToDebt",
+  sellOnAdvance: "pos:sellOnAdvance",
+  printAdvance: "pos:printAdvance",
+  saveAdvancePdf: "pos:saveAdvancePdf",
+  refundAdvance: "pos:refundAdvance",
+  printAdvanceRefund: "pos:printAdvanceRefund",
+  saveAdvanceRefundPdf: "pos:saveAdvanceRefundPdf",
+  getCollectionReceipt: "pos:getCollectionReceipt",
+  printCollectionReceipt: "pos:printCollectionReceipt",
+  saveCollectionReceiptPdf: "pos:saveCollectionReceiptPdf",
+  readInvoicePhoto: "pos:readInvoicePhoto",
+  listPhoneInvoices: "pos:listPhoneInvoices",
+  releasePhoneInvoice: "pos:releasePhoneInvoice",
+  getSaleReceipt: "pos:getSaleReceipt",
+  printSaleReceipt: "pos:printSaleReceipt",
+  saveSaleReceiptPdf: "pos:saveSaleReceiptPdf",
 } as const satisfies typeof CHANNELS;
 
 const api: PosApi = {
@@ -223,6 +249,8 @@ const api: PosApi = {
   currentCashier: () => ipcRenderer.invoke(CH.currentCashier),
   getCatalog: () => ipcRenderer.invoke(CH.getCatalog),
   createSale: (req) => ipcRenderer.invoke(CH.createSale, req),
+  createCustomerCreditSale: (req) => ipcRenderer.invoke(CH.createCustomerCreditSale, req),
+  createSplitSale: (req) => ipcRenderer.invoke(CH.createSplitSale, req),
   voidSale: (req) => ipcRenderer.invoke(CH.voidSale, { saleId: req.saleId, reason: req.reason }),
   getTodaySales: () => ipcRenderer.invoke(CH.getTodaySales),
   getSaleHistory: (req) => ipcRenderer.invoke(CH.getSaleHistory, { limit: req.limit }),
@@ -381,8 +409,17 @@ const api: PosApi = {
     ipcRenderer.invoke(CH.removeInvoiceLine, { invoiceId: req.invoiceId, lineId: req.lineId }),
   discardInvoiceDraft: (req) => ipcRenderer.invoke(CH.discardInvoiceDraft, { invoiceId: req.invoiceId }),
 
+  // INV-PAY-METHOD (2026-11-09): `payment` is forwarded ONLY when the renderer gave one, so every earlier
+  // request keeps its exact shape. Found by the first real E2E run: this line used to copy two fields by
+  // name, so the method chosen on screen never reached main — every unit test called the handler directly.
   finalizeInvoice: (req) =>
-    ipcRenderer.invoke(CH.finalizeInvoice, { invoiceId: req.invoiceId, issueOnAccount: req.issueOnAccount === true }),
+    ipcRenderer.invoke(CH.finalizeInvoice, {
+      invoiceId: req.invoiceId,
+      issueOnAccount: req.issueOnAccount === true,
+      ...(req.payment === undefined ? {} : { payment: req.payment }),
+      // R5: forwarded only when given, like `payment`; the service binds the issue to it.
+      ...(req.confirmedDraft === undefined ? {} : { confirmedDraft: req.confirmedDraft }),
+    }),
 
   listInvoices: (req) => ipcRenderer.invoke(CH.listInvoices, { term: req.term, limit: req.limit }),
   listInvoiceDrafts: (req) => ipcRenderer.invoke(CH.listInvoiceDrafts, { term: req.term, limit: req.limit }),
@@ -418,6 +455,73 @@ const api: PosApi = {
   pickInvoiceLogo: () => ipcRenderer.invoke(CH.pickInvoiceLogo),
   printInvoice: (req) => ipcRenderer.invoke(CH.printInvoice, { invoiceId: req.invoiceId }),
   saveInvoicePdf: (req) => ipcRenderer.invoke(CH.saveInvoicePdf, { invoiceId: req.invoiceId }),
+
+  // Customer advances — every field copied by name, so nothing extra crosses the bridge.
+  recordAdvance: (req) =>
+    ipcRenderer.invoke(CH.recordAdvance, {
+      customerId: req.customerId,
+      amountMinor: req.amountMinor,
+      channel: req.channel,
+      reference: req.reference ?? null,
+      fundsConfirmed: req.fundsConfirmed ?? false,
+      idempotencyKey: req.idempotencyKey,
+    }),
+  pendingAdvances: () => ipcRenderer.invoke(CH.pendingAdvances),
+  finishAdvance: (req) => ipcRenderer.invoke(CH.finishAdvance, { idempotencyKey: req.idempotencyKey }),
+  closeAdvance: (req) => ipcRenderer.invoke(CH.closeAdvance, { idempotencyKey: req.idempotencyKey }),
+  acknowledgeAdvance: (req) => ipcRenderer.invoke(CH.acknowledgeAdvance, { idempotencyKey: req.idempotencyKey }),
+  getAdvanceStatement: (req) => ipcRenderer.invoke(CH.getAdvanceStatement, { customerId: req.customerId }),
+  getDailyMoney: (req) => ipcRenderer.invoke(CH.getDailyMoney, req.date === undefined ? {} : { date: req.date }),
+  correctAdvance: (req) =>
+    ipcRenderer.invoke(CH.correctAdvance, {
+      advanceId: req.advanceId,
+      kind: req.kind,
+      reason: req.reason,
+      confirmNotReceived: req.confirmNotReceived,
+      customerId: req.customerId,
+      amountMinor: req.amountMinor,
+      channel: req.channel,
+      reference: req.reference,
+      fundsConfirmed: req.fundsConfirmed,
+      idempotencyKey: req.idempotencyKey,
+    }),
+  applyAdvanceToDebt: (req) =>
+    ipcRenderer.invoke(CH.applyAdvanceToDebt, {
+      advanceId: req.advanceId,
+      obligationId: req.obligationId,
+      amountMinor: req.amountMinor,
+      idempotencyKey: req.idempotencyKey,
+    }),
+  sellOnAdvance: (req) =>
+    ipcRenderer.invoke(CH.sellOnAdvance, {
+      idempotencyKey: req.idempotencyKey,
+      lines: req.lines,
+      expectedTotalMinor: req.expectedTotalMinor,
+      customerId: req.customerId,
+      advanceId: req.advanceId,
+      amountMinor: req.amountMinor,
+    }),
+  printAdvance: (req) => ipcRenderer.invoke(CH.printAdvance, { advanceId: req.advanceId }),
+  saveAdvancePdf: (req) => ipcRenderer.invoke(CH.saveAdvancePdf, { advanceId: req.advanceId }),
+  refundAdvance: (req) =>
+    ipcRenderer.invoke(CH.refundAdvance, {
+      advanceId: req.advanceId,
+      amountMinor: req.amountMinor,
+      reason: req.reason,
+      idempotencyKey: req.idempotencyKey,
+      ...(req.confirmRepeat === undefined ? {} : { confirmRepeat: req.confirmRepeat }),
+    }),
+  printAdvanceRefund: (req) => ipcRenderer.invoke(CH.printAdvanceRefund, { refundId: req.refundId }),
+  saveAdvanceRefundPdf: (req) => ipcRenderer.invoke(CH.saveAdvanceRefundPdf, { refundId: req.refundId }),
+  getCollectionReceipt: (req) => ipcRenderer.invoke(CH.getCollectionReceipt, { collectionNo: req.collectionNo }),
+  printCollectionReceipt: (req) => ipcRenderer.invoke(CH.printCollectionReceipt, { collectionNo: req.collectionNo }),
+  saveCollectionReceiptPdf: (req) => ipcRenderer.invoke(CH.saveCollectionReceiptPdf, { collectionNo: req.collectionNo }),
+  readInvoicePhoto: (req) => ipcRenderer.invoke(CH.readInvoicePhoto, req),
+  listPhoneInvoices: () => ipcRenderer.invoke(CH.listPhoneInvoices),
+  releasePhoneInvoice: (req) => ipcRenderer.invoke(CH.releasePhoneInvoice, req),
+  getSaleReceipt: (req) => ipcRenderer.invoke(CH.getSaleReceipt, { saleId: req.saleId }),
+  printSaleReceipt: (req) => ipcRenderer.invoke(CH.printSaleReceipt, { saleId: req.saleId, layout: req.layout, copy: req.copy }),
+  saveSaleReceiptPdf: (req) => ipcRenderer.invoke(CH.saveSaleReceiptPdf, { saleId: req.saleId, layout: req.layout, copy: req.copy }),
 };
 
 contextBridge.exposeInMainWorld("pos", Object.freeze(api));

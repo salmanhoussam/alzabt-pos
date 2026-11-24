@@ -25,6 +25,9 @@ const KEYS = [
   "inv.account.err.CREDIT_NEEDS_CUSTOMER",
   "inv.account.err.CREDIT_NEEDS_UNPAID",
   "inv.account.err.CREDIT_NOT_ISSUED",
+  "inv.account.err.CREDIT_PARTIAL_NEEDS_ACCOUNT",
+  "inv.account.err.CREDIT_PARTIAL_NEEDS_ACCOUNT.cashier",
+  "inv.account.err.CREDIT_NOTHING_OWED",
 ];
 
 describe("labels exist in both languages", () => {
@@ -48,8 +51,10 @@ describe("labels exist in both languages", () => {
 describe("the sheet's wiring (source-level)", () => {
   it("🔴 the account is chosen by id through the existing customer finder — never by name", () => {
     expect(SHEET).toContain("<CustomerFinder");
-    expect(SHEET).toContain("chooseAccount(c.id, c.displayName)");
-    expect(SHEET).toContain("customerPartyId: customerId");
+    // Were `chooseAccount(c.id, c.displayName)` and `customerPartyId: customerId` until INV-CUSTOMER-PREFILL
+    // passed the whole picked CustomerDto (for its phone and address). The link is still its id.
+    expect(SHEET).toContain("chooseAccount(c)");
+    expect(SHEET).toContain("customerPartyId: account?.id ?? null");
     // the printed-name input never feeds the link
     expect(SHEET).not.toMatch(/customerPartyId:[^,}]*customerName/);
   });
@@ -58,21 +63,31 @@ describe("the sheet's wiring (source-level)", () => {
     expect(SHEET).toMatch(/linkedId && isOwner[\s\S]{0,400}data-testid="account-issue"/);
     expect(SHEET).toContain("const account = issueOnAccount;");
     expect(SHEET).not.toMatch(/issueOnAccount && viewRef\.current\?\.invoice\.customerPartyId \? issueOnAccount : false/);
-    expect(SHEET).toContain("finalizeInvoice({ invoiceId, issueOnAccount: account })");
+    // TRANSITION (INV-PAY-METHOD): the call grew the paid amount's method. Old text:
+    // "finalizeInvoice({ invoiceId, issueOnAccount: account })". On account is still sent only as ticked.
+    expect(SHEET).toContain("issueOnAccount: account,");
+    expect(SHEET).toContain("pos().finalizeInvoice({");
     expect(SHEET).not.toMatch(/setIssueOnAccount\(true\)/);
   });
   it("🔴 changing the linked customer clears the previous credit authorization", () => {
     expect(SHEET).toContain("next.invoice.customerPartyId !== previousCustomerId");
     expect(SHEET).toContain("setIssueOnAccount(false)");
   });
-  it("🔴 the whole total must be unpaid — refused on the STORED values before the confirmation", () => {
+  it("🔴 a part-paid invoice needs the account, decided on the STORED values before the confirmation", () => {
+    // TRANSITION · INV-PARTIAL-DEBT (Option B): was "the whole total must be unpaid"
+    // (inv.account.err.CREDIT_NEEDS_UNPAID). Now a part-paid invoice WITHOUT the account is refused,
+    // and an account issue with nothing owed is refused — both after the flush, before confirming.
     const body = SHEET.slice(SHEET.indexOf("const prepareFinalize"));
-    expect(body.indexOf("await flushHeader()")).toBeLessThan(body.indexOf('inv.account.err.CREDIT_NEEDS_UNPAID'));
-    expect(body.indexOf('inv.account.err.CREDIT_NEEDS_UNPAID')).toBeLessThan(body.indexOf("setConfirming(true)"));
+    expect(body.indexOf("await flushHeader()")).toBeLessThan(body.indexOf("inv.account.err.CREDIT_PARTIAL_NEEDS_ACCOUNT"));
+    expect(body.indexOf("inv.account.err.CREDIT_PARTIAL_NEEDS_ACCOUNT")).toBeLessThan(body.indexOf("setConfirming(true)"));
+    expect(body.indexOf("inv.account.err.CREDIT_NOTHING_OWED")).toBeLessThan(body.indexOf("setConfirming(true)"));
+    expect(body.indexOf("inv.account.err.CREDIT_NEEDS_UNPAID")).toBe(-1);
   });
   it("🔴 an unclear outcome is resolved by asking the ledger (a verified replay), never by guessing", () => {
     expect(SHEET).toContain('e.code === "INVOICE_FINALIZED"');
-    expect(SHEET).toContain("finalizeInvoice({ invoiceId, issueOnAccount: true })");
+    // TRANSITION · INV-PARTIAL-DEBT: the replay repeats the SAME payment (was no payment at all), so a
+    // part-paid issue is verified against the tender it recorded.
+    expect(SHEET).toContain("finalizeInvoice({ invoiceId, issueOnAccount: true, ...paymentPart })");
     expect(SHEET).toContain('t("inv.account.unknown")');
   });
   it("the confirmation and the issued notice name the account", () => {

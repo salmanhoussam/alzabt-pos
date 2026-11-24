@@ -85,10 +85,40 @@ describe("the customer channels", () => {
     // 🔴 TRANSITION — SEVENTY-SIX to SEVENTY-NINE with Track 2 phase 3: exportFullBackup,
     // inspectRestoreBackup, applyRestore. None of them is a money write; the closed list of
     // money writers below is unchanged. The old value was 76.
-    expect(Object.keys(CHANNELS)).toHaveLength(79);
+    // 🔴 TRANSITION (SELL-CREDIT): 79 -> 80 with createCustomerCreditSale, the owner's sale on a customer's
+    // account (named in the debt-creator list below). The old value was 79.
+    // 🔴 TRANSITION (SELL-SPLIT-CASH-WHISH, 2026-11-09): 80 -> 81 with createSplitSale — a PAID sale (cash +
+    // Whish = the total exactly), same permission as createSale; it creates no debt, so the debt-creator
+    // list below is unchanged. The old value was 80.
+    // 🔴 TRANSITION (migration 20, ADV-RECORD-CASH-WHISH, owner DEC-35s): 81 -> 90 with the nine
+    // customer-advance channels (record / pending / finish / close / acknowledge / statement /
+    // correct / print / PDF). The three that move money are named in their OWN closed list in the
+    // next test, because the money-writer pattern there (/payment|receipt/) would not see them.
+    // The old value was 81.
+    // 🔴 TRANSITION (DEC-35x, Daily Money In/Out): 90 -> 91 with getDailyMoney — owner-only and a READ:
+    // it moves no money, so neither the money-writer nor the advance list below changes. The old value was 90.
+    // 🔴 TRANSITION (DEC-35x, Apply Advance to Existing Debt): 91 -> 92 with applyAdvanceToDebt — owner-only;
+    // it SETTLES an existing debt from an advance (no new money) and creates none. Named in every closed
+    // list in the next test. The old value was 91.
+    // 🔴 TRANSITION (DEC-35x, Apply Advance to New Sale): 92 -> 93 with sellOnAdvance — owner-only; it CREATES
+    // a debt (the sale on account) and settles part of it from an advance, atomically. The old value was 92.
+    // 🔴 TRANSITION (DEC-35z+, Cash Refund REF): 93 -> 96 with refundAdvance (owner; MONEY OUT, cash, from an
+    // advance's unused balance — no debt created or settled) and its owner-only reprint/PDF pair
+    // printAdvanceRefund / saveAdvanceRefundPdf (read by id, write nothing). The old value was 93.
+    // 🔴 TRANSITION (DEC-35z+, COL receipts): 96 -> 99 with getCollectionReceipt / printCollectionReceipt /
+    // saveCollectionReceiptPdf — owner-only READS of a COL- document by number; they write no payment. The old value was 96.
+    // 🔴 TRANSITION (OCR × Advances integration, DEC-35zz+): 99 -> 100 = the advances chain's 99 + OCR's readInvoicePhoto. Old values: 99 (advances) / 82 (OCR).
+    // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): 100 -> 103 with getSaleReceipt / printSaleReceipt / saveSaleReceiptPdf —
+    // session READS of one till receipt by sale id (the service limits a non-owner to History's window); they write
+    // nothing. The old value was 100.
+    expect(Object.keys(CHANNELS)).toHaveLength(103);
   });
 
-  it("🔴 S3C adds ONE money write — a SETTLEMENT — and still no way to CREATE a debt", () => {
+  // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".
+  // The owner decided every new debt is the OWNER's and opened exactly ONE way to create one from the
+  // till: `createCustomerCreditSale` (a whole sale on a customer's account). It is named below, owner-only,
+  // and still nothing can post a bare obligation, edit a balance, or reach the supplier side.
+  it("🔴 S3C adds ONE money write — a SETTLEMENT — and the ONLY way to CREATE a debt is the owner's credit sale", () => {
     // 🔴 TRANSITION, AND THE OLD ASSERTION IS NAMED. Through S3B this test was called "S3B added a
     // READ and nothing else — no channel on this bridge writes money", and that was true then.
     // S3C deliberately ends it: `recordCustomerPayment` writes a settlement. What has NOT changed,
@@ -113,14 +143,71 @@ describe("the customer channels", () => {
     expect(accessFor("recordCustomerPayment")).toBe("owner");
     // 🔴 EXACTLY ONE CHANNEL MENTIONS PAYMENT OR SETTLEMENT. If a second financial write is ever
     // added, this count moves and whoever adds it has to come and say so here.
-    const financial = names.filter((n) => /payment|settle|obligation|balance|debt/i.test(n));
-    expect(financial).toEqual(["recordCustomerPayment"]);
+    // 🔴 TRANSITION (DEC-35x): exactly one became a CLOSED NAMED list of two — applyAdvanceToDebt settles a
+    // debt FROM an advance (owner-only). Old value: ["recordCustomerPayment"].
+    const financial = names.filter((n) => /payment|settle|obligation|balance|debt/i.test(n)).sort();
+    expect(financial).toEqual(["applyAdvanceToDebt", "recordCustomerPayment"]);
+    expect(accessFor("applyAdvanceToDebt")).toBe("owner");
     // 🔴 TRANSITION (M17B-S1): "exactly one money writer" became a CLOSED, NAMED list of exactly two.
     // The new one shares one real external receipt across debts; it is owner-only and cannot post a
     // debt. A third money-moving channel must come here and be named — never matched by a pattern.
-    const moneyWriters = names.filter((n) => /payment|receipt/i.test(n)).sort();
+    // 🔴 TRANSITION (DEC-35z+ COL): the pattern now also sees the three COL- document channels, which are
+    // READS (print / PDF / view by number) and move no money — removed BY NAME, so the writers stay two.
+    // Old filter: /payment|receipt/ alone.
+    const colDocs = ["getCollectionReceipt","printCollectionReceipt","saveCollectionReceiptPdf"];
+    // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): the pattern also sees the three TILL receipt channels — READS of a sale's
+    // receipt (view / print / PDF) that move no money — removed BY NAME too. Old exclusion: the COL- three only.
+    const saleReceiptDocs = ["getSaleReceipt", "printSaleReceipt", "saveSaleReceiptPdf"];
+    const moneyWriters = names.filter((n) => /payment|receipt/i.test(n) && !colDocs.includes(n) && !saleReceiptDocs.includes(n)).sort();
+    for (const d of colDocs) expect(accessFor(d as never)).toBe("owner");
+    for (const d of saleReceiptDocs) expect(accessFor(d as never)).toBe("session");
     expect(moneyWriters).toEqual(["recordAllocatedReceipt", "recordCustomerPayment"]);
     expect(accessFor("recordAllocatedReceipt")).toBe("owner");
+    // SELL-CREDIT: the closed, NAMED list of debt creators. Old value: none.
+    // 🔴 TRANSITION (DEC-35x): the pattern now also sees applyAdvanceToDebt, which REDUCES a debt and
+    // creates none — so it is removed BY NAME, and the creators stay exactly one. Old filter: unchanged.
+    // 🔴 TRANSITION (DEC-35x): sellOnAdvance creates a debt but no pattern word names it — it is ADDED BY NAME.
+    // Old value: ["createCustomerCreditSale"].
+    const debtCreators = names.filter((n) => (/credit|debt|obligation|onAccount/i.test(n) && n !== "applyAdvanceToDebt") || n === "sellOnAdvance").sort();
+    expect(debtCreators).toEqual(["createCustomerCreditSale", "sellOnAdvance"]);
+    expect(accessFor("sellOnAdvance")).toBe("owner");
+    expect(accessFor("createCustomerCreditSale")).toBe("owner");
+    // 🔴 MIGRATION 20 — the advance channels, as a CLOSED NAMED list (the money-writer pattern above
+    // cannot see them: an enumeration that skips unknown names goes blind, it does not fail).
+    const advanceChannels = names.filter((n) => /advance/i.test(n)).sort();
+    expect(advanceChannels).toEqual(
+      [
+        "acknowledgeAdvance",
+        // TRANSITION (DEC-35x): the owner's application of an advance to a debt. Old list: without it.
+        "applyAdvanceToDebt",
+        "closeAdvance",
+        "correctAdvance",
+        "finishAdvance",
+        "getAdvanceStatement",
+        "pendingAdvances",
+        "printAdvance",
+        "recordAdvance",
+        "saveAdvancePdf",
+        // TRANSITION (DEC-35x): a new sale on account paid from an advance. Old list: without it.
+        "sellOnAdvance",
+        // TRANSITION (DEC-35z+): the owner's CASH refund of an advance's unused balance, and its
+        // reprint / PDF. Old list: without these three.
+        "refundAdvance",
+        "printAdvanceRefund",
+        "saveAdvanceRefundPdf",
+      ].sort(),
+    );
+    // The three that MOVE money: record and finish (owner + cashier, decision D1 — the cashier takes
+    // the money at the till) and correct (owner only). None creates a debt; none settles one.
+    expect(accessFor("recordAdvance")).toBe("session");
+    expect(accessFor("finishAdvance")).toBe("session");
+    expect(accessFor("correctAdvance")).toBe("owner");
+    expect(accessFor("getAdvanceStatement")).toBe("owner");
+    expect(accessFor("applyAdvanceToDebt")).toBe("owner");
+    // DEC-35z+: the one channel that takes money OUT of the drawer for a customer, and its documents — OWNER.
+    expect(accessFor("refundAdvance")).toBe("owner");
+    expect(accessFor("printAdvanceRefund")).toBe("owner");
+    expect(accessFor("saveAdvanceRefundPdf")).toBe("owner");
   });
 
   it("🔴 every channel is classified, and the customer ones carry the intended level", () => {

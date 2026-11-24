@@ -7,7 +7,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildLabel, readBuildInfo } from "../../src/main/buildInfo";
-import { LedgerMissingError, type LedgerFs, planLedgerOpen, recordLedger } from "../../src/main/ledgerGuard";
+import { LEDGER_FILE_NAME, LedgerMissingError, type LedgerFs, planLedgerOpen, recordLedger } from "../../src/main/ledgerGuard";
 import { LOG_FILE_NAME, createFileLogger, redact } from "../../src/main/logger";
 import { classifyStartupError, startupFailureMessage } from "../../src/main/startupFailure";
 import { BackupError } from "../../src/persistence/backup";
@@ -73,16 +73,18 @@ describe("ledger guard", () => {
     writeFileSync(join(t.dir, "ledger.json"), "{}");
     const err = startupError(() => planLedgerOpen(t.dir, realFs));
     expect(err).toBeInstanceOf(LedgerMissingError);
-    expect(existsSync(join(t.dir, "alzabt-pos-ledger.sqlite"))).toBe(false);
+    expect(existsSync(join(t.dir, LEDGER_FILE_NAME))).toBe(false);
     expect(classifyStartupError(err)).toBe("LEDGER_MISSING");
   });
 
-  it("a 0.1.0 ledger without a marker is adopted, not treated as missing", () => {
-    openDatabase(join(t.dir, "alzabt-pos-ledger.sqlite")).close();
+  it("the trial ledger guard does not adopt a production-named ledger", () => {
+    const productionLedger = join(t.dir, "alzabt-pos-ledger.sqlite");
+    openDatabase(productionLedger).close();
+    const before = readFileSync(productionLedger);
     const plan = planLedgerOpen(t.dir, realFs);
-    expect(plan.existing).toBe(true);
-    recordLedger(plan, realFs, { appVersion: "0.1.1", now: new Date() });
-    expect(existsSync(plan.markerPath)).toBe(true);
+    expect(plan.existing).toBe(false);
+    expect(plan.ledgerPath).toBe(join(t.dir, "alzabt-pos-trial-only-ledger.sqlite"));
+    expect(readFileSync(productionLedger).equals(before)).toBe(true);
   });
 });
 

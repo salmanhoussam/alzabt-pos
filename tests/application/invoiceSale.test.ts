@@ -62,7 +62,19 @@ function draft(lines: ReadonlyArray<LineSpec>, paid?: string): string {
 
 function finalize(lines: ReadonlyArray<LineSpec>, paid?: string): string {
   const id = draft(lines, paid);
-  h.invoices.finalizeInvoice(id);
+  // TRANSITION (INV-PAY-METHOD, 2026-11-09): money marked paid must say how it arrived at issue, so a
+  // paid draft is finalized with cash here. Old call: finalizeInvoice(id) with no method at all.
+  const somethingPaid = paid !== undefined && paid.trim() !== "" && Number(paid) !== 0;
+  // TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): a PART-paid invoice now goes on a customer's account
+  // (the owner, cashier-01 here, issues it on account). Fully paid and unpaid invoices are issued as before.
+  const inv = h.invoices.getInvoice(id).invoice;
+  if (somethingPaid && inv.balance_due_minor > 0n) {
+    const account = h.parties.create({ kind: "customer", displayName: "زبون" }).party;
+    h.invoices.updateDraftHeader(id, { customerPartyId: account.id });
+    h.invoices.finalizeInvoice(id, { issueOnAccount: true, payment: { method: "cash" } });
+    return id;
+  }
+  h.invoices.finalizeInvoice(id, somethingPaid ? { payment: { method: "cash" } } : undefined);
   return id;
 }
 
@@ -104,16 +116,19 @@ describe("the sale a finalized invoice is", () => {
     const sale = saleOf(id)!;
     expect([sale.paid.minor, sale.balanceDue.minor, sale.total.minor]).toEqual([3_000n, 7_000n, 10_000n]);
     expect(sale.paymentStatus).toBe("partial");
-    expect(sale.paymentMethod).toBeNull();
+    // TRANSITION (INV-PAY-METHOD): was toBeNull() — the paid part now records HOW it arrived.
+    expect(sale.paymentMethod).toBe("cash");
   });
 
-  it("C · a FULLY paid invoice becomes a paid sale — and still invents no method", () => {
+  // TRANSITION (INV-PAY-METHOD, owner 2026-11-09): this test was "… — and still invents no method" and
+  // asserted paymentMethod toBeNull(), because a manual invoice captured no method. It still invents
+  // none: the method is the one GIVEN at issue (cash here), and an unpaid invoice (A) keeps NULL.
+  it("C · a FULLY paid invoice becomes a paid sale with the method GIVEN at issue — never an invented one", () => {
     const id = finalize([{ unitPrice: "100.00" }], "100.00");
     const sale = saleOf(id)!;
     expect([sale.paid.minor, sale.balanceDue.minor]).toEqual([10_000n, 0n]);
     expect(sale.paymentStatus).toBe("paid");
-    // Paid in full, but HOW is still not recorded by a manual invoice in this patch.
-    expect(sale.paymentMethod).toBeNull();
+    expect(sale.paymentMethod).toBe("cash");
   });
 
   it("D · a TAX-ENABLED invoice carries its frozen tax into the sale, exactly", () => {
@@ -557,11 +572,14 @@ describe("the till contract is not one byte looser", () => {
         )
         .run({ id: `s-${status}-${paid}`, receipt: 600 + paid, key: `bad-${status}-${paid}-0001`, paid, balance, status });
     // "paid" with money still owed, "unpaid" with money received, "partial" with nothing received.
-    expect(bad("paid", 40, 60)).toThrow(/CHECK constraint failed/);
+    // TRANSITION (migration 19): was /CHECK constraint failed/ for all three. A till row that leaves a
+    // balance without a customer is now refused one step EARLIER, by `sales_pos_balance_requires_customer`
+    // (D-P2a). Still refused, nothing written — only the message differs for the two balance rows.
+    expect(bad("paid", 40, 60)).toThrow(/CHECK constraint failed|must name its customer/);
     expect(bad("unpaid", 100, 0)).toThrow(/CHECK constraint failed/);
-    expect(bad("partial", 0, 100)).toThrow(/CHECK constraint failed/);
+    expect(bad("partial", 0, 100)).toThrow(/CHECK constraint failed|must name its customer/);
     // And paid + balance must equal the total.
-    expect(bad("partial", 40, 50)).toThrow(/CHECK constraint failed/);
+    expect(bad("partial", 40, 50)).toThrow(/CHECK constraint failed|must name its customer/); // TRANSITION (migration 19), same reason
   });
 });
 

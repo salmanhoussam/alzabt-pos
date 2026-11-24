@@ -9,6 +9,7 @@
 // e2e-output/ (git-ignored).
 import { _electron as electron } from "playwright-core";
 import { E2E_PIN, signIn } from "./_signin.mjs";
+import { createOwned, endOwned, identifyTree } from "./_owned.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -27,7 +28,9 @@ mkdirSync(SHOTS, { recursive: true });
 const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["--no-sandbox"] : [];
 const home = mkdtempSync(join(tmpdir(), "pos-e2e-home-"));
 // Isolate the ledger in a throw-away profile on every OS (honoured by src/main/main.ts).
-const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
+// TRANSITION (DEMO-FALLBACK, D-DF1): this script sells the bundled sample catalog on a fresh profile, which the
+// merchant default no longer serves; the explicit demo switch keeps that coverage. Old value: no switch.
+const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData"), ALZABT_POS_DEMO_CATALOG: "1" };
 // 🔴 Tabs are selected by data-testid, NOT by their visible text. The terminal's default language
 // is Arabic, so "Sell" / "History" / "Today's Sales" / "Tools" are no longer the rendered labels —
 // an E2E that clicks by English name passes only while the UI happens to be English, which is
@@ -38,13 +41,21 @@ const assert = (cond, msg) => {
   log("PASS", msg);
 };
 
+// 🔴 Processes this test starts are recorded BY IDENTITY (pid + executable + OS creation time) and
+// ended ONLY through _owned.mjs, which proves that identity while holding a handle — never by pid
+// alone (Windows reuses pids). The exit handler also runs when an assertion throws.
+const owned = createOwned();
+process.on("exit", () => owned.endAll());
 async function launch() {
+  const t = Date.now();
   const app = await electron.launch({
     executablePath: ELECTRON,
     args: [...EXTRA_ARGS, ...APP_ARGS],
     env,
   });
+  owned.addStartedNear(app.process().pid, t);
   const page = await app.firstWindow();
+  owned.addStartedNear(await app.evaluate(() => process.pid), t);
   await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
   return { app, page };
 }
@@ -101,6 +112,10 @@ assert(surface.require === "undefined" && surface.process === "undefined" && sur
 // It went 19 -> 44 with manual invoices (migration 6), 45 with per-invoice tax (setInvoiceTax),
 // and 46 on 2026-10-10 with addInvoiceLines, then 53 with operator accounts (migration 8).
 //
+// TRANSITION SELL-SPLIT-CASH-WHISH (2026-11-09): 80 -> 81. Added createSplitSale (a sale paid in full by
+// cash + Whish, the same permission as createSale, never a debt) by NAME to the closed list below.
+// TRANSITION SELL-CREDIT: 79 -> 80. Added createCustomerCreditSale (owner-only; the till's one way to
+// create a customer debt) by NAME to the closed list below.
 // TRANSITION Track 2 phase 3: 76 -> 79. Added the three owner-only full backup / restore
 // channels — exportFullBackup, inspectRestoreBackup, applyRestore — by NAME to both closed lists.
 // None takes a path or bytes: main runs the pickers and stages only the package it previewed.
@@ -123,6 +138,16 @@ assert(surface.require === "undefined" && surface.process === "undefined" && sur
 // 🔴 66 -> 67 with the phone FORM (slice H2). The one: phoneSessionState, which the desktop QR
 // dialog polls. It is deliberately NOT named "...Status" — invoiceIpc.test.ts forbids that
 // substring so the renderer can never set a reconciliation status.
+// 🔴 TRANSITION 81 -> 90 with customer advances (migration 20): acknowledgeAdvance, closeAdvance,
+// correctAdvance, finishAdvance, getAdvanceStatement, pendingAdvances, printAdvance, recordAdvance,
+// saveAdvancePdf. Print/PDF take an advance ID only; main loads the document. The old value was 81.
+// 🔴 TRANSITION 90 -> 91 (DEC-35x): getDailyMoney — the owner-only, read-only Daily Money In/Out. The old value was 90.
+// 🔴 TRANSITION 92 -> 93 (DEC-35x): sellOnAdvance — owner-only sale on account paid from an advance. The old value was 92.
+// 🔴 TRANSITION 100 -> 103 (DEC-35zz++ TILL-PRINT): getSaleReceipt, printSaleReceipt, saveSaleReceiptPdf — session reads of one till receipt by sale id. The old value was 100.
+// 🔴 TRANSITION 96 -> 99 (DEC-35z+ COL): getCollectionReceipt, printCollectionReceipt, saveCollectionReceiptPdf — owner-only reads of a COL- document. The old value was 96.
+// 🔴 TRANSITION 93 -> 96 (DEC-35z+ REF): refundAdvance, printAdvanceRefund, saveAdvanceRefundPdf — owner-only cash refund of an advance and its reprint / PDF. The old value was 93.
+// 🔴 TRANSITION 91 -> 92 (DEC-35x): applyAdvanceToDebt — owner-only, settles a debt from an advance (no new money). The old value was 91.
+// 🔴 TRANSITION 81 -> 82 with readInvoicePhoto (PHOTO-INVOICE-TO-ITEMS; no path crosses — main runs the picker). Old value 81.
 // 🔴 64 -> 66 with the phone LAN bridge (slice H1). The two: startPhoneSession,
 // cancelPhoneSession. Neither returns the session token — main owns it, and the only place it
 // appears is inside the encoded QR symbol.
@@ -142,15 +167,15 @@ assert(surface.require === "undefined" && surface.process === "undefined" && sur
 // test — and not here. That is exactly why it is written by name: the one place that is not
 // derived from the contract is the one place a human has to notice.
 assert(
-  JSON.stringify(surface.posKeys) === JSON.stringify(["addInvoiceLine","addInvoiceLines","applyRestore","cancelPhoneSession","completeBootstrapSetup","createCategory","createCustomer","createInvoiceDraft","createOperator","createProduct","createSale","currentCashier","deleteCategory","discardInvoiceDraft","exportBackup","exportCatalog","exportFullBackup","exportOnlineCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getCustomer","getCustomerStatement","getInvoice","getProductImageBytes","getProductImageMeta","getSaleHistory","getSettings","getTodaySales","importCatalog","inspectRestoreBackup","listBrands","listCashiers","listCategories","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","phoneSessionState","pickInvoiceLogo","printInvoice","recordAllocatedReceipt","recordCustomerPayment","removeInvoiceLine","removeProductImage","renameCategory","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchCustomers","searchInvoices","setCategoryActive","setCustomerActive","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorMayCreateProducts","setOperatorRole","setProductActive","setProductImage","setTerminalLanguage","startPhoneSession","updateCustomerContact","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
+  JSON.stringify(surface.posKeys) === JSON.stringify(["acknowledgeAdvance","addInvoiceLine","addInvoiceLines","applyAdvanceToDebt","applyRestore","cancelPhoneSession","closeAdvance","completeBootstrapSetup","correctAdvance","createCategory","createCustomer","createCustomerCreditSale","createInvoiceDraft","createOperator","createProduct","createSale","createSplitSale","currentCashier","deleteCategory","discardInvoiceDraft","exportBackup","exportCatalog","exportFullBackup","exportOnlineCatalog","finalizeInvoice","findInvoiceByNumber","finishAdvance","getAdvanceStatement","getAppInfo","getCatalog","getCollectionReceipt","getCompanyProfile","getCustomer","getCustomerStatement","getDailyMoney","getInvoice","getProductImageBytes","getProductImageMeta","getSaleHistory","getSaleReceipt","getSettings","getTodaySales","importCatalog","inspectRestoreBackup","listBrands","listCashiers","listCategories","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","pendingAdvances","phoneSessionState","pickInvoiceLogo","printAdvance","printAdvanceRefund","printCollectionReceipt","printInvoice","printSaleReceipt","readInvoicePhoto","recordAdvance","recordAllocatedReceipt","recordCustomerPayment","refundAdvance","removeInvoiceLine","removeProductImage","renameCategory","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveAdvancePdf","saveAdvanceRefundPdf","saveCollectionReceiptPdf","saveCompanyProfile","saveInvoicePdf","saveSaleReceiptPdf","searchCustomers","searchInvoices","sellOnAdvance","setCategoryActive","setCustomerActive","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorMayCreateProducts","setOperatorRole","setProductActive","setProductImage","setTerminalLanguage","startPhoneSession","updateCustomerContact","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"]),
   // 🔴 THE MESSAGE NAMES THE DIFFERENCE, because reporting only the length is useless exactly when
   // the length is right. This assertion failed the G3 gate with "got 64" against an expected 64 —
   // the count matched and one NAME was missing, and the message could not say which.
   (() => {
-    const expected = ["addInvoiceLine","addInvoiceLines","applyRestore","cancelPhoneSession","completeBootstrapSetup","createCategory","createCustomer","createInvoiceDraft","createOperator","createProduct","createSale","currentCashier","deleteCategory","discardInvoiceDraft","exportBackup","exportCatalog","exportFullBackup","exportOnlineCatalog","finalizeInvoice","findInvoiceByNumber","getAppInfo","getCatalog","getCompanyProfile","getCustomer","getCustomerStatement","getInvoice","getProductImageBytes","getProductImageMeta","getSaleHistory","getSettings","getTodaySales","importCatalog","inspectRestoreBackup","listBrands","listCashiers","listCategories","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","phoneSessionState","pickInvoiceLogo","printInvoice","recordAllocatedReceipt","recordCustomerPayment","removeInvoiceLine","removeProductImage","renameCategory","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveCompanyProfile","saveInvoicePdf","searchCustomers","searchInvoices","setCategoryActive","setCustomerActive","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorMayCreateProducts","setOperatorRole","setProductActive","setProductImage","setTerminalLanguage","startPhoneSession","updateCustomerContact","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"];
+    const expected = ["acknowledgeAdvance","addInvoiceLine","addInvoiceLines","applyAdvanceToDebt","applyRestore","cancelPhoneSession","closeAdvance","completeBootstrapSetup","correctAdvance","createCategory","createCustomer","createCustomerCreditSale","createInvoiceDraft","createOperator","createProduct","createSale","createSplitSale","currentCashier","deleteCategory","discardInvoiceDraft","exportBackup","exportCatalog","exportFullBackup","exportOnlineCatalog","finalizeInvoice","findInvoiceByNumber","finishAdvance","getAdvanceStatement","getAppInfo","getCatalog","getCollectionReceipt","getCompanyProfile","getCustomer","getCustomerStatement","getDailyMoney","getInvoice","getProductImageBytes","getProductImageMeta","getSaleHistory","getSaleReceipt","getSettings","getTodaySales","importCatalog","inspectRestoreBackup","listBrands","listCashiers","listCategories","listInvoiceDrafts","listInvoices","listOperators","listProducts","listReconciliation","listReconciliationQueue","login","logout","pendingAdvances","phoneSessionState","pickInvoiceLogo","printAdvance","printAdvanceRefund","printCollectionReceipt","printInvoice","printSaleReceipt","readInvoicePhoto","recordAdvance","recordAllocatedReceipt","recordCustomerPayment","refundAdvance","removeInvoiceLine","removeProductImage","renameCategory","renameOperator","resetOperatorPin","resolveCreateProduct","resolveKeepCatalog","resolveKeepInvoiceOnly","resolveLinkProduct","resolveUpdateCatalog","saveAdvancePdf","saveAdvanceRefundPdf","saveCollectionReceiptPdf","saveCompanyProfile","saveInvoicePdf","saveSaleReceiptPdf","searchCustomers","searchInvoices","sellOnAdvance","setCategoryActive","setCustomerActive","setInvoiceTax","setNextInvoiceNumber","setOperatorActive","setOperatorMayCreateProducts","setOperatorRole","setProductActive","setProductImage","setTerminalLanguage","startPhoneSession","updateCustomerContact","updateInvoiceHeader","updateInvoiceLine","updateProduct","voidSale"];
     const missing = expected.filter((k) => !surface.posKeys.includes(k));
     const extra = surface.posKeys.filter((k) => !expected.includes(k));
-    return `window.pos exposes exactly the 79 business methods, and nothing else (got ${surface.posKeys.length}; missing: ${JSON.stringify(missing)}; unexpected: ${JSON.stringify(extra)})`;
+    return `window.pos exposes exactly the 103 business methods, and nothing else (got ${surface.posKeys.length}; missing: ${JSON.stringify(missing)}; unexpected: ${JSON.stringify(extra)})`;
   })(),
 );
 await page.screenshot({ path: SHOTS + "01-login.png" });
@@ -159,8 +184,19 @@ await page.screenshot({ path: SHOTS + "01-login.png" });
 await page.getByRole("button", { name: "Cashier One" }).click();
 for (const d of "9999") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
 await page.locator('[data-testid="login-submit"]').click();
-await page.waitForSelector("text=Cashier or PIN is incorrect");
-log("PASS wrong PIN refused");
+// TRANSITION (I18N-LOGIN-PIN, DEC-33 #3): was `text=Cashier or PIN is incorrect` — English on the Arabic
+// login. The refusal now reads in the shop's language, with the real numbers (5 tries, 5-minute lock).
+await page.waitForSelector(".login .error", { timeout: 30000 });
+{
+  const lang = await page.evaluate(() => document.documentElement.lang);
+  const shown = (await page.locator(".login .error").innerText()).trim();
+  const expected =
+    lang === "ar"
+      ? "الرمز غير صحيح. المحاولات المتبقّية قبل إيقاف الدخول مؤقّتاً: \u20684\u2069. مدّة الإيقاف بالدقائق: \u20685\u2069."
+      : "Cashier or PIN is incorrect. 4 attempts left before a 5-minute lock.";
+  if (shown !== expected) throw new Error(`ASSERTION FAILED: wrong-PIN refusal in ${lang} — got «${shown}»`);
+  log(`PASS wrong PIN refused, in ${lang}, with 4 attempts left and a 5-minute lock`);
+}
 for (const d of "1111") await page.locator(".keypad").getByRole("button", { name: d, exact: true }).click();
 await page.locator('[data-testid="login-submit"]').click();
 // 🔴 The operator is deliberately NOT re-clicked here: staying on the same selection is what proves
@@ -207,11 +243,16 @@ assert(
 await page.screenshot({ path: SHOTS + "04-receipt.png" });
 await page.locator('[data-testid="new-sale"]').click();
 
-// Second sale — card.
+// Second sale — Whish Money. TRANSITION (P3, DEC-35): this was a CARD sale (pay-card); the till now offers
+// cash and Whish only. The same sale, the same void below, the same totals.
 for (let i = 0; i < 3; i++) await product(page, "Mint Tea").click();
 assert((await totalText(page)) === "5.97 USD", "3 × 1.99 = 5.97");
 await page.locator('[data-testid="complete-sale"]').click();
-await page.locator('[data-testid="pay-card"]').click();
+assert((await page.locator('[data-testid="pay-card"]').count()) === 0 && (await page.locator('[data-testid="pay-other"]').count()) === 0, "🔴 P3: the till offers no Card and no Other");
+await page.locator('[data-testid="pay-whish"]').click();
+await page.locator('[data-testid="whish-reference"]').fill("WH-SMOKE-2");
+await page.locator('[data-testid="whish-confirm"]').check();
+await page.locator('[data-testid="whish-submit"]').click();
 await page.waitForSelector('[data-testid="receipt-number"]:has-text("#2")');
 await page.locator('[data-testid="new-sale"]').click();
 
@@ -235,8 +276,10 @@ await page.screenshot({ path: SHOTS + "05-today.png" });
 // Void receipt #2 from history.
 await page.locator('[data-testid="tab-history"]').click();
 await page.waitForSelector(".history-table");
-await page.locator('tr[data-payment-method="card"]').locator('[data-testid="history-void"]').click();
+await page.locator('tr[data-payment-method="external"]').locator('[data-testid="history-void"]').click(); // P3: was data-payment-method="card"
 await page.locator('[data-testid="void-reason"]').fill("customer cancelled");
+// DEC-35a: voiding a Whish sale says, before the confirm button, that it is NOT a refund.
+assert((await page.locator('[data-testid="void-not-refund"]').count()) === 1, "🔴 the Whish void dialog says a void is not a refund");
 await page.screenshot({ path: SHOTS + "06-void-dialog.png" });
 await page.locator('[data-testid="void-confirm"]').click();
 await page.waitForSelector("tr.voided");
@@ -263,7 +306,7 @@ assert((await stat(page, "Completed sales")) === "2" && (await stat(page, "Net s
 await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Water 500ml").click();
 await page.locator('[data-testid="complete-sale"]').click();
-await page.locator('[data-testid="pay-other"]').click();
+await page.locator('[data-testid="pay-cash"]').click(); // TRANSITION (P3): was pay-other
 await page.waitForSelector('[data-testid="receipt-number"]:has-text("#3")');
 
 // The REAL Electron main PID, asked of the main process itself. NOT app.process().pid: on Windows
@@ -281,16 +324,25 @@ const isAlive = (p) => {
   }
 };
 const image = basename(ELECTRON);
-const appPids = () =>
+// 🔴 THIS instance only — its launcher, its main process and their descendants. Counting every
+// process with the same image name made a process left behind by ANOTHER test look like this
+// instance failing to exit (installed run 2026-11-11: 8 counted, 4 were someone else's).
+const sameImage = () =>
   process.platform === "win32"
     ? execFileSync("tasklist", ["/FI", `IMAGENAME eq ${image}`, "/FO", "CSV", "/NH"], { encoding: "utf8" })
         .split(/\r?\n/)
         .filter((l) => l.toLowerCase().includes(image.toLowerCase()))
         .map((l) => Number(l.split('","')[1]))
     : [mainPid];
-const beforeKill = appPids();
-log(`app processes before the kill: ${beforeKill.length}`);
-process.kill(mainPid, "SIGKILL"); // TerminateProcess on Windows
+const beforeIds = [...identifyTree(launcherPid), ...identifyTree(mainPid)].filter((i, k, a) => a.findIndex((j) => j.pid === i.pid) === k);
+const beforeKill = beforeIds.map((i) => i.pid);
+for (const i of beforeIds) owned.add(i);
+const foreign = sameImage().filter((p) => !beforeKill.includes(p));
+log(`app processes before the kill: ${beforeKill.length} of this instance${foreign.length ? `; ${foreign.length} other ${image} process(es) NOT counted: ${foreign.join(", ")}` : ""}`);
+// The identity recorded AT LAUNCH (creation time checked against the launch moment), not a fresh read.
+const mainId = owned.list().find((i) => i.pid === mainPid) ?? null;
+const hardKill = endOwned([mainId], { tree: false }); // TerminateProcess on the PROVEN main process only
+assert(hardKill.length === 1 && hardKill[0].outcome === "ended", `the hard kill reached the proven main process (${JSON.stringify(hardKill)})`);
 log("hard-killed the Electron main process only", mainPid);
 
 // No cleanup: every process of the killed instance must go away BY ITSELF.

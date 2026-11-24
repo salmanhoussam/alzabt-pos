@@ -78,6 +78,17 @@ export interface SaleLineRecord {
 }
 
 /** A completed sale. Immutable: the database refuses UPDATE and DELETE on it. */
+/**
+ * P2 · SELL-WHISH-REFERENCE-AND-CONFIRMATION (owner, 2026-11-07). The evidence behind an `external`
+ * till sale: the provider and the operator-entered reference, as recorded on its `sale_tenders` row.
+ * Only Whish Money is offered at the till (bank transfer is out of scope by owner decision); the type
+ * names the provider so a stored row is read as what it is, never re-interpreted.
+ */
+export interface ExternalPaymentEvidence {
+  readonly provider: "whish" | "bank_transfer";
+  readonly reference: string;
+}
+
 export interface SaleRecord {
   readonly id: string;
   readonly receiptNumber: number;
@@ -103,10 +114,31 @@ export interface SaleRecord {
    * customer-credit POS sale. Never a fabricated 'cash'; ordinary paid POS sales require a method.
    */
   readonly paymentMethod: PaymentMethod | null;
+  /**
+   * P2: the provider + reference of an `external` sale's payment record, read from `sale_tenders`.
+   * Null (or absent, on a record built outside the repository) for every other sale — including a
+   * historic `external` sale, which has no record and is never given an invented one.
+   */
+  readonly externalPayment?: ExternalPaymentEvidence | null;
+  /**
+   * SELL-SPLIT-CASH-WHISH (owner, 2026-11-09): PRESENT ONLY on a sale paid by two or more tenders
+   * (`paymentMethod` is then null) — each tender in `seq` order, with its amount and, for Whish, its
+   * reference. Absent on every other sale, so no existing record changes shape.
+   */
+  readonly tenders?: ReadonlyArray<SaleTender>;
   readonly businessDate: string;
   readonly completedAt: string;
   readonly createdAt: string;
   readonly lines: ReadonlyArray<SaleLineRecord>;
+}
+
+/** One recorded tender of a multi-tender sale. */
+export interface SaleTender {
+  readonly seq: number;
+  readonly method: PaymentMethod;
+  readonly amount: Money;
+  readonly provider: "whish" | "bank_transfer" | null;
+  readonly reference: string | null;
 }
 
 /** A void is a separate, immutable event that points at the sale it cancels. */

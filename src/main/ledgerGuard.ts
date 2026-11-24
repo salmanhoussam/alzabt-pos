@@ -19,7 +19,7 @@
 import { join } from "node:path";
 import { JOURNAL_FILE, RESTORE_DIR } from "../persistence/restoreEngine";
 
-export const LEDGER_FILE_NAME = "alzabt-pos-ledger.sqlite";
+export const LEDGER_FILE_NAME = "alzabt-pos-trial-only-ledger.sqlite";
 export const LEDGER_MARKER_FILE_NAME = "ledger.json";
 
 export class LedgerMissingError extends Error {

@@ -20,8 +20,19 @@ export function ToolsScreen(props: {
     call(pos().getAppInfo()).then(setInfo).catch(() => setInfo(null));
   }, []);
 
+  // 🔴 QW-CASHIER-TOOLS (DEC-33 #4): a cashier sees no owner-only control. Every one of these channels is
+  // `owner` in channelPolicy.ts and refused BEFORE its handler runs — that stays the authority; hiding
+  // the buttons is the courtesy that stops a cashier meeting an English refusal box.
+  const isOwner = props.operator.role === "owner";
+
   return (
     <div className="tools">
+      {!isOwner && (
+        <section className="card" data-testid="tools-owner-only">
+          <p className="muted">{t("tools.ownerOnly")}</p>
+        </section>
+      )}
+      {isOwner && (
       <section className="card">
         <h2>{t("tools.catalog")}</h2>
         <p className="muted small">{t("tools.catalogNote")}</p>
@@ -40,6 +51,8 @@ export function ToolsScreen(props: {
           </button>
         </div>
       </section>
+      )}
+      {isOwner && (
       <section className="card">
         <h2>{t("tools.backup")}</h2>
         <p className="muted small">{t("tools.backupNote")}</p>
@@ -60,11 +73,12 @@ export function ToolsScreen(props: {
           </button>
         </div>
       </section>
+      )}
       {/* Owner only. Full backup and restore (Track 2); the three channels are refused for anyone
           else below the UI boundary — src/main/channelPolicy.ts and PosService.assertOwner. */}
-      {props.operator.role === "owner" && <BackupRestoreSection />}
+      {isOwner && <BackupRestoreSection />}
       {/* Owner only. The channels are owner-only regardless of whether this renders. */}
-      {props.operator.role === "owner" && <OperatorsSection selfId={props.operator.id} />}
+      {isOwner && <OperatorsSection selfId={props.operator.id} />}
       <section className="card about" data-testid="about">
         <h2>{t("tools.about")}</h2>
         <dl className="stats">

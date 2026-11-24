@@ -102,6 +102,26 @@ export const COUNTED_TABLES = [
   "receipts",
   "receipt_attempts",
   "receipt_attempt_lines",
+  // Migration 19 — the payment model. 🔴 EVERY ONE IS MONEY OR ITS EVIDENCE. A snapshot that lost
+  // `sale_tenders` restores split sales whose methods are gone; `external_references` is what stops a
+  // Whish / bank reference from being recorded twice, so losing it silently re-opens every used
+  // reference; `document_numbers` would restart COL- / ADV- / REF- numbering and issue duplicates;
+  // and without the three advance tables a customer's prepaid money, its uses and its cash refunds
+  // vanish while the backup still verifies. The derived contract test caught the omission.
+  "sale_tenders",
+  "external_references",
+  "document_numbers",
+  "collection_documents",
+  "customer_advances",
+  "advance_applications",
+  "advance_refunds",
+  // Migration 20 — the durable intent of an advance. A snapshot without it would restore advances
+  // but forget an attempt whose outcome the operator never saw — the very thing that stops a cash
+  // advance being recorded twice after a crash.
+  "advance_attempts",
+  // Migration 20 G2 — the audited corrections. Without it a restore would bring back a corrected
+  // advance as LIVE beside its successor: two balances for one payment.
+  "advance_corrections",
   "schema_migrations",
 ] as const;
 const DAILY_RE = /^daily-(\d{4}-\d{2}-\d{2})\.sqlite$/;

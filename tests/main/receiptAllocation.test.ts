@@ -113,16 +113,17 @@ describe("the happy path — USD (60.00 + 40.00 = 100.00, one Whish receipt)", (
     expect(outstanding(c, b.id)).toEqual({ minor: "1000", currency: "USD" });
   });
 
-  it("LBP stays LBP: a bank transfer of 5,000,000.00 LBP shared 3,000,000.00 + 2,000,000.00; USD debts untouched", () => {
+  it("LBP stays LBP: a Whish receipt of 5,000,000.00 LBP shared 3,000,000.00 + 2,000,000.00; USD debts untouched", () => {
+    // TRANSITION (P3, DEC-35): this was a BANK TRANSFER (BT-77); new receipts are Whish only. The subject is the currency.
     const c = customer();
     const l1 = owe(c.id, "L1", 300000000n, "LBP");
     const l2 = owe(c.id, "L2", 200000000n, "LBP");
     const usd = owe(c.id, "U", 1234n);
-    ok(send(receiptReq(c, "receipt-key-0004", "500000000", [[l1.id, "300000000"], [l2.id, "200000000"]], { channel: "bank_transfer", reference: "BT-77", currency: "LBP" })));
+    ok(send(receiptReq(c, "receipt-key-0004", "500000000", [[l1.id, "300000000"], [l2.id, "200000000"]], { channel: "whish", reference: "WH-LBP-77", currency: "LBP" })));
     expect(outstanding(c, l1.id)).toEqual({ minor: "0", currency: "LBP" });
     expect(outstanding(c, l2.id)).toEqual({ minor: "0", currency: "LBP" });
     expect(outstanding(c, usd.id)).toEqual({ minor: "1234", currency: "USD" });
-    expect(h.db.prepare("SELECT currency, provider, amount_minor FROM receipts").all()).toEqual([{ currency: "LBP", provider: "bank_transfer", amount_minor: 500000000n }]);
+    expect(h.db.prepare("SELECT currency, provider, amount_minor FROM receipts").all()).toEqual([{ currency: "LBP", provider: "whish", amount_minor: 500000000n }]);
   });
 });
 
@@ -251,15 +252,21 @@ describe("🔴 ONE provider reference is ONE record — receipts and direct coll
     expect(n("receipts")).toBe(1);
   });
 
-  it("the same reference text under the OTHER provider is a different reference", () => {
+  it("a NEW bank-transfer receipt is refused today (DEC-35) — not as a duplicate — and writes nothing", () => {
+    // TRANSITION (P3, DEC-35): this was "the same reference text under the OTHER provider is a different
+    // reference" (a bank receipt SAME-1 accepted next to a Whish SAME-1 → 2 receipts). New bank-transfer
+    // receipts are no longer accepted; the registry's provider distinction itself stays proven at the
+    // database level in migration19.test.ts.
     const c = customer();
     const a = owe(c.id, "A", 6000n);
     const b = owe(c.id, "B", 4000n);
     ok(send(receiptReq(c, "receipt-key-0033", "10000", [[a.id, "6000"], [b.id, "4000"]], { reference: "SAME-1" })));
     const e = owe(c.id, "E", 3000n);
     const f = owe(c.id, "F", 3000n);
-    ok(send(receiptReq(c, "receipt-key-0034", "2000", [[e.id, "1000"], [f.id, "1000"]], { reference: "SAME-1", channel: "bank_transfer" })));
-    expect(n("receipts")).toBe(2);
+    const before = snapshotCounts();
+    expect(errCode(send(receiptReq(c, "receipt-key-0034", "2000", [[e.id, "1000"], [f.id, "1000"]], { reference: "SAME-1", channel: "bank_transfer" })))).toBe("PAYMENT_METHOD_NOT_ACCEPTED");
+    expect(snapshotCounts()).toEqual(before);
+    expect(n("receipts")).toBe(1);
   });
 });
 

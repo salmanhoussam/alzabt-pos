@@ -38,12 +38,15 @@
  * merely avoids offering something that would be refused.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../api";
+import type { PaymentMethod } from "../../domain/sale";
 import { parseDecimal } from "../../domain/money";
 import { useT } from "../i18n";
+import { statementDocumentText } from "../statementDocument";
 import { AllocatedReceiptForm } from "./AllocatedReceiptForm";
 import { type ReceiptReconciliation, reconcileReceiptOutcome, sharableCurrencies } from "./receiptAllocation";
+import { tendersText } from "../tenders";
 import type {
   AllocatedReceiptRequest,
   PendingReceiptDto,
@@ -66,18 +69,40 @@ import type {
  */
 const UNSAFE_TO_RETRY: ReadonlySet<string> = new Set(["PAYMENT_RECORDED", "PAYMENT_STATUS_UNKNOWN"]);
 
-const COLLECTION_METHODS: ReadonlyArray<CollectionMethodDto> = ["cash", "card", "whish", "bank_transfer", "other"];
+/**
+ * P3 (DEC-35): a NEW collection is Cash or Whish Money only. Card, bank transfer and Other are no longer
+ * offered — and the service refuses them for new money — while every historic collection keeps its own
+ * channel on the statement. Old list: cash, card, whish, bank_transfer, other.
+ */
+const COLLECTION_METHODS: ReadonlyArray<CollectionMethodDto> = ["cash", "whish"];
+
+/** How a linked PAID sale was paid at the till — the Sell screen's own method labels (ACC-2). */
+const METHOD_LABEL: Record<PaymentMethod, string> = {
+  cash: "pay.cash",
+  card: "pay.card",
+  external: "pay.external",
+  other: "pay.other",
+};
+
+import { AdvanceStatementSection } from "./AdvancePanels";
+import { CollectionReceipt } from "./CollectionReceipt";
+import type { CollectionDocumentDto as ColDoc } from "../../shared/ipcContract";
 
 interface Props {
   readonly customerId: string;
+  /** Migration 20: bumps when an advance was recorded/settled, so the advances section re-reads. */
+  readonly advanceRefresh?: number;
 }
 
-export function CustomerStatement({ customerId }: Props) {
+export function CustomerStatement({ customerId, advanceRefresh = 0 }: Props) {
+  // DEC-35x: an advance applied to a debt changes THIS statement too — re-read it from main.
+  const [reload, setReload] = useState(0);
   const { t } = useT();
   /** Own sentences for this slice's refusals (own codes, so the refusal-audit rules are untouched). */
   const collectErrorText = (err: unknown): string => {
     if (err instanceof ApiError && (err.code === "FUNDS_NOT_CONFIRMED" ||
         err.code === "DUPLICATE_PAYMENT_REFERENCE" ||
+        err.code === "PAYMENT_METHOD_NOT_ACCEPTED" ||
         err.code === "COLLECTION_UNRESOLVED")) {
       return t(`collect.err.${err.code}`);
     }
@@ -105,14 +130,31 @@ export function CustomerStatement({ customerId }: Props) {
   const [payError, setPayError] = useState<string | null>(null);
   const [blocked, setBlocked] = useState(false);
   const [notice, setNotice] = useState<"done" | "duplicate" | "receipt" | null>(null);
+  // DEC-35z+ COL: the COL- receipt on screen (right after a payment, or a reprint from the statement).
+  const [colShown, setColShown] = useState<{ doc: ColDoc; duplicate: boolean } | null>(null);
+  const [colError, setColError] = useState<string | null>(null);
+  const openCollection = (docNo: number) => {
+    setColError(null);
+    call(pos().getCollectionReceipt({ collectionNo: docNo }))
+      .then((doc) => setColShown({ doc, duplicate: false }))
+      .catch((e: unknown) => setColError(errorText(e)));
+  };
   /** M17B-S1: whether the "one payment for several debts" form is open. */
   const [receiptOpen, setReceiptOpen] = useState(false);
   const [receiptBusy, setReceiptBusy] = useState(false);
+
+  /**
+   * QW-COLLECT-TITLE: true only after a confirm attempt found the "money received" box unticked. It
+   * highlights the box and explains; it is cleared as soon as the box, the method or the form changes.
+   */
+  const [confirmMissing, setConfirmMissing] = useState(false);
+  const confirmBoxRef = useRef<HTMLInputElement | null>(null);
 
   const resetPaymentDetails = () => {
     setMethod("cash");
     setReference("");
     setConfirmed(false);
+    setConfirmMissing(false);
   };
 
   const closeForm = () => {
@@ -136,6 +178,22 @@ export function CustomerStatement({ customerId }: Props) {
     setBlocked(false);
     setNotice(null);
     setAttemptKey(newIdempotencyKey());
+  };
+
+  /**
+   * ACC-3: a shared receipt whose whole total lands on ONE debt opens that debt's own payment form with
+   * the amount, method and reference the owner already typed. The funds confirmation is NOT carried —
+   * `openForm` clears it — so the owner confirms again here before anything is sent.
+   */
+  const openFormWithPrefill = (
+    obligationId: string,
+    prefill: { readonly amountText: string; readonly method: CollectionMethodDto; readonly reference: string },
+  ) => {
+    if (blocked || busy) return;
+    openForm(obligationId);
+    setAmountText(prefill.amountText);
+    setMethod(prefill.method);
+    setReference(prefill.reference);
   };
 
   const submit = async (o: StatementObligationDto) => {
@@ -167,7 +225,13 @@ export function CustomerStatement({ customerId }: Props) {
       return;
     }
     if (needsConfirmation && !confirmed) {
-      setPayError(t("collect.confirmRequired"));
+      // 🔴 QW-COLLECT-TITLE: SHOW WHERE, NEVER TICK. Nothing was sent; the box is focused, highlighted
+      // and explained, and every typed value stays as it was. Only the owner can tick it.
+      // QW-COLLECT-LAYOUT: ONE explanation, at the box — the generic error line is cleared, not doubled.
+      setPayError(null);
+      setConfirmMissing(true);
+      confirmBoxRef.current?.focus();
+      confirmBoxRef.current?.scrollIntoView({ block: "nearest" });
       return;
     }
     await post({
@@ -195,6 +259,7 @@ export function CustomerStatement({ customerId }: Props) {
       // commit, so nothing here subtracts a payment from a balance.
       setStatement(result.statement);
       setNotice(result.duplicate ? "duplicate" : "done");
+      if (result.collection) setColShown({ doc: result.collection, duplicate: result.duplicate });
       setPayingId(null);
       setAmountText("");
       setAttemptKey(newIdempotencyKey());
@@ -302,6 +367,7 @@ export function CustomerStatement({ customerId }: Props) {
       const result = await call(pos().recordAllocatedReceipt(request));
       setStatement(result.statement);
       setNotice("receipt");
+      if (result.collection) setColShown({ doc: result.collection, duplicate: result.duplicate });
     } catch (err) {
       setPayError(collectErrorText(err));
       // The failure may have followed a COMMIT: ask the ledger, and if exactly this receipt is in it say so.
@@ -332,7 +398,7 @@ export function CustomerStatement({ customerId }: Props) {
     return () => {
       live = false;
     };
-  }, [customerId]);
+  }, [customerId, reload]);
 
   if (error !== null) {
     return (
@@ -427,6 +493,13 @@ export function CustomerStatement({ customerId }: Props) {
         </div>
       )}
 
+      {colError && (
+        <p className="error" data-testid="col-error">
+          {colError}
+        </p>
+      )}
+      {colShown && <CollectionReceipt doc={colShown.doc} duplicate={colShown.duplicate} onClose={() => setColShown(null)} />}
+
       {notice !== null && (
         /* 🔴 "ALREADY RECORDED" IS NOT "RECORDED AGAIN". A replayed key returns the committed
            payment, and the owner is told the money was taken ONCE — never that a second one
@@ -460,10 +533,15 @@ export function CustomerStatement({ customerId }: Props) {
                 customerId={customerId}
                 statement={statement}
                 onClose={() => setReceiptOpen(false)}
+                onUseSingleDebt={({ obligationId, ...prefill }) => {
+                  setReceiptOpen(false);
+                  openFormWithPrefill(obligationId, prefill);
+                }}
                 onAskLedger={askLedgerAboutReceipt}
-                onRecorded={(next, duplicate) => {
+                onRecorded={(next, duplicate, collection) => {
                   setStatement(next);
                   setNotice(duplicate ? "duplicate" : "receipt");
+                  if (collection) setColShown({ doc: collection, duplicate });
                   setReceiptOpen(false);
                 }}
               />
@@ -505,9 +583,9 @@ export function CustomerStatement({ customerId }: Props) {
                 </div>
                 <div className="statement-row">
                   <span className="muted">{t("statement.source")}</span>
-                  <span data-testid="statement-source">
-                    {o.sourceKind === "sale" ? t("statement.sourceSale") : t("statement.sourceManual")}{" "}
-                    <bdi dir="ltr">{o.sourceRef}</bdi>
+                  {/* UX-REF-NUMBERS: the invoice / sale-receipt number or the typed reference — never the id. */}
+                  <span data-testid="statement-source" data-document={o.document.kind}>
+                    <bdi>{statementDocumentText(o.document, t)}</bdi>
                   </span>
                 </div>
                 <div className="statement-row">
@@ -526,9 +604,16 @@ export function CustomerStatement({ customerId }: Props) {
                       {o.settlements.map((s) => (
                         <li key={s.id} data-testid="statement-settlement">
                           <bdi dir="ltr">{fmt(s.amount)}</bdi>{" "}
-                          <span className="muted small" data-testid="statement-settlement-method" data-method={s.method} data-provider={s.provider ?? ""}>
-                            {t(`statement.channel.${s.provider ?? s.method}`)}
-                          </span>{" "}
+                          {s.advance !== null ? (
+                            /* DEC-35x: paid FROM an advance — not money received that day, so no channel is named. */
+                            <span className="muted small" data-testid="statement-settlement-advance" data-advance={s.advance.number}>
+                              {t("statement.fromAdvance")} <bdi dir="ltr">{s.advance.number}</bdi>
+                            </span>
+                          ) : (
+                            <span className="muted small" data-testid="statement-settlement-method" data-method={s.method} data-provider={s.provider ?? ""}>
+                              {t(`statement.channel.${s.provider ?? s.method}`)}
+                            </span>
+                          )}{" "}
                           {s.reference !== null && (
                             <span className="muted small" data-testid="statement-settlement-reference">
                               <bdi dir="ltr">{s.reference}</bdi>{" "}
@@ -544,7 +629,20 @@ export function CustomerStatement({ customerId }: Props) {
                           )}
                           <span className="muted small">
                             <bdi dir="ltr">{s.settledAt.slice(0, 10)}</bdi>
-                          </span>
+                          </span>{" "}
+                          {s.collection !== null ? (
+                            /* DEC-35z+ COL: the receipt of the money behind this row — open / reprint, writes nothing. */
+                            <button className="link" type="button" onClick={() => openCollection(s.collection!.docNo)} data-testid="statement-settlement-col" data-col={s.collection.number}>
+                              <bdi dir="ltr">{s.collection.number}</bdi>
+                            </button>
+                          ) : (
+                            s.advance === null && (
+                              /* History before COL: never numbered retroactively; said so, not hidden. */
+                              <span className="muted small" data-testid="statement-settlement-col-none">
+                                {t("col.none")}
+                              </span>
+                            )
+                          )}
                         </li>
                       ))}
                     </ul>
@@ -565,15 +663,19 @@ export function CustomerStatement({ customerId }: Props) {
                         void submit(o);
                       }}
                     >
-                      <h4>{t("collect.title")}</h4>
+                      {/* QW-COLLECT-TITLE: the title names the method actually chosen — a Whish, bank
+                          transfer, card or other payment is never called "cash". */}
+                      <h4 data-testid="collect-title" data-method={method}>
+                        {t(`collect.title.${method}`)}
+                      </h4>
                       <div className="statement-row">
                         <span className="muted">{t("collect.customer")}</span>
                         <bdi data-testid="collect-customer">{statement.customer.displayName}</bdi>
                       </div>
                       <div className="statement-row">
                         <span className="muted">{t("collect.reference")}</span>
-                        <bdi dir="ltr" data-testid="collect-reference">
-                          {o.sourceRef}
+                        <bdi data-testid="collect-reference" data-document={o.document.kind}>
+                          {statementDocumentText(o.document, t)}
                         </bdi>
                       </div>
                       <div className="statement-row">
@@ -615,6 +717,7 @@ export function CustomerStatement({ customerId }: Props) {
                             setMethod(e.target.value as CollectionMethodDto);
                             setReference("");
                             setConfirmed(false);
+                            setConfirmMissing(false);
                             setPayError(null);
                             setAttemptKey(newIdempotencyKey());
                           }}
@@ -649,21 +752,35 @@ export function CustomerStatement({ customerId }: Props) {
                         </label>
                       )}
                       {(method === "whish" || method === "bank_transfer" || method === "other") && (
-                        <label className="collect-confirm-funds">
-                          <input
-                            data-testid="collect-funds-confirmed"
-                            type="checkbox"
-                            checked={confirmed}
-                            disabled={blocked || busy}
-                            onChange={(e) => {
-                              setConfirmed(e.target.checked);
-                              setPayError(null);
-                              setAttemptKey(newIdempotencyKey());
-                            }}
-                          />{" "}
-                          <span>{t("collect.fundsConfirmed")}</span>
-                          <span className="muted small"> {t("collect.fundsHint")}</span>
-                        </label>
+                        <>
+                          <label className={`collect-confirm-funds${confirmMissing ? " missing" : ""}`} data-missing={confirmMissing ? "1" : "0"}>
+                            <input
+                              ref={confirmBoxRef}
+                              data-testid="collect-funds-confirmed"
+                              type="checkbox"
+                              checked={confirmed}
+                              disabled={blocked || busy}
+                              aria-invalid={confirmMissing}
+                              aria-describedby={confirmMissing ? `collect-confirm-missing-${o.id}` : undefined}
+                              onChange={(e) => {
+                                setConfirmed(e.target.checked);
+                                setConfirmMissing(false);
+                                setPayError(null);
+                                setAttemptKey(newIdempotencyKey());
+                              }}
+                            />
+                            {/* QW-COLLECT-LAYOUT: the box and its sentence share ONE row; the hint sits under the sentence. */}
+                            <span className="collect-confirm-text">
+                              <span>{t("collect.fundsConfirmed")}</span>
+                              <span className="muted small">{t("collect.fundsHint")}</span>
+                            </span>
+                          </label>
+                          {confirmMissing && (
+                            <p className="error small" id={`collect-confirm-missing-${o.id}`} role="alert" data-testid="collect-confirm-missing">
+                              {t("collect.confirmMissing")}
+                            </p>
+                          )}
+                        </>
                       )}
                       {payError !== null && (
                         <p className="error" data-testid="collect-error">
@@ -697,6 +814,63 @@ export function CustomerStatement({ customerId }: Props) {
           </ul>
         </>
       )}
+
+      {/* 🔴 ACC-2 · PAID SALES ARE ACTIVITY, NOT DEBT. A separate list, after the debts and outside
+          their totals: nothing here is added to «المتبقّي», and a credit sale is never repeated
+          here (it already appears once, as its obligation). Amounts are printed as main sent them. */}
+      <section className="statement-paid-sales" data-testid="statement-paid-sales">
+        <h3>{t("statement.paidSales")}</h3>
+        <p className="muted small" data-testid="statement-paid-sales-note">
+          {t("statement.paidSalesNote")}
+        </p>
+        {statement.paidSales.length === 0 ? (
+          <p className="muted small" data-testid="statement-paid-sales-none">
+            {t("statement.paidSalesNone")}
+          </p>
+        ) : (
+          <ul className="statement-paid-sale-list">
+            {statement.paidSales.map((ps) => (
+              <li key={ps.saleId} data-testid="statement-paid-sale" data-sale={ps.saleId} data-voided={ps.voided ? "1" : "0"}>
+                <span className="muted small">
+                  {t("statement.receiptNo")} <bdi dir="ltr">{ps.receiptNumber}</bdi>
+                </span>{" "}
+                <bdi dir="ltr" data-testid="statement-paid-sale-total">
+                  {fmt(ps.total)}
+                </bdi>{" "}
+                <span
+                  className="muted small"
+                  data-testid="statement-paid-sale-method"
+                  data-provider={ps.externalPayment?.provider ?? "none"}
+                  data-split={ps.tenders && ps.tenders.length >= 2 ? "1" : "0"}
+                >
+                  {/* SELL-SPLIT-CASH-WHISH: a split sale names each part; it has no single method. */}
+                  {ps.tenders && ps.tenders.length >= 2
+                    ? tendersText(ps.tenders, t)
+                    : ps.externalPayment?.provider === "whish"
+                      ? `${t("method.whish")} · ${ps.externalPayment.reference}`
+                      : ps.paymentMethod
+                        ? t(METHOD_LABEL[ps.paymentMethod])
+                        : t("history.payNoMethod")}
+                </span>{" "}
+                <span className="muted small">
+                  <bdi dir="ltr">{ps.completedAt.slice(0, 10)}</bdi>
+                </span>
+                {ps.voided && (
+                  <>
+                    {" "}
+                    <span className="badge" data-testid="statement-paid-sale-voided">
+                      {t("statement.voided")}
+                    </span>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      {/* Migration 20 — the customer's ADVANCES, inside the statement (they are its figures, owner
+          only) but in their OWN section: never netted against the debt above (owner decision D2). */}
+      <AdvanceStatementSection customerId={customerId} refreshKey={advanceRefresh} onChanged={() => setReload((n) => n + 1)} />
     </section>
   );
 }

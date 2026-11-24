@@ -45,7 +45,8 @@
 // This file's own header explains why it is a literal rather than MIGRATIONS.length: these scripts
 // assert what the INSTALLED app did, so deriving it from the build under test would make the check
 // circular.
-const SCHEMA = 18;
+// 🔴 TRANSITION 18 -> 19 with migration 19 (payment_model_tenders_references_advances). The old value was 18.
+const SCHEMA = 19;
 
 import { _electron as electron } from "playwright-core";
 import { spawn, execFileSync } from "node:child_process";
@@ -55,6 +56,7 @@ import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createOwned, endOwned } from "./_owned.mjs";
 
 const PHASE = process.argv[2];
 const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -72,7 +74,11 @@ const DEFAULT_PROFILE =
     ? join(process.env.APPDATA ?? "", "Alzabt POS")
     : join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "Alzabt POS");
 const LEDGER = join(DEFAULT_PROFILE, "alzabt-pos-ledger.sqlite");
-const env = { ...process.env };
+// TRANSITION (DEMO-FALLBACK, D-DF1): this script sells the bundled sample catalog on a fresh profile, which the
+// merchant default no longer serves; the explicit demo switch keeps that coverage. Old value: no switch.
+// Older builds ignore the variable; the NEW build needs it only in verify-from-v2, where the upgraded
+// demo-era profile (sample sales only, no merchant data) is still sold from the sample.
+const env = { ...process.env, ALZABT_POS_DEMO_CATALOG: "1" };
 delete env.ALZABT_POS_USER_DATA;
 
 /** Must match E2E_PIN in e2e/_signin.mjs — six digits, so it satisfies the real PIN rule. */
@@ -297,14 +303,11 @@ function saveFacts(name, data) {
 }
 const loadFacts = (name) => JSON.parse(readFileSync(factFile(name), "utf8"));
 
-function killTree(pid) {
-  try {
-    if (process.platform === "win32") execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
-    else process.kill(pid, "SIGKILL");
-  } catch {
-    // already gone
-  }
-}
+// 🔴 Processes this test starts are recorded BY IDENTITY (pid + executable + OS creation time) and
+// ended ONLY through _owned.mjs, which proves that identity while holding a handle — never by pid
+// alone (Windows reuses pids). The exit handler also runs when an assertion throws.
+const owned = createOwned();
+process.on("exit", () => owned.endAll());
 
 function windowTitle(pid) {
   if (process.platform !== "win32") return null;
@@ -334,10 +337,12 @@ async function runRefusing(expectedCode) {
   const logFile = join(DEFAULT_PROFILE, "logs", "alzabt-pos.log");
   const before = existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").length : 0;
   log(`log lines before the refusal attempt: ${before}`);
+  const tChild = Date.now();
   const child = spawn(ELECTRON, [...EXTRA_ARGS, ...APP_ARGS], {
     env: { ...env, ALZABT_POS_DISABLE_AUTOSTART: "1" },
     stdio: "ignore",
   });
+  const childId = owned.addStartedNear(child.pid, tChild);
   let exited = null;
   child.on("exit", (code) => (exited = code));
   let line = null;
@@ -352,7 +357,7 @@ async function runRefusing(expectedCode) {
     title = windowTitle(child.pid);
     if (!title) await sleep(250);
   }
-  killTree(child.pid);
+  endOwned([childId]);
   assert(line !== null, `the old build recorded a NEW startup failure (not a stale one)`);
   const entry = JSON.parse(line);
   assert(entry.code === expectedCode, `and classified it as ${expectedCode} (got ${entry.code})`);
@@ -907,7 +912,9 @@ if (PHASE === "seed-v2") {
   await product(page, "SYN-ROPE").click();
   const qty = page.locator('[data-testid^="qty-"]').first();
   await qty.fill("2.5");
-  await qty.press("Enter");
+  // THIS build (verify phase): a typed quantity is PENDING until ✓ (SB-RISK-01 option A). The
+  // seed phases below drive OLD releases, where Enter still commits — they are left as they are.
+  await page.locator('[data-testid="line-qty-confirm"]').click();
   await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("10.00"));
   assert((await totalText(page)).startsWith("10.00"), `2.5 kg at 4.00 totals 10.00 (got ${await totalText(page)})`);
   await page.locator('[data-testid="complete-sale"]').click();
@@ -1275,8 +1282,20 @@ if (PHASE === "seed-v2") {
   assert(bal.includes("10.00"), `the balance due is 13.25 - 3.25 = 10.00 (got ${bal})`);
   await page.screenshot({ path: SHOTS + "upgrade-e2-draft.png" });
 
+  // TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): 3.25 of 13.25 is paid, so the 10.00 left must go
+  // on a customer's account (owner, issue on account). Old flow: finalize on an unlinked draft.
+  await invTestid(page, "account-choose").click();
+  await invTestid(page, "customer-finder").waitFor({ timeout: 30000 });
+  await invTestid(page, "customer-new").click();
+  await invTestid(page, "customer-field-name").fill("زبون الترقية");
+  await invTestid(page, "customer-save").click();
+  await invTestid(page, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
+  await invTestid(page, "account-issue").check();
   await invTestid(page, "finalize").click();
   await page.waitForSelector('[data-testid="finalize-confirm"]');
+  // TRANSITION (INV-PAY-METHOD, 2026-11-09): 3.25 is marked paid, so the issue names how. Old flow:
+  // finalize-confirm-yes was clicked directly.
+  await invTestid(page, "confirm-pay-cash").click();
   await invTestid(page, "finalize-confirm-yes").click();
   await page.waitForSelector('[data-testid="finalized-notice"]');
   const notice = await invText(page, "finalized-notice");
@@ -1337,7 +1356,9 @@ if (PHASE === "seed-v2") {
     // anyway. Naming the real status is the stronger assertion AND the honest comment.
     assert(f.saleStatuses === "paid=2,partial=1", `two paid till sales and one partial invoice sale (got ${f.saleStatuses})`);
     assert(f.unpaidSales === 1, `exactly one sale is not settled in full (got ${f.unpaidSales})`);
-    assert(f.methodlessSales === 1, `exactly one sale records no payment method (got ${f.methodlessSales})`);
+    // TRANSITION (INV-PAY-METHOD): was 1 — the partial invoice issued above now records the cash it was
+    // paid with. The v5 till sales already carried their methods. Old value: 1.
+    assert(f.methodlessSales === 0, `no sale is left without its payment method (got ${f.methodlessSales})`);
     assert(f.voids === 1, "still exactly the one v5 void");
     // The two v5 till lines are untouched; the invoice's four lines are additional.
     assert(

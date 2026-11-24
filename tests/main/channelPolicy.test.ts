@@ -78,6 +78,7 @@ describe("the public set", () => {
     // The public set must stay things that cannot change money, master data or the shop's identity.
     const forbidden = [
       "createSale",
+      "createCustomerCreditSale",
       "voidSale",
       "createProduct",
       "updateProduct",
@@ -108,9 +109,11 @@ describe("the create-products set", () => {
    * `authorizePhoneSession` refuses EDIT_PRODUCT to anyone who is not an owner, which
    * `tests/main/phoneSessionAuth.test.ts` proves by execution rather than by this table.
    */
-  it("🔴 is EXACTLY these two channels", () => {
+  // TRANSITION (PHOTO-INVOICE-TO-ITEMS): two -> three. `readInvoicePhoto` READS a photo to prepare products
+  // and writes nothing; every product it leads to is still created through createProduct. Old value: two.
+  it("🔴 is EXACTLY these three channels", () => {
     const create = names.filter((n) => CHANNEL_POLICY[n] === "create-products").sort();
-    expect(create).toEqual(["createProduct", "startPhoneSession"]);
+    expect(create).toEqual(["createProduct", "readInvoicePhoto", "startPhoneSession"]);
   });
 });
 
@@ -119,6 +122,8 @@ describe("the owner-only set", () => {
     const ownerOnly = [
       // Reversing money.
       "voidSale",
+      // SELL-CREDIT: a new customer debt from the till (every new debt is the owner's, DEC-35a).
+      "createCustomerCreditSale",
       // Master data. 🔴 `createProduct` WAS IN THIS LIST AND IS NOT ANY MORE — migration 11 made
       // it "owner, or a cashier explicitly granted it", which is asserted on its own below.
       // Editing and retiring an EXISTING product stay owner-only, and that is the whole of the

@@ -24,6 +24,8 @@ export const CHANNELS = {
   currentCashier: "pos:currentCashier",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
+  createCustomerCreditSale: "pos:createCustomerCreditSale",
+  createSplitSale: "pos:createSplitSale",
   voidSale: "pos:voidSale",
   getTodaySales: "pos:getTodaySales",
   getSaleHistory: "pos:getSaleHistory",
@@ -117,6 +119,31 @@ export const CHANNELS = {
   pickInvoiceLogo: "pos:pickInvoiceLogo",
   printInvoice: "pos:printInvoice",
   saveInvoicePdf: "pos:saveInvoicePdf",
+  recordAdvance: "pos:recordAdvance",
+  pendingAdvances: "pos:pendingAdvances",
+  finishAdvance: "pos:finishAdvance",
+  closeAdvance: "pos:closeAdvance",
+  acknowledgeAdvance: "pos:acknowledgeAdvance",
+  getAdvanceStatement: "pos:getAdvanceStatement",
+  getDailyMoney: "pos:getDailyMoney",
+  correctAdvance: "pos:correctAdvance",
+  applyAdvanceToDebt: "pos:applyAdvanceToDebt",
+  sellOnAdvance: "pos:sellOnAdvance",
+  printAdvance: "pos:printAdvance",
+  saveAdvancePdf: "pos:saveAdvancePdf",
+  refundAdvance: "pos:refundAdvance",
+  printAdvanceRefund: "pos:printAdvanceRefund",
+  saveAdvanceRefundPdf: "pos:saveAdvanceRefundPdf",
+  getCollectionReceipt: "pos:getCollectionReceipt",
+  printCollectionReceipt: "pos:printCollectionReceipt",
+  saveCollectionReceiptPdf: "pos:saveCollectionReceiptPdf",
+  getSaleReceipt: "pos:getSaleReceipt",
+  printSaleReceipt: "pos:printSaleReceipt",
+  saveSaleReceiptPdf: "pos:saveSaleReceiptPdf",
+  readInvoicePhoto: "pos:readInvoicePhoto",
+  // DEC-35z16 (PILOT): the queue of supplier-invoice photos sent from the phone, waiting for review.
+  listPhoneInvoices: "pos:listPhoneInvoices",
+  releasePhoneInvoice: "pos:releasePhoneInvoice",
 } as const;
 
 export type ChannelName = keyof typeof CHANNELS;
@@ -204,14 +231,28 @@ export interface ProductDto {
   readonly id: string;
   readonly sku: string | null;
   readonly name: string;
+  /** TILL-NAMES: both stored names, for display/search only. Additive and optional. */
+  readonly nameAr?: string;
+  readonly nameEn?: string | null;
   readonly price: MoneyDto;
   readonly baseUnit: string;
   readonly priceNeedsReview: boolean;
+  /** Canonical form, or null. Matched exactly by a scan at Sell. */
+  readonly barcode: string | null;
 }
 
 export interface CatalogDto {
   readonly currency: string;
   readonly products: ReadonlyArray<ProductDto>;
+  /** Canonical barcodes of inactive products — the strings only, never the products. */
+  readonly inactiveBarcodes: ReadonlyArray<string>;
+  /** DEMO-FALLBACK: true only for the sample catalog under the explicit demo switch. Additive. */
+  readonly demo: boolean;
+  /**
+   * SHOWCASE MARKER: true only when this profile carries the tooling-written marker file. Display-only:
+   * a banner. Never enables the sample catalog, never changes a rule. Optional (absent = false).
+   */
+  readonly showcaseProfile?: boolean;
 }
 
 export interface SaleLineDto {
@@ -251,9 +292,39 @@ export interface SaleDto {
   readonly paymentStatus: PaymentStatus;
   /** 🔴 Null means NOT RECORDED. The UI must say so, never substitute a method. */
   readonly paymentMethod: PaymentMethod | null;
+  /**
+   * P2: the provider and reference recorded with an `external` sale (Whish Money at the till). Null for
+   * every other sale, and for a historic `external` sale that was recorded without one.
+   */
+  readonly externalPayment?: { readonly provider: "whish" | "bank_transfer"; readonly reference: string } | null;
+  /**
+   * SELL-SPLIT-CASH-WHISH: PRESENT ONLY on a sale paid by two or more tenders (`paymentMethod` is then
+   * null) — each tender with its amount and, for Whish, its reference. Absent on every other sale.
+   */
+  readonly tenders?: ReadonlyArray<SaleTenderDto>;
   readonly businessDate: string;
   readonly completedAt: string;
   readonly lines: ReadonlyArray<SaleLineDto>;
+}
+
+export interface SaleTenderDto {
+  readonly seq: number;
+  readonly method: PaymentMethod;
+  readonly amount: MoneyDto;
+  readonly provider: "whish" | "bank_transfer" | null;
+  readonly reference: string | null;
+}
+
+/** SELL-SPLIT-CASH-WHISH: one sale paid in full by a cash part and a Whish Money part. Never a debt. */
+export interface CreateSplitSaleRequest {
+  readonly idempotencyKey: string;
+  readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
+  readonly expectedTotalMinor: string;
+  readonly cashMinor: string;
+  readonly whishMinor: string;
+  readonly whish: { readonly reference: string; readonly fundsConfirmed: boolean };
+  /** As on createSale: the customer this PAID sale is for, or absent. */
+  readonly customerId?: string;
 }
 
 export interface VoidDto {
@@ -269,6 +340,22 @@ export interface VoidDto {
 export interface SaleWithVoidDto {
   readonly sale: SaleDto;
   readonly void: VoidDto | null;
+  /**
+   * HIST-CURRENT-BALANCE (ACC-3). ONLY in `getSaleHistory`, ONLY for the owner: the key is ABSENT
+   * from a cashier's response (main decides from the durable session; nothing is hidden on screen).
+   * `null` = this sale posted no debt. `sale.paymentStatus` / `sale.balanceDue` stay the snapshot of
+   * the moment of sale and are never rewritten.
+   */
+  readonly currentDebt?: SaleCurrentDebtDto | null;
+}
+
+/** The debt one sale posted, as the ledger holds it NOW (ACC-3). Read-only; nothing here is stored. */
+export interface SaleCurrentDebtDto {
+  /** What the debt was posted for. */
+  readonly amount: MoneyDto;
+  /** `amount − settlements`, computed in main by the statement's own `outstanding()`. */
+  readonly outstanding: MoneyDto;
+  readonly fullyPaid: boolean;
 }
 
 export interface TodaySalesDto {
@@ -281,6 +368,59 @@ export interface TodaySalesDto {
   readonly netSales: MoneyDto;
 }
 
+/** DAILY MONEY IN / OUT — one channel's amounts (minor units, as text). Cash and Whish are always present. */
+export type DailyMoneyChannelDto = "cash" | "whish" | "bank_transfer" | "external" | "card" | "other" | "unspecified";
+export type ChannelAmountsDto = Readonly<Record<DailyMoneyChannelDto, string>>;
+
+export interface MoneyPartDto {
+  readonly count: number;
+  readonly byChannel: ChannelAmountsDto;
+  readonly total: MoneyDto;
+}
+
+export interface DailyMoneyOperatorDto {
+  readonly operatorId: string;
+  readonly operatorName: string;
+  readonly sales: ChannelAmountsDto;
+  readonly voidedSales: ChannelAmountsDto;
+  readonly collections: ChannelAmountsDto;
+  readonly advances: ChannelAmountsDto;
+  readonly corrections: ChannelAmountsDto;
+  readonly moneyIn: ChannelAmountsDto;
+  readonly moneyOut: ChannelAmountsDto;
+}
+
+/** Owner only. Every figure is folded by main from immutable ledger rows of that business day. */
+export interface DailyMoneyDto {
+  readonly date: string;
+  readonly currency: string;
+  readonly sales: {
+    readonly count: number;
+    readonly voidedCount: number;
+    readonly revenue: MoneyDto;
+    readonly voidedTotal: MoneyDto;
+    readonly onAccount: MoneyDto;
+    readonly received: MoneyPartDto;
+    readonly voidedReceived: MoneyPartDto;
+  };
+  readonly collections: MoneyPartDto;
+  readonly advances: MoneyPartDto;
+  readonly corrections: MoneyPartDto;
+  readonly moneyIn: MoneyPartDto;
+  readonly refunds: MoneyPartDto;
+  readonly supplierPayments: MoneyPartDto;
+  readonly moneyOut: MoneyPartDto;
+  readonly net: { readonly byChannel: ChannelAmountsDto; readonly total: MoneyDto };
+  readonly advanceApplied: MoneyPartDto;
+  readonly byOperator: readonly DailyMoneyOperatorDto[];
+  /** Who RECORDED the day's corrections — audit only; the money stays with the original receiver. */
+  readonly correctionsBy: ReadonlyArray<{ readonly operatorId: string; readonly operatorName: string; readonly count: number }>;
+  /** Voids dated today for a sale of another day (foreign data). Not applied to any day's money. */
+  readonly lateVoids: ReadonlyArray<{ readonly saleId: string; readonly saleDate: string; readonly total: MoneyDto }>;
+  /** DEC-35zz++ Option A: the day's REF- documents (customer, amount, time, by) — «استردادات اليوم». */
+  readonly refundsList: readonly AdvanceRefundDto[];
+}
+
 export interface LoginRequest {
   readonly cashierId: string;
   readonly pin: string;
@@ -291,10 +431,74 @@ export interface CreateSaleRequest {
   readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
   readonly paymentMethod: PaymentMethod;
   readonly expectedTotalMinor: string;
+  /**
+   * SELL-CUSTOMER-LINK (ACC-2). The exact customer ACCOUNT this PAID sale is for, by id — never a
+   * name. Absent means an ordinary sale, recorded exactly as before. Present, main checks it is an
+   * active customer inside the sale transaction and stores it with a name snapshot taken there.
+   *
+   * 🔴 IT CREATES NO DEBT. The sale is still paid in full by `paymentMethod`; no obligation is posted.
+   * The renderer cannot send the snapshot: main reads the name from the account itself.
+   */
+  readonly customerId?: string;
+  /**
+   * P2 · SELL-WHISH-REFERENCE-AND-CONFIRMATION. Required with `paymentMethod: "external"` (Whish Money)
+   * and refused with any other method: the reference the operator typed, and `fundsConfirmed: true`
+   * only after they ticked "the money arrived". The till never contacts Whish.
+   */
+  readonly whish?: { readonly reference: string; readonly fundsConfirmed: boolean };
 }
 
 export interface CreateSaleResponse {
   readonly sale: SaleDto;
+  readonly duplicate: boolean;
+}
+
+/**
+ * SELL-CREDIT (owner, 2026-11-08): the whole sale on the chosen customer's account. No payment method —
+ * nothing was received; the full total becomes one receivable on that customer. Owner only.
+ */
+export interface CreateCustomerCreditSaleRequest {
+  readonly idempotencyKey: string;
+  readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
+  readonly expectedTotalMinor: string;
+  readonly customerId: string;
+  /**
+   * SELL-PARTIAL-DEBT: part of the total received now — cash, or Whish Money ("external") with its
+   * reference and the explicit confirmation. Omitted → the whole total goes on the account.
+   */
+  readonly downPayment?: {
+    readonly amountMinor: string;
+    readonly method: "cash" | "external";
+    readonly whish?: { readonly reference: string; readonly fundsConfirmed: boolean };
+  };
+}
+
+export interface CreateCustomerCreditSaleResponse {
+  readonly sale: SaleDto;
+  /** The receivable posted with the sale, in the same transaction. */
+  readonly obligationId: string;
+  readonly duplicate: boolean;
+}
+
+/** DEC-35x — a NEW sale on the customer's account, paid (part or all) from that customer's advance. Owner only. */
+export interface SellOnAdvanceRequest {
+  readonly idempotencyKey: string;
+  readonly lines: ReadonlyArray<{ readonly productId: string; readonly quantityMilli: number }>;
+  readonly expectedTotalMinor: string;
+  readonly customerId: string;
+  readonly advanceId: string;
+  /** How much of the advance pays this sale; the rest of the total stays the customer's debt. */
+  readonly amountMinor: string;
+}
+
+export interface SellOnAdvanceResponse {
+  readonly sale: SaleDto;
+  readonly obligationId: string;
+  readonly advanceNumber: string;
+  /** Read back AFTER the commit. */
+  readonly applied: MoneyDto;
+  readonly unused: MoneyDto;
+  readonly debtOutstanding: MoneyDto;
   readonly duplicate: boolean;
 }
 
@@ -502,7 +706,8 @@ export interface CategoryDto {
  * cannot widen the surface or weaken the credential.
  */
 export interface StartPhoneSessionRequest {
-  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  /** DEC-35z17: "COMPANION" = the one «من الهاتف» button; the phone chooses product or invoices. */
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION";
   readonly productId?: string | null;
 }
 
@@ -527,7 +732,7 @@ export interface LanCandidateDto {
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 export interface PhoneSessionDto {
-  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION";
   readonly host: string;
   readonly port: number;
   /** ISO-8601. The desktop counts down from this rather than inventing its own ten minutes. */
@@ -557,6 +762,25 @@ export interface PhoneSessionDto {
  * stays inside the QR symbol.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+/** DEC-35z16 (PILOT): one staged phone invoice, named by the ids the till assigned. */
+export interface PhoneInvoiceRef {
+  readonly batchId: string;
+  readonly id: string;
+}
+
+export interface PhoneInvoiceQueueItemDto extends PhoneInvoiceRef {
+  readonly bytes: number;
+  readonly receivedAt: string;
+  /** "incomplete": the phone never pressed «إنهاء» (timeout / cancel / app closed). Still reviewable. */
+  readonly batchStatus: "ready" | "incomplete";
+  /** Waiting longer than 14 days. Flagged, never deleted automatically. */
+  readonly stale: boolean;
+  /** A small JPEG data URL made by main for the list. Null if the photo could not be decoded. */
+  readonly thumbnail: string | null;
+  /** PHONE-INVOICE-ORIENTATION-01: this invoice's saved clockwise quarter-turns (0..3). */
+  readonly quarterTurns: number;
+}
+
 export interface PhoneSessionState {
   /**
    * `waiting` — open, no phone has scanned yet.
@@ -564,9 +788,12 @@ export interface PhoneSessionState {
    * `saved`   — a product was saved; `savedProductId` names it. Reported once.
    * `closed`  — nothing open (cancelled, expired, or never started).
    */
-  readonly state: "waiting" | "claimed" | "saved" | "closed";
+  readonly state: "waiting" | "claimed" | "saved" | "closed" | "batch_ready";
   readonly savedProductId: string | null;
-  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | null;
+  /** DEC-35z17: "COMPANION" while the phone has not chosen yet; then the purpose it locked. */
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION" | null;
+  /** DEC-35z16: INVOICE_BATCH only — photos received so far (live), or in the batch that just ended (once). */
+  readonly invoiceCount?: number;
   /** ISO-8601 while the session is live, so the dialog counts down from the real deadline. */
   readonly expiresAt: string | null;
   readonly claimed: boolean;
@@ -736,6 +963,64 @@ export interface StatementSettlementDto {
    * is never additional money. Null for every direct collection and every historical row.
    */
   readonly receipt: StatementReceiptDto | null;
+  /**
+   * DEC-35x. Set when this row was paid FROM a customer advance: it is NOT money received that day
+   * (the money arrived as the ADV-), so the screen names the advance instead of a payment channel.
+   */
+  readonly advance: { readonly advanceId: string; readonly number: string } | null;
+  /**
+   * DEC-35z+ COL. The COL- receipt behind this money: the settlement's own (a direct collection) or its
+   * receipt's (a share of one transfer). NULL for an advance application, and for every collection
+   * recorded before COL existed — history is never numbered retroactively.
+   */
+  readonly collection: { readonly docNo: number; readonly number: string } | null;
+}
+
+/**
+ * TILL-PRINT (DEC-35zz++) — ONE till receipt as main read it from the ledger BY SALE ID. The on-screen receipt
+ * (completion and History), the PDF and the print all render THIS, so they can never disagree. Every figure is
+ * a fact of the sale: the customer named at sale time, and — for a sale paid from an advance — the advance
+ * applied WITH the sale and what stayed on account at that moment (F4), never a live balance.
+ */
+export interface SaleReceiptDto {
+  readonly sale: SaleDto;
+  readonly void: VoidDto | null;
+  readonly customerName: string | null;
+  readonly advanceApplied: { readonly number: string; readonly applied: MoneyDto; readonly debtLeft: MoneyDto } | null;
+}
+export interface SaleIdRequest {
+  readonly saleId: string;
+}
+/** thermal80 = 80 mm roll (D-TP1 primary); a5 = an ordinary page / the PDF. copy = a reprint, marked «نسخة» (D-TP3). */
+export interface PrintSaleReceiptRequest {
+  readonly saleId: string;
+  readonly layout: "thermal80" | "a5";
+  readonly copy: boolean;
+}
+/** no-printer: Windows has no printer installed — the screen offers «Save PDF» instead. */
+export type PrintSaleReceiptResponse = { readonly status: "printed" | "cancelled" | "unavailable" | "no-printer" };
+
+/** DEC-35z+ COL — one COL- document as main read it from the ledger. Every figure is the ledger's own. */
+export interface CollectionDocumentDto {
+  readonly docNo: number;
+  /** `COL-000001` — formatted in main. */
+  readonly number: string;
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly total: MoneyDto;
+  /** Where the money came in. A NEW collection is cash or whish (P3); history may carry another. */
+  readonly channel: "cash" | "whish" | "bank_transfer" | "card" | "other";
+  /** The ORIGINAL reference (Whish), registered once with the payment; never re-registered by a document. */
+  readonly reference: string | null;
+  /** The debt(s) this money paid, each by its own document. */
+  readonly lines: ReadonlyArray<{ readonly obligationId: string; readonly debtDocument: StatementDocumentDto; readonly amount: MoneyDto }>;
+  readonly receivedByName: string;
+  readonly receivedAt: string;
+  readonly businessDate: string;
+}
+
+export interface CollectionNoRequest {
+  readonly collectionNo: number;
 }
 
 /** The receipt a settlement is a share of (migration 18). Display only; the amount is the WHOLE receipt. */
@@ -753,6 +1038,17 @@ export interface StatementReceiptDto {
 }
 
 /** One posted debt, its payments, and what is left on it. */
+/**
+ * UX-REF-NUMBERS: where a debt came from, in the merchant's terms. Resolved in main from real rows —
+ * an invoice's number, a till sale's receipt number, a manual debt's own reference — or `unresolved`.
+ * Never an invented number. Additive: `sourceRef` / `saleId` stay for the accounting links.
+ */
+export type StatementDocumentDto =
+  | { readonly kind: "invoice"; readonly number: number }
+  | { readonly kind: "sale"; readonly receiptNumber: number }
+  | { readonly kind: "manual"; readonly reference: string }
+  | { readonly kind: "unresolved" };
+
 export interface StatementObligationDto {
   readonly id: string;
   /** What was originally owed. Immutable, straight from the posted row. */
@@ -768,6 +1064,8 @@ export interface StatementObligationDto {
   readonly sourceRef: string;
   /** The sale this debt came from, when it came from one. Null for a manual entry. */
   readonly saleId: string | null;
+  /** UX-REF-NUMBERS: the readable document behind this debt (see StatementDocumentDto). */
+  readonly document: StatementDocumentDto;
   readonly postedAt: string;
   readonly settlements: readonly StatementSettlementDto[];
 }
@@ -788,10 +1086,37 @@ export interface CustomerStatementDto {
   readonly customer: CustomerDto;
   readonly obligations: readonly StatementObligationDto[];
   readonly balances: readonly MoneyDto[];
+  /**
+   * SELL-CUSTOMER-LINK (ACC-2). PAID till sales linked to this customer — activity, NOT debt.
+   *
+   * 🔴 NEVER PART OF `balances` OR `obligations`. A paid sale owes nothing, so it is listed apart and
+   * no total anywhere adds it. Credit (unpaid) sales are NOT here: they already appear once, as the
+   * obligation they posted. Invoice-origin sales carry no customer id (M14) and are not here either.
+   */
+  readonly paidSales: readonly StatementPaidSaleDto[];
   /** Collections started and not yet closed, each with the ledger's answer. Usually empty. */
   readonly pendingCollections: readonly PendingCollectionDto[];
   /** Migration 18. Receipts started and not yet closed, each with the ledger's answer. Usually empty. */
   readonly pendingReceipts: readonly PendingReceiptDto[];
+}
+
+/** One paid till sale linked to the customer (ACC-2). Read-only history; no amount here is owed. */
+export interface StatementPaidSaleDto {
+  readonly saleId: string;
+  readonly receiptNumber: number;
+  readonly total: MoneyDto;
+  /**
+   * TRANSITION (SELL-SPLIT-CASH-WHISH): was `PaymentMethod` (never null). A sale paid by two tenders
+   * carries no single method — null — and lists them in `tenders` instead.
+   */
+  readonly paymentMethod: PaymentMethod | null;
+  /** P2: present on a Whish Money sale — its provider and recorded reference. */
+  readonly externalPayment?: { readonly provider: "whish" | "bank_transfer"; readonly reference: string };
+  /** SELL-SPLIT-CASH-WHISH: present only on a sale paid by two or more tenders. */
+  readonly tenders?: ReadonlyArray<SaleTenderDto>;
+  readonly completedAt: string;
+  /** A voided sale stays in the history, marked; it was never a debt either way. */
+  readonly voided: boolean;
 }
 
 /**
@@ -910,6 +1235,8 @@ export interface PendingReceiptDto {
 
 export interface AllocatedReceiptResponse {
   readonly receipt: ReceiptDto;
+  /** DEC-35z+ COL: the ONE COL- document of this transfer (the same one on a replay). */
+  readonly collection: CollectionDocumentDto | null;
   readonly duplicate: boolean;
   readonly statement: CustomerStatementDto;
 }
@@ -927,6 +1254,8 @@ export interface AllocatedReceiptResponse {
  */
 export interface RecordPaymentResponse {
   readonly settlement: StatementSettlementDto;
+  /** DEC-35z+ COL: the COL- document of this collection (the same one on a replay; null only for history). */
+  readonly collection: CollectionDocumentDto | null;
   readonly duplicate: boolean;
   readonly statement: CustomerStatementDto;
 }
@@ -979,8 +1308,14 @@ export interface SetCustomerActiveRequest {
 export interface IpcError {
   readonly code: string;
   readonly message: string;
-  readonly context?: CustomerPaymentOverpaymentErrorContext;
+  readonly context?: CustomerPaymentOverpaymentErrorContext | LoginRefusalErrorContext;
 }
+
+/** I18N-LOGIN-PIN: the numbers of a PIN refusal, sent on the `login` channel only. Plain integers. */
+export type LoginRefusalErrorContext =
+  | { readonly reason: "LOGIN_PIN_WRONG"; readonly attemptsLeft: number; readonly lockMinutes: number }
+  | { readonly reason: "LOGIN_PIN_LOCKED"; readonly minutesRemaining: number }
+  | { readonly reason: "LOGIN_UNKNOWN_OPERATOR" };
 
 export interface CustomerPaymentOverpaymentErrorContext {
   readonly reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING";
@@ -1108,6 +1443,15 @@ export interface InvoiceDto {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly finalizedAt: string | null;
+  /**
+   * INV-PAY-METHOD: how the paid amount of a FINAL invoice arrived, from its sale. Present only when its
+   * issue recorded a method — absent on drafts, unpaid invoices and every invoice issued before.
+   */
+  readonly payment?: {
+    readonly method: PaymentMethod;
+    readonly provider: "whish" | "bank_transfer" | null;
+    readonly reference: string | null;
+  };
 }
 
 export interface InvoiceViewDto {
@@ -1237,7 +1581,26 @@ export interface InvoiceIdRequest {
 export interface FinalizeInvoiceRequest {
   readonly invoiceId: string;
   readonly issueOnAccount?: boolean;
+  /**
+   * INV-PAY-METHOD (owner, 2026-11-09): HOW the amount marked paid arrived — required when something is
+   * marked paid, refused when nothing is. Cash, or Whish Money ("external") with its reference and the
+   * explicit confirmation. Never Card, Other or bank (P3).
+   */
+  readonly payment?: InvoicePaymentDto;
+  /**
+   * R5 (Abu Abbas F3): what the issue confirmation SHOWED — `confirmationDigest(view, issueOnAccount)` of the view on
+   * screen. When present, the service recomputes it from the persisted draft inside the finalize transaction and
+   * refuses with INVOICE_CONFIRMATION_STALE on any difference, before a number, sale or payment is written.
+   * M21 binds protected issuance to a durable identity of this confirmation and payment. A replay of a protected
+   * invoice requires the matching confirmation; a confirmed replay of a historical NULL identity is unverifiable.
+   * The field remains optional for legacy first issuance and the existing unverified legacy on-account replay.
+   */
+  readonly confirmedDraft?: string;
 }
+
+export type InvoicePaymentDto =
+  | { readonly method: "cash" }
+  | { readonly method: "external"; readonly whish: { readonly reference: string; readonly fundsConfirmed: boolean } };
 
 export interface InvoiceNumberRequest {
   readonly invoiceNumber: number;
@@ -1397,6 +1760,240 @@ export type SaveInvoicePdfResponse =
   | { readonly status: "cancelled" }
   | { readonly status: "saved"; readonly fileName: string; readonly logoMissing?: boolean; readonly logoUnverified?: boolean };
 
+// ── Customer advances (migration 20: ADV-RECORD-CASH-WHISH + G2 correction) ──────────────────────
+
+/** A NEW receipt of money is Cash or Whish Money only (P3 / DEC-35). */
+export type AdvanceChannelDto = "cash" | "whish";
+
+/** One ADV- document as main read it from the ledger. Every figure is the ledger's own. */
+export interface AdvanceDto {
+  readonly id: string;
+  readonly docNo: number;
+  /** `ADV-000001` — formatted in main, never by the renderer. */
+  readonly number: string;
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly amount: MoneyDto;
+  readonly channel: AdvanceChannelDto;
+  readonly reference: string | null;
+  /** WHO really received the money (for a correction: copied from the original). */
+  readonly receivedByName: string;
+  readonly receivedAt: string;
+  readonly businessDate: string;
+  /** 'correction' = a restatement of `correctsNumber`, NOT a new receipt of money. */
+  readonly origin: "receipt" | "correction";
+  readonly correctsNumber: string | null;
+}
+
+export interface RecordAdvanceRequest {
+  readonly customerId: string;
+  readonly amountMinor: string;
+  readonly channel: AdvanceChannelDto;
+  readonly reference?: string | null;
+  readonly fundsConfirmed?: boolean;
+  readonly idempotencyKey: string;
+}
+
+export interface RecordAdvanceResponse {
+  readonly advance: AdvanceDto;
+  /** True when this exact request had already been recorded: nothing new was written. */
+  readonly duplicate: boolean;
+}
+
+/** An advance whose outcome the operator has not seen yet — answered from the ledger, never guessed. */
+export type PendingAdvanceDto =
+  | { readonly status: "recorded"; readonly key: string; readonly advance: AdvanceDto }
+  | {
+      readonly status: "open" | "closed";
+      readonly key: string;
+      readonly customerId: string;
+      readonly customerName: string;
+      readonly amount: MoneyDto;
+      readonly channel: AdvanceChannelDto;
+      readonly reference: string | null;
+      readonly createdAt: string;
+    }
+  | { readonly status: "unknown"; readonly key: string; readonly createdAt: string };
+
+export interface AdvanceKeyRequest {
+  readonly idempotencyKey: string;
+}
+
+export interface AdvanceIdRequest {
+  readonly advanceId: string;
+}
+
+export interface AdvanceCorrectionDto {
+  readonly kind: "not_received" | "replaced";
+  readonly reason: string;
+  readonly fundsNotReceived: boolean;
+  readonly correctedByName: string;
+  readonly correctedAt: string;
+  readonly businessDate: string;
+  /** For 'replaced': the successor's ADV number. */
+  readonly successorNumber: string | null;
+}
+
+export interface AdvanceStatementLineDto {
+  readonly advance: AdvanceDto;
+  /** The live, applicable balance — 0 once corrected. Never netted against debt (D2). */
+  readonly unused: MoneyDto;
+  readonly correction: AdvanceCorrectionDto | null;
+  /** DEC-35x: what this advance paid, debt by debt (oldest first). Not money received. */
+  readonly applications: readonly AdvanceApplicationDto[];
+  /** DEC-35z+: cash handed back from this advance, REF- by REF- (oldest first). Money OUT. */
+  readonly refunds: readonly AdvanceRefundDto[];
+}
+
+/** One REF- document as main read it from the ledger. Always cash (migration 19 CHECK). */
+export interface AdvanceRefundDto {
+  readonly id: string;
+  readonly docNo: number;
+  /** `REF-000001` — formatted in main. */
+  readonly number: string;
+  readonly advanceId: string;
+  readonly advanceNumber: string;
+  /** The ADV's own channel: a Whish ADV is still refunded in CASH; the document says so. */
+  readonly advanceChannel: AdvanceChannelDto;
+  readonly advanceReference: string | null;
+  readonly customerName: string;
+  readonly amount: MoneyDto;
+  readonly method: "cash";
+  readonly reason: string;
+  readonly refundedByName: string;
+  readonly refundedAt: string;
+  readonly businessDate: string;
+}
+
+export interface RefundAdvanceRequest {
+  readonly advanceId: string;
+  readonly amountMinor: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+  /** DEC-35zz++ Option A: required (true) only when this advance already has a REF- today. */
+  readonly confirmRepeat?: boolean;
+}
+
+export interface RefundAdvanceResponse {
+  readonly refund: AdvanceRefundDto;
+  /** The advance's balance read back AFTER the commit. */
+  readonly unused: MoneyDto;
+  /** True when this exact request had already been recorded: nothing new was written. */
+  readonly duplicate: boolean;
+}
+
+export interface AdvanceRefundIdRequest {
+  readonly refundId: string;
+}
+
+export interface AdvanceApplicationDto {
+  readonly id: string;
+  readonly obligationId: string;
+  /** The debt's own document (receipt number / invoice / manual reference), as the debt statement shows it. */
+  readonly debtDocument: StatementDocumentDto;
+  readonly amount: MoneyDto;
+  readonly appliedAt: string;
+  readonly appliedByName: string;
+}
+
+export interface ApplyAdvanceRequest {
+  readonly advanceId: string;
+  readonly obligationId: string;
+  readonly amountMinor: string;
+  readonly idempotencyKey: string;
+}
+
+export interface ApplyAdvanceResponse {
+  readonly application: AdvanceApplicationDto;
+  readonly advanceNumber: string;
+  /** Read back AFTER the commit. */
+  readonly unused: MoneyDto;
+  readonly debtOutstanding: MoneyDto;
+  readonly duplicate: boolean;
+}
+
+export interface AdvanceStatementDto {
+  readonly customerId: string;
+  /** DEC-35zz++: the terminal's business day (to name an earlier REF- of today). */
+  readonly today: string;
+  readonly lines: readonly AdvanceStatementLineDto[];
+}
+
+export interface CorrectAdvanceRequest {
+  readonly advanceId: string;
+  readonly kind: "not_received" | "replaced";
+  readonly reason: string;
+  readonly confirmNotReceived?: boolean;
+  readonly customerId?: string;
+  readonly amountMinor?: string;
+  readonly channel?: AdvanceChannelDto;
+  readonly reference?: string | null;
+  readonly fundsConfirmed?: boolean;
+  readonly idempotencyKey: string;
+}
+
+export interface CorrectAdvanceResponse {
+  readonly original: AdvanceDto;
+  readonly successor: AdvanceDto | null;
+  readonly correction: AdvanceCorrectionDto;
+  readonly duplicate: boolean;
+}
+
+export type PrintAdvanceResponse = { readonly status: "printed" | "cancelled" | "unavailable" };
+export type SaveAdvancePdfResponse = { readonly status: "cancelled" } | { readonly status: "saved"; readonly fileName: string };
+
+// ── PHOTO-INVOICE-TO-ITEMS (offline OCR) ─────────────────────────────────────────────────────────
+/** One candidate row read from a supplier invoice photo. Money as minor-unit strings; nothing decided. */
+export interface InvoicePhotoRowDto {
+  readonly id: string;
+  readonly rawText: string;
+  readonly name: string;
+  readonly quantityMilli: number | null;
+  readonly supplierPriceMinor: string | null;
+  readonly lineTotalMinor: string | null;
+  readonly arithmeticOk: boolean;
+  /** R1 qty×price · R2 discount · R3 boxes · R4 pack — an explanation, never a proof. */
+  readonly relation: "R1" | "R2" | "R3" | "R4";
+  readonly discountPercent: number | null;
+  /** DEC-35v: where this row sits on the ORIGINAL photo, and a crop of that strip (JPEG data URL). */
+  readonly y: number;
+  readonly crop: string | null;
+  readonly readings: number;
+  readonly alternativeNames: readonly string[];
+  readonly warnings: ReadonlyArray<"CONFLICT" | "SINGLE_READING" | "NOT_PLAIN_ARITHMETIC">;
+}
+export type ReadInvoicePhotoResponse =
+  | { readonly status: "cancelled" }
+  | { readonly status: "unavailable" }
+  | {
+      readonly status: "read";
+      /** "photo-only": no OCR ran (handwritten invoice) — rows are typed by hand beside the photo. */
+      readonly mode: "read" | "photo-only";
+      readonly currency: string;
+      readonly rows: readonly InvoicePhotoRowDto[];
+      /** Lines with amounts that no relation explained: for manual entry from the photo (with their crop). */
+      /** Stage A: `name` = the name read at that place (prefills a manual row; never a number). */
+      readonly unexplained: ReadonlyArray<{ readonly text: string; readonly name: string; readonly y: number; readonly crop: string | null }>;
+      readonly ms: number;
+      /** The photo itself (JPEG data URL) shown beside the rows. */
+      readonly preview: string | null;
+      /**
+       * PHONE-INVOICE-ORIENTATION-01: what was applied to make the photo upright — the photo's own EXIF
+       * orientation (1 = none) and the operator's clockwise quarter-turns (0..3).
+       */
+      readonly orientation?: { readonly exif: number; readonly quarterTurns: number };
+    };
+
+/** PHONE-INVOICE-ORIENTATION-01: how a photo should be read. */
+export interface ReadInvoicePhotoRequest {
+  readonly mode: "read" | "photo-only";
+  readonly phoneInvoice?: PhoneInvoiceRef;
+  /** Clockwise quarter-turns 0..3 chosen by the operator; for a phone invoice it is also SAVED for that invoice. */
+  readonly quarterTurns?: number;
+  /** Read the SAME desktop-picked file again (after a rotation) instead of opening the picker. */
+  readonly reuseLast?: boolean;
+}
+
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
   listCashiers(): Promise<IpcResult<CashierDto[]>>;
@@ -1413,6 +2010,8 @@ export interface PosApi {
   currentCashier(): Promise<IpcResult<CashierDto | null>>;
   getCatalog(): Promise<IpcResult<CatalogDto>>;
   createSale(req: CreateSaleRequest): Promise<IpcResult<CreateSaleResponse>>;
+  createCustomerCreditSale(req: CreateCustomerCreditSaleRequest): Promise<IpcResult<CreateCustomerCreditSaleResponse>>;
+  createSplitSale(req: CreateSplitSaleRequest): Promise<IpcResult<CreateSaleResponse>>;
   voidSale(req: VoidSaleRequest): Promise<IpcResult<VoidDto>>;
   getTodaySales(): Promise<IpcResult<TodaySalesDto>>;
   getSaleHistory(req: HistoryRequest): Promise<IpcResult<SaleWithVoidDto[]>>;
@@ -1532,4 +2131,49 @@ export interface PosApi {
   /** The renderer sends an INVOICE ID. Main loads the frozen invoice and owns the print. */
   printInvoice(req: InvoiceIdRequest): Promise<IpcResult<PrintInvoiceResponse>>;
   saveInvoicePdf(req: InvoiceIdRequest): Promise<IpcResult<SaveInvoicePdfResponse>>;
+
+  // ── Customer advances (migration 20) ─────────────────────────────────────────────────────────
+  /** Owner OR cashier (D1). Crash-safe: intent, then ADV number + advance + resolution. */
+  recordAdvance(req: RecordAdvanceRequest): Promise<IpcResult<RecordAdvanceResponse>>;
+  /** Every advance whose outcome was not yet seen, answered from the ledger. */
+  pendingAdvances(): Promise<IpcResult<PendingAdvanceDto[]>>;
+  /** Finish an OPEN advance under its ORIGINAL key (the money really was received). */
+  finishAdvance(req: AdvanceKeyRequest): Promise<IpcResult<RecordAdvanceResponse>>;
+  /** Close an OPEN advance as NOT received (its creator or the owner). Final. */
+  closeAdvance(req: AdvanceKeyRequest): Promise<IpcResult<null>>;
+  /** The operator has SEEN the outcome. */
+  acknowledgeAdvance(req: AdvanceKeyRequest): Promise<IpcResult<null>>;
+  /** Owner only: a customer's advances with balances and corrections (separate from debt). */
+  getAdvanceStatement(req: { readonly customerId: string }): Promise<IpcResult<AdvanceStatementDto>>;
+  /** Owner only (DEC-35x): pay part or all of ONE existing debt from the SAME customer's advance. Not new money. */
+  applyAdvanceToDebt(req: ApplyAdvanceRequest): Promise<IpcResult<ApplyAdvanceResponse>>;
+  /** Owner only (DEC-35x): a new sale on account + its advance application, atomically. Not new money. */
+  sellOnAdvance(req: SellOnAdvanceRequest): Promise<IpcResult<SellOnAdvanceResponse>>;
+  /** Owner only: one business day's money in / out (date absent = today). Read-only. */
+  getDailyMoney(req: { readonly date?: string }): Promise<IpcResult<DailyMoneyDto>>;
+  /** Owner only (G2): not received, or replaced by a corrected restatement. */
+  correctAdvance(req: CorrectAdvanceRequest): Promise<IpcResult<CorrectAdvanceResponse>>;
+  /** Main loads the ADV document from the ledger by id and owns the print / the PDF. */
+  printAdvance(req: AdvanceIdRequest): Promise<IpcResult<PrintAdvanceResponse>>;
+  saveAdvancePdf(req: AdvanceIdRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
+  /** Owner only (DEC-35z+): hand back part or all of an advance's unused balance, in CASH, with a reason. Money out. */
+  refundAdvance(req: RefundAdvanceRequest): Promise<IpcResult<RefundAdvanceResponse>>;
+  /** Owner only: print / save the SAME REF- document again, loaded by id. Never writes. */
+  printAdvanceRefund(req: AdvanceRefundIdRequest): Promise<IpcResult<PrintAdvanceResponse>>;
+  saveAdvanceRefundPdf(req: AdvanceRefundIdRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
+  /** Owner only (DEC-35z+ COL): one COL- document, read from the ledger. Never writes. */
+  getCollectionReceipt(req: CollectionNoRequest): Promise<IpcResult<CollectionDocumentDto>>;
+  /** Owner only: print / save the SAME COL- again, loaded by number. Records no payment. */
+  printCollectionReceipt(req: CollectionNoRequest): Promise<IpcResult<PrintAdvanceResponse>>;
+  saveCollectionReceiptPdf(req: CollectionNoRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
+  /** Main shows the picker, reads the photo OFFLINE and returns candidate rows. Writes nothing. */
+  readInvoicePhoto(req?: ReadInvoicePhotoRequest): Promise<IpcResult<ReadInvoicePhotoResponse>>;
+  /** DEC-35z16 (PILOT): supplier-invoice photos from the phone waiting for review, oldest first. Read-only. */
+  listPhoneInvoices(): Promise<IpcResult<readonly PhoneInvoiceQueueItemDto[]>>;
+  /** DEC-35z16: remove one from the queue — after its review was confirmed, or discarded by the operator. Writes no ledger row. */
+  releasePhoneInvoice(req: PhoneInvoiceRef & { readonly why: "reviewed" | "discarded" }): Promise<IpcResult<{ readonly released: boolean }>>;
+  /** TILL-PRINT: one till receipt from the ledger (owner: any sale; others: what History shows them). Read-only. */
+  getSaleReceipt(req: SaleIdRequest): Promise<IpcResult<SaleReceiptDto>>;
+  printSaleReceipt(req: PrintSaleReceiptRequest): Promise<IpcResult<PrintSaleReceiptResponse>>;
+  saveSaleReceiptPdf(req: PrintSaleReceiptRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
 }

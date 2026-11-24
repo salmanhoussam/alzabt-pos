@@ -17,8 +17,8 @@ import { MAX_PRODUCT_ID_LENGTH } from "../domain/catalog";
 import { DomainError } from "../domain/errors";
 import type { OnlineCatalogSnapshot } from "../application/posService";
 import { MAX_QUANTITY_MILLI } from "../domain/quantity";
-import { assertPaymentMethod } from "../domain/sale";
-import { formatDecimal, money } from "../domain/money";
+import { type PaymentMethod, assertPaymentMethod } from "../domain/sale";
+import { currencyExponent, formatDecimal, money } from "../domain/money";
 import { channelStorage, isCollectionChannel } from "../domain/ledger";
 import type { SaleRecord } from "../domain/sale";
 import { DEFAULT_TERMINAL_LANGUAGE, isLanguage } from "../shared/i18n";
@@ -28,7 +28,15 @@ import { saleOutcomeError } from "./saleOutcomeText";
 import { invoiceOutcomeError } from "./invoiceOutcomeText";
 import { paymentOutcomeError } from "./paymentOutcomeText";
 import type { PartyService } from "../application/partyService";
-import type { LedgerService } from "../application/ledgerService";
+import { type LedgerService, formatCollectionNo } from "../application/ledgerService";
+import type { AdvanceCorrectionView, AdvanceRefundView, AdvanceService, AdvanceView } from "../application/advanceService";
+import type { SaleReceiptService, SaleReceiptView } from "../application/saleReceiptService";
+import type { AdvanceApplicationRecord } from "../persistence/advanceRepository";
+import type { DailyMoneyService } from "../application/dailyMoneyService";
+import { type ChannelAmounts, type DailyMoneyReport, type MoneyPart, MONEY_CHANNELS } from "../domain/dailyMoney";
+import type { AdvanceCorrectionDto, AdvanceDto, AdvanceRefundDto, CollectionDocumentDto, PendingAdvanceDto, SaleReceiptDto } from "../shared/ipcContract";
+import { rowsFromPositioned } from "../domain/invoiceOcrRows";
+import type { PositionedLine } from "../domain/ocrLayout";
 import type { BackupRestoreActions } from "./backupRestore";
 import type { RestoreLock } from "./restoreLock";
 import type { PartyRow } from "../persistence/partyRepository";
@@ -67,6 +75,8 @@ import {
   CHANNELS,
   type ChannelName,
   type CustomerPaymentOverpaymentErrorContext,
+  type LoginRefusalErrorContext,
+  type StatementDocumentDto,
   INVOICE_HEADER_LINK_KEYS,
   INVOICE_HEADER_PATCH_KEYS,
   type InvoiceHeaderPatchKey,
@@ -79,6 +89,7 @@ import {
   type PhoneSessionState,
 } from "../shared/ipcContract";
 import { type Logger, nullLogger } from "./logger";
+import { CONFIRMATION_DIGEST_MAX } from "../shared/invoiceConfirmation";
 import { accessFor } from "./channelPolicy";
 
 /**
@@ -131,6 +142,11 @@ export interface PhoneSessionBridge {
 }
 
 export interface IpcHandlerOptions {
+  /**
+   * SHOWCASE MARKER (./showcaseMarker.ts): read ONCE at startup by main, from a file only tooling
+   * writes. Display-only — it adds `showcaseProfile: true` to the catalog DTO and nothing else.
+   */
+  readonly showcaseProfile?: boolean;
   /** Shows the native "open file" dialog. Absent (tests, headless) means import is unavailable. */
   readonly pickCatalogFile?: () => PickedFile | null;
   /** Native "save as" dialog + atomic write of the exported catalog. Absent means unavailable. */
@@ -166,6 +182,15 @@ export interface IpcHandlerOptions {
    * the owner check into main, where the listener could not re-use it.
    */
   readonly phoneSessions?: PhoneSessionBridge;
+  /**
+   * DEC-35z16 (PILOT): the queue of supplier-invoice photos staged by INVOICE_BATCH phone sessions.
+   * Absent means both queue channels answer NOT_AVAILABLE. It lists and releases files; it never
+   * writes a ledger row — the review that follows is the existing Photo Invoice flow.
+   */
+  readonly phoneInvoices?: {
+    readonly list: () => readonly import("../shared/ipcContract").PhoneInvoiceQueueItemDto[];
+    readonly release: (batchId: string, id: string, why: "reviewed" | "discarded") => boolean;
+  };
   /** Version/build identity of this installation. */
   readonly appInfo?: () => AppInfoDto;
   /** Called after a NEW sale is committed (the daily-backup trigger). Must not throw. */
@@ -200,6 +225,22 @@ export interface IpcHandlerOptions {
    */
   readonly pickInvoiceLogo?: () => string | null;
   /**
+   * PHOTO-INVOICE-TO-ITEMS: main shows the picker and reads the photo OFFLINE; null = cancelled.
+   * Absent (tests, headless) answers "unavailable". It never writes anything.
+   */
+  /** `photo-only` (handwritten invoices): show the photo for manual entry, no OCR. */
+  readonly readInvoicePhoto?: (
+    mode: "read" | "photo-only",
+    phoneInvoice?: { readonly batchId: string; readonly id: string },
+    orient?: { readonly quarterTurns?: number; readonly reuseLast?: boolean },
+  ) => Promise<{
+    readonly lines: readonly PositionedLine[];
+    readonly ms: number;
+    readonly preview: string | null;
+    readonly crop: (y: number, h: number) => string | null;
+    readonly orientation?: { readonly exif: number; readonly quarterTurns: number };
+  } | null>;
+  /**
    * Native photo picker for a product. Main shows the dialog, reads the file and NORMALIZES it
    * (decode, re-encode, bound the dimensions), then returns the bytes it produced — so the only
    * thing that crosses the IPC bridge in the other direction is a product id.
@@ -216,6 +257,25 @@ export interface IpcHandlerOptions {
   readonly parties?: PartyService;
   /** S3B: the read-only statement source. Absent on a terminal without the ledger. */
   readonly ledger?: LedgerService;
+  /** Customer advances (migration 20). Absent means every advance channel answers NOT_AVAILABLE. */
+  readonly advances?: AdvanceService;
+  /** DAILY MONEY IN / OUT (owner, read-only). Absent means the channel answers NOT_AVAILABLE. */
+  readonly dailyMoney?: DailyMoneyService;
+  /** Prints one ADV- document. Main loads it from the ledger BY ID; no markup crosses the bridge. */
+  readonly printAdvance?: (advanceId: string) => Promise<"printed" | "cancelled">;
+  /** Save-as dialog + PDF of one ADV- document. Null when the operator cancelled. */
+  readonly saveAdvancePdf?: (advanceId: string) => Promise<SavedFile | null>;
+  /** DEC-35z+: prints / saves one REF- document, loaded from the ledger BY ID. */
+  readonly printAdvanceRefund?: (refundId: string) => Promise<"printed" | "cancelled">;
+  readonly saveAdvanceRefundPdf?: (refundId: string) => Promise<SavedFile | null>;
+  /** DEC-35z+ COL: prints / saves one COL- document. The DTO is built HERE from the ledger by number. */
+  readonly printCollectionReceipt?: (doc: CollectionDocumentDto) => Promise<"printed" | "cancelled">;
+  readonly saveCollectionReceiptPdf?: (doc: CollectionDocumentDto) => Promise<SavedFile | null>;
+  /** TILL-PRINT: the ONE read model of a till receipt (absent → NOT_AVAILABLE). */
+  readonly saleReceipts?: SaleReceiptService;
+  /** TILL-PRINT: print / save the receipt DTO built HERE from the ledger by sale id; no markup crosses. */
+  readonly printSaleReceipt?: (doc: SaleReceiptDto, layout: "thermal80" | "a5", copy: boolean) => Promise<"printed" | "cancelled" | "no-printer">;
+  readonly saveSaleReceiptPdf?: (doc: SaleReceiptDto, layout: "thermal80" | "a5", copy: boolean) => Promise<SavedFile | null>;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
     get(): TerminalSettings;
@@ -278,9 +338,74 @@ function patchObject(payload: unknown, keys: readonly string[]): Record<string, 
   return payload as Record<string, unknown>;
 }
 
+/**
+ * The till's sale lines, as both sale channels accept them (createSale and, SELL-CREDIT, the owner's
+ * createCustomerCreditSale): exactly { productId, quantityMilli } each, 1..200 of them. ONE parser, so the
+ * two channels can never drift on what a line is.
+ */
+function saleLinesOf(lines: unknown): Array<{ productId: string; quantityMilli: number }> {
+  if (!Array.isArray(lines) || lines.length === 0 || lines.length > 200) invalid("'lines' must be a non-empty array");
+  return lines.map((raw) => {
+    const l = exactObject(raw, ["productId", "quantityMilli"]);
+    // Thousandths of a sale unit, as an integer. The unit's own rule (whole-only vs fractional)
+    // needs the catalog and is applied in the domain, not here.
+    if (
+      typeof l.quantityMilli !== "number" ||
+      !Number.isSafeInteger(l.quantityMilli) ||
+      l.quantityMilli < 1 ||
+      l.quantityMilli > MAX_QUANTITY_MILLI
+    ) {
+      invalid(`'quantityMilli' must be an integer between 1 and ${MAX_QUANTITY_MILLI}`);
+    }
+    return {
+      productId: str(l.productId, "productId", MAX_PRODUCT_ID_LENGTH),
+      quantityMilli: l.quantityMilli as number,
+    };
+  });
+}
+
 function str(value: unknown, field: string, max = 200): string {
   if (typeof value !== "string" || value.length === 0 || value.length > max) invalid(`'${field}' must be a string`);
   return value;
+}
+
+/**
+ * P2: the Whish Money evidence of a till sale — exactly { reference, fundsConfirmed }. Only the TYPES are
+ * checked here; the service applies the reference rule (the collection form's) and refuses an
+ * unconfirmed payment with its own code, so the operator reads the right sentence.
+ */
+function whishPayment(value: unknown): { reference: string; fundsConfirmed: boolean } {
+  const w = exactObject(value, ["reference", "fundsConfirmed"]);
+  if (typeof w.reference !== "string" || w.reference.length > 200) invalid("'whish.reference' must be text");
+  if (typeof w.fundsConfirmed !== "boolean") invalid("'whish.fundsConfirmed' must be true or false");
+  return { reference: w.reference, fundsConfirmed: w.fundsConfirmed };
+}
+
+/**
+ * SELL-PARTIAL-DEBT: the money received now on a sale on account — exactly { amountMinor, method } and,
+ * for Whish Money only, `whish` = { reference, fundsConfirmed }. The method is "cash" or "external"
+ * here; every rule about amounts and accepted methods is the service's.
+ */
+function creditDownPayment(value: unknown): { amountMinor: bigint; method: "cash" | "external"; whish?: { reference: string; fundsConfirmed: boolean } } {
+  const d = objectWithOptional(value, ["amountMinor", "method"], ["whish"]);
+  if (d.method !== "cash" && d.method !== "external") invalid("'downPayment.method' must be cash or external");
+  return {
+    amountMinor: parseMinor(d.amountMinor),
+    method: d.method,
+    ...("whish" in d ? { whish: whishPayment(d.whish) } : {}),
+  };
+}
+
+/** INV-PAY-METHOD: the method of an invoice's paid amount, exactly as the contract shapes it. */
+function invoicePayment(value: unknown): { method: "cash" } | { method: "external"; whish: { reference: string; fundsConfirmed: boolean } } {
+  const d = objectWithOptional(value, ["method"], ["whish"]);
+  if (d.method === "cash") {
+    if ("whish" in d) invalid("'payment.whish' belongs to a Whish Money payment only");
+    return { method: "cash" };
+  }
+  if (d.method !== "external") invalid("'payment.method' must be cash or external");
+  if (!("whish" in d)) invalid("'payment.whish' is required for a Whish Money payment");
+  return { method: "external", whish: whishPayment(d.whish) };
 }
 
 /** An optional text field: null, undefined and "" all mean "not given". */
@@ -515,6 +640,29 @@ export function invoiceFinalizeTruth(invoices: InvoiceService, payload: unknown,
   }
 }
 
+/**
+ * I18N-LOGIN-PIN (DEC-33 #3): the PIN refusal's numbers as an IPC context, or null.
+ * Only `INVALID_CREDENTIALS` / `CASHIER_LOCKED` with the matching reason, and only small non-negative
+ * integers — anything else returns null and the refusal crosses exactly as before.
+ */
+export function loginRefusalContext(error: DomainError): LoginRefusalErrorContext | null {
+  const c = error.context;
+  if (c === undefined || !("reason" in c)) return null;
+  const small = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 10_000;
+  if (error.code === "INVALID_CREDENTIALS" && c.reason === "LOGIN_PIN_WRONG" && error.reason === c.reason) {
+    return small(c.attemptsLeft) && small(c.lockMinutes)
+      ? { reason: "LOGIN_PIN_WRONG", attemptsLeft: c.attemptsLeft, lockMinutes: c.lockMinutes }
+      : null;
+  }
+  if (error.code === "INVALID_CREDENTIALS" && c.reason === "LOGIN_UNKNOWN_OPERATOR" && error.reason === c.reason) {
+    return { reason: "LOGIN_UNKNOWN_OPERATOR" };
+  }
+  if (error.code === "CASHIER_LOCKED" && c.reason === "LOGIN_PIN_LOCKED" && error.reason === c.reason) {
+    return small(c.minutesRemaining) ? { reason: "LOGIN_PIN_LOCKED", minutesRemaining: c.minutesRemaining } : null;
+  }
+  return null;
+}
+
 export function createIpcHandlers(service: PosService, options: IpcHandlerOptions = {}): Record<ChannelName, Handler> {
   const log = options.logger ?? nullLogger;
   const now = options.now ?? (() => new Date());
@@ -571,11 +719,18 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
 
   function toIpcError(error: DomainError, channel: ChannelName): IpcError {
     const result: IpcError = { code: error.code, message: error.message };
+    // I18N-LOGIN-PIN: the login channel only, its two codes only, small integers only — anything else
+    // is sent exactly as before (code + English message).
+    if (channel === "login") {
+      const context = loginRefusalContext(error);
+      return context ? { ...result, context } : result;
+    }
     if (
       channel !== "recordCustomerPayment" ||
       error.code !== "INVALID_AMOUNT" ||
       error.reason !== "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING" ||
       error.context === undefined ||
+      !("outstandingMinor" in error.context) ||
       typeof error.context.outstandingMinor !== "bigint" ||
       typeof error.context.currency !== "string"
     ) {
@@ -663,9 +818,9 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
    * token may create a product or touch an existing one, so a third value must be refused here
    * rather than reaching the session as something `switch` quietly ignores.
    */
-  function phoneAction(value: unknown): "NEW_PRODUCT" | "EDIT_PRODUCT" {
-    if (value !== "NEW_PRODUCT" && value !== "EDIT_PRODUCT") {
-      invalid("'action' must be NEW_PRODUCT or EDIT_PRODUCT");
+  function phoneAction(value: unknown): "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION" {
+    if (value !== "NEW_PRODUCT" && value !== "EDIT_PRODUCT" && value !== "INVOICE_BATCH" && value !== "COMPANION") {
+      invalid("'action' must be NEW_PRODUCT, EDIT_PRODUCT, INVOICE_BATCH or COMPANION");
     }
     return value;
   }
@@ -794,34 +949,23 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     }),
     getCatalog: wrap("getCatalog", (p) => {
       noPayload(p);
-      return toCatalogDto(service.getCatalog());
+      // The showcase flag is display-only and independent of `demo` (DEMO-FALLBACK), which is unchanged.
+      return { ...toCatalogDto(service.getCatalog()), showcaseProfile: options.showcaseProfile === true };
     }),
     createSale: wrap("createSale", (p) => {
-      const o = exactObject(p, ["idempotencyKey", "lines", "paymentMethod", "expectedTotalMinor"]);
-      if (!Array.isArray(o.lines) || o.lines.length === 0 || o.lines.length > 200) invalid("'lines' must be a non-empty array");
-      const lines = o.lines.map((raw) => {
-        const l = exactObject(raw, ["productId", "quantityMilli"]);
-        // Thousandths of a sale unit, as an integer. The unit's own rule (whole-only vs fractional)
-        // needs the catalog and is applied in the domain, not here.
-        if (
-          typeof l.quantityMilli !== "number" ||
-          !Number.isSafeInteger(l.quantityMilli) ||
-          l.quantityMilli < 1 ||
-          l.quantityMilli > MAX_QUANTITY_MILLI
-        ) {
-          invalid(`'quantityMilli' must be an integer between 1 and ${MAX_QUANTITY_MILLI}`);
-        }
-        return {
-          productId: str(l.productId, "productId", MAX_PRODUCT_ID_LENGTH),
-          quantityMilli: l.quantityMilli as number,
-        };
-      });
+      // ACC-2: `customerId` is the ONE optional key — an account id, never a name or a snapshot. Every
+      // other unexpected key is still refused, so the renderer cannot choose a customer's name.
+      // P2: `whish` is the second optional key — exactly { reference, fundsConfirmed }, nothing else.
+      const o = objectWithOptional(p, ["idempotencyKey", "lines", "paymentMethod", "expectedTotalMinor"], ["customerId", "whish"]);
+      const lines = saleLinesOf(o.lines);
       assertPaymentMethod(o.paymentMethod);
       const result = service.createSale({
         idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
         lines,
         paymentMethod: o.paymentMethod,
         expectedTotalMinor: parseMinor(o.expectedTotalMinor),
+        ...("customerId" in o ? { customerId: str(o.customerId, "customerId", 100) } : {}),
+        ...("whish" in o ? { whish: whishPayment(o.whish) } : {}),
       });
       if (!result.duplicate) {
         try {
@@ -832,6 +976,65 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       }
       return { sale: toSaleDto(result.sale, invoiceNumberFor(result.sale)), duplicate: result.duplicate };
     }, (p) => saleFailureTruth(service, p, operatorLanguage())),
+    /**
+     * SELL-SPLIT-CASH-WHISH (owner, 2026-11-09): ONE sale paid in full by a cash part and a Whish Money
+     * part — never a debt. Exactly these keys (`customerId` optional, as on createSale); amounts are
+     * integer minor-unit strings, never floats. The same permission as createSale. A failure after the
+     * write is answered from the ledger by the same truth-teller createSale uses.
+     */
+    createSplitSale: wrap("createSplitSale", (p) => {
+      const o = objectWithOptional(p, ["idempotencyKey", "lines", "expectedTotalMinor", "cashMinor", "whishMinor", "whish"], ["customerId"]);
+      const result = service.createSplitSale({
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+        lines: saleLinesOf(o.lines),
+        expectedTotalMinor: parseMinor(o.expectedTotalMinor),
+        cashMinor: parseMinor(o.cashMinor),
+        whishMinor: parseMinor(o.whishMinor),
+        whish: whishPayment(o.whish),
+        ...("customerId" in o ? { customerId: str(o.customerId, "customerId", 100) } : {}),
+      });
+      if (!result.duplicate) {
+        try {
+          options.afterSale?.();
+        } catch (err) {
+          log.warn("after-sale-hook-failed", { error: err });
+        }
+      }
+      return { sale: toSaleDto(result.sale, invoiceNumberFor(result.sale)), duplicate: result.duplicate };
+    }, (p) => saleFailureTruth(service, p, operatorLanguage())),
+    /**
+     * SELL-CREDIT (owner, 2026-11-08): a FULLY UNPAID sale on one identified customer's account — a debt,
+     * never a payment. OWNER ONLY at this channel AND in the service (which re-reads the live role inside
+     * its transaction). The sale, its lines and the receivable commit together or not at all; no tender
+     * row is written because no money was received. Every key is required; nothing else is accepted.
+     *
+     * SELL-PARTIAL-DEBT (owner, 2026-11-08): `downPayment` is the ONE optional key — exactly
+     * { amountMinor, method } plus `whish` for a Whish Money down payment, nothing else. With it the sale
+     * is partial: one tender for what was received now, one receivable for exactly the rest, still in one
+     * transaction and still OWNER ONLY. Without it, everything above is unchanged.
+     */
+    createCustomerCreditSale: wrap("createCustomerCreditSale", (p) => {
+      const o = objectWithOptional(p, ["idempotencyKey", "lines", "expectedTotalMinor", "customerId"], ["downPayment"]);
+      const result = service.createCustomerCreditSale({
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+        lines: saleLinesOf(o.lines),
+        expectedTotalMinor: parseMinor(o.expectedTotalMinor),
+        customerId: str(o.customerId, "customerId", 100),
+        ...("downPayment" in o ? { downPayment: creditDownPayment(o.downPayment) } : {}),
+      });
+      if (!result.duplicate) {
+        try {
+          options.afterSale?.();
+        } catch (err) {
+          log.warn("after-sale-hook-failed", { error: err });
+        }
+      }
+      return {
+        sale: toSaleDto(result.sale, invoiceNumberFor(result.sale)),
+        obligationId: result.obligation.id,
+        duplicate: result.duplicate,
+      };
+    }),
     voidSale: wrap("voidSale", (p) => {
       const o = exactObject(p, ["saleId", "reason"]);
       return toVoidDto(service.voidSale(str(o.saleId, "saleId", 64), str(o.reason, "reason", 400)));
@@ -845,10 +1048,29 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       if (typeof o.limit !== "number" || !Number.isSafeInteger(o.limit) || o.limit < 1 || o.limit > 200) {
         invalid("'limit' must be an integer between 1 and 200");
       }
-      return service.getSaleHistory(o.limit).map((h) => ({
-        sale: toSaleDto(h.sale, invoiceNumberFor(h.sale)),
-        void: h.void ? toVoidDto(h.void) : null,
-      }));
+      const history = service.getSaleHistory(o.limit);
+      // ACC-3: null for a cashier (decided in the service from the durable session) → the key is
+      // left OUT of every entry, so the response carries no current-debt data at all.
+      const debts = service.currentDebtsForHistory(history.map((h) => h.sale.id));
+      return history.map((h) => {
+        const d = debts?.get(h.sale.id);
+        return {
+          sale: toSaleDto(h.sale, invoiceNumberFor(h.sale)),
+          void: h.void ? toVoidDto(h.void) : null,
+          ...(debts === null
+            ? {}
+            : {
+                currentDebt:
+                  d === undefined
+                    ? null
+                    : {
+                        amount: { minor: d.obligation.amountMinor.toString(), currency: d.obligation.currency },
+                        outstanding: { minor: d.outstandingMinor.toString(), currency: d.obligation.currency },
+                        fullyPaid: d.outstandingMinor === 0n,
+                      },
+              }),
+        };
+      });
     }),
     importCatalog: wrap("importCatalog", (p) => {
       noPayload(p);
@@ -1100,8 +1322,14 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           fundsConfirmed: result.record.fundsConfirmed,
           settledAt: result.record.settledAt,
         } as const;
-        log.info("customer-payment-recorded", { id: result.record.id, duplicate: result.duplicate });
-        return { settlement, duplicate: result.duplicate, statement: dto };
+        const colNo = ledger().collectionNoOfSettlement(result.record.id);
+        log.info("customer-payment-recorded", { id: result.record.id, duplicate: result.duplicate, col: colNo });
+        return {
+          settlement: { ...settlement, collection: colNo === null ? null : { docNo: colNo, number: formatCollectionNo(colNo) } },
+          collection: colNo === null ? null : collectionDto(colNo),
+          duplicate: result.duplicate,
+          statement: dto,
+        };
       },
       (p) => paymentFailureTruth(ledger(), p, operatorLanguage()),
     ),
@@ -1153,7 +1381,8 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           allocations,
         });
         const dto = toStatementDto(party, ledger().statementFor(customerId));
-        log.info("allocated-receipt-recorded", { id: result.receipt.id, duplicate: result.duplicate });
+        const rcptNo = ledger().collectionNoOfReceipt(result.receipt.id);
+        log.info("allocated-receipt-recorded", { id: result.receipt.id, duplicate: result.duplicate, col: rcptNo });
         return {
           receipt: {
             id: result.receipt.id,
@@ -1163,6 +1392,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
             allocationCount: result.receipt.allocationCount,
             receivedAt: result.receipt.receivedAt,
           },
+          collection: rcptNo === null ? null : collectionDto(rcptNo),
           duplicate: result.duplicate,
           statement: dto,
         };
@@ -1473,10 +1703,17 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       // The payload is an id and nothing else: every frozen value is computed in the service.
       // `issueOnAccount` may be absent (every caller that predates migration 16); present, it must
       // be a real boolean — never a truthy string that would put a debt on an account by accident.
-      const o = objectWithOptional(p, ["invoiceId"], ["issueOnAccount"]);
+      // INV-PAY-METHOD: `payment` is the second optional key — exactly { method: "cash" } or
+      // { method: "external", whish: { reference, fundsConfirmed } }. The service decides whether one
+      // is required (something marked paid) and refuses Card / Other / bank.
+      // R5: `confirmedDraft` is the third optional key — the exact confirmation the operator saw; the service compares it
+      // with the persisted draft inside the transaction.
+      const o = objectWithOptional(p, ["invoiceId"], ["issueOnAccount", "payment", "confirmedDraft"]);
       if ("issueOnAccount" in o && typeof o.issueOnAccount !== "boolean") invalid("'issueOnAccount' must be true or false");
       const view = invoices().finalizeInvoice(str(o.invoiceId, "invoiceId", 100), {
         issueOnAccount: o.issueOnAccount === true,
+        ...("payment" in o ? { payment: invoicePayment(o.payment) } : {}),
+        ...("confirmedDraft" in o ? { confirmedDraft: str(o.confirmedDraft, "confirmedDraft", CONFIRMATION_DIGEST_MAX) } : {}),
       });
       log.info("invoice-finalized", {
         id: view.invoice.id,
@@ -1613,7 +1850,448 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         ? { status: "saved" as const, fileName: saved.fileName, logoMissing: saved.logoMissing, logoUnverified: saved.logoUnverified }
         : { status: "cancelled" as const };
     }),
+
+    // ── Customer advances (migration 20) ───────────────────────────────────────────────────────
+    // Every rule lives in `AdvanceService` and in the database triggers; these handlers validate the
+    // payload's SHAPE, call the service once, and map bigints to strings. No arithmetic here.
+    recordAdvance: wrap("recordAdvance", (p) => {
+      const o = objectWithOptional(p, ["customerId", "amountMinor", "channel", "idempotencyKey"], ["reference", "fundsConfirmed"]);
+      if (o.reference !== undefined && o.reference !== null && typeof o.reference !== "string") invalid("'reference' must be text or null");
+      if (o.fundsConfirmed !== undefined && typeof o.fundsConfirmed !== "boolean") invalid("'fundsConfirmed' must be true or false");
+      const r = advances().record({
+        customerId: str(o.customerId, "customerId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+        channel: o.channel,
+        reference: o.reference,
+        fundsConfirmed: o.fundsConfirmed,
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      log.info("advance-recorded", { id: r.record.id, docNo: r.record.docNo, duplicate: r.duplicate });
+      return { advance: advanceDto(advances().view(r.record)), duplicate: r.duplicate };
+    }),
+    pendingAdvances: wrap("pendingAdvances", (p) => {
+      noPayload(p);
+      return advances()
+        .pending()
+        .map((x): PendingAdvanceDto => {
+          if (x.status === "recorded") return { status: "recorded", key: x.key, advance: advanceDto(advances().view(x.advance)) };
+          if (x.status === "unknown") return { status: "unknown", key: x.key, createdAt: x.createdAt };
+          return {
+            status: x.status,
+            key: x.key,
+            customerId: x.intent.customerId,
+            customerName: advances().customerName(x.intent.customerId),
+            amount: { minor: x.intent.amountMinor.toString(), currency: x.intent.currency },
+            channel: x.intent.channel,
+            reference: x.intent.reference,
+            createdAt: x.createdAt,
+          };
+        });
+    }),
+    finishAdvance: wrap("finishAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey"]);
+      const r = advances().finish(str(o.idempotencyKey, "idempotencyKey", 100));
+      log.info("advance-finished", { id: r.record.id, docNo: r.record.docNo, duplicate: r.duplicate });
+      return { advance: advanceDto(advances().view(r.record)), duplicate: r.duplicate };
+    }),
+    closeAdvance: wrap("closeAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey"]);
+      advances().close(str(o.idempotencyKey, "idempotencyKey", 100));
+      log.info("advance-closed-not-received", { key: o.idempotencyKey });
+      return null;
+    }),
+    acknowledgeAdvance: wrap("acknowledgeAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey"]);
+      advances().acknowledge(str(o.idempotencyKey, "idempotencyKey", 100));
+      return null;
+    }),
+    getAdvanceStatement: wrap("getAdvanceStatement", (p) => {
+      const o = exactObject(p, ["customerId"]);
+      const customerId = str(o.customerId, "customerId", 100);
+      return {
+        customerId,
+        // DEC-35zz++ Option A: the business day, so the screen can name an earlier REF- of TODAY before another one.
+        today: advances().today(),
+        lines: advances()
+          .statement(customerId)
+          .map((l) => ({
+            advance: advanceDto(advances().view(l.advance)),
+            unused: { minor: l.unusedMinor.toString(), currency: l.advance.currency },
+            correction: correctionDto(advances().correctionView(l.correction)),
+            applications: advances().applicationsOf(l.advance.id).map(applicationDto),
+            refunds: advances().refundsOf(l.advance.id).map((r) => refundDto(advances().refundView(r))),
+          })),
+      };
+    }),
+    applyAdvanceToDebt: wrap("applyAdvanceToDebt", (p) => {
+      const o = exactObject(p, ["advanceId", "obligationId", "amountMinor", "idempotencyKey"]);
+      const r = advances().applyToDebt({
+        advanceId: str(o.advanceId, "advanceId", 100),
+        obligationId: str(o.obligationId, "obligationId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      return {
+        application: applicationDto(r.application),
+        advanceNumber: advances().view(r.advance).number,
+        unused: { minor: r.unusedMinor.toString(), currency: r.advance.currency },
+        debtOutstanding: { minor: r.debtOutstandingMinor.toString(), currency: r.advance.currency },
+        duplicate: r.duplicate,
+      };
+    }),
+    sellOnAdvance: wrap("sellOnAdvance", (p) => {
+      const o = exactObject(p, ["idempotencyKey", "lines", "expectedTotalMinor", "customerId", "advanceId", "amountMinor"]);
+      const r = advances().sellOnAdvance({
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+        lines: saleLinesOf(o.lines),
+        expectedTotalMinor: parseMinor(o.expectedTotalMinor),
+        customerId: str(o.customerId, "customerId", 100),
+        advanceId: str(o.advanceId, "advanceId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+      });
+      if (!r.duplicate) {
+        try {
+          options.afterSale?.();
+        } catch (err) {
+          log.warn("after-sale-hook-failed", { error: err });
+        }
+      }
+      const cur = r.sale.total.currency;
+      return {
+        sale: toSaleDto(r.sale, invoiceNumberFor(r.sale)),
+        obligationId: r.obligation.id,
+        advanceNumber: advances().view(r.application.advance).number,
+        applied: { minor: r.application.application.amountMinor.toString(), currency: cur },
+        unused: { minor: r.application.unusedMinor.toString(), currency: cur },
+        debtOutstanding: { minor: r.application.debtOutstandingMinor.toString(), currency: cur },
+        duplicate: r.duplicate,
+      };
+    }),
+    getDailyMoney: wrap("getDailyMoney", (p) => {
+      const o = objectWithOptional(p, [], ["date"]);
+      if (!options.dailyMoney) throw new DomainError("NOT_AVAILABLE", "The day's money is not available on this terminal");
+      const report = dailyMoneyDto(options.dailyMoney.day("date" in o ? o.date : undefined));
+      // DEC-35zz++ Option A: the day's REF- documents, by name — not only their total (owner-only, like the report).
+      const refundsList = options.advances ? options.advances.refundsOnDay(report.date).map((r) => refundDto(options.advances!.refundView(r))) : [];
+      return { ...report, refundsList };
+    }),
+    correctAdvance: wrap("correctAdvance", (p) => {
+      const o = objectWithOptional(
+        p,
+        ["advanceId", "kind", "reason", "idempotencyKey"],
+        ["confirmNotReceived", "customerId", "amountMinor", "channel", "reference", "fundsConfirmed"],
+      );
+      const r = advances().correct({
+        advanceId: str(o.advanceId, "advanceId", 100),
+        kind: o.kind,
+        reason: o.reason,
+        confirmNotReceived: o.confirmNotReceived,
+        customerId: o.customerId,
+        amountMinor: o.amountMinor === undefined ? undefined : parseMinor(o.amountMinor),
+        channel: o.channel,
+        reference: o.reference,
+        fundsConfirmed: o.fundsConfirmed,
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+      });
+      log.info("advance-corrected", { advance: r.original.id, kind: r.correction.kind, successor: r.successor?.id ?? null, duplicate: r.duplicate });
+      const correction = correctionDto(advances().correctionView(r.correction));
+      if (!correction) throw new DomainError("LEDGER_INTEGRITY", "A correction could not be read back");
+      return {
+        original: advanceDto(advances().view(r.original)),
+        successor: r.successor ? advanceDto(advances().view(r.successor)) : null,
+        correction,
+        duplicate: r.duplicate,
+      };
+    }),
+    printAdvance: wrapAsync("printAdvance", async (p) => {
+      const o = exactObject(p, ["advanceId"]);
+      const id = str(o.advanceId, "advanceId", 100);
+      advances().document(id); // exists, and the caller may record advances — before any window opens
+      if (!options.printAdvance) return { status: "unavailable" as const };
+      return { status: await options.printAdvance(id) };
+    }),
+    saveAdvancePdf: wrapAsync("saveAdvancePdf", async (p) => {
+      const o = exactObject(p, ["advanceId"]);
+      const id = str(o.advanceId, "advanceId", 100);
+      advances().document(id);
+      if (!options.saveAdvancePdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveAdvancePdf(id);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
+    // ── DEC-35z+ REF: cash refund of an advance (owner) ─────────────────────────────────────────────
+    refundAdvance: wrap("refundAdvance", (p) => {
+      const o = objectWithOptional(p, ["advanceId", "amountMinor", "reason", "idempotencyKey"], ["confirmRepeat"]);
+      if ("confirmRepeat" in o && typeof o.confirmRepeat !== "boolean") invalid("'confirmRepeat' must be true or false");
+      const r = advances().refund({
+        advanceId: str(o.advanceId, "advanceId", 100),
+        amountMinor: parseMinor(o.amountMinor),
+        reason: o.reason,
+        idempotencyKey: str(o.idempotencyKey, "idempotencyKey", 100),
+        confirmRepeat: o.confirmRepeat,
+      });
+      log.info("advance-refunded", { id: r.refund.id, docNo: r.refund.docNo, advance: r.advance.id, duplicate: r.duplicate });
+      return {
+        refund: refundDto(advances().refundView(r.refund)),
+        unused: { minor: r.unusedMinor.toString(), currency: r.advance.currency },
+        duplicate: r.duplicate,
+      };
+    }),
+    // ── DEC-35z+ COL: the COL- document of a collection / receipt (owner, read-only) ──────────────────
+    getCollectionReceipt: wrap("getCollectionReceipt", (p) => collectionDto(collectionNo(p))),
+    // ── TILL-PRINT (D-TP1/2/3): one till receipt from the ledger by sale id — screen, PDF and print alike ──
+    getSaleReceipt: wrap("getSaleReceipt", (p) => {
+      const o = exactObject(p, ["saleId"]);
+      return saleReceiptDto(saleReceipts().receipt(str(o.saleId, "saleId", 64)));
+    }),
+    // Visibility is checked BEFORE any window opens; printing writes nothing.
+    printSaleReceipt: wrapAsync("printSaleReceipt", async (p) => {
+      const { saleId, layout, copy } = printRequest(p);
+      const doc = saleReceiptDto(saleReceipts().receipt(saleId));
+      if (!options.printSaleReceipt) return { status: "unavailable" as const };
+      return { status: await options.printSaleReceipt(doc, layout, copy) };
+    }),
+    saveSaleReceiptPdf: wrapAsync("saveSaleReceiptPdf", async (p) => {
+      const { saleId, layout, copy } = printRequest(p);
+      const doc = saleReceiptDto(saleReceipts().receipt(saleId));
+      if (!options.saveSaleReceiptPdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveSaleReceiptPdf(doc, layout, copy);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
+    printCollectionReceipt: wrapAsync("printCollectionReceipt", async (p) => {
+      const doc = collectionDto(collectionNo(p)); // exists, and the caller is the owner — before any window opens
+      if (!options.printCollectionReceipt) return { status: "unavailable" as const };
+      return { status: await options.printCollectionReceipt(doc) };
+    }),
+    saveCollectionReceiptPdf: wrapAsync("saveCollectionReceiptPdf", async (p) => {
+      const doc = collectionDto(collectionNo(p));
+      if (!options.saveCollectionReceiptPdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveCollectionReceiptPdf(doc);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
+    // A reprint loads the SAME REF- by id and writes nothing; a print/PDF failure never touches the refund.
+    printAdvanceRefund: wrapAsync("printAdvanceRefund", async (p) => {
+      const o = exactObject(p, ["refundId"]);
+      const id = str(o.refundId, "refundId", 100);
+      advances().refundDocument(id); // exists, and the caller is the owner — before any window opens
+      if (!options.printAdvanceRefund) return { status: "unavailable" as const };
+      return { status: await options.printAdvanceRefund(id) };
+    }),
+    saveAdvanceRefundPdf: wrapAsync("saveAdvanceRefundPdf", async (p) => {
+      const o = exactObject(p, ["refundId"]);
+      const id = str(o.refundId, "refundId", 100);
+      advances().refundDocument(id);
+      if (!options.saveAdvanceRefundPdf) throw new DomainError("NOT_AVAILABLE", "Saving a PDF is not available here");
+      const saved = await options.saveAdvanceRefundPdf(id);
+      return saved ? { status: "saved" as const, fileName: saved.fileName } : { status: "cancelled" as const };
+    }),
+    readInvoicePhoto: wrapAsync("readInvoicePhoto", async (p) => {
+      // OCR-REVIEW-UX: an optional { mode } — absent = "read" (unchanged); "photo-only" = the photo beside manual rows.
+      let mode: "read" | "photo-only" = "read";
+      let phoneInvoice: { batchId: string; id: string } | undefined;
+      const orient: { quarterTurns?: number; reuseLast?: boolean } = {};
+      if (p !== undefined && p !== null) {
+        const o = objectWithOptional(p, [], ["mode", "phoneInvoice", "quarterTurns", "reuseLast"]);
+        // PHONE-INVOICE-ORIENTATION-01: an operator rotation (0..3 clockwise quarter-turns) and "read the same file again".
+        if ("quarterTurns" in o && o.quarterTurns !== undefined) {
+          if (typeof o.quarterTurns !== "number" || !Number.isInteger(o.quarterTurns) || o.quarterTurns < 0 || o.quarterTurns > 3) invalid("'quarterTurns' must be 0, 1, 2 or 3");
+          orient.quarterTurns = o.quarterTurns;
+        }
+        if ("reuseLast" in o && o.reuseLast !== undefined) {
+          if (typeof o.reuseLast !== "boolean") invalid("'reuseLast' must be a boolean");
+          orient.reuseLast = o.reuseLast;
+        }
+        if ("mode" in o && o.mode !== "read" && o.mode !== "photo-only") invalid("'mode' must be read or photo-only");
+        if (o.mode === "photo-only") mode = "photo-only";
+        // DEC-35z16: a staged phone photo instead of the file picker. Ids only — main resolves the file.
+        if ("phoneInvoice" in o && o.phoneInvoice !== undefined) phoneInvoice = phoneInvoiceRef(o.phoneInvoice);
+      }
+      if (!options.readInvoicePhoto) return { status: "unavailable" as const };
+      let reading: Awaited<ReturnType<NonNullable<IpcHandlerOptions["readInvoicePhoto"]>>>;
+      try {
+        reading = await options.readInvoicePhoto(mode, phoneInvoice, orient);
+      } catch (e) {
+        // DEC-35zzzz: a REFUSED reading (not an image, OCR failed) is logged here with its code and the engine's
+        // short reason — the screen shows only a bilingual sentence and the code. Unexpected faults are logged by
+        // wrapAsync as ipc-internal-error. Never the invoice's text.
+        if (e instanceof DomainError) log.warn("invoice-photo-refused", { mode, code: e.code, detail: e.message.slice(0, 200) });
+        throw e;
+      }
+      if (reading === null) return { status: "cancelled" as const };
+      const currency = service.getCatalog().currency;
+      // CURRENCY-P1: the reading's minor units use the catalog currency's OWN exponent (`money.ts`), the same contract
+      // every stored amount uses. It said `LBP ? 0 : 2`, so a read «1,500» LBP became minor 1500 = 15.00 LBP, 100 times
+      // too small against the domain, the review screen (`formatDecimal`) and the catalog prices it is compared with.
+      const exponent = currencyExponent(currency);
+      const r = rowsFromPositioned(reading.lines, exponent);
+      log.info("invoice-photo-read", { mode, source: phoneInvoice ? "phone" : "picker", exif: reading.orientation?.exif ?? 1, quarterTurns: reading.orientation?.quarterTurns ?? 0, rows: r.rows.length, unexplained: r.unexplained.length, ms: reading.ms });
+      return {
+        status: "read" as const,
+        mode,
+        currency,
+        rows: r.rows.map((x) => ({
+          id: x.id,
+          rawText: x.rawText,
+          name: x.name,
+          quantityMilli: x.quantityMilli,
+          supplierPriceMinor: x.supplierPriceMinor === null ? null : x.supplierPriceMinor.toString(),
+          lineTotalMinor: x.lineTotalMinor === null ? null : x.lineTotalMinor.toString(),
+          arithmeticOk: x.arithmeticOk,
+          relation: x.relation,
+          discountPercent: x.discountPercent,
+          y: x.y,
+          crop: reading.crop(x.y, x.h),
+          readings: x.readings,
+          alternativeNames: x.alternativeNames,
+          warnings: x.warnings,
+        })),
+        unexplained: r.unexplained.map((u) => ({ text: u.text, name: u.name, y: u.y, crop: reading.crop(u.y, u.h) })),
+        ms: reading.ms,
+        preview: reading.preview,
+        ...(reading.orientation ? { orientation: reading.orientation } : {}),
+      };
+    }),
+    // DEC-35z16 (PILOT): the phone-invoice queue. Lists and releases staged FILES; no ledger write.
+    listPhoneInvoices: wrap("listPhoneInvoices", (p) => {
+      noPayload(p);
+      if (!options.phoneInvoices) throw new DomainError("NOT_AVAILABLE", "Supplier invoices from a phone are not available on this terminal");
+      return options.phoneInvoices.list();
+    }),
+    releasePhoneInvoice: wrap("releasePhoneInvoice", (p) => {
+      const o = objectWithOptional(p, ["batchId", "id", "why"], []);
+      const ref = phoneInvoiceRef({ batchId: o.batchId, id: o.id });
+      if (o.why !== "reviewed" && o.why !== "discarded") invalid("'why' must be reviewed or discarded");
+      if (!options.phoneInvoices) throw new DomainError("NOT_AVAILABLE", "Supplier invoices from a phone are not available on this terminal");
+      const released = options.phoneInvoices.release(ref.batchId, ref.id, o.why);
+      log.info("phone-invoice-queue-release", { why: o.why, released });
+      return { released };
+    }),
   };
+
+  /** DEC-35z16: two server-made 32-hex ids, checked before they can ever name a file. */
+  function phoneInvoiceRef(v: unknown): { batchId: string; id: string } {
+    const o = objectWithOptional(v, ["batchId", "id"], []);
+    if (typeof o.batchId !== "string" || !/^[0-9a-f]{32}$/.test(o.batchId)) invalid("'batchId' must be 32 lower-case hex");
+    if (typeof o.id !== "string" || !/^[0-9a-f]{32}$/.test(o.id)) invalid("'id' must be 32 lower-case hex");
+    return { batchId: o.batchId, id: o.id };
+  }
+
+  function saleReceipts(): SaleReceiptService {
+    if (!options.saleReceipts) throw new DomainError("NOT_AVAILABLE", "Receipts are not available on this terminal");
+    return options.saleReceipts;
+  }
+
+  function printRequest(p: unknown): { saleId: string; layout: "thermal80" | "a5"; copy: boolean } {
+    const o = exactObject(p, ["saleId", "layout", "copy"]);
+    if (o.layout !== "thermal80" && o.layout !== "a5") invalid("'layout' must be thermal80 or a5");
+    if (typeof o.copy !== "boolean") invalid("'copy' must be true or false");
+    return { saleId: str(o.saleId, "saleId", 64), layout: o.layout as "thermal80" | "a5", copy: o.copy as boolean };
+  }
+
+  /** The read model as the screen, the PDF and the print all receive it. Bigints → strings; no arithmetic. */
+  function saleReceiptDto(v: SaleReceiptView): SaleReceiptDto {
+    const cur = v.sale.total.currency;
+    return {
+      sale: toSaleDto(v.sale, invoiceNumberFor(v.sale)),
+      void: v.void ? toVoidDto(v.void) : null,
+      customerName: v.customerName,
+      advanceApplied: v.advanceAtSale
+        ? {
+            number: v.advanceAtSale.number,
+            applied: { minor: v.advanceAtSale.appliedMinor.toString(), currency: cur },
+            debtLeft: { minor: v.advanceAtSale.leftOnAccountMinor.toString(), currency: cur },
+          }
+        : null,
+    };
+  }
+
+  function collectionNo(p: unknown): number {
+    const o = exactObject(p, ["collectionNo"]);
+    if (typeof o.collectionNo !== "number" || !Number.isSafeInteger(o.collectionNo) || o.collectionNo <= 0) invalid("'collectionNo' must be a positive whole number");
+    return o.collectionNo as number;
+  }
+
+  /** One COL- document, from the ledger, named by each debt's own document. No arithmetic. */
+  function collectionDto(docNo: number): CollectionDocumentDto {
+    const v = ledger().collectionDocument(docNo);
+    const channel: CollectionDocumentDto["channel"] =
+      v.method === "cash" ? "cash" : v.method === "external" ? (v.provider === "bank_transfer" ? "bank_transfer" : "whish") : v.method === "card" ? "card" : "other";
+    return {
+      docNo: v.docNo,
+      number: formatCollectionNo(v.docNo),
+      customerId: v.customerId,
+      customerName: v.customerName,
+      total: { minor: v.totalMinor.toString(), currency: v.currency },
+      channel,
+      reference: v.reference,
+      lines: v.lines.map((l) => ({
+        obligationId: l.obligation.id,
+        debtDocument: statementDocument(l.obligation),
+        amount: { minor: l.amountMinor.toString(), currency: v.currency },
+      })),
+      receivedByName: v.receivedByName,
+      receivedAt: v.receivedAt,
+      businessDate: v.businessDate,
+    };
+  }
+
+  /** One application, named by the debt's own document — the same words the debt statement uses. */
+  function applicationDto(a: AdvanceApplicationRecord) {
+    const debt = advances().debtOf(a.obligationId);
+    return {
+      id: a.id,
+      obligationId: a.obligationId,
+      debtDocument: debt ? statementDocument(debt) : ({ kind: "unresolved" } as const),
+      amount: { minor: a.amountMinor.toString(), currency: a.currency },
+      appliedAt: a.appliedAt,
+      appliedByName: advances().operatorName(a.appliedBy),
+    };
+  }
+
+  function dailyMoneyDto(r: DailyMoneyReport) {
+    const ch = (m: ChannelAmounts) => Object.fromEntries(MONEY_CHANNELS.map((c) => [c, m[c].toString()])) as Record<(typeof MONEY_CHANNELS)[number], string>;
+    const m = (v: bigint) => ({ minor: v.toString(), currency: r.currency });
+    const part = (x: MoneyPart) => ({ count: x.count, byChannel: ch(x.byChannel), total: m(x.totalMinor) });
+    return {
+      date: r.date,
+      currency: r.currency,
+      sales: {
+        count: r.sales.count,
+        voidedCount: r.sales.voidedCount,
+        revenue: m(r.sales.revenueMinor),
+        voidedTotal: m(r.sales.voidedTotalMinor),
+        onAccount: m(r.sales.onAccountMinor),
+        received: part(r.sales.received),
+        voidedReceived: part(r.sales.voidedReceived),
+      },
+      collections: part(r.collections),
+      advances: part(r.advances),
+      corrections: part(r.corrections),
+      moneyIn: part(r.moneyIn),
+      refunds: part(r.refunds),
+      supplierPayments: part(r.supplierPayments),
+      moneyOut: part(r.moneyOut),
+      net: { byChannel: ch(r.net.byChannel), total: m(r.net.totalMinor) },
+      advanceApplied: part(r.advanceApplied),
+      byOperator: r.byOperator.map((o) => ({
+        operatorId: o.operatorId,
+        operatorName: o.operatorName,
+        sales: ch(o.sales),
+        voidedSales: ch(o.voidedSales),
+        collections: ch(o.collections),
+        advances: ch(o.advances),
+        corrections: ch(o.corrections),
+        moneyIn: ch(o.moneyIn),
+        moneyOut: ch(o.moneyOut),
+      })),
+      correctionsBy: r.correctionsBy.map((c) => ({ ...c })),
+      lateVoids: r.lateVoids.map((v) => ({ saleId: v.saleId, saleDate: v.saleDate, total: { minor: v.totalMinor.toString(), currency: v.currency } })),
+    };
+  }
+
+  function advances(): AdvanceService {
+    if (!options.advances) throw new DomainError("NOT_AVAILABLE", "Customer advances are not available on this terminal");
+    return options.advances;
+  }
 
   // ── Shapes used by the invoice channels only ─────────────────────────────────────────────────
 
@@ -1624,6 +2302,24 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
    * lives on the invoice, which is immutable once final — so there is nothing to keep in sync. On a
    * terminal with no invoice service configured this is simply null; the sale is still correct.
    */
+  /**
+   * UX-REF-NUMBERS: the readable document behind a debt, from REAL rows only. A sale-sourced debt shows
+   * its invoice's number when the sale came from a finalized invoice, otherwise the sale's own receipt
+   * number; a manual debt shows its typed reference. A sale that cannot be read is `unresolved` —
+   * never an id, never an invented number.
+   */
+  function statementDocument(o: { readonly sourceKind: string; readonly sourceRef: string; readonly saleId: string | null }): StatementDocumentDto {
+    if (o.sourceKind !== "sale" || o.saleId === null) return { kind: "manual", reference: o.sourceRef };
+    let sale: SaleRecord;
+    try {
+      sale = service.getSale(o.saleId).sale;
+    } catch {
+      return { kind: "unresolved" };
+    }
+    const invoiceNumber = invoiceNumberFor(sale);
+    return invoiceNumber !== null ? { kind: "invoice", number: invoiceNumber } : { kind: "sale", receiptNumber: sale.receiptNumber };
+  }
+
   function invoiceNumberFor(sale: SaleRecord): number | null {
     if (sale.sourceType !== "invoice" || !sale.invoiceId || !options.invoices) return null;
     const number = options.invoices.invoiceNumberOf(sale.invoiceId);
@@ -1666,8 +2362,39 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
   function toStatementDto(customer: PartyRow, s: ReturnType<LedgerService["statementFor"]>): CustomerStatementDto {
     // Migration 18: which settlements are SHARES of a receipt (display only; a share is not money).
     const shares = ledger().receiptsOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)));
+    // DEC-35x: which settlements were paid FROM an advance (display only; not money of that day).
+    // DEC-35z+ COL: the COL- behind each settlement (own, or its receipt's). Display only.
+    const colNos = ledger().collectionNumbersOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)));
+    const fromAdvance = options.advances
+      ? options.advances.advancesOfSettlements(s.obligations.flatMap((row) => row.settlements.map((st) => st.id)))
+      : new Map<string, { advanceId: string; number: string }>();
     return {
       customer: toCustomerDto(customer),
+      // ACC-2: built HERE, so every channel that returns a statement (read, and the refreshed one
+      // after a payment) carries the same paid-sale history. Owner-only, like the statement.
+      paidSales: service.customerPaidSales(customer.id).map(({ sale, voided }) => ({
+        saleId: sale.id,
+        receiptNumber: sale.receiptNumber,
+        total: { minor: sale.total.minor.toString(), currency: sale.total.currency },
+        // TRANSITION (SELL-SPLIT-CASH-WHISH, 2026-11-09): this used to say "a paid POS sale always carries
+        // its real method" and cast it. Since migration 19 a sale paid by two tenders carries NO single
+        // method (NULL), so it is passed as null — never fabricated — with its tenders beside it.
+        paymentMethod: sale.paymentMethod,
+        ...(sale.externalPayment ? { externalPayment: { provider: sale.externalPayment.provider, reference: sale.externalPayment.reference } } : {}),
+        ...(sale.tenders && sale.tenders.length >= 2
+          ? {
+              tenders: sale.tenders.map((t) => ({
+                seq: t.seq,
+                method: t.method,
+                amount: { minor: t.amount.minor.toString(), currency: t.amount.currency },
+                provider: t.provider,
+                reference: t.reference,
+              })),
+            }
+          : {}),
+        completedAt: sale.completedAt,
+        voided,
+      })),
       obligations: s.obligations.map((row) => ({
         id: row.obligation.id,
         amount: { minor: row.obligation.amountMinor.toString(), currency: row.obligation.currency },
@@ -1676,6 +2403,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         sourceKind: row.obligation.sourceKind,
         sourceRef: row.obligation.sourceRef,
         saleId: row.obligation.saleId,
+        document: statementDocument(row.obligation),
         postedAt: row.obligation.postedAt,
         settlements: row.settlements.map((st) => ({
           id: st.id,
@@ -1695,6 +2423,8 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
                   total: { minor: r.amountMinor.toString(), currency: r.currency },
                 }
               : null)(shares.get(st.id)),
+          advance: fromAdvance.get(st.id) ?? null,
+          collection: ((n) => (n === undefined ? null : { docNo: n, number: formatCollectionNo(n) }))(colNos.get(st.id)),
         })),
       })),
       // One entry per currency, in a stable order so the screen does not reshuffle between reads.
@@ -1817,6 +2547,61 @@ export function syncHandlers(
     };
   }
   return out;
+}
+
+/** An advance as the ledger holds it, bigints as strings. No arithmetic. */
+export function advanceDto(v: AdvanceView): AdvanceDto {
+  const a = v.record;
+  return {
+    id: a.id,
+    docNo: a.docNo,
+    number: v.number,
+    customerId: a.customerId,
+    customerName: v.customerName,
+    amount: { minor: a.amountMinor.toString(), currency: a.currency },
+    channel: a.method === "external" ? "whish" : "cash",
+    reference: a.reference,
+    receivedByName: v.receivedByName,
+    receivedAt: a.receivedAt,
+    businessDate: a.businessDate,
+    origin: a.origin ?? "receipt",
+    correctsNumber: v.correctsNumber,
+  };
+}
+
+export function correctionDto(c: AdvanceCorrectionView | null): AdvanceCorrectionDto | null {
+  if (!c) return null;
+  return {
+    kind: c.record.kind,
+    reason: c.record.reason,
+    fundsNotReceived: c.record.fundsNotReceived,
+    correctedByName: c.correctedByName,
+    correctedAt: c.record.correctedAt,
+    businessDate: c.record.businessDate,
+    successorNumber: c.successorNumber,
+  };
+}
+
+/** One REF- document as the ledger holds it (always cash), bigints as strings. No arithmetic. */
+export function refundDto(v: AdvanceRefundView): AdvanceRefundDto {
+  const r = v.record;
+  const adv = advanceDto(v.advance);
+  return {
+    id: r.id,
+    docNo: r.docNo,
+    number: v.number,
+    advanceId: r.advanceId,
+    advanceNumber: adv.number,
+    advanceChannel: adv.channel,
+    advanceReference: adv.reference,
+    customerName: adv.customerName,
+    amount: { minor: r.amountMinor.toString(), currency: adv.amount.currency },
+    method: "cash",
+    reason: r.reason,
+    refundedByName: v.refundedByName,
+    refundedAt: r.refundedAt,
+    businessDate: r.businessDate,
+  };
 }
 
 /** Every handler maps to exactly one fixed channel string. */

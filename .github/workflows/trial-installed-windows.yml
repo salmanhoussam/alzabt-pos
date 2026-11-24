@@ -1,0 +1,100 @@
+name: TEST ONLY installed trial validation
+
+on:
+  push:
+    branches: [codex/functional-trial-installer-20261124]
+
+permissions:
+  contents: read
+
+jobs:
+  installed-trial:
+    if: github.repository == 'salmanhoussam/alzabt-pos' && github.ref == 'refs/heads/codex/functional-trial-installer-20261124' && github.event.created == true && github.event.forced == false && github.event.deleted == false && github.run_attempt == 1
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare evidence directory
+        run: |
+          $directory = Join-Path $env:RUNNER_TEMP 'alzabt-trial-evidence'
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          "Source $env:GITHUB_SHA; image $env:ImageOS $env:ImageVersion" | Set-Content -LiteralPath (Join-Path $directory 'run.txt')
+      - name: Verify checkout and disposable runner
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_AFTER: ${{ github.event.after }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows' -or $env:GITHUB_EVENT_NAME -ne 'push') { throw 'Hosted Windows branch-creation push required' }
+          if ($env:EVENT_BEFORE -cne '0000000000000000000000000000000000000000' -or $env:GITHUB_SHA -cnotmatch '^[a-f0-9]{40}$' -or $env:EVENT_AFTER -cne $env:GITHUB_SHA -or (git rev-parse HEAD).Trim() -cne $env:GITHUB_SHA) { throw 'Fresh branch and event-bound source SHA required' }
+          if (git status --porcelain --untracked-files=all) { throw 'Checkout must be clean' }
+          Write-Host "Source $env:GITHUB_SHA; image $env:ImageOS $env:ImageVersion"
+          git rev-parse 'HEAD^{tree}'
+      - name: Stop until the complete installed lifecycle is reviewed
+        run: |
+          throw 'BLOCKED: standard-user orchestration and safe uninstaller completion require implementation and review'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm.cmd ci
+      - name: Typecheck and focused tests
+        run: |
+          npm.cmd run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx.cmd vitest run tests/main/trialBootstrap.test.ts tests/main/trialIsolation.test.ts tests/main/trialLocalGate.test.ts --maxWorkers=1 --no-file-parallelism
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stop until standard-user sentinels are established before build
+        run: |
+          throw 'BLOCKED: create and hash protected sentinels under a disposable standard user before building'
+      - name: Build source
+        run: |
+          $env:ALZABT_BUILD_SHA = $env:GITHUB_SHA
+          npm.cmd run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx.cmd electron-rebuild --force --which-module better-sqlite3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the guarded TEST ONLY installer as the runner
+        id: trial-build
+        run: |
+          node scripts/trial-build-candidate.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installer = Join-Path $PWD 'release/Alzabt-POS-TRIAL-TEST-ONLY-Setup-0.1.1.exe'
+          $manifest = Join-Path $PWD 'release/trial-payload-manifest.json'
+          $installerHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifestHash = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
+          "installer_sha256=$installerHash" >> $env:GITHUB_OUTPUT
+          "manifest_sha256=$manifestHash" >> $env:GITHUB_OUTPUT
+          Write-Host "Built installer SHA-256 $installerHash; manifest SHA-256 $manifestHash"
+      - name: Stop until restricted artifact transfer and standard-user launch are implemented
+        run: |
+          throw 'BLOCKED: transfer only the bound installer and manifest into an ACL-restricted location and launch the lifecycle with the disposable user profile'
+      - name: Installer lifecycle and sentinels
+        env:
+          ALZABT_TRIAL_EXPECTED_INSTALLER_SHA256: ${{ steps.trial-build.outputs.installer_sha256 }}
+          ALZABT_TRIAL_EXPECTED_MANIFEST_SHA256: ${{ steps.trial-build.outputs.manifest_sha256 }}
+        run: |
+          $transcript = Join-Path $env:RUNNER_TEMP 'alzabt-trial-evidence/lifecycle.txt'
+          Start-Transcript -LiteralPath $transcript | Out-Null
+          try { ./scripts/trial-installed-windows.ps1 } finally { Stop-Transcript | Out-Null }
+      - name: Upload synthetic run evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trial-installed-evidence
+          path: ${{ runner.temp }}/alzabt-trial-evidence/
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Quarantine installer after all checks pass
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trial-installer-test-only
+          path: release/Alzabt-POS-TRIAL-TEST-ONLY-Setup-0.1.1.exe
+          if-no-files-found: error
+          retention-days: 3

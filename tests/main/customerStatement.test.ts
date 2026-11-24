@@ -113,6 +113,9 @@ const statementOf = (customerId: string): CustomerStatementDto => {
       sourceKind: r.obligation.sourceKind,
       sourceRef: r.obligation.sourceRef,
       saleId: r.obligation.saleId,
+      // TRANSITION (UX-REF-NUMBERS): the DTO gained `document`; this hand-built statement feeds only the
+      // renderer helpers under test, and these debts are manual, so their document is their reference.
+      document: { kind: "manual" as const, reference: r.obligation.sourceRef },
       postedAt: r.obligation.postedAt,
       settlements: r.settlements.map((st) => ({
         id: st.id,
@@ -125,6 +128,9 @@ const statementOf = (customerId: string): CustomerStatementDto => {
         settledAt: st.settledAt,
         // TRANSITION with migration 18: null unless the row is a share of a receipt (none here).
         receipt: null,
+        // TRANSITION (DEC-35x): a settlement paid from an advance names it; none here. Old shape: without the field.
+        advance: null,
+        collection: null,
       })),
     })),
     balances: [...s.balances.entries()]
@@ -132,6 +138,8 @@ const statementOf = (customerId: string): CustomerStatementDto => {
       .map(([currency, minor]) => ({ minor: minor.toString(), currency })),
     // TRANSITION with migration 17: the statement carries the collections still open (none here).
     pendingCollections: [],
+    // ACC-2: the handler also lists paid sales; none exist in this ledger-only fixture.
+    paidSales: [],
     // TRANSITION with migration 18: receipts still open (none here).
     pendingReceipts: [],
   };
@@ -149,7 +157,10 @@ describe("the statement channel", () => {
     for (const name of Object.keys(CHANNELS) as ChannelName[]) expect(() => accessFor(name)).not.toThrow();
   });
 
-  it("🔴 the ONE money write is a settlement; nothing creates a debt, nothing mentions a supplier", () => {
+  // TRANSITION (SELL-CREDIT, owner 2026-11-08): this was "… nothing creates a debt …". The owner's
+  // `createCustomerCreditSale` now creates one (owner-only, asserted by name in customerIpc.test.ts); the
+  // names below are unchanged — still no bare Obligation / Balance / Settlement channel and no supplier.
+  it("🔴 the ONE money write is a settlement; no bare obligation or balance channel, nothing mentions a supplier", () => {
     // 🔴 TRANSITION, AND THE OLD ASSERTION IS NAMED. Through S3B this read "no channel on this
     // bridge writes money" and forbade "Payment" outright. S3C deliberately ends that: exactly one
     // channel, `recordCustomerPayment`, now writes a settlement.

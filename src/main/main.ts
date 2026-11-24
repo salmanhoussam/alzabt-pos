@@ -6,15 +6,20 @@
  * windows, every permission request denied, and every IPC call checked to come from our own
  * window's top frame.
  */
+import "./trialBootstrap";
+import { SYNTHETIC_TRIAL_IMAGE } from "./syntheticTrialImage";
+import { trialInvoiceSessionPayload } from "./trialPhonePolicy";
 import { createHash, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, dialog, ipcMain, nativeImage, session } from "electron";
-import { PosService, startupCatalog } from "../application/posService";
+import { MAX_HISTORY, PosService, startupCatalog } from "../application/posService";
 import { PHOTO_EXTENSIONS, createProductPhotoPicker, electronCodec } from "./productPhoto";
 import { writeOnlineCatalogPackage, type PackageFs } from "./onlineCatalogPackage";
 import { PhoneSessionBridge } from "./phoneSessionBridge";
+import { PhoneInvoiceStaging } from "./phoneInvoiceStaging";
+import { uprightForReading, uprightThumbnail } from "./invoiceOrientation";
 import { decodeBarcodePhoto } from "./phoneBarcode";
 import { assertStorable, normalizeProductPhoto } from "./photoNormalize";
 import type { OnlineCatalogSnapshot } from "../application/posService";
@@ -23,13 +28,27 @@ import { makeInvoiceCreditPort } from "../application/invoiceCreditPort";
 import { InvoiceService } from "../application/invoiceService";
 import { PartyService } from "../application/partyService";
 import { LedgerService } from "../application/ledgerService";
+import { AdvanceService, formatAdvanceNo } from "../application/advanceService";
+import { SaleReceiptService } from "../application/saleReceiptService";
+import { SaleReceiptRepository } from "../persistence/saleReceiptRepository";
+import { type ReceiptLayout, renderSaleReceiptDocument } from "./saleReceiptDocument";
+import { DailyMoneyService } from "../application/dailyMoneyService";
+import { DailyMoneyRepository } from "../persistence/dailyMoneyRepository";
+import { AdvanceRepository } from "../persistence/advanceRepository";
+import { renderAdvanceDocument } from "./advanceDocument";
+import { advanceDto, correctionDto, refundDto } from "./ipcHandlers";
+import { renderRefundDocument } from "./refundDocument";
+import { renderCollectionDocument } from "./collectionDocument";
+import type { CollectionDocumentDto, SaleReceiptDto } from "../shared/ipcContract";
 import { PartyRepository } from "../persistence/partyRepository";
 import { LedgerRepository } from "../persistence/ledgerRepository";
 import { ReceiptRepository } from "../persistence/receiptRepository";
 import { businessDateOf } from "../domain/businessDay";
 import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
-import { loadCatalog } from "../domain/catalog";
+import { asDemoCatalog, emptyCatalog, loadCatalog } from "../domain/catalog";
+import { decideDemoCatalog, demoCatalogRequested, probeMerchantData } from "./demoCatalog";
+import { readShowcaseMarker } from "./showcaseMarker";
 import { FIXTURE_CASHIERS } from "../fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../fixtures/catalog";
 import { FIXTURE_TERMINAL } from "../fixtures/terminal";
@@ -49,6 +68,7 @@ import { OperatorService } from "../application/operatorService";
 import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
 import { toInvoiceViewDto } from "../shared/dto";
+import { loadInvoicePhoto, readInvoiceImage } from "./invoiceOcr";
 import { renderInvoiceDocument } from "./invoiceDocument";
 import {
   type InvoiceIssuerLogo,
@@ -61,7 +81,6 @@ import { createBackupRestoreActions } from "./backupRestore";
 import { restoreNoticeFor, runPendingRestore } from "./restoreStartup";
 import { RestoreLock } from "./restoreLock";
 import { JOURNAL_FILE, RESTORE_DIR } from "../persistence/restoreEngine";
-import { AUTO_START_MARKER_FILE, applyAutoStart } from "./autoStart";
 import { diag, diagEnabled } from "./diagnostics";
 import { buildLabel, readBuildInfo } from "./buildInfo";
 import { CHANNEL_NAMES, type IpcHandlerOptions, type PickedFile, type SavedFile, createIpcHandlers } from "./ipcHandlers";
@@ -78,6 +97,9 @@ let db: Db | null = null;
 let invoices: InvoiceService | null = null;
 let parties: PartyService | null = null;
 let ledgerService: LedgerService | null = null;
+let advanceService: AdvanceService | null = null;
+/** TILL-PRINT: the one read model of a till receipt (screen, PDF and print). */
+let saleReceiptService: SaleReceiptService | null = null;
 let log: Logger = nullLogger;
 
 /**
@@ -107,10 +129,20 @@ let log: Logger = nullLogger;
  * and the phone can pair but not save, which fails closed rather than crashing.
  */
 let posService: PosService | null = null;
+/**
+ * DEC-35z16 (PILOT): staged supplier-invoice photos from the phone, under `<userData>/phone-invoices`.
+ * Created by `startTill` (it needs the profile path) and read through a getter, like the service.
+ */
+let phoneInvoiceStaging: PhoneInvoiceStaging | null = null;
 
 const phoneSessions = new PhoneSessionBridge({
+  // The runner's phone simulator is local to this VM; no LAN listener is opened.
+  trialLoopback: true,
   get service() {
     return posService ?? undefined;
+  },
+  get invoiceStaging() {
+    return phoneInvoiceStaging ?? undefined;
   },
   /**
    * 🔴 SLICE F'S PIPELINE, VERBATIM — the same two calls `createProductPhotoPicker` makes for a
@@ -156,7 +188,8 @@ function createWindow(): BrowserWindow {
     height: 800,
     minWidth: 1024,
     minHeight: 640,
-    title: "Alzabt POS",
+    title: "Alzabt POS - TRIAL / TEST ONLY",
+    autoHideMenuBar: true,
     backgroundColor: "#f4f5f7",
     show: false,
     webPreferences: {
@@ -168,6 +201,7 @@ function createWindow(): BrowserWindow {
       spellcheck: false,
     },
   });
+  win.on("page-title-updated", (event) => event.preventDefault());
   win.removeMenu();
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   win.webContents.on("will-navigate", (event, url) => {
@@ -510,6 +544,206 @@ async function saveInvoicePdfFile(
   return { fileName: basename(path), logoMissing, logoUnverified };
 }
 
+/**
+ * The ADV- document's HTML, loaded from the ledger BY ID (same rules as the invoice: the renderer
+ * never supplies markup). The shop name is read best-effort; without a profile the receipt still
+ * prints, with the title alone.
+ */
+function advanceHtml(advanceId: string): { html: string; number: string } {
+  if (!advanceService) throw new DomainError("NOT_AVAILABLE", "Customer advances are not available");
+  const doc = advanceService.document(advanceId);
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  const html = renderAdvanceDocument({
+    advance: advanceDto(doc.advance),
+    correction: correctionDto(doc.correction),
+    shopName,
+    timeZone: FIXTURE_TERMINAL.timeZone,
+  });
+  return { html, number: doc.advance.number };
+}
+
+async function withPrintWindow<T>(html: string, name: string, fn: (win: BrowserWindow) => Promise<T>): Promise<T> {
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
+  });
+  const staged = stagePrintable(html, name);
+  try {
+    await win.loadURL(staged.url);
+    return await fn(win);
+  } finally {
+    win.destroy();
+    staged.cleanup();
+  }
+}
+
+async function printAdvanceDocument(advanceId: string): Promise<"printed" | "cancelled"> {
+  const { html, number } = advanceHtml(advanceId);
+  const printed = await withPrintWindow(html, "advance-print", (win) =>
+    new Promise<boolean>((done) => win.webContents.print({ silent: false, printBackground: true }, (ok) => done(ok))),
+  );
+  log.info("advance-printed", { id: advanceId, number, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveAdvancePdfFile(advanceId: string): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const { html, number } = advanceHtml(advanceId);
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save advance receipt PDF",
+    defaultPath: join(app.getPath("documents"), `${number}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(html, "advance-pdf", (win) =>
+    win.webContents.printToPDF({ pageSize: "A5", printBackground: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } }),
+  );
+  writeFileSync(path, pdf);
+  log.info("advance-pdf-saved", { id: advanceId, number, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
+/**
+ * DEC-35z+ — the REF- document's HTML, loaded from the ledger BY ID (owner-checked by the service).
+ * A print or PDF failure here never touches the refund: the money row committed before any window opened.
+ */
+function refundHtml(refundId: string): { html: string; number: string } {
+  if (!advanceService) throw new DomainError("NOT_AVAILABLE", "Customer advances are not available");
+  const view = advanceService.refundDocument(refundId);
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  return { html: renderRefundDocument({ refund: refundDto(view), shopName, timeZone: FIXTURE_TERMINAL.timeZone }), number: view.number };
+}
+
+async function printRefundDocument(refundId: string): Promise<"printed" | "cancelled"> {
+  const { html, number } = refundHtml(refundId);
+  const printed = await withPrintWindow(html, "refund-print", (win) =>
+    new Promise<boolean>((done) => win.webContents.print({ silent: false, printBackground: true }, (ok) => done(ok))),
+  );
+  log.info("refund-printed", { id: refundId, number, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveRefundPdfFile(refundId: string): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const { html, number } = refundHtml(refundId);
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save refund receipt PDF",
+    defaultPath: join(app.getPath("documents"), `${number}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(html, "refund-pdf", (win) =>
+    win.webContents.printToPDF({ pageSize: "A5", printBackground: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } }),
+  );
+  writeFileSync(path, pdf);
+  log.info("refund-pdf-saved", { id: refundId, number, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
+/**
+ * DEC-35z+ COL — the COL- document's HTML from the DTO the IPC handler read from the ledger BY NUMBER
+ * (owner-checked there). Printing records nothing; a print/PDF failure never touches the payment.
+ */
+function collectionHtml(doc: CollectionDocumentDto): string {
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  return renderCollectionDocument({ doc, shopName, timeZone: FIXTURE_TERMINAL.timeZone });
+}
+
+async function printCollectionDocument(doc: CollectionDocumentDto): Promise<"printed" | "cancelled"> {
+  const printed = await withPrintWindow(collectionHtml(doc), "collection-print", (win) =>
+    new Promise<boolean>((done) => win.webContents.print({ silent: false, printBackground: true }, (ok) => done(ok))),
+  );
+  log.info("collection-printed", { number: doc.number, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveCollectionPdfFile(doc: CollectionDocumentDto): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save collection receipt PDF",
+    defaultPath: join(app.getPath("documents"), `${doc.number}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(collectionHtml(doc), "collection-pdf", (win) =>
+    win.webContents.printToPDF({ pageSize: "A5", printBackground: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } }),
+  );
+  writeFileSync(path, pdf);
+  log.info("collection-pdf-saved", { number: doc.number, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
+/**
+ * TILL-PRINT — the till receipt's HTML from the DTO the IPC handler read from the ledger BY SALE ID (visibility
+ * checked there). Printing records nothing; a print/PDF failure never touches the sale.
+ */
+function saleReceiptHtml(doc: SaleReceiptDto, layout: ReceiptLayout, copy: boolean): string {
+  let shopName: string | null = null;
+  try {
+    shopName = invoices?.getCompanyProfile()?.name_ar ?? null;
+  } catch {
+    shopName = null;
+  }
+  return renderSaleReceiptDocument({ receipt: doc, layout, copy, shopName, timeZone: FIXTURE_TERMINAL.timeZone });
+}
+
+/**
+ * D-TP1: the Windows print dialog lets the operator pick ANY installed printer (a thermal one later, at a shop
+ * that has one). With NO printer installed, nothing is opened and the screen offers «Save PDF» instead — the
+ * app never waits on a dialog that cannot print.
+ */
+async function printSaleReceiptDocument(doc: SaleReceiptDto, layout: ReceiptLayout, copy: boolean): Promise<"printed" | "cancelled" | "no-printer"> {
+  const printers = mainWindow ? await mainWindow.webContents.getPrintersAsync() : [];
+  log.info("sale-receipt-print-request", { receipt: doc.sale.receiptNumber, layout, copy, printers: printers.length });
+  if (printers.length === 0) return "no-printer";
+  const printed = await withPrintWindow(saleReceiptHtml(doc, layout, copy), "sale-receipt-print", (win) =>
+    new Promise<boolean>((done) =>
+      win.webContents.print(
+        { silent: false, printBackground: true, ...(layout === "thermal80" ? { pageSize: { width: 80000, height: 297000 } } : { pageSize: "A5" as const }) },
+        (ok) => done(ok),
+      ),
+    ),
+  );
+  log.info("sale-receipt-printed", { receipt: doc.sale.receiptNumber, layout, copy, printed });
+  return printed ? "printed" : "cancelled";
+}
+
+async function saveSaleReceiptPdfFile(doc: SaleReceiptDto, layout: ReceiptLayout, copy: boolean): Promise<SavedFile | null> {
+  if (!mainWindow) return null;
+  const path = dialog.showSaveDialogSync(mainWindow, {
+    title: "Save receipt PDF",
+    defaultPath: join(app.getPath("documents"), `receipt-${doc.sale.receiptNumber}${copy ? "-copy" : ""}.pdf`),
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!path) return null;
+  const pdf = await withPrintWindow(saleReceiptHtml(doc, layout, copy), "sale-receipt-pdf", (win) =>
+    win.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+      ...(layout === "a5" ? { pageSize: "A5" as const } : {}),
+      margins: { top: 0, bottom: 0, left: 0, right: 0 },
+    }),
+  );
+  writeFileSync(path, pdf);
+  log.info("sale-receipt-pdf-saved", { receipt: doc.sale.receiptNumber, layout, copy, bytes: pdf.length });
+  return { fileName: basename(path) };
+}
+
 /** Native "save as" + a verified consistent snapshot of the live ledger (never a raw file copy). */
 function exportBackup(ledgerPath: string): SavedFile | null {
   if (!mainWindow || !db) return null;
@@ -610,16 +844,33 @@ function registerIpc(service: PosService, extra: IpcHandlerOptions): void {
       if (!fromOurWindow) {
         return { ok: false, error: { code: "FORBIDDEN", message: "Unknown sender" } };
       }
+      if (TRIAL_BLOCKED_CHANNELS.has(name)) {
+        return { ok: false, error: { code: "FORBIDDEN", message: "Not available in the synthetic trial" } };
+      }
+      if (name === "startPhoneSession") {
+        // The trial exposes the invoice flow only, even when the unified UI asks
+        // for COMPANION. Keep product-entry and edit sessions unavailable.
+        const invoicePayload = trialInvoiceSessionPayload(payload);
+        if (!invoicePayload) {
+          return { ok: false, error: { code: "FORBIDDEN", message: "Invoice trial only" } };
+        }
+        return handlers[name](invoicePayload);
+      }
       return handlers[name](payload);
     });
   }
 }
 
-// Optional profile override (tests and support only). Must run before the single-instance lock and
-// before `ready`. Without it, the ledger lives in the OS per-user app-data folder.
+// Trial-only: refuse overrides and unknown profiles before creating application logs or acquiring a lock.
+// This JavaScript preflight is not an OS sandbox; Chromium startup and adversarial races need independent review.
+const TRIAL_BLOCKED_CHANNELS = new Set([
+  "importCatalog", "exportCatalog", "exportOnlineCatalog", "exportBackup", "exportFullBackup",
+  "inspectRestoreBackup", "applyRestore", "setProductImage", "pickInvoiceLogo",
+  "printInvoice", "saveInvoicePdf", "printAdvance", "saveAdvancePdf", "printAdvanceRefund",
+  "saveAdvanceRefundPdf", "printCollectionReceipt", "saveCollectionReceiptPdf", "printSaleReceipt",
+  "saveSaleReceiptPdf",
+]);
 const userDataOverride = process.env.ALZABT_POS_USER_DATA;
-if (userDataOverride) app.setPath("userData", userDataOverride);
-
 log = createFileLogger(join(app.getPath("userData"), "logs"));
 log.info("app-start", {
   version: BUILD_INFO.version,
@@ -684,6 +935,25 @@ if (!gotSingleInstanceLock) {
 function startTill(): void {
   const userData = app.getPath("userData");
   const backupDir = join(userData, BACKUP_DIR_NAME);
+  // DEC-35z16 (PILOT): the phone-invoice staging folder, and the crash/restart recovery of any batch
+  // a session left open (kept as `incomplete`, never dropped). Counts only are logged.
+  try {
+    phoneInvoiceStaging = new PhoneInvoiceStaging(join(userData, "phone-invoices"), {
+      decodes: (bytes) => {
+        const img = nativeImage.createFromBuffer(bytes);
+        if (img.isEmpty()) return false;
+        const { width, height } = img.getSize();
+        return width > 0 && height > 0 && width * height <= 80_000_000;
+      },
+      logger: log,
+    });
+    phoneInvoiceStaging.recover();
+    // A reading copy left by a crash mid-reading is removed (it is only ever a temporary upright copy).
+    rmSync(join(userData, "reading-tmp"), { recursive: true, force: true });
+  } catch (err) {
+    phoneInvoiceStaging = null;
+    log.error("phone-invoice-staging-unavailable", { error: err });
+  }
   // 🔴 FIRST, before planLedgerOpen and before any SQLite connection exists in this process: the
   // only moment a ledger file may be replaced. `halted` throws RestoreHaltedError → failStartup, so
   // the till, its services and the phone bridge's service never come up on an undecided profile.
@@ -740,10 +1010,21 @@ function startTill(): void {
   // everything else, because a second connection would not be atomic with the product write.
   const categoryStore = new CategoryRepository(db);
   const productImageStore = new ProductImageRepository(db);
-  const start = startupCatalog(catalogStore, loadCatalog(FIXTURE_CATALOG), FIXTURE_TERMINAL.currency);
-  console.info(`[pos] catalog: ${start.origin}, ${start.catalog.products.length} products`);
-  diag("catalog", { origin: start.origin, products: start.catalog.products.length });
-  log.info("catalog", { origin: start.origin, products: start.catalog.products.length });
+  // 🔴 DEMO-FALLBACK (RISK-24). The sample café catalog is served ONLY under the explicit switch AND
+  // only on a ledger with no merchant data (src/main/demoCatalog.ts). Otherwise a shop with no active
+  // product gets an EMPTY till — never the sample, whose sales used to be recorded as genuine.
+  const demoDecision = decideDemoCatalog(
+    demoCatalogRequested(process.env),
+    probeMerchantData(db, FIXTURE_CATALOG.products.map((p) => p.id)),
+  );
+  const fallbackCatalog =
+    demoDecision.mode === "demo" ? asDemoCatalog(loadCatalog(FIXTURE_CATALOG)) : emptyCatalog(FIXTURE_TERMINAL.currency);
+  const start = startupCatalog(catalogStore, fallbackCatalog, FIXTURE_TERMINAL.currency);
+  const catalogOrigin = start.origin === "local" ? "local" : demoDecision.mode === "demo" ? "demo" : "empty";
+  const demoRefused = demoDecision.mode === "merchant" && demoDecision.demoRefused;
+  console.info(`[pos] catalog: ${catalogOrigin}, ${start.catalog.products.length} products${demoRefused ? " (demo switch IGNORED: merchant data present)" : ""}`);
+  diag("catalog", { origin: catalogOrigin, products: start.catalog.products.length, demoRefused });
+  log.info("catalog", { origin: catalogOrigin, products: start.catalog.products.length, demoRefused });
   // Operator settings (language) live in a small JSON file beside the ledger, not in it.
   const settings = new SettingsStore(userData);
   log.info("settings", { ...settings.get() });
@@ -764,6 +1045,7 @@ function startTill(): void {
     repository: saleStore,
     pinStates: new PinStateRepository(db),
     catalog: start.catalog,
+    fallbackCatalog,
     catalogStore,
     categories: categoryStore,
     productImages: productImageStore,
@@ -868,14 +1150,108 @@ function startTill(): void {
   });
   creditSaleServices = { parties, ledger: ledgerService };
 
+  // Customer advances (migration 20): the SAME connection, the SAME transaction provider and the
+  // SAME live actor as the ledger above. The service owns who may record (owner + cashier) and who
+  // may correct (owner); the triggers enforce both again.
+  advanceService = new AdvanceService({
+    advances: new AdvanceRepository(db),
+    ledger: new LedgerRepository(db),
+    parties: new PartyRepository(db),
+    actor: () => {
+      const cashier = service.currentCashier();
+      if (!cashier) return null;
+      const role = service.currentRole();
+      return role === null ? null : { id: cashier.id, name: cashier.name, role };
+    },
+    transact: (fn) => {
+      if (!db) throw new Error("ledger is not open");
+      restoreLock.assertOpen();
+      return db.transaction(fn).immediate();
+    },
+    terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
+    // DEC-35x: the till's own owner-only credit sale, run inside the advance transaction.
+    creditSale: (input) => service.createCustomerCreditSale(input),
+  });
+
+  // TILL-PRINT (D-TP2): the SAME live role as everything else; History's own window for non-owners.
+  saleReceiptService = new SaleReceiptService({
+    reads: new SaleReceiptRepository(db),
+    getSale: (id) => service.getSale(id),
+    role: () => service.currentRole(),
+    historyWindow: MAX_HISTORY,
+    formatAdvanceNo,
+  });
+
+  // DAILY MONEY IN / OUT (DEC-35x): read-only, the SAME connection and the SAME live actor. No
+  // transaction provider — it never writes.
+  const dailyMoney = new DailyMoneyService({
+    repository: new DailyMoneyRepository(db),
+    actor: () => {
+      const cashier = service.currentCashier();
+      if (!cashier) return null;
+      const role = service.currentRole();
+      return role === null ? null : { id: cashier.id, role };
+    },
+    terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
+  });
+
   // The phone bridge reads this through its getter when a session starts.
   posService = service;
 
+  // SHOWCASE MARKER: read once, never written by the app. Logged so a support check can see why a
+  // banner shows. Independent of the DEMO-FALLBACK decision above, which it cannot influence.
+  const showcaseProfile = readShowcaseMarker(userData);
+  log.info("showcase", { showcaseProfile });
   registerIpc(service, {
+    showcaseProfile,
     invoices,
     parties,
     ledger: ledgerService,
+    advances: advanceService,
+    dailyMoney,
+    printAdvance: printAdvanceDocument,
+    saveAdvancePdf: saveAdvancePdfFile,
+    printAdvanceRefund: printRefundDocument,
+    saveAdvanceRefundPdf: saveRefundPdfFile,
+    printCollectionReceipt: printCollectionDocument,
+    saleReceipts: saleReceiptService ?? undefined,
+    printSaleReceipt: printSaleReceiptDocument,
+    saveSaleReceiptPdf: saveSaleReceiptPdfFile,
+    saveCollectionReceiptPdf: saveCollectionPdfFile,
     pickInvoiceLogo,
+    // PHOTO-INVOICE-TO-ITEMS: picker + OFFLINE OCR in main; returns lines only, writes nothing.
+    readInvoicePhoto: async (mode, phoneInvoice, orient) => {
+      // DEC-35z16: a photo from the phone-invoice queue goes through the SAME readers as a picked file.
+      // PHONE-INVOICE-ORIENTATION-01: every source is read UPRIGHT — its EXIF orientation applied, then
+      // the operator's quarter-turns — from a private copy deleted right after the reading.
+      let file: string;
+      let turns = orient?.quarterTurns;
+      if (phoneInvoice) {
+        if (!phoneInvoiceStaging) throw new DomainError("NOT_AVAILABLE", "Supplier invoices from a phone are not available on this terminal");
+        file = phoneInvoiceStaging.pathOf(phoneInvoice.batchId, phoneInvoice.id);
+        // A rotation is remembered for THIS invoice; without one, its saved rotation is used.
+        if (turns === undefined) turns = phoneInvoiceStaging.turnsOf(phoneInvoice.batchId, phoneInvoice.id);
+        else phoneInvoiceStaging.setTurns(phoneInvoice.batchId, phoneInvoice.id, turns);
+      } else {
+        // Only an embedded synthetic image is available from the desktop entry;
+        // never show a picker or accept an external pathname in this trial.
+        file = join(userData, "synthetic-trial-invoice.png");
+        if (!existsSync(file)) writeFileSync(file, Buffer.from(SYNTHETIC_TRIAL_IMAGE, "base64"), { flag: "wx" });
+      }
+      const up = uprightForReading(readFileSync(file), turns ?? 0, electronCodec(nativeImage));
+      const read = (path: string) => (mode === "photo-only" ? loadInvoicePhoto(path) : readInvoiceImage(path, userData));
+      const orientation = { exif: up.exifOrientation, quarterTurns: up.turns };
+      if (!up.jpeg) return { ...(await read(file)), orientation };
+      const dir = join(userData, "reading-tmp");
+      mkdirSync(dir, { recursive: true });
+      const copy = join(dir, `${randomBytes(12).toString("hex")}.jpg`);
+      writeFileSync(copy, up.jpeg);
+      try {
+        return { ...(await read(copy)), orientation };
+      } finally {
+        rmSync(copy, { force: true });
+      }
+    },
     pickProductPhoto,
     printInvoice: printInvoiceDocument,
     saveInvoicePdf: saveInvoicePdfFile,
@@ -916,6 +1292,33 @@ function startTill(): void {
     // one. Created unconditionally because a till with a window can always serve a phone — the
     // refusal, when there is no network, comes from the address selection with a real sentence.
     phoneSessions: phoneSessions,
+    // DEC-35z16 (PILOT): the queue lists and releases staged FILES; thumbnails are made here, small.
+    phoneInvoices: phoneInvoiceStaging
+      ? {
+          list: () =>
+            phoneInvoiceStaging!.pending().map((p) => {
+              let thumbnail: string | null = null;
+              try {
+                // PHONE-INVOICE-ORIENTATION-01: upright (EXIF + this invoice's saved turns), shrunk before turning.
+                const jpeg = uprightThumbnail(readFileSync(phoneInvoiceStaging!.pathOf(p.batchId, p.id)), p.quarterTurns, electronCodec(nativeImage));
+                if (jpeg) thumbnail = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+              } catch {
+                thumbnail = null;
+              }
+              return {
+                batchId: p.batchId,
+                id: p.id,
+                bytes: p.bytes,
+                receivedAt: new Date(p.receivedAtMs).toISOString(),
+                batchStatus: p.batchStatus,
+                stale: p.stale,
+                thumbnail,
+                quarterTurns: p.quarterTurns,
+              };
+            }),
+          release: (batchId, id, why) => phoneInvoiceStaging!.release(batchId, id, why),
+        }
+      : undefined,
     appInfo: () => ({ version: BUILD_INFO.version, build: BUILD_INFO.build }),
     afterSale: maybeDailyBackup,
     logger: log,
@@ -931,23 +1334,30 @@ function startTill(): void {
   if (notice) {
     const win = mainWindow;
     win.once("ready-to-show", () => {
-      void dialog.showMessageBox(win, { type: restore.kind === "restored" ? "info" : "warning", title: notice.title, message: notice.title, detail: notice.body, buttons: ["OK"], noLink: true });
+      // Diagnostics only (DEC-35y review): WHEN the notice was handed to Windows and when it was closed,
+      // so a test that does not see it can tell "never shown" from "shown late" or "not enumerated".
+      // DEC-35zz+ investigation (diagnostics only, opt-in): the window's state when the box is handed over and
+      // when it returns, which button answered it, and every hide / blur / minimize / close of the main
+      // window while it is open — so "who closed the notice" is answered from evidence, not guessed.
+      const winState = () => (win.isDestroyed() ? { destroyed: true } : { visible: win.isVisible(), focused: win.isFocused(), minimized: win.isMinimized() });
+      diag("restore-notice-shown", { kind: restore.kind, ...winState() });
+      const watch = ["blur", "focus", "hide", "show", "minimize", "restore", "close"] as const;
+      const listeners = watch.map((ev) => {
+        const fn = () => diag(`restore-notice-window-${ev}`, { kind: restore.kind });
+        win.on(ev as "blur", fn);
+        return [ev, fn] as const;
+      });
+      void dialog
+        .showMessageBox(win, { type: restore.kind === "restored" ? "info" : "warning", title: notice.title, message: notice.title, detail: notice.body, buttons: ["OK"], noLink: true })
+        .then((r) => {
+          diag("restore-notice-closed", { kind: restore.kind, response: r.response, ...winState() });
+          if (!win.isDestroyed()) for (const [ev, fn] of listeners) win.removeListener(ev as "blur", fn);
+        });
     });
   }
 
-  // Best-effort, after the till is already up: a failure here is logged, never fatal.
-  const autoStart = applyAutoStart({
-    app: { setLoginItemSettings: (settings) => app.setLoginItemSettings(settings) },
-    store: { exists: existsSync, write: (path, contents) => writeFileSync(path, contents, "utf8") },
-    markerPath: join(app.getPath("userData"), AUTO_START_MARKER_FILE),
-    executablePath: process.execPath,
-    platform: process.platform,
-    isPackaged: app.isPackaged,
-    env: process.env,
-    now: () => new Date(),
-  });
-  console.info("[pos] auto-start:", JSON.stringify(autoStart));
-  log.info("auto-start", { ...autoStart });
+  // Trial never registers a Windows login item.
+
 }
 
 function failStartup(err: unknown): void {

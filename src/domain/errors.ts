@@ -53,6 +53,11 @@ export type DomainErrorCode =
   | "INVOICE_NOT_FOUND"
   | "INVOICE_NOT_DRAFT"
   | "INVOICE_NOT_FINALIZABLE"
+  /** R5: the persisted draft is not the one the issue confirmation showed (`shared/invoiceConfirmation.ts`). */
+  | "INVOICE_CONFIRMATION_STALE"
+  | "INVOICE_CONFIRMATION_REQUIRED"
+  | "INVOICE_CONFIRMATION_UNVERIFIABLE"
+  | "INVOICE_TAX_CONFIRMATION_REQUIRED"
   | "COMPANY_PROFILE_REQUIRED"
   | "INVOICE_NUMBERING_LOCKED"
   | "RECONCILIATION_NOT_FOUND"
@@ -76,6 +81,8 @@ export type DomainErrorCode =
   | "CREDIT_OWNER_ONLY"
   | "CREDIT_NEEDS_CUSTOMER"
   | "CREDIT_NEEDS_UNPAID"
+  | "CREDIT_PARTIAL_NEEDS_ACCOUNT"
+  | "CREDIT_NOTHING_OWED"
   | "CREDIT_NOT_ISSUED"
   // Migration 17 — collection details. Each its own sentence the owner can act on.
   | "FUNDS_NOT_CONFIRMED"
@@ -87,6 +94,58 @@ export type DomainErrorCode =
   | "RECEIPT_NEEDS_TWO_DEBTS"
   | "RECEIPT_ALLOCATION_MISMATCH"
   | "RECEIPT_CHANNEL_NOT_ALLOWED"
+  // DEC-35 / P3 — a NEW payment by a method the shop no longer accepts (card, other, bank transfer).
+  // History is never refused or re-labelled; only a new write is.
+  | "PAYMENT_METHOD_NOT_ACCEPTED"
+  // SELL-PARTIAL-DEBT (owner, 2026-11-08) — the amount received now on a sale on account. Two codes,
+  // two different corrections: "type more than zero" vs "less than the total, or it is a paid sale".
+  | "DOWN_PAYMENT_INVALID"
+  | "DOWN_PAYMENT_NOT_PARTIAL"
+  // SELL-SPLIT-CASH-WHISH (owner, 2026-11-09) — a sale paid in full by cash + Whish Money. Two
+  // corrections: "each part above zero" vs "the two parts must add up to the total exactly".
+  | "SPLIT_AMOUNT_INVALID"
+  | "SPLIT_TOTAL_MISMATCH"
+  // INV-PAY-METHOD (owner, 2026-11-09) — an invoice marked (part-)paid must say, at issue, how the money
+  // arrived (cash, or Whish with its evidence). Its own sentence: the fix is "choose a method".
+  | "INVOICE_PAYMENT_METHOD_REQUIRED"
+  // Migration 20 (DEC-35r) — an earlier advance for this customer was started and its outcome has not
+  // been settled (finished under its own key, or closed as not received). Its own sentence: the fix is
+  // "resolve the pending advance", which is not the collection's sentence.
+  | "ADVANCE_UNRESOLVED"
+  // Migration 20 G2 (DEC-35s) — correcting a mistaken advance. Each its own sentence and its own fix:
+  // the advance does not exist / was already corrected / is already used (apply or refund) / the
+  // corrected amount is ABOVE what was recorded (the extra of one transfer cannot reuse its reference:
+  // owner review, never a second receipt).
+  | "ADVANCE_NOT_FOUND"
+  | "ADVANCE_ALREADY_CORRECTED"
+  | "ADVANCE_IN_USE"
+  | "ADVANCE_CORRECTION_ABOVE_ORIGINAL"
+  // DEC-35x — APPLY AN ADVANCE TO AN EXISTING DEBT (owner only). Each its own sentence and its own fix:
+  // the debt does not exist / belongs to another customer / owes nothing (settled, or its sale voided) /
+  // is in another currency / the amount is above the advance's unused balance / above what the debt
+  // still owes / the advance was corrected (its successor, if any, is the one to apply).
+  | "ADVANCE_DEBT_NOT_FOUND"
+  | "ADVANCE_DEBT_OTHER_CUSTOMER"
+  | "ADVANCE_DEBT_NOT_OPEN"
+  | "ADVANCE_DEBT_CURRENCY"
+  | "ADVANCE_APPLY_ABOVE_BALANCE"
+  | "ADVANCE_APPLY_ABOVE_DEBT"
+  | "ADVANCE_CORRECTED_NOT_APPLICABLE"
+  // DEC-35z+ REF — a cash refund of an advance (owner only). Its own sentences, not the application's:
+  // the refund document does not exist / the amount is above the unused balance / the advance was
+  // corrected (it has no balance; a successor, if any, is the one that holds the money).
+  | "ADVANCE_REFUND_NOT_FOUND"
+  | "ADVANCE_REFUND_ABOVE_BALANCE"
+  | "ADVANCE_CORRECTED_NOT_REFUNDABLE"
+  // DEC-35zz++ REF Option A — a SECOND refund of the same advance on the same business day needs the owner's
+  // explicit "this is a NEW refund, not the earlier one again". Its own sentence: the fix is to look at the
+  // earlier REF- (already recorded; its cash must not be handed over twice), not to retry.
+  | "ADVANCE_REFUND_REPEAT_UNCONFIRMED"
+  // DEC-35z+ COL — a COL- receipt asked for by number that does not exist (never "issued" by a print).
+  | "COLLECTION_DOCUMENT_NOT_FOUND"
+  // PHOTO-INVOICE-TO-ITEMS (DEC-35u): the offline reading of an invoice photo failed. Its own code: the fix is
+  // "try again or enter the items by hand", and the POS keeps running.
+  | "OCR_FAILED"
   | "LAST_OWNER_PROTECTED"
   | "SELF_ROLE_CHANGE"
   // Migration 11. Its own code rather than reusing SELF_ROLE_CHANGE: the refused act is different,
@@ -103,6 +162,16 @@ export interface CustomerPaymentOverpaymentContext {
   readonly outstandingMinor: bigint;
   readonly currency: string;
 }
+
+/**
+ * I18N-LOGIN-PIN (DEC-33 #3): the numbers a PIN refusal carries, as DATA — so the Arabic screen can say
+ * them without parsing the English sentence (refusalText.ts rule (b)). Attached by `PosService.login`
+ * only; the English message is unchanged.
+ */
+export type LoginRefusalContext =
+  | { readonly reason: "LOGIN_PIN_WRONG"; readonly attemptsLeft: number; readonly lockMinutes: number }
+  | { readonly reason: "LOGIN_PIN_LOCKED"; readonly minutesRemaining: number }
+  | { readonly reason: "LOGIN_UNKNOWN_OPERATOR" };
 
 export class DomainError extends Error {
   /**
@@ -121,7 +190,7 @@ export class DomainError extends Error {
    */
   readonly code: DomainErrorCode;
   readonly reason?: string;
-  readonly context?: CustomerPaymentOverpaymentContext;
+  readonly context?: CustomerPaymentOverpaymentContext | LoginRefusalContext;
 
   constructor(code: DomainErrorCode, message: string);
   constructor(code: DomainErrorCode, message: string, reason: string);
@@ -131,11 +200,12 @@ export class DomainError extends Error {
     reason: "CUSTOMER_PAYMENT_EXCEEDS_OUTSTANDING",
     context: CustomerPaymentOverpaymentContext,
   );
+  constructor(code: DomainErrorCode, message: string, reason: LoginRefusalContext["reason"], context: LoginRefusalContext);
   constructor(
     code: DomainErrorCode,
     message: string,
     reason?: string,
-    context?: CustomerPaymentOverpaymentContext,
+    context?: CustomerPaymentOverpaymentContext | LoginRefusalContext,
   ) {
     super(message);
     this.code = code;

@@ -102,8 +102,9 @@ describe("what the form offers", () => {
   // 🔴 TRANSITION with migration 17 (M17A): this pinned CASH ONLY. The form now offers exactly five
   // channels; 'credit' (a state) and 'external' (a stored value, not a channel) are still never a
   // choice, and the method sent is the owner's selection, never a literal.
-  it("🔴 offers exactly the five channels — never credit, never a bare 'external'", () => {
-    expect(STATEMENT).toContain('["cash", "card", "whish", "bank_transfer", "other"]');
+  it("🔴 offers exactly cash and Whish (P3, DEC-35) — never credit, never a bare 'external'", () => {
+    // TRANSITION (P3): was the five channels ["cash", "card", "whish", "bank_transfer", "other"].
+    expect(STATEMENT).toContain('const COLLECTION_METHODS: ReadonlyArray<CollectionMethodDto> = ["cash", "whish"];');
     expect(STATEMENT).not.toMatch(/method: "cash"/);
     expect(STATEMENT).toMatch(/\n\s+method,\n/);
     expect(STATEMENT.toLowerCase()).not.toContain("credit");
@@ -157,7 +158,9 @@ describe("the words and the contract", () => {
     const used = Object.keys(CHANNELS).filter((c) => STATEMENT.includes(`pos().${c}(`));
     // 🔴 TRANSITION with M17B-S1: "exactly one money-writing channel" is now a CLOSED, NAMED list of two.
     // The second shares one real external receipt across debts; it is not reachable from anywhere else.
-    expect(used.sort()).toEqual(["getCustomerStatement", "recordAllocatedReceipt", "recordCustomerPayment"]);
+    // 🔴 TRANSITION (DEC-35z+ COL): + getCollectionReceipt — a READ of a COL- document by number (reprint from
+    // a statement row); it writes no money. The money writers stay exactly the two. Old list: without it.
+    expect(used.sort()).toEqual(["getCollectionReceipt", "getCustomerStatement", "recordAllocatedReceipt", "recordCustomerPayment"]);
   });
 });
 
@@ -173,7 +176,8 @@ describe("payment methods on the collection form (source-level)", () => {
   it("🔴 the confirmation is sent as the owner's choice, and is required for whish, bank transfer and other", () => {
     expect(STATEMENT).toMatch(/method === "whish" \|\| method === "bank_transfer" \|\| method === "other"/);
     expect(STATEMENT).toContain("fundsConfirmed: needsConfirmation ? confirmed : false");
-    expect(STATEMENT).toContain('t("collect.confirmRequired")');
+    // TRANSITION (QW-COLLECT-LAYOUT): was t("collect.confirmRequired"); the one explanation is collect.confirmMissing.
+    expect(STATEMENT).toContain('t("collect.confirmMissing")');
     expect(STATEMENT).toContain('t("collect.referenceRequired")');
   });
   it("🔴 a different method, reference or confirmation is a different payment and takes a new key — except while an outcome is UNKNOWN, when the fields are frozen", () => {

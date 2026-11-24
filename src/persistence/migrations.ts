@@ -18,6 +18,30 @@ export interface Migration {
   readonly sql: string;
 }
 
+/**
+ * D-REF-1 (owner, 2026-11-07): the ONE normalization of a Whish / bank reference, as SQL, so a legacy
+ * backfill and every live registration compute the identical key. Arabic-Indic (U+0660–0669) and
+ * Extended Arabic-Indic (U+06F0–06F9) digits → ASCII; spaces (incl. no-break), '-', '_', '/', '.'
+ * removed; Latin letters upper-cased. Every OTHER character is KEPT (Arabic letters, '#', …): owner
+ * decision D-REF-1 = B (2026-11-07), because merchants type references such as «WH-2026/10 #55» and
+ * «مرجع 77» today. The only rule on a live key is that it is not empty (CHECK on the table).
+ */
+/**
+ * Exported (P2) ONLY so a read can ask the registry with the IDENTICAL normalisation the triggers use;
+ * exporting changes no migration's SQL and therefore no checksum.
+ */
+export function M19_REF_KEY(expr: string): string {
+  let e = expr;
+  const arabicIndic = "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669";
+  const extended = "\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9";
+  for (let d = 0; d <= 9; d++) {
+    e = `replace(${e}, '${arabicIndic[d]}', '${d}')`;
+    e = `replace(${e}, '${extended[d]}', '${d}')`;
+  }
+  for (const sep of [" ", "\u00A0", "-", "_", "/", "."]) e = `replace(${e}, '${sep}', '')`;
+  return `upper(${e})`;
+}
+
 export const MIGRATIONS: ReadonlyArray<Migration> = [
   {
     version: 1,
@@ -2240,6 +2264,627 @@ CREATE TRIGGER receipt_attempt_lines_immutable_update BEFORE UPDATE ON receipt_a
 BEGIN SELECT RAISE(ABORT, 'ledger: a receipt attempt line is immutable'); END;
 CREATE TRIGGER receipt_attempt_lines_immutable_delete BEFORE DELETE ON receipt_attempt_lines
 BEGIN SELECT RAISE(ABORT, 'ledger: a receipt attempt line cannot be deleted'); END;
+`,
+  },
+  {
+    version: 19,
+    name: "payment_model_tenders_references_advances",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 19 — the unified payment model (owner design v3, decisions D-P1a D-P1b D-P2a D-P4a
+    // D-P4b D-P5a D-P6a D-REF-1 D-REF-2, 2026-11-07). Schema only: no checkout, collection, advance or
+    // refund code path uses it yet; every existing write path keeps working byte-for-byte.
+    //
+    // 1. `sales` is REBUILT, exactly as migration 14 did (same ordering, same rule: never rename the
+    //    old parent). Two changes only: a new column `tender_count` (0 = a legacy sale whose method is
+    //    `payment_method`, as every existing row and the current till write; 1..8 = the tenders in
+    //    `sale_tenders` are authoritative), and the method CHECK accepting a multi-tender sale with a
+    //    NULL method. NOTHING is backfilled into `sale_tenders`: an old sale keeps exactly the method
+    //    it was recorded with, and no tender row is invented for it (owner condition 3).
+    //    The rebuild VERIFIES ITSELF: every row is compared column-by-column, typed, against a copy
+    //    taken before the drop; a single difference fails a CHECK on `m19_assert` and the whole
+    //    migration rolls back (the runner wraps it in BEGIN IMMEDIATE).
+    // 2. Every trigger that reads `sales` is recreated VERBATIM, except one deliberate change:
+    //    `obligations_invoice_sale_match` now accepts a PARTLY paid invoice whose receivable equals its
+    //    balance (D-P2a: the remainder of a partly paid invoice becomes the customer's debt). Before, a
+    //    receivable was accepted only when nothing was paid.
+    // 3. New: `sale_tenders` (D-P1a/b, ≤ 8 per sale, sealed by the sale row), `external_references`
+    //    (D-REF: one normalized Whish / bank reference once across every money table; existing
+    //    references registered as LEGACY, kept as history, never edited; a new use of a legacy key is
+    //    refused), `document_numbers` + `collection_documents` (D-P4a/b: COL- / ADV- / REF-, never
+    //    restarted, issued in order), `customer_advances`, `advance_applications`, `advance_refunds`
+    //    (D-P5a FINAL: refund CASH ONLY and OWNER ONLY — enforced HERE, against the operator row, so a
+    //    cashier is refused even below the service).
+    // Customer advances are merchant accounting. They are not, and never share anything with,
+    // SalmanSaaS online-service credits (DEC-28 §5).
+    sql: `
+PRAGMA defer_foreign_keys = ON;
+
+CREATE TEMP TABLE m19_assert (what TEXT NOT NULL, ok INTEGER NOT NULL CHECK (ok = 1));
+
+CREATE TEMP TABLE m19_sales_before AS
+SELECT id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+       cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+       balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+       created_at, customer_id, customer_name_snapshot
+FROM sales;
+
+DROP TRIGGER sale_lines_closed_sale;
+DROP TRIGGER sale_lines_pos_shape;
+DROP TRIGGER sale_lines_invoice_shape;
+DROP TRIGGER obligations_sale_customer_match;
+DROP TRIGGER obligations_invoice_sale_match;
+
+DROP TABLE sales;
+
+CREATE TABLE sales (
+  id                  TEXT    PRIMARY KEY,
+  receipt_number      INTEGER NOT NULL UNIQUE CHECK (receipt_number > 0),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL,
+  source_type         TEXT    NOT NULL CHECK (source_type IN ('pos', 'invoice')),
+  invoice_id          TEXT    UNIQUE REFERENCES invoices (id),
+  cashier_id          TEXT    NOT NULL,
+  cashier_name        TEXT    NOT NULL,
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  subtotal_minor      INTEGER NOT NULL CHECK (subtotal_minor >= 0),
+  tax_minor           INTEGER NOT NULL CHECK (tax_minor >= 0),
+  total_minor         INTEGER NOT NULL CHECK (total_minor >= 0),
+  paid_minor          INTEGER NOT NULL CHECK (paid_minor >= 0),
+  balance_due_minor   INTEGER NOT NULL CHECK (balance_due_minor >= 0),
+  payment_status      TEXT    NOT NULL CHECK (payment_status IN ('paid', 'partial', 'unpaid')),
+  payment_method      TEXT    CHECK (payment_method IS NULL
+                                     OR payment_method IN ('cash', 'card', 'external', 'other')),
+  line_count          INTEGER NOT NULL CHECK (line_count > 0),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  completed_at        TEXT    NOT NULL,
+  created_at          TEXT    NOT NULL,
+  customer_id         TEXT,
+  customer_name_snapshot TEXT
+      CHECK (customer_name_snapshot IS NULL OR length(trim(customer_name_snapshot)) > 0),
+  customer_kind       TEXT    GENERATED ALWAYS AS ('customer') STORED,
+  tender_count        INTEGER NOT NULL DEFAULT 0 CHECK (tender_count BETWEEN 0 AND 8),
+  CHECK (total_minor = subtotal_minor + tax_minor),
+  CHECK (paid_minor + balance_due_minor = total_minor),
+  CHECK (
+    (payment_status = 'paid'    AND balance_due_minor = 0)
+    OR (payment_status = 'unpaid'  AND paid_minor = 0 AND balance_due_minor > 0)
+    OR (payment_status = 'partial' AND paid_minor > 0 AND balance_due_minor > 0)
+  ),
+  CHECK (source_type = 'invoice' OR payment_method IS NOT NULL
+      OR (payment_status = 'unpaid' AND paid_minor = 0
+          AND balance_due_minor = total_minor AND customer_id IS NOT NULL
+          AND customer_name_snapshot IS NOT NULL)
+      OR (tender_count >= 2 AND paid_minor > 0)),
+  CHECK (tender_count = 0
+      OR (tender_count = 1 AND payment_method IS NOT NULL AND paid_minor > 0)
+      OR (tender_count >= 2 AND payment_method IS NULL AND paid_minor > 0)),
+  CHECK ((source_type = 'invoice' AND invoice_id IS NOT NULL)
+      OR (source_type = 'pos' AND invoice_id IS NULL)),
+  CHECK ((customer_id IS NULL AND customer_name_snapshot IS NULL)
+      OR (source_type = 'pos' AND customer_id IS NOT NULL
+          AND customer_name_snapshot IS NOT NULL)),
+  FOREIGN KEY (customer_id, customer_kind) REFERENCES parties (id, kind)
+) STRICT;
+
+INSERT INTO sales (
+  id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+  cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+  balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+  created_at, customer_id, customer_name_snapshot
+)
+SELECT
+  id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+  cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+  balance_due_minor, payment_status, payment_method, line_count, business_date, completed_at,
+  created_at, customer_id, customer_name_snapshot
+FROM m19_sales_before;
+
+INSERT INTO m19_assert
+SELECT 'sales: same row count', (SELECT count(*) FROM sales) = (SELECT count(*) FROM m19_sales_before);
+INSERT INTO m19_assert
+SELECT 'sales: every row identical, column by column, typed',
+  NOT EXISTS (
+    SELECT id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+           cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+           balance_due_minor, payment_status, payment_method, line_count, business_date,
+           completed_at, created_at, customer_id, customer_name_snapshot
+    FROM sales
+    EXCEPT SELECT * FROM m19_sales_before)
+  AND NOT EXISTS (
+    SELECT * FROM m19_sales_before
+    EXCEPT
+    SELECT id, receipt_number, idempotency_key, request_fingerprint, source_type, invoice_id,
+           cashier_id, cashier_name, currency, subtotal_minor, tax_minor, total_minor, paid_minor,
+           balance_due_minor, payment_status, payment_method, line_count, business_date,
+           completed_at, created_at, customer_id, customer_name_snapshot
+    FROM sales);
+INSERT INTO m19_assert
+SELECT 'sales: no tender invented for an existing sale', NOT EXISTS (SELECT 1 FROM sales WHERE tender_count <> 0);
+
+DROP TABLE m19_sales_before;
+
+CREATE INDEX sales_business_date ON sales (business_date);
+CREATE INDEX sales_source_type ON sales (source_type, completed_at DESC);
+
+CREATE TRIGGER sales_immutable_update BEFORE UPDATE ON sales
+BEGIN SELECT RAISE(ABORT, 'ledger: completed sales are immutable'); END;
+CREATE TRIGGER sales_immutable_delete BEFORE DELETE ON sales
+BEGIN SELECT RAISE(ABORT, 'ledger: completed sales cannot be deleted'); END;
+
+CREATE TRIGGER sale_lines_closed_sale BEFORE INSERT ON sale_lines
+WHEN (SELECT count(*) FROM sale_lines WHERE sale_id = NEW.sale_id)
+     >= (SELECT line_count FROM sales WHERE id = NEW.sale_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: sale already holds all of its lines'); END;
+
+CREATE TRIGGER sale_lines_pos_shape BEFORE INSERT ON sale_lines
+WHEN (SELECT source_type FROM sales WHERE id = NEW.sale_id) = 'pos'
+ AND (NEW.product_id IS NULL
+      OR NEW.sku IS NULL
+      OR NEW.sale_unit IS NULL
+      OR NEW.invoice_line_id IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'ledger: a POS sale line requires its product, sku and unit'); END;
+
+CREATE TRIGGER sale_lines_invoice_shape BEFORE INSERT ON sale_lines
+WHEN (SELECT source_type FROM sales WHERE id = NEW.sale_id) = 'invoice'
+ AND (NEW.invoice_line_id IS NULL OR length(trim(NEW.product_name)) = 0)
+BEGIN SELECT RAISE(ABORT, 'ledger: an invoice-origin sale line must name its invoice line and description'); END;
+
+CREATE TRIGGER sales_pos_unpaid_requires_no_tender BEFORE INSERT ON sales
+WHEN NEW.source_type = 'pos' AND NEW.payment_status = 'unpaid'
+ AND NEW.payment_method IS NOT NULL AND NEW.paid_minor = 0
+ AND NEW.balance_due_minor = NEW.total_minor
+ AND NEW.total_minor = NEW.subtotal_minor + NEW.tax_minor
+BEGIN SELECT RAISE(ABORT, 'ledger: an unpaid POS sale cannot record a tender'); END;
+
+CREATE TRIGGER sales_credit_requires_active_customer BEFORE INSERT ON sales
+WHEN NEW.source_type = 'pos' AND NEW.payment_status = 'unpaid'
+ AND NEW.payment_method IS NULL AND NEW.paid_minor = 0
+ AND NEW.balance_due_minor = NEW.total_minor
+ AND NEW.total_minor = NEW.subtotal_minor + NEW.tax_minor
+ AND NOT EXISTS (
+   SELECT 1 FROM parties
+   WHERE id = NEW.customer_id AND kind = 'customer' AND is_active = 1
+     AND display_name = NEW.customer_name_snapshot
+ )
+BEGIN SELECT RAISE(ABORT, 'ledger: a credit sale requires its active customer snapshot'); END;
+
+CREATE TRIGGER obligations_sale_customer_match BEFORE INSERT ON obligations
+WHEN NEW.source_kind = 'sale'
+ AND EXISTS (
+   SELECT 1 FROM sales AS s
+   WHERE s.id = NEW.sale_id AND s.source_type = 'pos' AND s.customer_id IS NOT NULL
+     AND (s.customer_id <> NEW.party_id OR s.currency <> NEW.currency
+          OR s.balance_due_minor <> NEW.amount_minor
+          OR NEW.direction <> 'receivable' OR NEW.party_kind <> 'customer')
+ )
+BEGIN SELECT RAISE(ABORT, 'ledger: sale obligation does not match sale identity or balance'); END;
+
+CREATE TRIGGER obligations_invoice_sale_match BEFORE INSERT ON obligations
+WHEN NEW.source_kind = 'sale'
+ AND EXISTS (SELECT 1 FROM sales WHERE id = NEW.sale_id AND source_type = 'invoice')
+ AND NOT EXISTS (
+   SELECT 1 FROM sales AS s JOIN invoices AS i ON i.id = s.invoice_id
+   WHERE s.id = NEW.sale_id AND i.customer_party_id = NEW.party_id
+     AND NEW.direction = 'receivable' AND NEW.party_kind = 'customer'
+     AND s.currency = NEW.currency
+     AND s.payment_status IN ('unpaid', 'partial') AND s.balance_due_minor = NEW.amount_minor
+ )
+BEGIN SELECT RAISE(ABORT, 'ledger: an invoice receivable must match its invoice customer, currency and unpaid balance'); END;
+
+-- A NEW till sale that leaves a balance must name its customer (D-P2a): never an anonymous debt.
+CREATE TRIGGER sales_pos_balance_requires_customer BEFORE INSERT ON sales
+WHEN NEW.source_type = 'pos' AND NEW.balance_due_minor > 0 AND NEW.customer_id IS NULL
+BEGIN SELECT RAISE(ABORT, 'ledger: a sale that leaves a balance must name its customer'); END;
+
+-- ── Tenders (D-P1a / D-P1b) ───────────────────────────────────────────────────────────────────
+CREATE TABLE sale_tenders (
+  sale_id         TEXT    NOT NULL REFERENCES sales (id) DEFERRABLE INITIALLY DEFERRED,
+  seq             INTEGER NOT NULL CHECK (seq BETWEEN 1 AND 8),
+  method          TEXT    NOT NULL CHECK (method IN ('cash', 'card', 'external', 'other')),
+  provider        TEXT    CHECK (provider IS NULL OR provider IN ('whish', 'bank_transfer')),
+  reference       TEXT    CHECK (reference IS NULL OR (length(reference) BETWEEN 1 AND 64 AND reference = trim(reference))),
+  funds_confirmed INTEGER CHECK (funds_confirmed IS NULL OR funds_confirmed = 1),
+  amount_minor    INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  PRIMARY KEY (sale_id, seq),
+  CHECK ((method = 'external' AND provider IS NOT NULL AND reference IS NOT NULL AND funds_confirmed = 1)
+      OR (method <> 'external' AND provider IS NULL AND reference IS NULL))
+) STRICT;
+
+CREATE TRIGGER sale_tenders_sealed BEFORE INSERT ON sale_tenders
+WHEN EXISTS (SELECT 1 FROM sales WHERE id = NEW.sale_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a recorded sale cannot take another tender'); END;
+CREATE TRIGGER sale_tenders_immutable_update BEFORE UPDATE ON sale_tenders
+BEGIN SELECT RAISE(ABORT, 'ledger: a tender is immutable'); END;
+CREATE TRIGGER sale_tenders_immutable_delete BEFORE DELETE ON sale_tenders
+BEGIN SELECT RAISE(ABORT, 'ledger: a tender cannot be deleted'); END;
+
+-- The sale row SEALS its tenders: inserted first, they must match it exactly, in one transaction.
+CREATE TRIGGER sales_tender_seal BEFORE INSERT ON sales
+WHEN NEW.tender_count > 0 AND (
+     (SELECT count(*) FROM sale_tenders WHERE sale_id = NEW.id) <> NEW.tender_count
+  OR coalesce((SELECT sum(amount_minor) FROM sale_tenders WHERE sale_id = NEW.id), 0) <> NEW.paid_minor
+  OR EXISTS (SELECT 1 FROM sale_tenders WHERE sale_id = NEW.id AND seq > NEW.tender_count)
+  OR (NEW.tender_count = 1
+      AND NOT EXISTS (SELECT 1 FROM sale_tenders WHERE sale_id = NEW.id AND method = NEW.payment_method)))
+BEGIN SELECT RAISE(ABORT, 'ledger: a sale''s tenders must match its paid amount exactly'); END;
+CREATE TRIGGER sales_legacy_shape_has_no_tender BEFORE INSERT ON sales
+WHEN NEW.tender_count = 0 AND EXISTS (SELECT 1 FROM sale_tenders WHERE sale_id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a sale''s tenders must match its paid amount exactly'); END;
+
+-- ── One external reference, once (D-REF-1 / D-REF-2) ────────────────────────────────────────────
+CREATE TABLE external_references (
+  provider      TEXT    NOT NULL CHECK (provider IN ('whish', 'bank_transfer')),
+  ref_key       TEXT    NOT NULL,
+  ref_display   TEXT    NOT NULL,
+  owner_kind    TEXT    NOT NULL CHECK (owner_kind IN ('settlement', 'receipt', 'sale_tender', 'advance')),
+  owner_id      TEXT    NOT NULL,
+  legacy        INTEGER NOT NULL CHECK (legacy IN (0, 1)),
+  registered_at TEXT    NOT NULL,
+  PRIMARY KEY (owner_kind, owner_id),
+  CHECK (legacy = 1 OR length(ref_key) BETWEEN 1 AND 64)
+) STRICT;
+CREATE UNIQUE INDEX external_references_live ON external_references (provider, ref_key) WHERE legacy = 0;
+CREATE INDEX external_references_key ON external_references (provider, ref_key);
+CREATE TRIGGER external_references_vs_legacy BEFORE INSERT ON external_references
+WHEN NEW.legacy = 0
+ AND EXISTS (SELECT 1 FROM external_references WHERE provider = NEW.provider AND ref_key = NEW.ref_key)
+BEGIN SELECT RAISE(ABORT, 'ledger: that payment reference is already recorded'); END;
+CREATE TRIGGER external_references_immutable_update BEFORE UPDATE ON external_references
+BEGIN SELECT RAISE(ABORT, 'ledger: a registered reference is immutable'); END;
+CREATE TRIGGER external_references_immutable_delete BEFORE DELETE ON external_references
+BEGIN SELECT RAISE(ABORT, 'ledger: a registered reference cannot be deleted'); END;
+
+INSERT INTO external_references (provider, ref_key, ref_display, owner_kind, owner_id, legacy, registered_at)
+SELECT provider, ${M19_REF_KEY("reference")}, reference, 'settlement', id, 1, settled_at
+FROM settlements WHERE receipt_id IS NULL AND provider IS NOT NULL AND reference IS NOT NULL;
+INSERT INTO external_references (provider, ref_key, ref_display, owner_kind, owner_id, legacy, registered_at)
+SELECT provider, ${M19_REF_KEY("reference")}, reference, 'receipt', id, 1, received_at FROM receipts;
+
+INSERT INTO m19_assert
+SELECT 'references: every existing reference registered as legacy',
+  (SELECT count(*) FROM external_references WHERE legacy = 1)
+  = (SELECT count(*) FROM settlements WHERE receipt_id IS NULL AND provider IS NOT NULL AND reference IS NOT NULL)
+  + (SELECT count(*) FROM receipts);
+
+-- Historic references that share a key after normalization: KEPT, both, and reported here.
+CREATE VIEW external_reference_legacy_collisions AS
+SELECT provider, ref_key, count(*) AS uses, group_concat(owner_kind || ':' || owner_id, ', ') AS owners
+FROM external_references WHERE legacy = 1
+GROUP BY provider, ref_key HAVING count(*) > 1;
+
+CREATE TRIGGER settlements_register_reference AFTER INSERT ON settlements
+WHEN NEW.receipt_id IS NULL AND NEW.provider IS NOT NULL AND NEW.reference IS NOT NULL
+BEGIN
+  INSERT INTO external_references (provider, ref_key, ref_display, owner_kind, owner_id, legacy, registered_at)
+  VALUES (NEW.provider, ${M19_REF_KEY("NEW.reference")}, NEW.reference, 'settlement', NEW.id, 0, NEW.settled_at);
+END;
+CREATE TRIGGER receipts_register_reference AFTER INSERT ON receipts
+BEGIN
+  INSERT INTO external_references (provider, ref_key, ref_display, owner_kind, owner_id, legacy, registered_at)
+  VALUES (NEW.provider, ${M19_REF_KEY("NEW.reference")}, NEW.reference, 'receipt', NEW.id, 0, NEW.received_at);
+END;
+CREATE TRIGGER sale_tenders_register_reference AFTER INSERT ON sale_tenders
+WHEN NEW.reference IS NOT NULL
+BEGIN
+  INSERT INTO external_references (provider, ref_key, ref_display, owner_kind, owner_id, legacy, registered_at)
+  VALUES (NEW.provider, ${M19_REF_KEY("NEW.reference")}, NEW.reference, 'sale_tender', NEW.sale_id || '#' || NEW.seq, 0,
+          strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+END;
+
+-- ── Readable documents (D-P4a / D-P4b): COL- / ADV- / REF-, never restarted ─────────────────────
+CREATE TABLE document_numbers (
+  kind    TEXT    PRIMARY KEY CHECK (kind IN ('collection', 'advance', 'advance_refund')),
+  last_no INTEGER NOT NULL CHECK (last_no >= 0)
+) STRICT;
+INSERT INTO document_numbers (kind, last_no) VALUES ('collection', 0), ('advance', 0), ('advance_refund', 0);
+CREATE TRIGGER document_numbers_forward BEFORE UPDATE ON document_numbers
+WHEN NEW.kind <> OLD.kind OR NEW.last_no <> OLD.last_no + 1
+BEGIN SELECT RAISE(ABORT, 'ledger: document numbers only move forward by one'); END;
+CREATE TRIGGER document_numbers_no_delete BEFORE DELETE ON document_numbers
+BEGIN SELECT RAISE(ABORT, 'ledger: a document counter cannot be deleted'); END;
+
+CREATE TABLE collection_documents (
+  doc_no        INTEGER PRIMARY KEY CHECK (doc_no > 0),
+  settlement_id TEXT    UNIQUE REFERENCES settlements (id) DEFERRABLE INITIALLY DEFERRED,
+  receipt_id    TEXT    UNIQUE REFERENCES receipts (id) DEFERRABLE INITIALLY DEFERRED,
+  CHECK ((settlement_id IS NULL) <> (receipt_id IS NULL))
+) STRICT;
+CREATE TRIGGER collection_documents_in_order BEFORE INSERT ON collection_documents
+WHEN NEW.doc_no <> (SELECT last_no FROM document_numbers WHERE kind = 'collection')
+BEGIN SELECT RAISE(ABORT, 'ledger: a document number must be the one just issued'); END;
+CREATE TRIGGER collection_documents_immutable_update BEFORE UPDATE ON collection_documents
+BEGIN SELECT RAISE(ABORT, 'ledger: a document is immutable'); END;
+CREATE TRIGGER collection_documents_immutable_delete BEFORE DELETE ON collection_documents
+BEGIN SELECT RAISE(ABORT, 'ledger: a document cannot be deleted'); END;
+
+-- ── Customer advances (D-P5a) — merchant accounting, never platform credits ────────────────────
+CREATE TABLE customer_advances (
+  id                  TEXT    PRIMARY KEY,
+  doc_no              INTEGER NOT NULL UNIQUE CHECK (doc_no > 0),
+  customer_id         TEXT    NOT NULL,
+  customer_kind       TEXT    GENERATED ALWAYS AS ('customer') STORED,
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  amount_minor        INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  method              TEXT    NOT NULL CHECK (method IN ('cash', 'card', 'external', 'other')),
+  provider            TEXT    CHECK (provider IS NULL OR provider IN ('whish', 'bank_transfer')),
+  reference           TEXT    CHECK (reference IS NULL OR (length(reference) BETWEEN 1 AND 64 AND reference = trim(reference))),
+  funds_confirmed     INTEGER CHECK (funds_confirmed IS NULL OR funds_confirmed = 1),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  received_by         TEXT    NOT NULL REFERENCES operators (id),
+  received_at         TEXT    NOT NULL CHECK (received_at GLOB
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  CHECK ((method = 'external' AND provider IS NOT NULL AND reference IS NOT NULL AND funds_confirmed = 1)
+      OR (method <> 'external' AND provider IS NULL AND reference IS NULL)),
+  FOREIGN KEY (customer_id, customer_kind) REFERENCES parties (id, kind)
+) STRICT;
+CREATE INDEX customer_advances_customer ON customer_advances (customer_id, received_at);
+CREATE TRIGGER customer_advances_shape BEFORE INSERT ON customer_advances
+WHEN NEW.doc_no <> (SELECT last_no FROM document_numbers WHERE kind = 'advance')
+  OR NOT EXISTS (SELECT 1 FROM parties WHERE id = NEW.customer_id AND kind = 'customer' AND is_active = 1)
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance needs an active customer and the document number just issued'); END;
+CREATE TRIGGER customer_advances_immutable_update BEFORE UPDATE ON customer_advances
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance is immutable'); END;
+CREATE TRIGGER customer_advances_immutable_delete BEFORE DELETE ON customer_advances
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance cannot be deleted'); END;
+CREATE TRIGGER customer_advances_register_reference AFTER INSERT ON customer_advances
+WHEN NEW.reference IS NOT NULL
+BEGIN
+  INSERT INTO external_references (provider, ref_key, ref_display, owner_kind, owner_id, legacy, registered_at)
+  VALUES (NEW.provider, ${M19_REF_KEY("NEW.reference")}, NEW.reference, 'advance', NEW.id, 0, NEW.received_at);
+END;
+
+CREATE TABLE advance_applications (
+  id              TEXT    PRIMARY KEY,
+  advance_id      TEXT    NOT NULL REFERENCES customer_advances (id),
+  settlement_id   TEXT    NOT NULL UNIQUE REFERENCES settlements (id),
+  amount_minor    INTEGER NOT NULL CHECK (amount_minor > 0),
+  idempotency_key TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  applied_by      TEXT    NOT NULL REFERENCES operators (id),
+  applied_at      TEXT    NOT NULL
+) STRICT;
+CREATE TRIGGER advance_applications_immutable_update BEFORE UPDATE ON advance_applications
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance application is immutable'); END;
+CREATE TRIGGER advance_applications_immutable_delete BEFORE DELETE ON advance_applications
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance application cannot be deleted'); END;
+
+-- D-P5a FINAL: CASH ONLY (CHECK), OWNER ONLY (trigger, against the live operator row), a reason,
+-- a numbered document, idempotent, never above the unused balance, never an edit of history.
+CREATE TABLE advance_refunds (
+  id                  TEXT    PRIMARY KEY,
+  doc_no              INTEGER NOT NULL UNIQUE CHECK (doc_no > 0),
+  advance_id          TEXT    NOT NULL REFERENCES customer_advances (id),
+  amount_minor        INTEGER NOT NULL CHECK (amount_minor > 0),
+  method              TEXT    NOT NULL CHECK (method = 'cash'),
+  reason              TEXT    NOT NULL CHECK (length(trim(reason)) BETWEEN 3 AND 200),
+  idempotency_key     TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  refunded_by         TEXT    NOT NULL REFERENCES operators (id),
+  refunded_at         TEXT    NOT NULL CHECK (refunded_at GLOB
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date       TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+) STRICT;
+CREATE TRIGGER advance_applications_shape BEFORE INSERT ON advance_applications
+WHEN NOT EXISTS (
+       SELECT 1 FROM settlements AS s
+       JOIN obligations AS o ON o.id = s.obligation_id
+       JOIN customer_advances AS a ON a.id = NEW.advance_id
+       WHERE s.id = NEW.settlement_id
+         AND s.amount_minor = NEW.amount_minor AND s.currency = a.currency AND s.method = a.method
+         AND s.receipt_id IS NULL AND s.provider IS NULL AND s.reference IS NULL
+         AND o.party_id = a.customer_id AND o.party_kind = 'customer' AND o.direction = 'receivable')
+  OR NOT EXISTS (SELECT 1 FROM operators WHERE id = NEW.applied_by AND role = 'owner' AND is_active = 1)
+  OR coalesce((SELECT sum(amount_minor) FROM advance_applications WHERE advance_id = NEW.advance_id), 0)
+     + coalesce((SELECT sum(amount_minor) FROM advance_refunds WHERE advance_id = NEW.advance_id), 0)
+     + NEW.amount_minor > (SELECT amount_minor FROM customer_advances WHERE id = NEW.advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance application must settle its own customer''s debt, by the owner, within the unused balance'); END;
+CREATE TRIGGER advance_refunds_shape BEFORE INSERT ON advance_refunds
+WHEN NOT EXISTS (SELECT 1 FROM operators WHERE id = NEW.refunded_by AND role = 'owner' AND is_active = 1)
+  OR NEW.doc_no <> (SELECT last_no FROM document_numbers WHERE kind = 'advance_refund')
+  OR coalesce((SELECT sum(amount_minor) FROM advance_applications WHERE advance_id = NEW.advance_id), 0)
+     + coalesce((SELECT sum(amount_minor) FROM advance_refunds WHERE advance_id = NEW.advance_id), 0)
+     + NEW.amount_minor > (SELECT amount_minor FROM customer_advances WHERE id = NEW.advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a refund must be the owner''s, in cash, within the unused advance'); END;
+CREATE TRIGGER advance_refunds_immutable_update BEFORE UPDATE ON advance_refunds
+BEGIN SELECT RAISE(ABORT, 'ledger: a refund is immutable'); END;
+CREATE TRIGGER advance_refunds_immutable_delete BEFORE DELETE ON advance_refunds
+BEGIN SELECT RAISE(ABORT, 'ledger: a refund cannot be deleted'); END;
+
+DROP TABLE m19_assert;
+`,
+  },
+  {
+    version: 20,
+    name: "advance_safety_attempts_voids",
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // Migration 20 — customer-advance SAFETY (owner approval DEC-35r, 2026-11-11). Additive only: no
+    // existing row is read, changed or deleted (no writer of `customer_advances` has ever shipped).
+    //
+    // Two parts, ONE migration (owner: no migration 21): G1 the durable intent, G2 the audited correction.
+    // The two ALTERs add columns to `customer_advances`; every existing row gets origin = 'receipt' and
+    // no link, which is exactly what it is. No existing row is changed in any other way.
+    //
+    // G1 — a cash advance is never recorded twice because a reply was lost. The same shape migration 17
+    // gave collections (`collection_attempts` cannot be reused: its `obligation_id` is NOT NULL and an
+    // advance has no obligation), plus an ACKNOWLEDGEMENT, because the dangerous case for a cash advance
+    // is the lost RESPONSE: the money row committed but the receipt never reached the screen.
+    //   Tx1  the intent (key, customer, amount, channel, reference, confirmation, fingerprint) commits
+    //        BEFORE any money row can exist;
+    //   Tx2  the ADV number, the advance and the attempt's resolution commit together;
+    //   UI   the receipt is shown, then the attempt is acknowledged.
+    // An attempt that is open, or recorded but not acknowledged, is answered from the ledger after a
+    // crash — never from "same customer, same amount, same day".
+    //
+    // G2 — correcting a mistaken advance (owner approval of the corrected design, DEC-35s). Owner only,
+    // only while the advance is fully unused, one immutable correction per advance, never an edit:
+    //   not_received  the money was never received: the advance's balance becomes 0, with the owner's
+    //                 explicit declaration and reason; no fake refund, no REF document.
+    //   replaced      the money WAS received but recorded wrongly (wrong customer, Cash ↔ Whish, a
+    //                 mistyped reference, an amount recorded HIGHER than received): a successor advance
+    //                 (origin = 'correction') carries the right details, a new ADV number, and COPIES who
+    //                 received the money and when. It is not a receipt of money: the daily report shows,
+    //                 on the correction date, − the original + the successor per method (0 for a pure
+    //                 re-link); the same Whish reference is never registered twice.
+    // ORDER IS THE SAFETY: the correction row is written FIRST and the successor's trigger requires it,
+    // so a successor can never exist beside a still-live original (two balances for one payment); a
+    // 'replaced' correction whose successor never arrives fails at COMMIT (deferred foreign key).
+    // A corrected advance can never be applied or refunded (trigger), so one payment has ONE balance.
+    // An amount HIGHER than recorded is refused: the extra of the same transfer cannot reuse its
+    // reference — that case needs the owner's review outside this mechanism.
+    sql: `
+ALTER TABLE customer_advances ADD COLUMN origin TEXT NOT NULL DEFAULT 'receipt'
+  CHECK (origin IN ('receipt', 'correction'));
+ALTER TABLE customer_advances ADD COLUMN corrects_advance_id TEXT REFERENCES customer_advances (id);
+CREATE INDEX customer_advances_corrects ON customer_advances (corrects_advance_id) WHERE corrects_advance_id IS NOT NULL;
+
+CREATE TABLE advance_attempts (
+  idempotency_key     TEXT    PRIMARY KEY CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  customer_id         TEXT    NOT NULL REFERENCES parties (id),
+  currency            TEXT    NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)),
+  amount_minor        INTEGER NOT NULL CHECK (amount_minor > 0 AND amount_minor <= 1000000000000000),
+  channel             TEXT    NOT NULL CHECK (channel IN ('cash', 'whish')),
+  reference           TEXT    CHECK (reference IS NULL OR (length(reference) BETWEEN 1 AND 64 AND reference = trim(reference))),
+  funds_confirmed     INTEGER CHECK (funds_confirmed IS NULL OR funds_confirmed = 1),
+  request_fingerprint TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  created_by          TEXT    NOT NULL REFERENCES operators (id),
+  created_at          TEXT    NOT NULL CHECK (created_at GLOB
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  resolved_at         TEXT,
+  resolution          TEXT    CHECK (resolution IS NULL OR resolution IN ('recorded', 'not_recorded')),
+  acknowledged_at     TEXT,
+  CHECK ((resolved_at IS NULL) = (resolution IS NULL)),
+  CHECK (acknowledged_at IS NULL OR resolution IS NOT NULL),
+  CHECK ((channel = 'cash' AND reference IS NULL AND funds_confirmed IS NULL)
+      OR (channel = 'whish' AND reference IS NOT NULL AND funds_confirmed = 1))
+) STRICT;
+CREATE INDEX advance_attempts_pending ON advance_attempts (created_at) WHERE acknowledged_at IS NULL;
+
+-- Only the resolution and the acknowledgement may be written, each exactly once; the intent is frozen.
+CREATE TRIGGER advance_attempts_frozen BEFORE UPDATE ON advance_attempts
+WHEN NEW.idempotency_key IS NOT OLD.idempotency_key OR NEW.customer_id IS NOT OLD.customer_id
+  OR NEW.currency IS NOT OLD.currency OR NEW.amount_minor IS NOT OLD.amount_minor
+  OR NEW.channel IS NOT OLD.channel OR NEW.reference IS NOT OLD.reference
+  OR NEW.funds_confirmed IS NOT OLD.funds_confirmed OR NEW.request_fingerprint IS NOT OLD.request_fingerprint
+  OR NEW.created_by IS NOT OLD.created_by OR NEW.created_at IS NOT OLD.created_at
+  OR (OLD.resolution IS NOT NULL AND (NEW.resolution IS NOT OLD.resolution OR NEW.resolved_at IS NOT OLD.resolved_at))
+  OR (OLD.acknowledged_at IS NOT NULL AND NEW.acknowledged_at IS NOT OLD.acknowledged_at)
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance attempt can only be resolved once and acknowledged once'); END;
+CREATE TRIGGER advance_attempts_no_delete BEFORE DELETE ON advance_attempts
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance attempt cannot be deleted'); END;
+
+-- The resolution must tell the truth about the ledger.
+CREATE TRIGGER advance_attempts_resolution_truth BEFORE UPDATE ON advance_attempts
+WHEN OLD.resolution IS NULL AND (
+       (NEW.resolution = 'recorded' AND NOT EXISTS (SELECT 1 FROM customer_advances
+            WHERE idempotency_key = NEW.idempotency_key AND request_fingerprint = NEW.request_fingerprint))
+    OR (NEW.resolution = 'not_recorded' AND EXISTS (SELECT 1 FROM customer_advances
+            WHERE idempotency_key = NEW.idempotency_key)))
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance attempt resolution must match the ledger'); END;
+
+-- 🔴 BACKSTOPS ON THE MONEY ROW ITSELF. From this migration on, no advance exists without the intent
+-- that preceded it (same key, same fingerprint, still open), and a key closed as NOT recorded can
+-- never be resurrected by a late retry.
+CREATE TRIGGER customer_advances_needs_open_attempt BEFORE INSERT ON customer_advances
+WHEN NEW.origin = 'receipt' AND NOT EXISTS (SELECT 1 FROM advance_attempts
+                 WHERE idempotency_key = NEW.idempotency_key
+                   AND request_fingerprint = NEW.request_fingerprint
+                   AND customer_id = NEW.customer_id AND currency = NEW.currency
+                   AND amount_minor = NEW.amount_minor AND resolution IS NULL)
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance needs its open, identical attempt'); END;
+CREATE TRIGGER customer_advances_receipt_has_no_link BEFORE INSERT ON customer_advances
+WHEN NEW.origin = 'receipt' AND NEW.corrects_advance_id IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'ledger: only a correction advance may name the advance it corrects'); END;
+
+-- ── G2: the audited correction ─────────────────────────────────────────────────────────────────
+CREATE TABLE advance_corrections (
+  id                   TEXT    PRIMARY KEY,
+  advance_id           TEXT    NOT NULL UNIQUE REFERENCES customer_advances (id),
+  kind                 TEXT    NOT NULL CHECK (kind IN ('not_received', 'replaced')),
+  successor_advance_id TEXT    UNIQUE REFERENCES customer_advances (id) DEFERRABLE INITIALLY DEFERRED,
+  funds_not_received   INTEGER CHECK (funds_not_received IS NULL OR funds_not_received = 1),
+  reason               TEXT    NOT NULL CHECK (length(trim(reason)) BETWEEN 3 AND 200),
+  corrected_by         TEXT    NOT NULL REFERENCES operators (id),
+  corrected_at         TEXT    NOT NULL CHECK (corrected_at GLOB
+                         '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  business_date        TEXT    NOT NULL CHECK (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+  idempotency_key      TEXT    NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 8 AND 100),
+  request_fingerprint  TEXT    NOT NULL CHECK (length(request_fingerprint) > 0),
+  CHECK ((kind = 'not_received' AND successor_advance_id IS NULL AND funds_not_received = 1)
+      OR (kind = 'replaced' AND successor_advance_id IS NOT NULL))
+) STRICT;
+CREATE INDEX advance_corrections_day ON advance_corrections (business_date);
+
+CREATE TRIGGER advance_corrections_owner_only BEFORE INSERT ON advance_corrections
+WHEN NOT EXISTS (SELECT 1 FROM operators WHERE id = NEW.corrected_by AND role = 'owner' AND is_active = 1)
+BEGIN SELECT RAISE(ABORT, 'ledger: only the owner can correct an advance'); END;
+CREATE TRIGGER advance_corrections_once BEFORE INSERT ON advance_corrections
+WHEN EXISTS (SELECT 1 FROM advance_corrections WHERE advance_id = NEW.advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: that advance is already corrected'); END;
+CREATE TRIGGER advance_corrections_unused_only BEFORE INSERT ON advance_corrections
+WHEN NOT EXISTS (SELECT 1 FROM customer_advances WHERE id = NEW.advance_id)
+  OR EXISTS (SELECT 1 FROM advance_applications WHERE advance_id = NEW.advance_id)
+  OR EXISTS (SELECT 1 FROM advance_refunds WHERE advance_id = NEW.advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: only an existing, fully unused advance can be corrected'); END;
+CREATE TRIGGER advance_corrections_successor_issued_with_it BEFORE INSERT ON advance_corrections
+WHEN NEW.kind = 'replaced' AND EXISTS (SELECT 1 FROM customer_advances WHERE id = NEW.successor_advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a correction''s successor must be issued with it'); END;
+CREATE TRIGGER advance_corrections_immutable_update BEFORE UPDATE ON advance_corrections
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance correction is immutable'); END;
+CREATE TRIGGER advance_corrections_immutable_delete BEFORE DELETE ON advance_corrections
+BEGIN SELECT RAISE(ABORT, 'ledger: an advance correction cannot be deleted'); END;
+
+-- A successor exists ONLY under its own correction, and only as a faithful re-statement of the same
+-- received money: same currency, never more, less only with the declared not-received difference,
+-- the original receiver and moment copied, Cash or Whish, and something actually changed.
+CREATE TRIGGER customer_advances_correction_shape BEFORE INSERT ON customer_advances
+WHEN NEW.origin = 'correction' AND NOT EXISTS (
+  SELECT 1 FROM advance_corrections AS c JOIN customer_advances AS o ON o.id = c.advance_id
+  WHERE c.advance_id = NEW.corrects_advance_id AND c.kind = 'replaced' AND c.successor_advance_id = NEW.id
+    AND c.idempotency_key = NEW.idempotency_key AND c.request_fingerprint = NEW.request_fingerprint
+    AND o.currency = NEW.currency AND NEW.amount_minor <= o.amount_minor
+    AND (NEW.amount_minor < o.amount_minor) = (c.funds_not_received IS 1)
+    AND NEW.received_by = o.received_by AND NEW.received_at = o.received_at AND NEW.business_date = o.business_date
+    AND (NEW.method = 'cash' OR (NEW.method = 'external' AND NEW.provider = 'whish'))
+    AND NOT (NEW.customer_id = o.customer_id AND NEW.amount_minor = o.amount_minor
+             AND NEW.method = o.method AND NEW.reference IS o.reference))
+BEGIN SELECT RAISE(ABORT, 'ledger: a correction advance must restate its original under its own correction'); END;
+
+-- The registry (migration 19), re-created: a successor carrying its original's SAME reference registers
+-- nothing (the original keeps it); a different reference registers once, and a taken one is refused.
+DROP TRIGGER customer_advances_register_reference;
+CREATE TRIGGER customer_advances_register_reference AFTER INSERT ON customer_advances
+WHEN NEW.reference IS NOT NULL
+ AND NOT (NEW.origin = 'correction' AND EXISTS (
+       SELECT 1 FROM customer_advances AS o
+       WHERE o.id = NEW.corrects_advance_id AND o.provider IS NEW.provider AND o.reference IS NOT NULL
+         AND ${M19_REF_KEY("o.reference")} = ${M19_REF_KEY("NEW.reference")}))
+BEGIN
+  INSERT INTO external_references (provider, ref_key, ref_display, owner_kind, owner_id, legacy, registered_at)
+  VALUES (NEW.provider, ${M19_REF_KEY("NEW.reference")}, NEW.reference, 'advance', NEW.id, 0, NEW.received_at);
+END;
+
+-- One payment, one balance: a corrected advance can never be applied or refunded.
+CREATE TRIGGER advance_applications_not_corrected BEFORE INSERT ON advance_applications
+WHEN EXISTS (SELECT 1 FROM advance_corrections WHERE advance_id = NEW.advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a corrected advance has no balance to apply'); END;
+CREATE TRIGGER advance_refunds_not_corrected BEFORE INSERT ON advance_refunds
+WHEN EXISTS (SELECT 1 FROM advance_corrections WHERE advance_id = NEW.advance_id)
+BEGIN SELECT RAISE(ABORT, 'ledger: a corrected advance has no balance to refund'); END;
+`,
+  },
+  {
+    version: 21,
+    name: "invoice_confirmed_request_identity",
+    // NULL means no confirmation identity was recorded; no historical invoice is backfilled.
+    // A protected identity is immutable with the rest of the final invoice (migration 6 trigger).
+    sql: `
+ALTER TABLE invoices ADD COLUMN confirmed_request_identity TEXT
+  CHECK (confirmed_request_identity IS NULL OR (
+    length(confirmed_request_identity) = 67
+    AND substr(confirmed_request_identity, 1, 3) = 'v1:'
+    AND substr(confirmed_request_identity, 4) NOT GLOB '*[^0-9a-f]*'
+  ));
 `,
   },
 ];

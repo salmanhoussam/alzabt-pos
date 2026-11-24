@@ -60,7 +60,10 @@ import type {
 import type { ReconciliationRepository, ReconciliationRow } from "../persistence/reconciliationRepository";
 import type { NewSaleLine, NewSaleHeader } from "../persistence/saleRepository";
 import { type SaleRecord, paymentStatusFor } from "../domain/sale";
+import { cleanPaymentReference } from "../domain/ledger";
 import type { TerminalConfig } from "../fixtures/terminal";
+import { toInvoiceViewDto } from "../shared/dto";
+import { CONFIRMATION_DIGEST_MAX, confirmationDigest } from "../shared/invoiceConfirmation";
 
 /** Where a reconciliation edit says it came from, in audit metadata. */
 /** 100% in basis points. A rate above this is refused, not clamped. */
@@ -197,6 +200,45 @@ export interface InvoiceServiceDeps {
 export interface InvoiceView {
   readonly invoice: InvoiceRow;
   readonly lines: ReadonlyArray<InvoiceLineRow>;
+  /**
+   * INV-PAY-METHOD (owner, 2026-11-09): HOW the paid amount of a FINAL invoice arrived, read from the
+   * invoice's own sale. Present only when its issue recorded a method; absent for a draft, an unpaid
+   * invoice and every invoice issued before this slice — nothing is ever invented for them.
+   */
+  readonly payment?: InvoicePaymentView;
+}
+
+export interface InvoicePaymentView {
+  readonly method: "cash" | "card" | "external" | "other";
+  readonly provider: "whish" | "bank_transfer" | null;
+  readonly reference: string | null;
+}
+
+/**
+ * INV-PAY-METHOD: how the amount marked paid on the draft actually arrived, given AT ISSUE — cash, or
+ * Whish Money with its reference and the operator's explicit "the money arrived". Nothing else (P3).
+ */
+export type InvoicePaymentInput =
+  | { readonly method: "cash" }
+  | { readonly method: "external"; readonly whish: { readonly reference: unknown; readonly fundsConfirmed: unknown } };
+
+/** After validation: what is written onto the invoice's sale (and its one tender). */
+interface InvoicePayment {
+  readonly method: "cash" | "external";
+  readonly whish: { readonly provider: "whish"; readonly reference: string; readonly fundsConfirmed: true } | null;
+}
+
+const REFERENCE_TAKEN_ON_ISSUE = /payment reference is already recorded/;
+
+/** M21: identity of the trusted, byte-exact R5 confirmation and the normalized payment request. */
+function confirmedRequestIdentity(confirmedDraft: string, onAccount: boolean, payment: InvoicePayment | null): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    confirmedDraft,
+    onAccount,
+    payment: payment === null ? null : { method: payment.method, reference: payment.whish?.reference ?? null },
+  });
+  return `v1:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
 }
 
 /** The header fields an operator may edit while a draft is open. */
@@ -464,7 +506,7 @@ export class InvoiceService {
     this.requireCashier();
     const invoice = this.deps.invoices.findById(invoiceId);
     if (!invoice) throw new DomainError("INVOICE_NOT_FOUND", "This invoice no longer exists");
-    return { invoice, lines: this.deps.invoices.listLines(invoiceId) };
+    return this.withPayment({ invoice, lines: this.deps.invoices.listLines(invoiceId) });
   }
 
   listDrafts(limit?: number): InvoiceRow[] {
@@ -630,6 +672,19 @@ export class InvoiceService {
     }
 
     const productId = cleanText(draft.productId, "product_id", 100);
+    // CURRENCY-P1: a line linked to a catalog product must be in that product's currency. The line's price is parsed
+    // in the INVOICE currency; linking it to a product priced in another one would later let reconciliation and the
+    // sale snapshot read one currency's minor units as another's. Refused before anything is written, never relabelled.
+    // A product id that no longer resolves keeps today's behaviour (the line is not a foreign key).
+    if (productId !== null) {
+      const product = this.deps.catalogStore.findById(productId);
+      if (product && product.currency !== currency) {
+        throw new DomainError(
+          "MIXED_CURRENCY",
+          `This product is priced in ${product.currency} and this invoice is in ${currency}; nothing was changed`,
+        );
+      }
+    }
     return {
       description,
       unitLabel,
@@ -792,33 +847,137 @@ export class InvoiceService {
    * is returned, no reconciliation row survives, and the invoice is still an editable draft. That
    * is asserted by a failure-injection test, not assumed from the word "transaction".
    */
-  finalizeInvoice(invoiceId: string, options?: { readonly issueOnAccount?: boolean }): InvoiceView {
+  finalizeInvoice(
+    invoiceId: string,
+    options?: {
+      readonly issueOnAccount?: boolean;
+      readonly payment?: InvoicePaymentInput | null;
+      /** R5: the confirmation the operator saw (`confirmationDigest`); compared inside the transaction when given. */
+      readonly confirmedDraft?: string;
+    },
+  ): InvoiceView {
     const cashier = this.requireCashier();
     const instant = this.now();
+    if (options?.confirmedDraft !== undefined &&
+      (typeof options.confirmedDraft !== "string" || options.confirmedDraft.length === 0 || options.confirmedDraft.length > CONFIRMATION_DIGEST_MAX)) {
+      throw new DomainError("INVALID_INPUT", "The confirmation is malformed");
+    }
     // 🔴 ON ACCOUNT IS AN EXPLICIT ACT, never inferred from a linked customer or an unpaid balance.
     const onAccount = options?.issueOnAccount === true;
     const credit = onAccount ? this.requireCreditPort() : null;
     // Refused before any work, and re-read INSIDE the transaction below.
     credit?.requireLiveOwner();
+    // INV-PAY-METHOD: the method's SHAPE is checked before anything is read; whether one is required
+    // (something was paid) is decided inside the transaction, from the persisted draft.
+    const payment = this.invoicePaymentOf(options?.payment);
 
+    try {
+      return this.finalizeWithin(invoiceId, cashier, instant, credit, payment, options?.confirmedDraft);
+    } catch (err) {
+      // A Whish reference already used anywhere: the tender's registration aborts the WHOLE issue —
+      // no number, no sale, no tender — and the operator reads the same sentence as everywhere else.
+      if (payment?.whish && err instanceof Error && !(err instanceof DomainError) && REFERENCE_TAKEN_ON_ISSUE.test(err.message)) {
+        throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * INV-PAY-METHOD: cash, or Whish Money with its reference (the collection form's own cleaning rule)
+   * and an explicit confirmation. Card / Other / bank are refused (P3, DEC-35) — never a default.
+   */
+  private invoicePaymentOf(given: InvoicePaymentInput | null | undefined): InvoicePayment | null {
+    if (given === undefined || given === null) return null;
+    if (typeof given !== "object") throw new DomainError("INVALID_INPUT", "The payment method is malformed");
+    if (given.method === "cash") {
+      if ("whish" in given && (given as { whish?: unknown }).whish != null) {
+        throw new DomainError("INVALID_INPUT", "A Whish reference belongs to a Whish Money payment only");
+      }
+      return { method: "cash", whish: null };
+    }
+    if (given.method !== "external") {
+      throw new DomainError("PAYMENT_METHOD_NOT_ACCEPTED", "This shop records new payments in cash or Whish Money only");
+    }
+    const w = given.whish;
+    if (w === null || w === undefined || typeof w !== "object") {
+      throw new DomainError("INVALID_INPUT", "A Whish Money payment needs its reference and the confirmation that the money arrived");
+    }
+    const reference = cleanPaymentReference(w.reference, "whish");
+    if (reference === null) throw new DomainError("INVALID_INPUT", "This payment method needs a reference");
+    if (w.fundsConfirmed !== true) throw new DomainError("FUNDS_NOT_CONFIRMED", "Confirm that the money was actually received");
+    return { method: "external", whish: { provider: "whish", reference, fundsConfirmed: true } };
+  }
+
+  private finalizeWithin(
+    invoiceId: string,
+    cashier: Cashier,
+    instant: Date,
+    credit: InvoiceCreditPort | null,
+    payment: InvoicePayment | null,
+    confirmedDraft?: string,
+  ): InvoiceView {
     return this.deps.transact((): InvoiceView => {
-      if (credit) {
-        credit.requireLiveOwner();
-        // A repeat of a request that already committed (its response was lost): verify, never redo.
-        const existing = this.deps.invoices.findById(invoiceId);
-        if (existing && existing.status === "final") return this.verifiedAccountReplay(existing, credit);
+      if (this.requireCashier().id !== cashier.id) {
+        throw new DomainError("NOT_LOGGED_IN", "The operator session changed before invoice finalization");
+      }
+      if (credit) credit.requireLiveOwner();
+      const existing = this.deps.invoices.findById(invoiceId);
+      if (existing && existing.status === "final") {
+        const stored = existing.confirmed_request_identity;
+        if (stored === null) {
+          // Historical or legacy-tokenless issuance: never invent proof of an earlier confirmation.
+          if (confirmedDraft !== undefined) {
+            throw new DomainError("INVOICE_CONFIRMATION_UNVERIFIABLE", "The original confirmation identity is unavailable; review the issued invoice");
+          }
+          if (credit) return this.verifiedAccountReplay(existing, credit, payment);
+          throw new DomainError("INVOICE_NOT_DRAFT", `Invoice ${existing.invoice_number} has been issued and cannot be changed`);
+        }
+        if (!/^v1:[0-9a-f]{64}$/.test(stored)) {
+          throw new DomainError("INVOICE_CONFIRMATION_UNVERIFIABLE", "The recorded confirmation identity cannot be verified");
+        }
+        if (confirmedDraft === undefined) {
+          throw new DomainError("INVOICE_CONFIRMATION_REQUIRED", "This issued invoice requires its original confirmation for a replay");
+        }
+        if (confirmedRequestIdentity(confirmedDraft, credit !== null, payment) !== stored) {
+          throw new DomainError("IDEMPOTENCY_CONFLICT", "The confirmation or payment differs from the issued invoice");
+        }
+        return credit
+          ? this.verifiedAccountReplay(existing, credit, payment)
+          : this.verifiedOrdinaryReplay(existing, payment);
       }
       // 1 · reread from the database; whatever the UI believed is irrelevant
       const invoice = this.requireDraft(invoiceId);
+      // CURRENCY-P1: an invoice is issued only in the terminal's currency. Issuing it records a SALE in the invoice's
+      // currency, and the daily money summary and the sales report refuse a day holding two currencies
+      // (`dailyMoney.ts`, `report.ts`: MIXED_CURRENCY) — one such issue would break that day's reports. A draft in
+      // another currency (only a restored or synthetic ledger can hold one) stays a draft, untouched.
+      if (invoice.currency !== this.deps.terminal.currency) {
+        throw new DomainError(
+          "MIXED_CURRENCY",
+          `This invoice is in ${invoice.currency} and this terminal records ${this.deps.terminal.currency}; it was not issued`,
+        );
+      }
       const lines = this.deps.invoices.listLines(invoiceId);
+      // R5 (Abu Abbas F3): the issue is bound to the COMPLETE draft the confirmation showed — every line's identity and
+      // content, every printed header field, the money and the account choice — compared HERE, inside the same
+      // IMMEDIATE transaction that will write the number, the sale and the payment. A row deleted or substituted after
+      // the confirmation opened, even one that changes no total, refuses the issue and writes nothing. A verified
+      // on-account replay of an issue that already committed returned above and is never compared (no false failure).
+      if (confirmedDraft !== undefined && confirmationDigest(toInvoiceViewDto({ invoice, lines }), credit !== null) !== confirmedDraft) {
+        throw new DomainError(
+          "INVOICE_CONFIRMATION_STALE",
+          "This invoice changed after its confirmation was shown; it was not issued. Check it and confirm again",
+        );
+      }
       let accountCustomerId: string | null = null;
       if (credit) {
         if (!invoice.customer_party_id) {
           throw new DomainError("CREDIT_NEEDS_CUSTOMER", "Choose the customer account before issuing on account");
         }
-        if (invoice.paid_minor !== 0n) {
-          throw new DomainError("CREDIT_NEEDS_UNPAID", "An invoice issued on account must have nothing paid yet");
-        }
+        // TRANSITION · INV-PARTIAL-DEBT (Option B, DEC-35h): was CREDIT_NEEDS_UNPAID for any paid amount.
+        // A part-paid invoice now goes on account by design; "is anything left to owe" is decided
+        // from the recomputed totals at 5c, still before the number.
         // Re-read NOW: the account may have been archived since the draft was linked.
         accountCustomerId = credit.activeCustomer(invoice.customer_party_id).id;
       }
@@ -866,12 +1025,50 @@ export class InvoiceService {
       //     A draft that never set one falls back to the shop setting, which is how it behaved
       //     before per-invoice tax existed.
       const tax = this.invoiceTax(invoice);
+      // A legacy NULL snapshot does not identify the effective company tax in the confirmation.
+      // A protected issue must have an explicit snapshot before it can issue with enabled tax.
+      if (confirmedDraft !== undefined && invoice.tax_snapshot_json === null && tax.enabled) {
+        throw new DomainError("INVOICE_TAX_CONFIRMATION_REQUIRED", "Set the invoice tax explicitly and confirm it again");
+      }
       const totals = computeInvoiceTotals(
         lineTotals,
         invoice.currency,
         tax,
         money(invoice.paid_minor, invoice.currency),
       );
+      if (confirmedDraft !== undefined && (totals.subtotal.minor !== invoice.subtotal_minor ||
+        totals.tax.minor !== invoice.tax_minor || totals.total.minor !== invoice.total_minor ||
+        totals.paid.minor !== invoice.paid_minor || totals.balanceDue.minor !== invoice.balance_due_minor)) {
+        throw new DomainError("INVOICE_CONFIRMATION_STALE", "The invoice totals changed after confirmation; check and confirm again");
+      }
+
+      // 5c · INV-PARTIAL-DEBT — OPTION B (owner, DEC-35h): a part-paid invoice's remainder is ALWAYS a
+      //      debt on a named customer's account. An untracked remainder is no longer possible for a
+      //      NEW invoice: issuing one without the account path is refused, for every role, before
+      //      the number. Unpaid and fully paid invoices keep exactly their earlier rules.
+      const partlyPaid = totals.paid.minor > 0n && totals.balanceDue.minor > 0n;
+      if (partlyPaid && !credit) {
+        throw new DomainError(
+          "CREDIT_PARTIAL_NEEDS_ACCOUNT",
+          "A part-paid invoice must put its remainder on a customer's account (owner, issue on account)",
+        );
+      }
+      if (credit && totals.balanceDue.minor <= 0n) {
+        throw new DomainError("CREDIT_NOTHING_OWED", "Nothing remains to put on the customer's account");
+      }
+
+      // 5b · INV-PAY-METHOD (owner, 2026-11-09): money marked paid must say how it arrived — cash, or
+      //      Whish with its evidence — and nothing paid must not carry a method. Decided from the
+      //      PERSISTED paid amount, before the number (the first irreversible act) is allocated.
+      if (totals.paid.minor > 0n && payment === null) {
+        throw new DomainError(
+          "INVOICE_PAYMENT_METHOD_REQUIRED",
+          "Choose how the paid amount was received — cash or Whish Money — before issuing",
+        );
+      }
+      if (totals.paid.minor === 0n && payment !== null) {
+        throw new DomainError("INVALID_INPUT", "Nothing is marked paid on this invoice, so it takes no payment method");
+      }
 
       // 6 · the words, frozen onto the document so a later build cannot reword a printed invoice
       const amountInWords = amountInWordsAr(totals.total);
@@ -923,18 +1120,21 @@ export class InvoiceService {
           issuerSnapshotJson,
           taxSnapshotJson,
           finalizedAt,
+          confirmedRequestIdentity: confirmedDraft === undefined ? null : confirmedRequestIdentity(confirmedDraft, credit !== null, payment),
         },
         instant,
       );
 
       // 10 · THE SALE. A finalized invoice is a real sale for business reporting (migration 7).
-      this.createSaleForInvoice(finalized, lines, cashier, instant);
+      //      INV-PAY-METHOD: with the method given at issue, the paid amount becomes ONE tender of it.
+      this.createSaleForInvoice(finalized, lines, cashier, instant, payment);
 
       // 10b · ON ACCOUNT: the one matching receivable, in THIS transaction, then verified by reading
       //       both rows back. Any mismatch throws and rolls the whole finalization back.
       if (credit && accountCustomerId) {
-        if (finalized.paid_minor !== 0n || finalized.total_minor <= 0n) {
-          throw new DomainError("CREDIT_NEEDS_UNPAID", "An invoice issued on account must have nothing paid yet");
+        // Read back from the FROZEN row: the remainder owed is its balance, never more, never zero.
+        if (finalized.balance_due_minor <= 0n || finalized.paid_minor + finalized.balance_due_minor !== finalized.total_minor) {
+          throw new DomainError("CREDIT_NOTHING_OWED", "Nothing remains to put on the customer's account");
         }
         const sale = this.deps.sales.findByInvoiceId(finalized.id);
         if (!sale) throw new DomainError("LEDGER_INTEGRITY", "The invoice sale was not recorded");
@@ -950,8 +1150,26 @@ export class InvoiceService {
       // 11 · classify every line against the catalog AS IT IS NOW, and write the review queue
       this.createReconciliation(finalized, lines, cashier, instant);
 
-      return { invoice: finalized, lines: this.deps.invoices.listLines(invoiceId) };
+      return this.withPayment({ invoice: finalized, lines: this.deps.invoices.listLines(invoiceId) });
     });
+  }
+
+  /**
+   * INV-PAY-METHOD: adds `payment` to a FINAL invoice's view when its sale recorded a method — read
+   * from the sale (and its one tender), never stored a second time on the invoice. Unchanged otherwise.
+   */
+  private withPayment(view: InvoiceView): InvoiceView {
+    if (view.invoice.status !== "final") return view;
+    const sale = this.deps.sales.findByInvoiceId(view.invoice.id);
+    if (!sale || sale.paymentMethod === null) return view;
+    return {
+      ...view,
+      payment: {
+        method: sale.paymentMethod,
+        provider: sale.externalPayment?.provider ?? null,
+        reference: sale.externalPayment?.reference ?? null,
+      },
+    };
   }
 
   // ── The sale a finalized invoice is ─────────────────────────────────────────────────────────────
@@ -984,6 +1202,16 @@ export class InvoiceService {
   private assertAccountPair(invoice: InvoiceRow, credit: InvoiceCreditPort): void {
     const sale = this.deps.sales.findByInvoiceId(invoice.id);
     const ob = sale ? credit.receivableForSale(sale.id) : null;
+    // INV-PARTIAL-DEBT: two shapes are valid. UNPAID — no method, receivable = total. PARTIAL — one
+    // tender (cash, or Whish with its confirmed reference) for the paid part, receivable = balance.
+    const partial = invoice.paid_minor > 0n;
+    const tenderOk =
+      !!sale &&
+      (partial
+        ? (sale.paymentMethod === "cash" && !sale.externalPayment) ||
+          // The tender row itself carries funds_confirmed = 1 (sale_tenders CHECK, M19).
+          (sale.paymentMethod === "external" && !!sale.externalPayment && sale.externalPayment.provider === "whish")
+        : sale.paymentMethod === null);
     if (
       !sale ||
       !ob ||
@@ -993,20 +1221,21 @@ export class InvoiceService {
       sale.invoiceId !== invoice.id ||
       sale.customerId !== null ||
       sale.currency !== invoice.currency ||
-      sale.paymentMethod !== null ||
-      sale.paymentStatus !== "unpaid" ||
+      !tenderOk ||
+      sale.paymentStatus !== (partial ? "partial" : "unpaid") ||
       sale.subtotal.minor !== invoice.subtotal_minor ||
       sale.tax.minor !== invoice.tax_minor ||
       sale.total.minor !== invoice.total_minor ||
-      sale.paid.minor !== 0n ||
+      sale.paid.minor !== invoice.paid_minor ||
       sale.balanceDue.minor !== invoice.balance_due_minor ||
       !invoice.customer_party_id ||
       ob.partyId !== invoice.customer_party_id ||
       ob.direction !== "receivable" ||
       ob.currency !== invoice.currency ||
       ob.amountMinor !== invoice.balance_due_minor ||
-      ob.amountMinor !== invoice.total_minor ||
-      invoice.paid_minor !== 0n
+      invoice.balance_due_minor <= 0n ||
+      invoice.paid_minor < 0n ||
+      invoice.paid_minor + invoice.balance_due_minor !== invoice.total_minor
     ) {
       throw new DomainError(
         "LEDGER_INTEGRITY",
@@ -1022,7 +1251,7 @@ export class InvoiceService {
    * it never writes. A final invoice with no receivable was issued some other way and is refused
    * plainly rather than reported as having been put on the account.
    */
-  private verifiedAccountReplay(invoice: InvoiceRow, credit: InvoiceCreditPort): InvoiceView {
+  private verifiedAccountReplay(invoice: InvoiceRow, credit: InvoiceCreditPort, payment: InvoicePayment | null): InvoiceView {
     const sale = this.deps.sales.findByInvoiceId(invoice.id);
     if (!sale) {
       throw new DomainError("LEDGER_INTEGRITY", "The finalized invoice's sale is missing");
@@ -1031,7 +1260,47 @@ export class InvoiceService {
       throw new DomainError("CREDIT_NOT_ISSUED", "This invoice was issued without a customer account");
     }
     this.assertAccountPair(invoice, credit);
-    return { invoice, lines: this.deps.invoices.listLines(invoice.id) };
+    // INV-PARTIAL-DEBT: a repeat is the SAME request only if it names the payment the ledger recorded
+    // — same method, same Whish reference — or, for an unpaid one, none. Anything else is a different
+    // request reusing this invoice, refused without writing.
+    const recorded = sale.paymentMethod === null ? null : { method: sale.paymentMethod, reference: sale.externalPayment?.reference ?? null };
+    const asked = payment === null ? null : { method: payment.method, reference: payment.whish?.reference ?? null };
+    if (JSON.stringify(recorded) !== JSON.stringify(asked)) {
+      throw new DomainError("IDEMPOTENCY_CONFLICT", "This invoice was already issued with a different payment");
+    }
+    return this.withPayment({ invoice, lines: this.deps.invoices.listLines(invoice.id) });
+  }
+
+  /** A protected ordinary replay has no account debt; re-check its recorded invoice sale before returning it. */
+  private verifiedOrdinaryReplay(invoice: InvoiceRow, payment: InvoicePayment | null): InvoiceView {
+    const sale = this.deps.sales.findByInvoiceId(invoice.id);
+    const lines = this.deps.invoices.listLines(invoice.id);
+    const paymentAgrees = !!sale && (payment === null
+      ? sale.paymentMethod === null && sale.externalPayment === null
+      : payment.method === "cash"
+        ? sale.paymentMethod === "cash" && sale.externalPayment === null
+        : sale.paymentMethod === "external" && sale.externalPayment?.provider === "whish" &&
+          sale.externalPayment.reference === payment.whish?.reference);
+    const rowsAgree = !!sale && sale.lines.length === lines.length && lines.every((line, i) => {
+      const row = sale.lines[i];
+      return !!row && row.invoiceLineId === line.id && row.lineNo === Number(line.line_no) &&
+        row.productId === line.product_id && row.productName === (line.description ?? "") &&
+        row.saleUnit === line.canonical_unit && row.unitLabel === line.unit_label &&
+        BigInt(row.quantityMilli) === line.quantity_milli && row.unitPrice.minor === line.unit_price_minor &&
+        row.lineTotal.minor === line.line_total_minor;
+    });
+    if (!sale || sale.sourceType !== "invoice" || sale.invoiceId !== invoice.id || sale.customerId !== null ||
+      sale.currency !== invoice.currency || sale.subtotal.minor !== invoice.subtotal_minor ||
+      sale.tax.minor !== invoice.tax_minor || sale.total.minor !== invoice.total_minor ||
+      sale.paid.minor !== invoice.paid_minor || sale.balanceDue.minor !== invoice.balance_due_minor ||
+      invoice.subtotal_minor + invoice.tax_minor !== invoice.total_minor ||
+      invoice.paid_minor < 0n || invoice.balance_due_minor < 0n ||
+      invoice.paid_minor + invoice.balance_due_minor !== invoice.total_minor ||
+      sale.paymentStatus !== paymentStatusFor(invoice.paid_minor, invoice.balance_due_minor) ||
+      !paymentAgrees || !rowsAgree) {
+      throw new DomainError("LEDGER_INTEGRITY", "The issued invoice and its sale could not be verified together");
+    }
+    return this.withPayment({ invoice, lines });
   }
 
   private createSaleForInvoice(
@@ -1039,6 +1308,7 @@ export class InvoiceService {
     lines: ReadonlyArray<InvoiceLineRow>,
     cashier: Cashier,
     instant: Date,
+    payment: InvoicePayment | null = null,
   ): void {
     const key = invoiceSaleIdempotencyKey(invoice.id);
 
@@ -1088,6 +1358,9 @@ export class InvoiceService {
             totalMinor: invoice.total_minor.toString(),
             paidMinor: invoice.paid_minor.toString(),
             lines: saleLines.map((l) => [l.lineNo, l.quantityMilli, l.unitPriceMinor.toString()]),
+            // INV-PAY-METHOD: appended ONLY when a method was given, so every earlier invoice sale keeps
+            // its exact fingerprint; the method and the reference are part of WHAT was paid.
+            ...(payment === null ? {} : { paymentMethod: payment.method, ...(payment.whish ? { whish: payment.whish.reference } : {}) }),
           }),
         )
         .digest("hex"),
@@ -1104,7 +1377,10 @@ export class InvoiceService {
       paidMinor: invoice.paid_minor,
       balanceDueMinor: invoice.balance_due_minor,
       paymentStatus: paymentStatusFor(paid.minor, balanceDue.minor),
-      paymentMethod: null,
+      // TRANSITION · INV-PAY-METHOD: was always NULL ("not recorded"). Now the method given at issue —
+      // and only then; an invoice issued without one (nothing paid) keeps NULL, never an invented method.
+      paymentMethod: payment?.method ?? null,
+      externalPayment: payment?.whish ?? null,
       // 🔴 THE BUSINESS DAY THIS WAS RECORDED, not the date printed on the document. An invoice may
       // be back-dated; "Today's Sales" means what the shop recorded today, and changing that
       // definition would silently alter a report every POS sale already feeds. The document keeps
@@ -1213,7 +1489,7 @@ export class InvoiceService {
     this.requireCashier();
     const invoice = this.deps.invoices.findByNumber(invoiceNumber);
     if (!invoice || invoice.status !== "final") return null;
-    return { invoice, lines: this.deps.invoices.listLines(invoice.id) };
+    return this.withPayment({ invoice, lines: this.deps.invoices.listLines(invoice.id) });
   }
 
   /** The frozen invoice behind a review item — read, never recomputed from today's catalog. */
@@ -1377,6 +1653,18 @@ export class InvoiceService {
       return this.markCreated(row, row.matched_product_id, cashier);
     }
 
+    // CURRENCY-P1 (Abu Abbas's risk): a new catalog product is priced in the catalog's currency, which is the terminal's
+    // (`PosService` refuses any other). The price comes from the invoice line, so the line's invoice must be in that
+    // same currency; otherwise its minor units would be relabelled as the catalog's. Refused, nothing created.
+    const sourceInvoice = this.deps.invoices.findById(line.invoice_id);
+    if (!sourceInvoice) throw new DomainError("INVOICE_NOT_FOUND", "The invoice behind this item is gone");
+    if (sourceInvoice.currency !== this.deps.terminal.currency) {
+      throw new DomainError(
+        "MIXED_CURRENCY",
+        `This invoice is in ${sourceInvoice.currency} and the catalog is in ${this.deps.terminal.currency}; no product was created`,
+      );
+    }
+
     const baseUnit =
       cleanText(input.baseUnit, "base_unit", MAX_SKU) ??
       (line.canonical_unit ?? (line.unit_label ? canonicalUnitFor(line.unit_label) : null));
@@ -1392,7 +1680,9 @@ export class InvoiceService {
       // 🔴 Never inferred from the description. Absent stays absent.
       nameEn: cleanText(input.nameEn, "name_en", MAX_PRODUCT_NAME),
       sku: cleanText(input.sku, "sku", MAX_SKU),
-      price: priceText(line.unit_price_minor, this.deps.terminal.currency),
+      // CURRENCY-P1: the line's minor units are formatted in the INVOICE's currency — they were formatted in the
+      // terminal's, which reads one currency's integers as another's whenever the two differ.
+      price: priceText(line.unit_price_minor, sourceInvoice.currency),
       baseUnit,
     };
 
@@ -1454,6 +1744,19 @@ export class InvoiceService {
     }
     const current = this.deps.catalogStore.findById(row.matched_product_id);
     if (!current) throw new DomainError("PRODUCT_NOT_FOUND", "That product no longer exists");
+    // CURRENCY-P1 (Abu Abbas's risk): accepting the invoice PRICE copies the line's minor units into the product, which
+    // `targetState` formats in the PRODUCT's currency. Unless the invoice is in that same currency, that relabels the
+    // amount. Refused before any write; name/unit-only updates carry no money and are unaffected.
+    if (fields.includes("selling_price_minor")) {
+      const sourceInvoice = this.deps.invoices.findById(line.invoice_id);
+      if (!sourceInvoice) throw new DomainError("INVOICE_NOT_FOUND", "The invoice behind this item is gone");
+      if (sourceInvoice.currency !== current.currency) {
+        throw new DomainError(
+          "MIXED_CURRENCY",
+          `This invoice is in ${sourceInvoice.currency} and the product is priced in ${current.currency}; the price was not changed`,
+        );
+      }
+    }
 
     const target = this.targetState(fields, selection, line, current);
 

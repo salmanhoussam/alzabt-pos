@@ -41,7 +41,9 @@ const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["
 
 // A fresh profile per run: this script creates records and must never touch a real ledger.
 const home = mkdtempSync(join(tmpdir(), "pos-e2e-customers-"));
-const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
+// TRANSITION (DEMO-FALLBACK, D-DF1): this script sells the bundled sample catalog on a fresh profile, which the
+// merchant default no longer serves; the explicit demo switch keeps that coverage. Old value: no switch.
+const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData"), ALZABT_POS_DEMO_CATALOG: "1" };
 const Database = createRequire(import.meta.url)("better-sqlite3");
 const LEDGER = join(home, "userData", "alzabt-pos-ledger.sqlite");
 
@@ -53,6 +55,16 @@ const assert = (cond, msg) => {
 
 const testid = (page, id) => page.locator(`[data-testid="${id}"]`);
 const tab = (page, name) => page.locator(`[data-testid="tab-${name}"]`).click();
+/**
+ * ACC-3 (M17B-ALLOC-DEFAULT): a shared receipt now PROPOSES its shares oldest debt first as soon as a total is
+ * typed. Sections written before it type their own shares from EMPTY fields; this empties the proposal first —
+ * exactly what an owner overwriting it does, which switches the form to manual. TRANSITION: the old start state
+ * (every share empty) is what this restores; no assertion of those sections changes.
+ */
+const clearProposal = async (page) => {
+  const fields = page.locator('[data-testid="receipt-share"]');
+  for (let i = 0; i < (await fields.count()); i++) await fields.nth(i).fill("");
+};
 
 /** Calls a channel straight through the bridge, exactly as an untrusted renderer could. */
 const direct = (page, method, payload) =>
@@ -362,9 +374,10 @@ try {
     (await testid(page, "sell-customer").innerText()).includes("زبون من الكاشير"),
     "the chosen customer is shown beside the cart",
   );
+  // Was `sell-customer-not-attached` ("not attached to the sale") until ACC-2 linked paid sales.
   assert(
-    (await testid(page, "sell-customer-not-attached").count()) === 1,
-    "🔴 and the screen SAYS it is not attached to the sale and records no debt",
+    (await testid(page, "sell-customer-paid-link").count()) === 1,
+    "🔴 and the screen SAYS a linked paid sale records no debt and does not raise the balance",
   );
   // 🔴 THE BUTTON SAYS WHAT IT DOES. It used to borrow «تعديل» from the record-editing action,
   // which a cashier may never perform — so the one control a cashier DOES have was labelled with
@@ -476,7 +489,9 @@ try {
     // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
     // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
     // 🔴 TRANSITION 17 -> 18 with migration 18 (external_receipt_allocation). The old value was 17.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 18, "the installed app's ledger is at schema v18");
+    // 🔴 TRANSITION 18 -> 19 with migration 19 (payment_model_tenders_references_advances). The old value was 18.
+    // 🔴 TRANSITION 19 -> 20 with migration 20 (advance_safety_attempts_voids). The old value was 19.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 20, "the installed app's ledger is at schema v20");
     assert(n("SELECT count(*) AS n FROM parties") === 5, "five party rows, and no more");
     assert(n("SELECT count(*) AS n FROM party_contact_history") === 0, "and zero contact-history rows — nothing was edited");
     assert(n("SELECT count(*) AS n FROM sales") === 0, "🔴 and still not one sale, obligation or payment anywhere");
@@ -755,6 +770,13 @@ try {
   // rather than below the fold — the S3B review could only verify that one by assertion.
   await settledBadge.scrollIntoViewIfNeeded();
   await p5.screenshot({ path: SHOTS + "S3C-A3-settled-badge-arabic.png" });
+  // UX-REF-NUMBERS (DEC-33 #2): the debt's origin reads as words and the owner's own reference — never an id.
+  {
+    const src = (await card("o-unpaid").locator('[data-testid="statement-source"]').innerText()).trim();
+    assert(src === "مستند خارجي FIX-001", `🔴 UX-REF: Arabic statement shows the manual document by its reference («${src}»)`);
+    const all = await p5.locator('[data-testid="statement-source"]').allInnerTexts();
+    assert(all.length > 0 && all.every((x) => !/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(x)), `🔴 UX-REF: no statement line shows an internal id (${JSON.stringify(all)})`);
+  }
 
   // ── D · the Arabic overpayment refusal preserves the authoritative balance ──────────────────
   await card("o-part").locator('[data-testid="collect-open"]').click();
@@ -776,6 +798,10 @@ try {
   await card("o-part").locator('[data-testid="collect-open"]').click();
   await testid(p5, "collect-form").waitFor({ state: "visible", timeout: 30000 });
   await p5.screenshot({ path: SHOTS + "S3C-A4-collect-form-english.png" });
+  {
+    const ref = (await testid(p5, "collect-reference").innerText()).trim();
+    assert(ref === "External document FIX-002", `🔴 UX-REF: the English payment form names the document, not an id («${ref}»)`);
+  }
 
   // ── F · an overpayment is refused in English, on screen, and writes nothing ─────────────────
   await testid(p5, "collect-amount").fill("999.00");
@@ -814,7 +840,9 @@ try {
     // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
     // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
     // 🔴 TRANSITION 17 -> 18 with migration 18 (external_receipt_allocation). The old value was 17.
-    assert(n("SELECT count(*) AS n FROM schema_migrations") === 18, "the ledger is still at schema v18");
+    // 🔴 TRANSITION 18 -> 19 with migration 19 (payment_model_tenders_references_advances). The old value was 18.
+    // 🔴 TRANSITION 19 -> 20 with migration 20 (advance_safety_attempts_voids). The old value was 19.
+    assert(n("SELECT count(*) AS n FROM schema_migrations") === 20, "the ledger is still at schema v20");
     db.close();
   }
 
@@ -918,7 +946,9 @@ try {
   await testid(p6, "collect-error").waitFor({ state: "visible", timeout: 30000 });
   await testid(p6, "collect-payment-reference").fill("WH-E2E-001");
   await testid(p6, "collect-confirm").click();
-  await testid(p6, "collect-error").waitFor({ state: "visible", timeout: 30000 });
+  // TRANSITION (QW-COLLECT-LAYOUT): was collect-error; a missing confirmation now has ONE explanation, at the box.
+  await testid(p6, "collect-confirm-missing").waitFor({ state: "visible", timeout: 30000 });
+  assert((await testid(p6, "collect-error").count()) === 0, "🔴 QW-LAYOUT: one red line only — no generic error beside the explanation");
   assert(dbCount() === settlementsBefore + 1, "🔴 neither refusal wrote a settlement (only the recovered one exists)");
   await testid(p6, "collect-funds-confirmed").check();
   await testid(p6, "collect-confirm").click();
@@ -928,18 +958,26 @@ try {
   assert((await card6("o-part").innerText()).includes("WH-E2E-001"), "and carries its reference");
   await p6.screenshot({ path: SHOTS + "M17A-A2-after-whish.png" });
 
-  // Card terminal (no reference) and bank transfer (reference + confirmation) on the same debt.
+  // TRANSITION (P3, DEC-35): this step recorded 3.00 by CARD and 4.00 by BANK TRANSFER (BT-E2E-001). New
+  // collections are cash or Whish only, so the form must offer exactly those two, and the same 3.00 + 4.00
+  // are recorded as two more Whish payments — the amounts, and everything asserted after, are unchanged.
   await card6("o-part").locator('[data-testid="collect-open"]').click();
   await testid(p6, "collect-form").waitFor({ state: "visible", timeout: 30000 });
-  await testid(p6, "collect-method").selectOption("card");
+  {
+    const offered = await testid(p6, "collect-method").evaluate((s) => [...s.options].map((o) => o.value));
+    assert(JSON.stringify(offered) === JSON.stringify(["cash", "whish"]), `🔴 P3: a new collection offers ONLY cash and Whish (${offered})`);
+  }
+  await testid(p6, "collect-method").selectOption("whish");
   await testid(p6, "collect-amount").fill("3.00");
+  await testid(p6, "collect-payment-reference").fill("WH-E2E-002");
+  await testid(p6, "collect-funds-confirmed").check();
   await testid(p6, "collect-confirm").click();
   await testid(p6, "collect-done").waitFor({ state: "visible", timeout: 30000 });
   await card6("o-part").locator('[data-testid="collect-open"]').click();
   await testid(p6, "collect-form").waitFor({ state: "visible", timeout: 30000 });
-  await testid(p6, "collect-method").selectOption("bank_transfer");
+  await testid(p6, "collect-method").selectOption("whish");
   await testid(p6, "collect-amount").fill("4.00");
-  await testid(p6, "collect-payment-reference").fill("BT-E2E-001");
+  await testid(p6, "collect-payment-reference").fill("WH-E2E-003");
   await testid(p6, "collect-funds-confirmed").check();
   await testid(p6, "collect-confirm").click();
   await testid(p6, "collect-done").waitFor({ state: "visible", timeout: 30000 });
@@ -954,10 +992,11 @@ try {
     assert(rec.k === "e2e-pending-key-01" && rec.m === "external" && rec.p === "whish" && rec.r === "recorded", `🔴 the recovered payment kept its ORIGINAL key and closed its attempt (${JSON.stringify(rec)})`);
     const w = db.prepare("SELECT method, provider, reference, funds_confirmed AS c, amount_minor AS a FROM settlements WHERE reference = 'WH-E2E-001'").get();
     assert(w.method === "external" && w.provider === "whish" && Number(w.c) === 1 && Number(w.a) === 500, `🔴 Whish is stored as external/whish, confirmed, 5.00 (${JSON.stringify(w)})`);
-    const c = db.prepare("SELECT method, provider, reference FROM settlements WHERE method = 'card' AND obligation_id = 'o-part'").get();
-    assert(c.provider === null && c.reference === null, "card is stored as card with no reference");
-    const b = db.prepare("SELECT method, provider, reference, funds_confirmed AS c FROM settlements WHERE reference = 'BT-E2E-001'").get();
-    assert(b.method === "external" && b.provider === "bank_transfer" && Number(b.c) === 1, "bank transfer is stored as external/bank_transfer, confirmed");
+    // TRANSITION (P3): were "card is stored as card with no reference" and "bank transfer is stored as
+    // external/bank_transfer". Now: the two payments are Whish, and NO new card / bank row was written.
+    const w23 = db.prepare("SELECT count(*) AS n FROM settlements WHERE method = 'external' AND provider = 'whish' AND reference IN ('WH-E2E-002', 'WH-E2E-003') AND funds_confirmed = 1").get();
+    assert(Number(w23.n) === 2, "🔴 P3: the 3.00 and 4.00 are stored as confirmed Whish payments");
+    assert(n("SELECT count(*) AS n FROM settlements WHERE obligation_id = 'o-part' AND (method IN ('card', 'other') OR provider = 'bank_transfer')") === 0, "🔴 P3: no new card / other / bank-transfer collection exists");
     assert(
       n("SELECT coalesce(sum(amount_minor), 0) AS n FROM settlements WHERE method = 'cash'") === cashBefore,
       "🔴 NONE of it is cash: the cash total is exactly what it was",
@@ -1298,13 +1337,38 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
     await testid(pq, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
     assert((await testid(pq, "receipt-confirm").isDisabled()), "🔴 Confirm starts DISABLED (nothing is allocated yet)");
     assert(!(await testid(pq, "receipt-funds-confirmed").isChecked()), "🔴 the funds-received confirmation starts UNCHECKED");
-    // Only Whish and bank transfer are offered.
+    // TRANSITION (P3, DEC-35): was "only Whish and bank transfer are offered" (["whish", "bank_transfer"]).
     const methods = await testid(pq, "receipt-method").evaluate((s) => [...s.options].map((o) => o.value));
-    assert(JSON.stringify(methods) === JSON.stringify(["whish", "bank_transfer"]), `only Whish and bank transfer are offered (${methods})`);
+    assert(JSON.stringify(methods) === JSON.stringify(["whish"]), `🔴 P3: only Whish is offered for a shared receipt (${methods})`);
     const shareFor = (id) => pq.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
     await testid(pq, "receipt-currency").selectOption("USD");
     await testid(pq, "receipt-reference").fill("WH-S1-DUP");
     await testid(pq, "receipt-total").fill("100.00");
+    // ACC-3: before the owner types anything, 100.00 is PROPOSED oldest debt first (posted_at, then id), each
+    // debt up to what it still owes — computed here from the ledger itself, not from the screen.
+    {
+      const open = readDb((d) =>
+        d
+          .prepare(
+            `SELECT o.id, o.amount_minor - coalesce((SELECT sum(s.amount_minor) FROM settlements s WHERE s.obligation_id = o.id), 0) AS owed
+               FROM obligations o WHERE o.party_id = ? AND o.currency = 'USD' ORDER BY o.posted_at, o.id`,
+          )
+          .all(statementCustomerId),
+      ).filter((r) => Number(r.owed) > 0);
+      let rest = 10000;
+      const expected = open.map((r) => {
+        const take = Math.min(rest, Number(r.owed));
+        rest -= take;
+        return [r.id, take > 0 ? (take / 100).toFixed(2) : ""];
+      });
+      const shown = await pq.locator('[data-testid="receipt-debt"]').evaluateAll((els) =>
+        els.map((e) => [e.getAttribute("data-obligation"), e.querySelector('[data-testid="receipt-share"]').value]),
+      );
+      assert(JSON.stringify(shown) === JSON.stringify(expected), `🔴 ACC-3: 100.00 is proposed oldest debt first (${JSON.stringify(shown)})`);
+      assert((await testid(pq, "receipt-mode").getAttribute("data-mode")) === "auto", "ACC-3: the proposal is automatic until a share is edited");
+    }
+    await clearProposal(pq);
+    assert((await testid(pq, "receipt-mode").getAttribute("data-mode")) === "manual", "ACC-3: overwriting the proposal switches to manual");
     await shareFor("s1-A").fill("60.00");
     await shareFor("s1-B").fill("39.00");
     assert((await testid(pq, "receipt-left").getAttribute("data-complete")) === "no", "🔴 99.00 of 100.00 is NOT complete");
@@ -1342,7 +1406,9 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
 
     // refusal 1: the confirmation was not given → refused on screen, nothing written
     await testid(pq, "receipt-confirm").click();
-    await testid(pq, "receipt-error").waitFor({ state: "visible", timeout: 30000 });
+    // TRANSITION (QW-COLLECT-LAYOUT): was receipt-error; the missing confirmation now has ONE explanation, at the box.
+    await testid(pq, "receipt-confirm-missing").waitFor({ state: "visible", timeout: 30000 });
+    assert((await testid(pq, "receipt-error").count()) === 0, "🔴 QW-LAYOUT: one red line only on the shared receipt");
     assert(num("SELECT count(*) AS n FROM receipts") === 0 && num("SELECT count(*) AS n FROM receipt_attempts") === 0, "🔴 an unconfirmed receipt wrote NOTHING");
     // refusal 2: the reference already belongs to a direct collection → the ledger refuses, nothing is shared
     await testid(pq, "receipt-funds-confirmed").check();
@@ -1460,8 +1526,10 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       );
       assert(await lbpCurrency.isDisabled(), "the single-currency selector is intentionally disabled");
       assert((await lbpCurrency.inputValue()) === "LBP", "LBP is selected automatically");
-      await testid(pe, "receipt-method").selectOption("bank_transfer");
-      await testid(pe, "receipt-reference").fill("BT-S1-77");
+      // TRANSITION (P3, DEC-35): this LBP receipt was a BANK TRANSFER (BT-S1-77); it is now Whish (WH-S1-77).
+      // The subject — currencies stay apart — is unchanged.
+      await testid(pe, "receipt-method").selectOption("whish");
+      await testid(pe, "receipt-reference").fill("WH-S1-77");
       await testid(pe, "receipt-total").fill("5000000.00");
       const share = (id) => pe.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
       assert((await pe.locator('[data-testid="receipt-debt"]').count()) === 2, "only the two LBP debts are listed for an LBP receipt (USD debts are never mixed in)");
@@ -1473,8 +1541,8 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       await testid(pe, "receipt-confirm").click();
       await testid(pe, "receipt-done").waitFor({ state: "visible", timeout: 30000 });
       assert(outstandingOf("s1-L1") === 0 && outstandingOf("s1-L2") === 0, "both LBP debts are settled to exactly 0");
-      const lbp = readDb((d) => d.prepare("SELECT provider, currency, amount_minor AS a FROM receipts WHERE reference = 'BT-S1-77'").get());
-      assert(lbp.provider === "bank_transfer" && lbp.currency === "LBP" && Number(lbp.a) === 500000000, `the LBP receipt is a bank transfer of 5,000,000.00 (${JSON.stringify(lbp)})`);
+      const lbp = readDb((d) => d.prepare("SELECT provider, currency, amount_minor AS a FROM receipts WHERE reference = 'WH-S1-77'").get());
+      assert(lbp.provider === "whish" && lbp.currency === "LBP" && Number(lbp.a) === 500000000, `the LBP receipt is a Whish receipt of 5,000,000.00 (${JSON.stringify(lbp)})`);
       await pe.screenshot({ path: SHOTS + "M18-S1-A5-after-lbp-english.png" });
     } finally {
       await app.close().catch(() => undefined);
@@ -1484,7 +1552,7 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
   // ── S1-4 · what the whole installed ledger now says ───────────────────────────────────────────
   readDb((d) => {
     const n = (sql) => Number(d.prepare(sql).get().n);
-    assert(n("SELECT count(*) AS n FROM receipts") === 3, "three receipts: USD Whish, recovered USD Whish, LBP bank transfer");
+    assert(n("SELECT count(*) AS n FROM receipts") === 3, "three receipts: USD Whish, recovered USD Whish, LBP Whish (P3; was LBP bank transfer)");
     assert(n("SELECT count(*) AS n FROM settlements WHERE receipt_id IS NOT NULL") === 6, "six allocation shares in all");
     assert(n("SELECT count(*) AS n FROM obligations") === base.obligations, "🔴 no debt was ever created or rewritten");
     assert(n("SELECT coalesce(sum(amount_minor),0) AS n FROM settlements WHERE method = 'cash'") === base.cash, "🔴 the cash total is exactly what it was");
@@ -1532,6 +1600,7 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
       assert((await testid(p, "receipt-currency").inputValue()) === "USD", "R1: USD selected");
       await testid(p, "receipt-reference").fill("WH-S1-R1-UI");
       await testid(p, "receipt-total").fill("10.00");
+      await clearProposal(p); // ACC-3 TRANSITION: this section types its own 6+4 from empty shares
       const share = (id) => p.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
       await share("s1-R1-A").fill("6.00");
       await share("s1-R1-B").fill("4.00");
@@ -1602,6 +1671,462 @@ $dwm = [W]::DwmGetWindowAttribute($h, 9, [ref]$f, 16)
   }
 
   log("M17B-S1 shared-receipt E2E complete");
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // ACC-2 · SELL-CUSTOMER-LINK — a PAID sale names its customer, by id; the owner's statement lists
+  // it as activity, apart from the debts, and no balance moves. Change / clear before paying, a
+  // fresh sale starts with no customer, an archived customer is refused, and it all survives a
+  // restart. Synthetic data only.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const acc2App = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    const q = await acc2App.firstWindow();
+    try {
+      await signIn(q, "Cashier One", "1111");
+      await q.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      // The language persists across launches and S1-3 leaves it English: select Arabic explicitly.
+      if ((await q.evaluate(() => document.documentElement.lang)) !== "ar") await testid(q, "lang-toggle").click();
+      await q.waitForFunction(() => document.documentElement.lang === "ar" && document.documentElement.dir === "rtl", undefined, { timeout: 10000 });
+      const mk = async (displayName) => {
+        const r = await direct(q, "createCustomer", { displayName, phone: null, address: null, note: null });
+        if (!r.ok) throw new Error(`createCustomer: ${JSON.stringify(r.error)}`);
+        return r.data.customer.id;
+      };
+      // TRANSITION (DEMO-FALLBACK, D-DF1): this profile already holds customers and debts — merchant data —
+      // so the demo switch is (correctly) ignored from here on and the sample catalog is gone. The sections
+      // below sell "the first card", never a sample-specific product or price, so the shop gets one REAL
+      // product of its own. Old value: the bundled sample, served whatever the ledger held.
+      if ((await q.locator("button.product").count()) === 0) {
+        const made = await direct(q, "createProduct", {
+          draft: { nameAr: "صنف حساب تجريبي", nameEn: "ACC test item", sku: "ACC2-REAL-1", price: "2.50", baseUnit: "piece" },
+        });
+        if (!made.ok) throw new Error(`createProduct: ${JSON.stringify(made.error)}`);
+        await testid(q, "tab-today").click();
+        await testid(q, "tab-sell").click();
+        await q.locator("button.product").first().waitFor({ state: "visible", timeout: 30000 });
+      }
+      const PAID = "زبون البيع المدفوع";
+      const paidId = await mk(PAID);
+      const otherId = await mk("زبون آخر للتبديل");
+      const goneId = await mk("زبون سيُؤرشف");
+      const pick = async (name) => {
+        await testid(q, "sell-choose-customer").click();
+        await testid(q, "customer-finder").waitFor({ timeout: 30000 });
+        await testid(q, "customer-search").fill(name);
+        await q.locator('[data-testid="customer-row"]').filter({ hasText: name }).first().click();
+        await testid(q, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
+        await testid(q, "sell-customer").waitFor({ timeout: 30000 });
+      };
+      const base = { sales: num("SELECT count(*) AS n FROM sales"), obligations: num("SELECT count(*) AS n FROM obligations") };
+
+      // 1 · Choose, CHANGE, then CLEAR before paying: the sale carries no customer at all.
+      await q.locator("button.product").first().click();
+      await pick(PAID);
+      await pick("زبون آخر للتبديل");
+      assert((await testid(q, "sell-customer").getAttribute("data-customer")) === otherId, "ACC-2: changing the customer replaces it");
+      await testid(q, "sell-clear-customer").click();
+      assert((await testid(q, "sell-customer").count()) === 0, "ACC-2: clearing removes the customer before payment");
+      await testid(q, "complete-sale").click();
+      assert((await testid(q, "pay-customer").count()) === 0, "ACC-2: the payment pane names no customer when none is chosen");
+      await testid(q, "pay-cash").click();
+      await testid(q, "new-sale").waitFor({ timeout: 30000 });
+      const cleared = readDb((d) => d.prepare("SELECT customer_id AS c FROM sales ORDER BY receipt_number DESC LIMIT 1").get());
+      assert(cleared.c === null, "🔴 ACC-2: a cleared customer is NOT sent — the sale carries no customer");
+      await testid(q, "new-sale").click();
+
+      // 2 · A linked PAID sale: the customer is shown before paying, recorded by id, and owes nothing.
+      await q.locator("button.product").first().click();
+      await pick(PAID);
+      const note = (await testid(q, "sell-customer-paid-link").innerText()).trim();
+      assert(
+        note === "المبيعات المدفوعة المرتبطة بهذا العميل تظهر في سجل حركاته، ولا تزيد الرصيد المستحق.",
+        `ACC-2: the Sell note says the linked paid sale is not a debt ("${note}")`,
+      );
+      await testid(q, "complete-sale").click();
+      await testid(q, "pay-customer").waitFor({ timeout: 30000 });
+      assert((await testid(q, "pay-customer").innerText()).includes(PAID), "🔴 ACC-2: the customer is visible BEFORE the payment is confirmed");
+      await q.screenshot({ path: SHOTS + "ACC2-1-pay-with-customer.png" });
+      await testid(q, "pay-cash").click();
+      await testid(q, "new-sale").waitFor({ timeout: 30000 });
+      const linked = readDb((d) =>
+        d.prepare(
+          "SELECT id, customer_id AS c, customer_name_snapshot AS snap, payment_status AS st, balance_due_minor AS due FROM sales ORDER BY receipt_number DESC LIMIT 1",
+        ).get(),
+      );
+      assert(linked.c === paidId && linked.snap === PAID, `🔴 ACC-2: the sale is stored with the customer's id and name snapshot (${JSON.stringify(linked)})`);
+      assert(linked.st === "paid" && Number(linked.due) === 0, "🔴 ACC-2: it is PAID in full — balance due 0");
+      assert(num("SELECT count(*) AS n FROM obligations") === base.obligations, "🔴 ACC-2: and NO obligation was posted");
+      assert(num("SELECT count(*) AS n FROM sales") === base.sales + 2, "exactly two sales so far in this section — no duplicate");
+      await testid(q, "new-sale").click();
+      assert((await testid(q, "sell-customer").count()) === 0, "🔴 ACC-2: the next sale does NOT inherit the previous customer");
+
+      // 3 · An ARCHIVED customer is refused at payment: nothing is recorded and the cart stays.
+      await q.locator("button.product").first().click();
+      await pick("زبون سيُؤرشف");
+      const off = await direct(q, "setCustomerActive", { customerId: goneId, isActive: false });
+      assert(off.ok, "the owner archives that customer while the sale is open");
+      const salesBeforeRefusal = num("SELECT count(*) AS n FROM sales");
+      await testid(q, "complete-sale").click();
+      await testid(q, "pay-cash").click();
+      await q.locator(".overlay .error").waitFor({ timeout: 30000 });
+      assert(num("SELECT count(*) AS n FROM sales") === salesBeforeRefusal, "🔴 ACC-2: an archived customer is refused — no sale recorded");
+      await q.keyboard.press("Escape");
+      assert((await q.locator('[data-testid="cart"] li.line').count()) === 1, "and the cart is still there to fix");
+      await testid(q, "sell-clear-customer").click();
+      await testid(q, "clear-cart").click();
+      await testid(q, "clear-confirm").click();
+
+      // 4 · The owner's statement lists the paid sale ONCE, apart from the debts — and survives a restart.
+      const openStatement = async (page, id, name) => {
+        await page.locator('[data-testid="tab-customers"]').click();
+        await testid(page, "customers-search").fill(name);
+        await page.locator(`[data-customer="${id}"]`).first().click();
+        await testid(page, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+        await testid(page, "statement-paid-sales").waitFor({ timeout: 30000 });
+      };
+      await openStatement(q, paidId, PAID);
+      const rows = await q.locator('[data-testid="statement-paid-sale"]').evaluateAll((els) => els.map((e) => e.getAttribute("data-sale")));
+      assert(JSON.stringify(rows) === JSON.stringify([linked.id]), `🔴 ACC-2: the statement lists the linked paid sale exactly once (${rows})`);
+      assert((await testid(q, "statement-empty").count()) === 1, "🔴 ACC-2: and still says NO posted debts — the paid sale is not a debt");
+      assert((await testid(q, "statement-balance").count()) === 0, "and shows no outstanding balance for it");
+      await q.screenshot({ path: SHOTS + "ACC2-2-statement-paid-sales.png" });
+    } finally {
+      await acc2App.close().catch(() => undefined);
+    }
+
+    // Restart, then English.
+    const acc2b = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    const r = await acc2b.firstWindow();
+    try {
+      await signIn(r, "Cashier One", "1111");
+      await r.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      const paidId = readDb((d) => d.prepare("SELECT id FROM parties WHERE display_name = 'زبون البيع المدفوع'").get().id);
+      if ((await r.evaluate(() => document.documentElement.lang)) !== "en") await testid(r, "lang-toggle").click();
+      await r.waitForFunction(() => document.documentElement.lang === "en" && document.documentElement.dir === "ltr", undefined, { timeout: 20000 });
+      await r.locator('[data-testid="tab-customers"]').click();
+      await testid(r, "customers-search").fill("زبون البيع المدفوع");
+      await r.locator(`[data-customer="${paidId}"]`).first().click();
+      await testid(r, "statement-paid-sales").waitFor({ timeout: 30000 });
+      assert((await r.locator('[data-testid="statement-paid-sale"]').count()) === 1, "🔴 ACC-2: after a restart the paid sale is still listed once");
+      const title = await testid(r, "statement-paid-sales").innerText();
+      assert(title.includes("Paid sales linked to the customer") && title.includes("not a debt"), "ACC-2: the English history says paid sales are not a debt");
+      await r.locator('[data-testid="tab-sell"]').click();
+      await r.locator("button.product").first().click();
+      await testid(r, "sell-choose-customer").click();
+      await testid(r, "customer-finder").waitFor({ timeout: 30000 });
+      await testid(r, "customer-search").fill("زبون البيع المدفوع");
+      await r.locator('[data-testid="customer-row"]').filter({ hasText: "زبون البيع المدفوع" }).first().click();
+      const en = (await testid(r, "sell-customer-paid-link").innerText()).trim();
+      assert(
+        en === "Paid sales linked to this customer appear in the activity history without increasing the outstanding balance.",
+        `ACC-2: the English Sell note ("${en}")`,
+      );
+      if ((await r.evaluate(() => document.documentElement.lang)) !== "ar") await testid(r, "lang-toggle").click();
+      await r.waitForFunction(() => document.documentElement.lang === "ar" && document.documentElement.dir === "rtl", undefined, { timeout: 10000 });
+    } finally {
+      await acc2b.close().catch(() => undefined);
+    }
+    log("ACC-2 sell-customer-link E2E complete");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // ACC-3 · M17B-ALLOC-DEFAULT — a shared receipt proposes its shares OLDEST DEBT FIRST until the owner
+  // edits one; a total that lands on ONE debt points to the single-debt payment and is never sent as a
+  // shared receipt; shares above the total no longer blank the window. HIST-CURRENT-BALANCE — the
+  // owner's History carries the current-debt column; a cashier's response carries no such key at all.
+  // The debts are seeded into this run's disposable ledger, like S3B and S1. Synthetic data only.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const ACC3_NAME = "زبون التوزيع الأقدم";
+    let acc3Id;
+    {
+      const a = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+      try {
+        const q = await a.firstWindow();
+        await signIn(q, "Cashier One", "1111");
+        await q.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+        const r = await direct(q, "createCustomer", { displayName: ACC3_NAME, phone: null, address: null, note: null });
+        if (!r.ok) throw new Error(`createCustomer: ${JSON.stringify(r.error)}`);
+        acc3Id = r.data.customer.id;
+      } finally {
+        await a.close().catch(() => undefined);
+      }
+    }
+    {
+      const dbw = new Database(LEDGER);
+      try {
+        const op = dbw.prepare("SELECT id FROM operators WHERE role = 'owner' LIMIT 1").get().id;
+        const ins = dbw.prepare(
+          `INSERT INTO obligations (id, party_id, party_kind, direction, source_kind, source_ref, sale_id, currency, amount_minor, posted_by, posted_at, business_date)
+           VALUES (?, ?, 'customer', 'receivable', 'manual', ?, NULL, 'USD', ?, ?, ?, ?)`,
+        );
+        // Ids deliberately NOT in age order (a-mid < m-old < z-new), and inserted newest first: only posted_at
+        // can put them in the order the proposal must follow — the field case 0.60 (oldest) + 1.50.
+        ins.run("acc3-z-new", acc3Id, "ACC3-NEW", 500, op, "2026-10-28T08:00:00.000Z", "2026-10-28");
+        ins.run("acc3-a-mid", acc3Id, "ACC3-MID", 150, op, "2026-10-27T08:00:00.000Z", "2026-10-27");
+        ins.run("acc3-m-old", acc3Id, "ACC3-OLD", 60, op, "2026-10-26T08:00:00.000Z", "2026-10-26");
+      } finally {
+        dbw.close();
+      }
+    }
+    const app3 = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    const q = await app3.firstWindow();
+    try {
+      await signIn(q, "Cashier One", "1111");
+      await q.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      if ((await q.evaluate(() => document.documentElement.lang)) !== "ar") await testid(q, "lang-toggle").click();
+      await q.waitForFunction(() => document.documentElement.lang === "ar" && document.documentElement.dir === "rtl", undefined, { timeout: 10000 });
+      await q.locator('[data-testid="tab-customers"]').click();
+      await testid(q, "customers-search").fill(ACC3_NAME);
+      await q.locator(`[data-customer="${acc3Id}"]`).first().click();
+      await testid(q, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+      await testid(q, "receipt-open").click();
+      await testid(q, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
+      const shares = () =>
+        q.locator('[data-testid="receipt-debt"]').evaluateAll((els) =>
+          els.map((e) => [e.getAttribute("data-obligation"), e.querySelector('[data-testid="receipt-share"]').value]),
+        );
+      const shareOf = (id) => q.locator(`[data-testid="receipt-debt"][data-obligation="${id}"] [data-testid="receipt-share"]`);
+      const mode = () => testid(q, "receipt-mode").getAttribute("data-mode");
+      const same = async (want) => JSON.stringify(await shares()) === JSON.stringify(want);
+
+      assert(
+        JSON.stringify((await shares()).map((x) => x[0])) === JSON.stringify(["acc3-m-old", "acc3-a-mid", "acc3-z-new"]),
+        "🔴 ACC-3: the debts are listed oldest first by posting time — not by id, not by insertion",
+      );
+      await testid(q, "receipt-reference").fill("WH-ACC3-1");
+      await testid(q, "receipt-total").fill("2.00");
+      assert(await same([["acc3-m-old", "0.60"], ["acc3-a-mid", "1.40"], ["acc3-z-new", ""]]), `🔴 ACC-3: 2.00 is proposed 0.60 to the oldest debt, then 1.40 (${JSON.stringify(await shares())})`);
+      assert((await mode()) === "auto", "ACC-3: the proposal is automatic");
+      await testid(q, "receipt-total").fill("7.00");
+      assert(await same([["acc3-m-old", "0.60"], ["acc3-a-mid", "1.50"], ["acc3-z-new", "4.90"]]), "🔴 ACC-3: a new total is re-proposed, oldest first, no debt above what it owes");
+
+      await shareOf("acc3-z-new").fill("4.00");
+      assert((await mode()) === "manual", "🔴 ACC-3: editing a share switches to manual");
+      assert((await testid(q, "receipt-auto-reset").count()) === 1, "and offers the explicit re-distribute action");
+      await testid(q, "receipt-total").fill("8.00");
+      assert(await same([["acc3-m-old", "0.60"], ["acc3-a-mid", "1.50"], ["acc3-z-new", "4.00"]]), "🔴 ACC-3: in manual, a new total does NOT rewrite the owner's shares");
+
+      await shareOf("acc3-z-new").fill("9.00");
+      await testid(q, "receipt-share-over").waitFor({ timeout: 10000 });
+      assert((await testid(q, "receipt-over-total").count()) === 1, "ACC-3: shares above the total are said to be above it");
+      assert((await testid(q, "receipt-left").innerText()).includes("−3.10 USD"), `🔴 ACC-3: 'left' shows the over-allocation signed — the window is still there (${await testid(q, "receipt-left").innerText()})`);
+      assert(await testid(q, "receipt-confirm").isDisabled(), "and Confirm stays disabled");
+
+      await testid(q, "receipt-auto-reset").click();
+      assert((await mode()) === "auto", "🔴 ACC-3: re-distribute returns to the automatic proposal");
+      assert(await same([["acc3-m-old", "0.60"], ["acc3-a-mid", "1.50"], ["acc3-z-new", "5.00"]]), "and fills every debt up to exactly what it owes");
+      assert((await testid(q, "receipt-over-outstanding").count()) === 1, "🔴 ACC-3: 8.00 is more than the 7.10 owed — said, never spread");
+      assert(await testid(q, "receipt-confirm").isDisabled(), "and Confirm stays disabled");
+
+      await testid(q, "receipt-total").fill("0.50");
+      await testid(q, "receipt-single-debt").waitFor({ timeout: 10000 });
+      assert((await testid(q, "receipt-single-debt").getAttribute("data-obligation")) === "acc3-m-old", "the one debt is the oldest");
+      assert(
+        (await testid(q, "receipt-single-debt").innerText()).includes("هذا المبلغ يغطّي ديناً واحداً فقط. استخدم تسديد الدين الواحد لإتمام التحصيل."),
+        "🔴 ACC-3: the owner's exact single-debt sentence",
+      );
+      assert(await testid(q, "receipt-confirm").isDisabled(), "🔴 ACC-3: a one-debt total is never offered as a shared receipt");
+      const before3 = { receipts: num("SELECT count(*) AS n FROM receipts"), settlements: num("SELECT count(*) AS n FROM settlements") };
+      await q.screenshot({ path: SHOTS + "ACC3-1-single-debt.png" });
+      await testid(q, "receipt-use-single").click();
+      await testid(q, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+      assert((await testid(q, "receipt-form").count()) === 0, "the shared-receipt form closes");
+      assert((await testid(q, "collect-form").getAttribute("data-obligation")) === "acc3-m-old", "🔴 ACC-3: the single-debt payment opens on THAT debt");
+      assert((await testid(q, "collect-amount").inputValue()) === "0.50", "with the amount carried over");
+      assert((await testid(q, "collect-method").inputValue()) === "whish", "and the same method — never silently switched");
+      assert((await testid(q, "collect-payment-reference").inputValue()) === "WH-ACC3-1", "and the same reference");
+      assert(!(await testid(q, "collect-funds-confirmed").isChecked()), "🔴 ACC-3: the funds confirmation is NOT carried — it is asked again");
+      assert(
+        num("SELECT count(*) AS n FROM receipts") === before3.receipts && num("SELECT count(*) AS n FROM settlements") === before3.settlements,
+        "🔴 ACC-3: pointing to the single-debt payment recorded NOTHING",
+      );
+      await testid(q, "collect-cancel").click();
+
+      // A real shared receipt left on the automatic proposal: the ledger records exactly oldest first.
+      await testid(q, "receipt-open").click();
+      await testid(q, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
+      await testid(q, "receipt-reference").fill("WH-ACC3-2");
+      await testid(q, "receipt-total").fill("2.00");
+      await testid(q, "receipt-funds-confirmed").check();
+      assert((await testid(q, "receipt-left").getAttribute("data-complete")) === "yes", "the automatic 0.60 + 1.40 is complete");
+      await q.screenshot({ path: SHOTS + "ACC3-2-auto-proposal.png" });
+      await testid(q, "receipt-confirm").click();
+      await testid(q, "receipt-done").waitFor({ state: "visible", timeout: 30000 });
+      const got = readDb((d) =>
+        d.prepare("SELECT obligation_id AS o, amount_minor AS m FROM settlements WHERE obligation_id LIKE 'acc3-%' ORDER BY obligation_id").all(),
+      ).map((r) => [r.o, Number(r.m)]);
+      assert(JSON.stringify(got) === JSON.stringify([["acc3-a-mid", 140], ["acc3-m-old", 60]]), `🔴 ACC-3: the ledger holds 0.60 on the oldest and 1.40 on the next (${JSON.stringify(got)})`);
+      assert(num("SELECT count(*) AS n FROM receipts") === before3.receipts + 1, "one receipt, recorded once");
+
+      // The owner's History carries the current-debt column; these till sales posted no debt.
+      await tab(q, "history");
+      await q.waitForSelector(".history-table", { timeout: 30000 });
+      assert((await testid(q, "history-due-note").count()) === 1, "🔴 ACC-3: the owner's History explains the two figures");
+      const rowsN = await testid(q, "history-row").count();
+      assert(rowsN > 0 && (await testid(q, "history-current").count()) === rowsN, "and every row has a current-debt cell");
+      const states = await q.locator('[data-testid="history-current"] > [data-state]').evaluateAll((els) => els.map((e) => e.getAttribute("data-state")));
+      assert(states.length === rowsN && states.every((x) => x === "none"), "paid till sales posted no debt — shown as none, never as owing 0");
+    } finally {
+      await app3.close().catch(() => undefined);
+    }
+
+    // 🔴 A cashier: no column on screen, and — what matters — no key in the bridge's own answer.
+    const app4 = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    const c = await app4.firstWindow();
+    try {
+      await signIn(c, "Cashier Two", "2222");
+      await c.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      await tab(c, "history");
+      await c.waitForSelector(".history-table", { timeout: 30000 });
+      assert((await testid(c, "history-current").count()) === 0 && (await testid(c, "history-due-note").count()) === 0, "ACC-3: the cashier's History shows no current-debt column");
+      const raw = await direct(c, "getSaleHistory", { limit: 50 });
+      assert(raw.ok && raw.data.length > 0, "the cashier still reads the sale history");
+      assert(raw.data.every((e) => !("currentDebt" in e)), "🔴 ACC-3: a cashier's history response carries NO current-debt key — through the bridge itself");
+      const st = await direct(c, "getCustomerStatement", { customerId: acc3Id });
+      assert(!st.ok && st.error?.code === "NOT_AUTHORIZED", "and the statement stays owner-only");
+      await c.screenshot({ path: SHOTS + "ACC3-3-history-cashier.png" });
+    } finally {
+      await app4.close().catch(() => undefined);
+    }
+    log("ACC-3 allocation and history E2E complete");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // QW-COLLECT-TITLE — the payment form names the method actually chosen (a Whish payment is never
+  // titled "cash"), and Confirm without the "money received" box explains, focuses and highlights the
+  // box, sends nothing and keeps every typed value. Uses the ACC-3 customer's still-open debts.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  {
+    const qwId = readDb((d) => d.prepare("SELECT id FROM parties WHERE display_name = ?").get("زبون التوزيع الأقدم").id);
+    const qwApp = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
+    const q = await qwApp.firstWindow();
+    try {
+      await signIn(q, "Cashier One", "1111");
+      await q.waitForSelector('[data-testid="cart"]', { timeout: 30000 });
+      const setLang = async (lang) => {
+        if ((await q.evaluate(() => document.documentElement.lang)) !== lang) await testid(q, "lang-toggle").click();
+        await q.waitForFunction((l) => document.documentElement.lang === l, lang, { timeout: 10000 });
+      };
+      await setLang("ar");
+      const openStatement = async (name) => {
+        await q.locator('[data-testid="tab-customers"]').click();
+        await testid(q, "customers-search").fill(name);
+        await q.locator(`[data-customer="${qwId}"]`).first().click();
+        await testid(q, "customer-statement").waitFor({ state: "visible", timeout: 30000 });
+      };
+      await openStatement("زبون التوزيع الأقدم");
+      await q.locator('[data-testid="statement-obligation"][data-obligation="acc3-z-new"] [data-testid="collect-open"]').click();
+      await testid(q, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+      const title = async () => [(await testid(q, "collect-title").innerText()).trim(), await testid(q, "collect-title").getAttribute("data-method")];
+      assert(JSON.stringify(await title()) === JSON.stringify(["تسجيل دفعة نقديّة", "cash"]), "QW: cash (the default) is titled cash");
+      // TRANSITION (P3, DEC-35): the form offers cash and Whish only, so only those two titles can be shown.
+      // Old list: card, bank_transfer, other, whish (their titles stay in the dictionary for history).
+      for (const [m, want] of [
+        ["whish", "تسجيل دفعة ويش"],
+      ]) {
+        await testid(q, "collect-method").selectOption(m);
+        assert(JSON.stringify(await title()) === JSON.stringify([want, m]), `🔴 QW: ${m} is titled «${want}» — never cash (${JSON.stringify(await title())})`);
+      }
+
+      // Confirm WITHOUT the box: explained at the box, focused, highlighted — nothing recorded, nothing lost.
+      await testid(q, "collect-amount").fill("1.00");
+      await testid(q, "collect-payment-reference").fill("WH-QW-1");
+      const settledBefore = num("SELECT count(*) AS n FROM settlements");
+      await testid(q, "collect-confirm").click();
+      await testid(q, "collect-confirm-missing").waitFor({ state: "visible", timeout: 10000 });
+      assert(
+        (await testid(q, "collect-confirm-missing").innerText()).trim() ===
+          "لم يُسجَّل شيء بعد. إذا وصل المبلغ فعلاً، ضع إشارة على «أؤكّد أنّ المبلغ وصلني فعلاً» ثم اضغط «تأكيد الدفعة».",
+        "🔴 QW: the missing confirmation is explained in the shop's language, at the box",
+      );
+      assert((await q.evaluate(() => document.activeElement?.getAttribute("data-testid"))) === "collect-funds-confirmed", "🔴 QW: focus moved to the box itself");
+      assert((await testid(q, "collect-funds-confirmed").getAttribute("aria-invalid")) === "true", "the box is marked invalid for assistive technology");
+      assert((await q.locator('[data-testid="collect-form"] label.collect-confirm-funds').getAttribute("data-missing")) === "1", "and highlighted");
+      // QW-COLLECT-LAYOUT: MEASURED, not styled-by-assumption — the box sits on the same row as its sentence
+      // (its top within the sentence's first line), and there is exactly ONE red line under it.
+      {
+        const g = await q.evaluate(() => {
+          const box = document.querySelector('[data-testid="collect-funds-confirmed"]').getBoundingClientRect();
+          const txt = document.querySelector('[data-testid="collect-form"] .collect-confirm-text').getBoundingClientRect();
+          return { boxTop: box.top, boxBottom: box.bottom, boxLeft: box.left, boxRight: box.right, txtTop: txt.top, txtLeft: txt.left, txtRight: txt.right };
+        });
+        assert(Math.abs(g.boxTop - g.txtTop) <= 8 && g.boxBottom > g.txtTop, `🔴 QW-LAYOUT: the box shares the sentence's row (${JSON.stringify(g)})`);
+        assert(g.boxRight <= g.txtLeft + 1 || g.boxLeft >= g.txtRight - 1, `🔴 QW-LAYOUT: the box is beside the sentence, not over it (${JSON.stringify(g)})`);
+        assert((await testid(q, "collect-error").count()) === 0, "🔴 QW-LAYOUT: one red line only");
+      }
+      assert(!(await testid(q, "collect-funds-confirmed").isChecked()), "🔴 QW: the box is still UNTICKED — never ticked by the screen");
+      assert(
+        (await testid(q, "collect-amount").inputValue()) === "1.00" &&
+          (await testid(q, "collect-method").inputValue()) === "whish" &&
+          (await testid(q, "collect-payment-reference").inputValue()) === "WH-QW-1",
+        "QW: the amount, method and reference are kept",
+      );
+      assert(num("SELECT count(*) AS n FROM settlements") === settledBefore, "🔴 QW: validation recorded NOTHING");
+      await q.screenshot({ path: SHOTS + "QW-1-confirm-missing.png" });
+
+      await testid(q, "collect-funds-confirmed").check();
+      assert((await testid(q, "collect-confirm-missing").count()) === 0, "ticking the box clears the explanation");
+      assert((await q.locator('[data-testid="collect-form"] label.collect-confirm-funds').getAttribute("data-missing")) === "0", "and the highlight");
+      await testid(q, "collect-confirm").click();
+      await testid(q, "collect-done").waitFor({ state: "visible", timeout: 30000 });
+      const st = readDb((d) =>
+        d
+          .prepare("SELECT amount_minor AS a, method AS m, provider AS p, funds_confirmed AS f, reference AS r FROM settlements WHERE obligation_id = 'acc3-z-new'")
+          .all(),
+      ).map((r) => [Number(r.a), r.m, r.p, Number(r.f), r.r]);
+      assert(JSON.stringify(st) === JSON.stringify([[100, "external", "whish", 1, "WH-QW-1"]]), `🔴 QW: the confirmed Whish payment is recorded once, exactly as before (${JSON.stringify(st)})`);
+      assert(num("SELECT count(*) AS n FROM settlements") === settledBefore + 1, "one settlement, no duplicate");
+
+      // The shared receipt: the same guidance, nothing sent.
+      await testid(q, "receipt-open").click();
+      await testid(q, "receipt-form").waitFor({ state: "visible", timeout: 30000 });
+      await testid(q, "receipt-reference").fill("WH-QW-2");
+      await testid(q, "receipt-total").fill("1.00");
+      assert((await testid(q, "receipt-left").getAttribute("data-complete")) === "yes", "the proposal is complete — only the box is missing");
+      const receiptsBefore = num("SELECT count(*) AS n FROM receipts");
+      await testid(q, "receipt-confirm").click();
+      await testid(q, "receipt-confirm-missing").waitFor({ state: "visible", timeout: 10000 });
+      assert((await q.evaluate(() => document.activeElement?.getAttribute("data-testid"))) === "receipt-funds-confirmed", "🔴 QW: the shared receipt focuses its box too");
+      assert(!(await testid(q, "receipt-funds-confirmed").isChecked()), "still unticked");
+      {
+        const g = await q.evaluate(() => {
+          const box = document.querySelector('[data-testid="receipt-funds-confirmed"]').getBoundingClientRect();
+          const txt = document.querySelector('[data-testid="receipt-form"] .collect-confirm-text').getBoundingClientRect();
+          return { boxTop: box.top, boxBottom: box.bottom, txtTop: txt.top };
+        });
+        assert(Math.abs(g.boxTop - g.txtTop) <= 8 && g.boxBottom > g.txtTop, `🔴 QW-LAYOUT: shared receipt box shares the sentence's row (${JSON.stringify(g)})`);
+        assert((await testid(q, "receipt-error").count()) === 0, "🔴 QW-LAYOUT: one red line only on the shared receipt");
+      }
+      assert((await testid(q, "receipt-total").inputValue()) === "1.00" && (await testid(q, "receipt-reference").inputValue()) === "WH-QW-2", "the total and reference are kept");
+      assert(num("SELECT count(*) AS n FROM receipts") === receiptsBefore, "🔴 QW: no receipt recorded by the validation");
+      await testid(q, "receipt-cancel").click();
+
+      // English.
+      await setLang("en");
+      await openStatement("زبون التوزيع الأقدم");
+      await q.locator('[data-testid="statement-obligation"][data-obligation="acc3-z-new"] [data-testid="collect-open"]').click();
+      await testid(q, "collect-form").waitFor({ state: "visible", timeout: 30000 });
+      assert((await testid(q, "collect-title").innerText()).trim() === "Record a cash payment", "QW: English cash title");
+      await testid(q, "collect-method").selectOption("whish");
+      assert((await testid(q, "collect-title").innerText()).trim() === "Record a Whish payment", "🔴 QW: English Whish title — not cash");
+      await testid(q, "collect-amount").fill("1.00");
+      await testid(q, "collect-payment-reference").fill("WH-QW-3");
+      await testid(q, "collect-confirm").click();
+      await testid(q, "collect-confirm-missing").waitFor({ state: "visible", timeout: 10000 });
+      assert(
+        (await testid(q, "collect-confirm-missing").innerText()).trim() ===
+          "Nothing has been recorded yet. If the money really arrived, tick “I confirm the money was actually received”, then press “Confirm payment”.",
+        "QW: the English explanation",
+      );
+      assert(num("SELECT count(*) AS n FROM settlements") === settledBefore + 1, "and nothing more was recorded");
+      await testid(q, "collect-cancel").click();
+      await setLang("ar");
+    } finally {
+      await qwApp.close().catch(() => undefined);
+    }
+    log("QW-COLLECT-TITLE E2E complete");
+  }
 
   log("customer collection E2E complete");
   log("customer statement E2E complete");

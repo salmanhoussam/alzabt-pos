@@ -23,6 +23,7 @@ import type {
   ReconciliationFilterDto,
 } from "../../../shared/ipcContract";
 import { call, errorText, pos } from "../../api";
+import { formatDecimal, money } from "../../../domain/money";
 import { useT } from "../../i18n";
 
 type Field = DifferenceDto["field"];
@@ -50,10 +51,18 @@ function decimal(minor: string): string {
   return `${digits.slice(0, -2)}.${digits.slice(-2)}`;
 }
 
-function valueOf(d: DifferenceDto, which: "invoice" | "catalog"): string {
+/**
+ * CURRENCY-P1: the INVOICE side of a price difference is rendered at the invoice line's own currency exponent
+ * (`invoiceCurrency`, from the frozen line). The CATALOG side and the candidate prices carry no currency in their DTOs,
+ * so they keep `decimal` — exact for every 2-decimal currency (USD, LBP), and display-only: nothing on this screen is
+ * written back (the service takes a price from the stored line, never from this text). Giving them a currency needs a
+ * DTO/IPC change, recorded as a residual rather than guessed here.
+ */
+function valueOf(d: DifferenceDto, which: "invoice" | "catalog", invoiceCurrency: string | null): string {
   const raw = which === "invoice" ? d.invoice : d.catalog;
   if (raw === null) return "—";
-  return d.field === "selling_price_minor" ? decimal(raw) : raw;
+  if (d.field !== "selling_price_minor") return raw;
+  return which === "invoice" && invoiceCurrency ? formatDecimal(money(BigInt(raw), invoiceCurrency)) : decimal(raw);
 }
 
 export function ReconciliationQueue({ focusInvoiceId }: { readonly focusInvoiceId?: string | null }) {
@@ -392,8 +401,8 @@ function ResolutionPanel({
                       fieldLabel(d.field, t)
                     )}
                   </td>
-                  <td dir="auto">{valueOf(d, "invoice")}</td>
-                  <td dir="auto">{valueOf(d, "catalog")}</td>
+                  <td dir="auto">{valueOf(d, "invoice", item.line?.unitPrice.currency ?? null)}</td>
+                  <td dir="auto">{valueOf(d, "catalog", null)}</td>
                 </tr>
               ))}
             </tbody>

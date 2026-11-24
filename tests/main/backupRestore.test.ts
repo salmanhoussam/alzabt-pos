@@ -23,6 +23,8 @@ import { runPendingRestore } from "../../src/main/restoreStartup";
 import { verifyBackupPackage } from "../../src/persistence/backupPackage";
 import { openDatabase } from "../../src/persistence/db";
 import { MIGRATIONS } from "../../src/persistence/migrations";
+import { confirmationDigest } from "../../src/shared/invoiceConfirmation";
+import { toInvoiceViewDto } from "../../src/shared/dto";
 import { CatalogRepository } from "../../src/persistence/catalogRepository";
 import { InvoiceRepository } from "../../src/persistence/invoiceRepository";
 import { ReconciliationRepository } from "../../src/persistence/reconciliationRepository";
@@ -332,6 +334,36 @@ describe("🔴 a cashier is refused on all three channels — before any picker 
 });
 
 describe("🔴 restore — preview, consent, stage, restart, open", () => {
+  it("M21: a protected confirmation survives full package export, staged restore and restart", () => {
+    const a = open("synthetic-m21-source");
+    a.h.invoices.saveCompanyProfile({ nameAr: "Synthetic shop" });
+    const customer = a.h.parties.create({ kind: "customer", displayName: "Synthetic customer" }).party;
+    const id = a.h.invoices.createDraft().invoice.id;
+    a.h.invoices.addLines(id, [{ description: "Synthetic item", unitLabel: "piece", canonicalUnit: null, productId: null, quantity: "1", unitPrice: "10.00" }], "m21-restore-batch");
+    a.h.invoices.updateDraftHeader(id, { customerPartyId: customer.id });
+    const token = confirmationDigest(toInvoiceViewDto(a.h.invoices.getInvoice(id)), true);
+    a.h.invoices.finalizeInvoice(id, { issueOnAccount: true, confirmedDraft: token });
+    const identity = (a.h.db.prepare("SELECT confirmed_request_identity FROM invoices WHERE id = ?").get(id) as { confirmed_request_identity: string }).confirmed_request_identity;
+    expect(identity).toMatch(/^v1:[0-9a-f]{64}$/);
+    const pkg = exportPackage(a);
+
+    const b = open("synthetic-m21-target");
+    writeFileSync(join(b.userData, "ledger.json"), JSON.stringify({ ledgerFile: LIVE_LEDGER_FILE }));
+    b.picked["restore-backup"] = pkg;
+    const inspected = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    expect(inspected.status).toBe("ready");
+    if (inspected.status !== "ready") throw new Error("Synthetic package was not ready");
+    expect(data<ApplyRestoreResponse>(b.ipc.applyRestore({ manifestSha256: inspected.preview.manifestSha256, acceptMissingAssets: false })).status).toBe("staged");
+    b.h.db.close();
+    expect(runPendingRestore({ userDataDir: b.userData, now: NOW, log: nullLogger }).kind).toBe("restored");
+    const plan = planLedgerOpen(b.userData, realLedgerFs);
+    b.h = makeHarness(plan.ledgerPath);
+    expect((b.h.db.prepare("SELECT confirmed_request_identity FROM invoices WHERE id = ?").get(id) as { confirmed_request_identity: string }).confirmed_request_identity).toBe(identity);
+    const before = b.h.db.prepare("SELECT (SELECT count(*) FROM sales) AS sales, (SELECT count(*) FROM obligations) AS debts").get();
+    expect(b.h.invoices.finalizeInvoice(id, { issueOnAccount: true, confirmedDraft: token }).invoice.id).toBe(id);
+    expect(() => b.h.invoices.finalizeInvoice(id, { issueOnAccount: true, confirmedDraft: token + " " })).toThrow(/differs/);
+    expect(b.h.db.prepare("SELECT (SELECT count(*) FROM sales) AS sales, (SELECT count(*) FROM obligations) AS debts").get()).toEqual(before);
+  });
   it("previewing stages NOTHING; confirming stages and restarts once; the next start restores; the ledger opens with the backup's money", () => {
     const a = open("بيانات المحل أ");
     seed(a);
@@ -388,6 +420,50 @@ describe("🔴 restore — preview, consent, stage, restart, open", () => {
       sales: Number((db.prepare("SELECT count(*) AS n FROM sales").get() as { n: bigint }).n),
     }));
     expect(old).toEqual({ integrity: "ok", sales: 1 });
+  });
+
+  it("🔴 P2: a Whish sale's payment record and its reference survive backup + restore — and the reference stays TAKEN", () => {
+    const a = open("محل ويش أ");
+    a.h.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: 199n });
+    a.h.service.createSale({
+      idempotencyKey: newKey(),
+      paymentMethod: "external",
+      whish: { reference: "WH-BACKUP-1", fundsConfirmed: true },
+      lines: [{ productId: "prod-0003", quantityMilli: 1000 }],
+      expectedTotalMinor: 199n,
+    });
+    const m19 = (db: { prepare: (s: string) => { all: () => unknown[] } }) => ({
+      tenders: db.prepare("SELECT * FROM sale_tenders ORDER BY sale_id, seq").all(),
+      refs: db.prepare("SELECT provider, ref_key, ref_display, owner_kind, owner_id, legacy FROM external_references ORDER BY owner_id").all(),
+    });
+    const fromA = m19(a.h.db);
+    expect(fromA.tenders).toHaveLength(2);
+    expect(fromA.refs).toHaveLength(1);
+    const pkg = exportPackage(a);
+
+    const b = open("محل ويش ب");
+    b.picked["restore-backup"] = pkg;
+    const inspected = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    expect(inspected.status).toBe("ready");
+    if (inspected.status !== "ready") return;
+    expect(data<ApplyRestoreResponse>(b.ipc.applyRestore({ manifestSha256: inspected.preview.manifestSha256, acceptMissingAssets: false }))).toEqual({ status: "staged" });
+    b.h.db.close();
+    expect(runPendingRestore({ userDataDir: b.userData, now: NOW, log: nullLogger }).kind).toBe("restored");
+    const plan = planLedgerOpen(b.userData, realLedgerFs);
+    b.h = makeHarness(plan.ledgerPath);
+    expect(m19(b.h.db)).toEqual(fromA);
+    expect(b.h.service.getSaleHistory(5).find((r) => r.sale.paymentMethod === "external")?.sale.externalPayment).toEqual({ provider: "whish", reference: "WH-BACKUP-1" });
+    // the restored registry still refuses the same Whish payment twice
+    expect(() =>
+      b.h.service.createSale({
+        idempotencyKey: newKey(),
+        paymentMethod: "external",
+        whish: { reference: "wh backup 1", fundsConfirmed: true },
+        lines: [{ productId: "prod-0003", quantityMilli: 1000 }],
+        expectedTotalMinor: 199n,
+      }),
+    ).toThrow(expect.objectContaining({ code: "DUPLICATE_PAYMENT_REFERENCE" }));
+    expect(b.h.db.pragma("integrity_check", { simple: true })).toBe("ok");
   });
 
   it("refusals: no preview, a different hash, a package REPLACED after preview — nothing staged, no restart", () => {
@@ -564,9 +640,11 @@ describe("🔴 P0 — after a restore is staged, nothing can change the data unt
   it("🔴 main.ts checks the lock in EVERY transaction provider it hands out", () => {
     const main = readFileSync("src/main/main.ts", "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
     const providers = main.match(/transact: \(fn\) => \{[^}]*\}/g) ?? [];
-    expect(providers.length).toBe(5);
+    // TRANSITION (migration 20): 5 → 6. The sixth is `AdvanceService`'s provider (customer advances),
+    // and the loop below holds it to the same rule as the other five: the lock is checked first.
+    expect(providers.length).toBe(6);
     for (const p of providers) expect(p).toMatch(/restoreLock\.assertOpen\(\);[\s\S]*\.transaction\(fn\)\.immediate\(\)/);
-    expect(main.match(/\.transaction\(fn\)\.immediate\(\)/g)).toHaveLength(5);
+    expect(main.match(/\.transaction\(fn\)\.immediate\(\)/g)).toHaveLength(6);
   });
 
   it("normal operation is untouched while nothing is staged — including after a REFUSED restore", () => {

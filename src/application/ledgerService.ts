@@ -31,6 +31,7 @@
  */
 import { createHash } from "node:crypto";
 import { businessDateOf } from "../domain/businessDay";
+import { assertAcceptedNewCollection } from "../domain/acceptedPayments";
 import { DomainError } from "../domain/errors";
 import { formatDecimal, money } from "../domain/money";
 import {
@@ -128,6 +129,29 @@ export interface SettlementDraft {
 }
 
 /** What a caller gets back. `duplicate` distinguishes a retry from a fresh posting. */
+/** DEC-35z+ COL — one COL- document, read from the ledger. No arithmetic beyond what the rows say. */
+export interface CollectionDocumentView {
+  readonly docNo: number;
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly receivedByName: string;
+  readonly currency: string;
+  readonly totalMinor: bigint;
+  readonly method: SettlementMethod;
+  readonly provider: SettlementProvider | null;
+  readonly reference: string | null;
+  readonly receivedBy: string;
+  readonly receivedAt: string;
+  readonly businessDate: string;
+  /** The debt(s) this money paid — one for a direct collection, every share for a receipt. */
+  readonly lines: ReadonlyArray<{ readonly obligation: ObligationRecord; readonly amountMinor: bigint }>;
+}
+
+/** `COL-000001`: six digits, never reset, issued in order with the money (D-P4a/b). */
+export function formatCollectionNo(docNo: number): string {
+  return `COL-${String(docNo).padStart(6, "0")}`;
+}
+
 export interface PostResult<T> {
   readonly record: T;
   readonly duplicate: boolean;
@@ -428,6 +452,26 @@ export class LedgerService {
     return ledgerAmount(amountMinor, currency);
   }
 
+  /**
+   * HIST-CURRENT-BALANCE (ACC-3): what is CURRENTLY owed on the debt each of these sales posted, keyed
+   * by sale id. OWNER ONLY — it reveals payments, which only the owner's statement shows.
+   *
+   * 🔴 READ FROM THE LEDGER, NEVER FROM THE SALE. The sale's own `payment_status` / `balance_due_minor`
+   * is the snapshot of the moment of sale and is never rewritten; this is `amount − settlements` by
+   * the same `outstanding()` the statement uses, so History and the statement cannot disagree. A sale
+   * that posted no debt (every paid sale) is absent from the map — it is never shown as owing 0.
+   */
+  currentSaleDebts(
+    saleIds: ReadonlyArray<string>,
+  ): Map<string, { readonly obligation: ObligationRecord; readonly outstandingMinor: bigint }> {
+    this.requireOwner();
+    const out = new Map<string, { readonly obligation: ObligationRecord; readonly outstandingMinor: bigint }>();
+    for (const o of this.deps.ledger.findSaleObligations(saleIds)) {
+      out.set(o.sourceRef, { obligation: o, outstandingMinor: outstanding(o, this.deps.ledger.listSettlements(o.id)).minor });
+    }
+    return out;
+  }
+
   /** Owner-authorized read used to reconcile an atomic POS credit-sale pair. */
   findSaleObligation(saleId: string): ObligationRecord | null {
     this.requireOwner();
@@ -441,9 +485,99 @@ export class LedgerService {
    * "that is more than is owed" with the real figure; the trigger is the authority, and it is what
    * holds if two payments are ever attempted at once.
    */
+  /**
+   * P3 (DEC-35): the ONE place a new settlement's or receipt's way of paying is checked. `protected` only so
+   * a TEST can stand in for a pre-DEC-35 build when seeding history (tests/helpers/preDec35.ts); nothing in
+   * src/ overrides it — a source test proves that.
+   */
+  /** Crash seam INSIDE the money transaction, right after the COL number was issued (tests only). */
+  protected afterCollectionNumberIssued(): void {}
+
+  /** DEC-35z+ COL: the COL number of a direct collection, or null (history, or not a collection). */
+  collectionNoOfSettlement(settlementId: string): number | null {
+    this.requireOwner();
+    return this.deps.ledger.collectionNoOfSettlement(settlementId);
+  }
+
+  /** DEC-35z+ COL: the COL number of a shared receipt, or null (history). */
+  collectionNoOfReceipt(receiptId: string): number | null {
+    this.requireOwner();
+    return this.deps.ledger.collectionNoOfReceipt(receiptId);
+  }
+
+  /** Statement display: settlement id → COL number (its own, or its receipt's). */
+  collectionNumbersOfSettlements(settlementIds: ReadonlyArray<string>): Map<string, number> {
+    this.requireOwner();
+    return this.deps.ledger.collectionNumbersOfSettlements(settlementIds);
+  }
+
+  /**
+   * One COL- document as the ledger holds it (print / PDF / reprint). OWNER — the same gate as every
+   * collection — and READ-ONLY: it never writes a payment, a document or a reference.
+   */
+  collectionDocument(docNo: unknown): CollectionDocumentView {
+    this.requireOwner();
+    if (typeof docNo !== "number" || !Number.isSafeInteger(docNo) || docNo <= 0) {
+      throw new DomainError("COLLECTION_DOCUMENT_NOT_FOUND", "That collection receipt does not exist");
+    }
+    const doc = this.deps.ledger.findCollectionDocument(docNo);
+    if (!doc) throw new DomainError("COLLECTION_DOCUMENT_NOT_FOUND", "That collection receipt does not exist");
+    if (doc.settlementId) {
+      const st = this.deps.ledger.findSettlementById(doc.settlementId);
+      const ob = st ? this.deps.ledger.findObligationById(st.obligationId) : null;
+      if (!st || !ob) throw new DomainError("LEDGER_INTEGRITY", "A collection document lost its payment");
+      return {
+        docNo,
+        customerId: ob.partyId,
+        customerName: this.deps.parties.findById(ob.partyId)?.display_name ?? "—",
+        receivedByName: this.deps.ledger.operatorName(st.settledBy) ?? "—",
+        currency: st.currency,
+        totalMinor: st.amountMinor,
+        method: st.method,
+        provider: st.provider,
+        reference: st.reference,
+        receivedBy: st.settledBy,
+        receivedAt: st.settledAt,
+        businessDate: st.businessDate,
+        lines: [{ obligation: ob, amountMinor: st.amountMinor }],
+      };
+    }
+    const r = doc.receiptId ? this.deps.receipts?.findById(doc.receiptId) : null;
+    if (!r || !this.deps.receipts) throw new DomainError("LEDGER_INTEGRITY", "A collection document lost its receipt");
+    const lines = this.deps.receipts.listAllocations(r.id).map((a) => {
+      const ob = this.deps.ledger.findObligationById(a.obligationId);
+      if (!ob) throw new DomainError("LEDGER_INTEGRITY", "A receipt share lost its debt");
+      return { obligation: ob, amountMinor: a.amountMinor };
+    });
+    return {
+      docNo,
+      customerId: r.customerId,
+      customerName: this.deps.parties.findById(r.customerId)?.display_name ?? "—",
+      receivedByName: this.deps.ledger.operatorName(r.receivedBy) ?? "—",
+      currency: r.currency,
+      totalMinor: r.amountMinor,
+      method: "external",
+      provider: r.provider,
+      reference: r.reference,
+      receivedBy: r.receivedBy,
+      receivedAt: r.receivedAt,
+      businessDate: r.businessDate,
+      lines,
+    };
+  }
+
+  protected assertAcceptedNewCollection(method: SettlementMethod, provider: SettlementProvider | null): void {
+    assertAcceptedNewCollection(method, provider);
+  }
+
   settle(draft: SettlementDraft): PostResult<SettlementRecord> {
     const actor = this.requireOwner();
-    return this.commitCollection(this.prepareCollection(draft), actor, true);
+    const prepared = this.prepareCollection(draft);
+    // P3 (DEC-35): a NEW settlement is cash or Whish only; a replay of an existing key answers as before.
+    if (!this.deps.ledger.findSettlementByIdempotencyKey(prepared.key)) {
+      this.assertAcceptedNewCollection(prepared.method, prepared.provider);
+    }
+    return this.commitCollection(prepared, actor, true);
   }
 
   /**
@@ -528,6 +662,9 @@ export class LedgerService {
       }
       return; // only an OPEN same-intent attempt may continue under its original key (Tx2 re-checks the receipt lock)
     }
+    // 🔴 P3 (DEC-35): only a genuinely NEW collection reaches this line (a settlement or an attempt under
+    // this key returned above), and it must be cash or Whish. Nothing is written before this refusal.
+    this.assertAcceptedNewCollection(p.method, p.provider);
     // 🔴 Migration 18: a NEW collection is refused while an earlier allocated receipt of this customer is
     // unknown or in conflict (see assertNoUnresolvedReceipts). A replay or continuation never gets here.
     this.assertNoUnresolvedReceipts(p.partyId);
@@ -716,7 +853,9 @@ export class LedgerService {
         provider !== null &&
         reference !== null &&
         (this.deps.ledger.findSettlementByProviderReference(provider, reference) ||
-          this.deps.receipts?.findByProviderReference(provider, reference))
+          this.deps.receipts?.findByProviderReference(provider, reference) ||
+          // P2: a Whish SALE's reference, or the same reference written differently, is just as taken.
+          this.deps.ledger.isReferenceRegistered(provider, reference))
       ) {
         throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
       }
@@ -747,6 +886,14 @@ export class LedgerService {
         businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
       };
       this.deps.ledger.insertSettlement({ ...record, requestFingerprint: fingerprint });
+      // 🔴 DEC-35z+ COL: money RECEIVED from a customer gets its COL- number in THIS transaction — the
+      // number and the money commit together or neither does (no gap, no orphan document, no payment
+      // without its document). A supplier payment (payable) is money OUT and gets none.
+      if (obligation.direction === "receivable") {
+        const docNo = this.deps.ledger.issueCollectionNumber();
+        this.afterCollectionNumberIssued();
+        this.deps.ledger.insertCollectionDocument({ docNo, settlementId: record.id, receiptId: null });
+      }
       // The settlement and the closing of its attempt are ONE transaction: an attempt is never open
       // for a payment that committed.
       this.deps.ledger.resolveAttempt(key, "recorded", instant);
@@ -922,6 +1069,9 @@ export class LedgerService {
       }
       return; // an OPEN attempt of the SAME intent continues under its original key
     }
+    // 🔴 P3 (DEC-35): a NEW shared receipt is Whish only — a bank-transfer receipt recorded before this rule
+    // still replays above under its key, and an open attempt still continues.
+    this.assertAcceptedNewCollection("external", p.provider);
     // 🔴 NOTHING NEW WHILE AN EARLIER MONEY-IN FOR THIS CUSTOMER IS UNANSWERED. Open collection attempts
     // are only READ here (M17A's own behaviour is not touched); open receipt attempts are classified
     // from the ledger and, when it can answer, closed.
@@ -1043,7 +1193,12 @@ export class LedgerService {
       this.assertNoUnresolvedCollections(p.customerId);
 
       // 🔴 ONE REAL PROVIDER TRANSACTION, ONE RECORD — as a receipt AND as a direct collection.
-      if (repo.findByProviderReference(p.provider, p.reference) || this.deps.ledger.findSettlementByProviderReference(p.provider, p.reference)) {
+      if (
+        repo.findByProviderReference(p.provider, p.reference) ||
+        this.deps.ledger.findSettlementByProviderReference(p.provider, p.reference) ||
+        // P2: a Whish SALE's reference, or the same reference written differently, is just as taken.
+        this.deps.ledger.isReferenceRegistered(p.provider, p.reference)
+      ) {
         throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
       }
       // The customer may have been archived since validation.
@@ -1099,6 +1254,10 @@ export class LedgerService {
         receivedAt: instant.toISOString(),
         businessDate: day,
       });
+      // 🔴 DEC-35z+ COL: ONE document for the ONE real transfer — never one per debt it was shared across.
+      const docNo = this.deps.ledger.issueCollectionNumber();
+      this.afterCollectionNumberIssued();
+      this.deps.ledger.insertCollectionDocument({ docNo, settlementId: null, receiptId });
       repo.resolveAttempt(p.key, "recorded", instant);
       const stored = repo.findByKey(p.key);
       if (!stored || !repo.receiptIntegrity(receiptId).ok) {

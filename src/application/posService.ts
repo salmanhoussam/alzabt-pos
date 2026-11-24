@@ -12,6 +12,8 @@ import { MAX_CART_LINES, type CartLine, priceCart } from "../domain/cart";
 import { BASE_UNITS, type Catalog, loadCatalog } from "../domain/catalog";
 import { decodeUtf8Strict, toImportCsv, validateImport, type ImportRejection } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
+import { assertAcceptedNewSalePayment } from "../domain/acceptedPayments";
+import { cleanPaymentReference } from "../domain/ledger";
 import { money } from "../domain/money";
 import { type TodaySalesReport, buildTodaySales } from "../domain/report";
 import { categoryNameAr, categoryNameEn } from "../domain/category";
@@ -166,6 +168,16 @@ export interface PosServiceDeps {
   readonly repository: SaleRepository;
   readonly pinStates: PinStateRepository;
   readonly catalog: Catalog;
+  /**
+   * DEMO-FALLBACK: what the till serves when the local catalog has no active product. Merchant mode:
+   * an EMPTY catalog; demo mode: the sample marked `demo`. OPTIONAL for older callers and tests,
+   * which keep the previous fallback (`catalog`).
+   *
+   * 🔴 WHY A SEPARATE DEPENDENCY. The fallback used to be `catalog` — the catalog the terminal
+   * STARTED with. On a terminal that started with real products, deactivating the last one fell back
+   * to that stale startup list (deactivated products included), not to the sample its comment named.
+   */
+  readonly fallbackCatalog?: Catalog;
   /** The local catalog table. Without it (tests, older callers) catalog import is unavailable. */
   readonly catalogStore?: CatalogRepository;
   /**
@@ -239,13 +251,39 @@ export interface PosServiceDeps {
  */
 export type { AuditRow, AuditEventType } from "../domain/audit";
 
+/** SELL-SPLIT-CASH-WHISH: a sale paid in full by a cash part and a Whish Money part (minor units). */
+export interface CreateSplitSaleInput {
+  readonly idempotencyKey: string;
+  readonly lines: ReadonlyArray<CartLine>;
+  readonly expectedTotalMinor: bigint;
+  readonly cashMinor: bigint;
+  readonly whishMinor: bigint;
+  readonly whish: { readonly reference: unknown; readonly fundsConfirmed: unknown } | null;
+  readonly customerId?: string | null;
+}
+
 export interface CreateSaleInput {
   readonly idempotencyKey: string;
   readonly lines: ReadonlyArray<CartLine>;
   readonly paymentMethod: PaymentMethod;
   /** The total the cashier saw, in minor units. A mismatch means the screen was stale: refuse. */
   readonly expectedTotalMinor: bigint;
+  /**
+   * SELL-CUSTOMER-LINK (ACC-2): the customer account this PAID sale is for, or absent. Never a debt.
+   * Checked active inside the sale transaction; the name snapshot is read from the account there.
+   */
+  readonly customerId?: string | null;
+  /**
+   * P2 · SELL-WHISH-REFERENCE-AND-CONFIRMATION (owner, 2026-11-07). REQUIRED for a NEW `external` sale
+   * and refused with any other method: the Whish Money reference the operator typed and their explicit
+   * confirmation that the money actually arrived. This till never contacts Whish; both are the
+   * operator's own record. Bank transfer is out of scope (owner decision), so the provider is fixed.
+   */
+  readonly whish?: { readonly reference: unknown; readonly fundsConfirmed: unknown } | null;
 }
+
+/** The exact SQLite refusal of a reference already in `external_references` (migration 19 triggers). */
+const REFERENCE_TAKEN = /payment reference is already recorded/;
 
 export interface CreateSaleResult {
   readonly sale: SaleRecord;
@@ -258,6 +296,25 @@ export interface CreateCreditSaleInput {
   readonly lines: ReadonlyArray<CartLine>;
   readonly expectedTotalMinor: bigint;
   readonly customerId: string;
+  /**
+   * SELL-PARTIAL-DEBT (owner, 2026-11-08): part of the total received NOW, by ONE accepted method (cash,
+   * or Whish Money with its reference and the explicit "the money arrived"). Absent or null → the
+   * whole total goes on the account, exactly as SELL-CREDIT (same fingerprint, same rows).
+   */
+  readonly downPayment?: CreditDownPaymentInput | null;
+}
+
+export interface CreditDownPaymentInput {
+  readonly amountMinor: bigint;
+  readonly method: "cash" | "external";
+  readonly whish?: { readonly reference: unknown; readonly fundsConfirmed: unknown } | null;
+}
+
+/** A down payment after validation: what is actually written (one tender) — never a debt. */
+interface CreditDownPayment {
+  readonly amountMinor: bigint;
+  readonly method: "cash" | "external";
+  readonly whish: { readonly provider: "whish"; readonly reference: string; readonly fundsConfirmed: true } | null;
 }
 
 export interface CreateCreditSaleResult {
@@ -454,7 +511,11 @@ export class PosService {
    */
   login(cashierId: string, pin: string): LoginResult {
     const account = this.credentialFor(cashierId);
-    if (!account) throw new DomainError("INVALID_CREDENTIALS", "Cashier or PIN is incorrect");
+    if (!account) {
+      throw new DomainError("INVALID_CREDENTIALS", "Cashier or PIN is incorrect", "LOGIN_UNKNOWN_OPERATOR", {
+        reason: "LOGIN_UNKNOWN_OPERATOR",
+      });
+    }
     const fixture = account;
     const now = this.now();
     const lockMinutes = PIN_LOCKOUT_POLICY.lockDurationMs / 60000;
@@ -475,12 +536,16 @@ export class PosService {
       throw new DomainError(
         "CASHIER_LOCKED",
         `Too many incorrect PIN attempts. ${fixture.name} is locked — try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+        "LOGIN_PIN_LOCKED",
+        { reason: "LOGIN_PIN_LOCKED", minutesRemaining: minutes },
       );
     }
     if (outcome.kind === "wrong") {
       throw new DomainError(
         "INVALID_CREDENTIALS",
         `Cashier or PIN is incorrect. ${outcome.left} attempt${outcome.left === 1 ? "" : "s"} left before a ${lockMinutes}-minute lock.`,
+        "LOGIN_PIN_WRONG",
+        { reason: "LOGIN_PIN_WRONG", attemptsLeft: outcome.left, lockMinutes },
       );
     }
     // The PIN was correct. Whether that opens a session is the operator service's decision.
@@ -871,12 +936,13 @@ export class PosService {
   /**
    * Reloads the live catalog from the local table after an administrative write. When the last
    * active product has just been deactivated the local catalog is empty; the till then falls back
-   * to the bundled demo fixture exactly as a fresh install does, rather than holding a stale list.
+   * to `fallbackCatalog` exactly as a fresh install does — EMPTY in merchant mode, the marked sample
+   * only under the demo switch (DEMO-FALLBACK) — rather than holding a stale list.
    */
   private refreshCatalogFromStore(store: CatalogRepository): void {
     const currency = this.deps.terminal.currency;
     const local = store.loadActiveSource(currency);
-    const next = local ? loadCatalog(local) : this.deps.catalog;
+    const next = local ? loadCatalog(local) : (this.deps.fallbackCatalog ?? this.deps.catalog);
     this.assertTerminalCurrency(next);
     this.catalog = next;
   }
@@ -1376,6 +1442,16 @@ export class PosService {
    * ══════════════════════════════════════════════════════════════════════════════════════════════
    */
   authorizePhoneSession(action: PhoneSessionAction, productId: string | null): PhoneSessionSpec {
+    // DEC-35z16 (PILOT): supplier-invoice photos from the phone. The SAME gate as the desktop Photo
+    // Invoice (create-products): the photos only feed that review, and its confirmation is what writes.
+    // DEC-35z17: the one «من الهاتف» button. Both purposes the phone may choose (a NEW product, or
+    // supplier-invoice photos) need the SAME create-products grant, checked here; the phone only narrows.
+    if (action === "COMPANION" || action === "INVOICE_BATCH") {
+      const creator = this.requireProductCreator();
+      if (productId !== null) throw new DomainError("INVALID_INPUT", "An invoice batch names no product");
+      this.requireStore();
+      return { action, productId: null, operatorId: creator.id };
+    }
     if (action !== "NEW_PRODUCT" && action !== "EDIT_PRODUCT") {
       // 🔴 VALIDATED BEFORE ANYONE IS AUTHORIZED, because the two actions are authorized
       // DIFFERENTLY now. An unknown action must never fall through to the weaker of the two gates.
@@ -2071,13 +2147,47 @@ export class PosService {
 
   // ── Sales ───────────────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * P3 (DEC-35): the ONE place a new till sale's method is checked against the shop's accepted methods.
+   * `protected` for exactly one reason: a TEST may stand in for a build released before DEC-35 to seed the
+   * historic card / other rows only such a build could write (tests/helpers/preDec35.ts). Nothing in
+   * src/ overrides it — a source test proves that.
+   */
+  protected assertAcceptedNewSale(method: PaymentMethod): void {
+    assertAcceptedNewSalePayment(method);
+  }
+
   createSale(input: CreateSaleInput): CreateSaleResult {
     const cashier = this.requireCashier();
     assertPaymentMethod(input.paymentMethod);
     if (typeof input.idempotencyKey !== "string" || !/^[A-Za-z0-9-]{8,100}$/.test(input.idempotencyKey)) {
       throw new DomainError("INVALID_INPUT", "A valid idempotency key is required");
     }
+    const customerId = input.customerId ?? null;
+    if (customerId !== null && (typeof customerId !== "string" || customerId.length === 0 || customerId.length > 100)) {
+      throw new DomainError("INVALID_INPUT", "A customer account must be given by its id");
+    }
+    // P2: Whish evidence belongs to an `external` sale only, and its shape is checked before anything
+    // is read. The reference is cleaned by the SAME rule the collection form uses (1–64 characters,
+    // never a card number); "the money arrived" must be an explicit true, never a default.
+    const whishGiven = input.whish ?? null;
+    if (whishGiven !== null && input.paymentMethod !== "external") {
+      throw new DomainError("INVALID_INPUT", "A Whish reference belongs to a Whish Money payment only");
+    }
+    let whish: { readonly provider: "whish"; readonly reference: string; readonly fundsConfirmed: true } | null = null;
+    if (whishGiven !== null) {
+      if (typeof whishGiven !== "object") throw new DomainError("INVALID_INPUT", "Whish payment details are malformed");
+      const reference = cleanPaymentReference(whishGiven.reference, "whish");
+      if (reference === null) throw new DomainError("INVALID_INPUT", "This payment method needs a reference");
+      if (whishGiven.fundsConfirmed !== true) {
+        throw new DomainError("FUNDS_NOT_CONFIRMED", "Confirm that the money was actually received");
+      }
+      whish = { provider: "whish", reference, fundsConfirmed: true };
+    }
 
+    // 🔴 THE CUSTOMER-FREE FINGERPRINT IS BYTE-IDENTICAL TO BEFORE ACC-2. `customerId` is appended only
+    // when a customer is linked, so an existing key replays exactly as it always did, and the same
+    // key reused for another customer (or for none) is a different request: IDEMPOTENCY_CONFLICT.
     const fingerprint = createHash("sha256")
       .update(
         JSON.stringify({
@@ -2087,6 +2197,10 @@ export class PosService {
           // and 2 kg vs 2.001 kg cannot hash the same.
           lines: input.lines.map((l) => [l.productId, l.quantityMilli]),
           expectedTotalMinor: input.expectedTotalMinor.toString(),
+          ...(customerId === null ? {} : { customerId }),
+          // P2: appended only when present, so every pre-P2 request keeps its exact fingerprint. The
+          // reference is part of WHAT the payment is: the same key with another reference is a conflict.
+          ...(whish === null ? {} : { whish: whish.reference }),
         }),
       )
       .digest("hex");
@@ -2100,6 +2214,16 @@ export class PosService {
       return { sale: existing.sale, duplicate: true };
     }
 
+    // 🔴 P2: A NEW `external` SALE NEEDS ITS EVIDENCE. Checked AFTER the replay above on purpose: a sale
+    // already recorded before P2 (with no reference) still answers its own retry, and nothing new is
+    // ever written as "external" without a reference and an explicit confirmation.
+    if (input.paymentMethod === "external" && whish === null) {
+      throw new DomainError("INVALID_INPUT", "A Whish Money payment needs its reference and the confirmation that the money arrived");
+    }
+    // 🔴 P3 (DEC-35): a NEW sale is paid in cash or Whish Money only. Card and Other stay readable on every
+    // historic sale, and a pre-P3 card / other request still replays above under its own key.
+    this.assertAcceptedNewSale(input.paymentMethod);
+
     const priced = priceCart(this.catalog, input.lines);
     if (priced.total.minor !== input.expectedTotalMinor) {
       throw new DomainError(
@@ -2111,54 +2235,276 @@ export class PosService {
     const instant = this.now();
     const timestamp = instant.toISOString();
     const saleId = this.newId();
-    this.repository.commitSale(
-      {
-        id: saleId,
-        idempotencyKey: input.idempotencyKey,
-        requestFingerprint: fingerprint,
-        // A till checkout, stated rather than defaulted (migration 7). A POS sale is settled in
-        // full at completion by one real method — unchanged behaviour, now written down.
-        sourceType: "pos",
-        invoiceId: null,
-        customerId: null,
-        customerNameSnapshot: null,
-        cashierId: cashier.id,
-        cashierName: cashier.name,
-        currency: priced.currency,
-        subtotalMinor: priced.subtotal.minor,
-        taxMinor: 0n,
-        totalMinor: priced.total.minor,
-        paidMinor: priced.total.minor,
-        balanceDueMinor: 0n,
-        paymentStatus: "paid",
-        paymentMethod: input.paymentMethod,
-        businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
-        completedAt: timestamp,
-        createdAt: timestamp,
-      },
-      priced.lines.map((l) => ({
-        id: this.newId(),
-        lineNo: l.lineNo,
-        invoiceLineId: null,
-        productId: l.productId,
-        sku: l.sku,
-        productName: l.productName,
-        saleUnit: l.saleUnit,
-        unitLabel: null,
-        quantityMilli: l.quantityMilli,
-        unitPriceMinor: l.unitPrice.minor,
-        lineTotalMinor: l.lineTotal.minor,
-      })),
-    );
+    const header: NewSaleHeader = {
+      id: saleId,
+      idempotencyKey: input.idempotencyKey,
+      requestFingerprint: fingerprint,
+      // A till checkout, stated rather than defaulted (migration 7). A POS sale is settled in
+      // full at completion by one real method — unchanged behaviour, now written down.
+      sourceType: "pos",
+      invoiceId: null,
+      customerId: null,
+      customerNameSnapshot: null,
+      cashierId: cashier.id,
+      cashierName: cashier.name,
+      currency: priced.currency,
+      subtotalMinor: priced.subtotal.minor,
+      taxMinor: 0n,
+      totalMinor: priced.total.minor,
+      paidMinor: priced.total.minor,
+      balanceDueMinor: 0n,
+      paymentStatus: "paid",
+      paymentMethod: input.paymentMethod,
+      externalPayment: whish,
+      businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
+      completedAt: timestamp,
+      createdAt: timestamp,
+    };
+    const lines: NewSaleLine[] = priced.lines.map((l) => ({
+      id: this.newId(),
+      lineNo: l.lineNo,
+      invoiceLineId: null,
+      productId: l.productId,
+      sku: l.sku,
+      productName: l.productName,
+      saleUnit: l.saleUnit,
+      unitLabel: null,
+      quantityMilli: l.quantityMilli,
+      unitPriceMinor: l.unitPrice.minor,
+      lineTotalMinor: l.lineTotal.minor,
+    }));
+
+    // P2: the ledger itself refuses a Whish reference already used anywhere (the tender's registration
+    // trigger aborts the WHOLE sale transaction — nothing is written). The operator reads the same
+    // sentence the collection form gives, never the internal SQLite text.
+    const refusingTakenReference = <T>(write: () => T): T => {
+      try {
+        return write();
+      } catch (err) {
+        if (whish !== null && err instanceof Error && !(err instanceof DomainError) && REFERENCE_TAKEN.test(err.message)) {
+          throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
+        }
+        throw err;
+      }
+    };
+
+    if (customerId === null) {
+      refusingTakenReference(() => this.repository.commitSale(header, lines));
+    } else {
+      // 🔴 SELL-CUSTOMER-LINK (ACC-2): ONE TRANSACTION FOR THE CHECK AND THE WRITE. The account is
+      // re-read as an ACTIVE customer by id inside the same BEGIN IMMEDIATE that writes the sale, so
+      // an account archived a moment earlier cannot receive it, and the name snapshot is the one
+      // the account carries at that instant. It is still a PAID sale: no obligation is posted.
+      const services = this.deps.creditSaleServices?.();
+      const transact = this.deps.transact;
+      if (!services || !transact) {
+        throw new DomainError("NOT_AVAILABLE", "Customer accounts are not available on this terminal");
+      }
+      let raced: CreateSaleResult | null = null;
+      refusingTakenReference(() => transact(() => {
+        const again = this.repository.findByIdempotencyKey(input.idempotencyKey);
+        if (again) {
+          if (again.fingerprint !== fingerprint) {
+            throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
+          }
+          raced = { sale: again.sale, duplicate: true };
+          return;
+        }
+        const customer = services.parties.activeCustomerForSale(customerId);
+        this.repository.commitSaleWithinTransaction(
+          { ...header, customerId: customer.id, customerNameSnapshot: customer.display_name },
+          lines,
+        );
+      }));
+      if (raced !== null) return raced;
+    }
     const sale = this.repository.getSale(saleId);
     if (!sale) throw new DomainError("LEDGER_INTEGRITY", "Committed sale could not be read back");
     return { sale, duplicate: false };
   }
 
   /**
-   * Internal-only, owner-authorized, fully unpaid POS sale. Its outer transaction is the sole
-   * commit boundary for the sale header, every line and the LedgerService-posted receivable.
-   * This method is deliberately not registered on the renderer bridge.
+   * SELL-SPLIT-CASH-WHISH (owner, 2026-11-09): ONE sale paid IN FULL by cash AND Whish Money — never a
+   * debt. Same permission as an ordinary paid sale (any signed-in operator); creating a debt stays the
+   * owner's, and nothing here can create one: cash + Whish must equal the total EXACTLY.
+   *
+   *  - Amounts are integer minor units end to end (bigint): no floating point anywhere.
+   *  - Each part > 0 (a part of zero is not a split — use the single method); their sum = the TRUSTED
+   *    total, re-priced from the catalogue; anything else is refused before a row is written.
+   *  - The Whish part needs its reference (the collection form's own cleaning rule) and the operator's
+   *    explicit "the money arrived"; a reference already used anywhere rolls back the WHOLE sale.
+   *  - Two tenders (seq 1 cash, seq 2 Whish) + the sale + its lines, in ONE transaction; the sale row
+   *    seals them (migration 19: count and sum must match). `payment_method` is NULL, as M19 requires
+   *    for a multi-tender sale; the tenders ARE the record of how the money arrived.
+   *  - The same key with the same request replays the same sale; the same key with other amounts, another
+   *    reference or another customer is IDEMPOTENCY_CONFLICT.
+   */
+  createSplitSale(input: CreateSplitSaleInput): CreateSaleResult {
+    const cashier = this.requireCashier();
+    if (typeof input.idempotencyKey !== "string" || !/^[A-Za-z0-9-]{8,100}$/.test(input.idempotencyKey)) {
+      throw new DomainError("INVALID_INPUT", "A valid idempotency key is required");
+    }
+    if (typeof input.expectedTotalMinor !== "bigint") {
+      throw new DomainError("INVALID_INPUT", "A valid displayed total is required");
+    }
+    const customerId = input.customerId ?? null;
+    if (customerId !== null && (typeof customerId !== "string" || customerId.length === 0 || customerId.length > 100)) {
+      throw new DomainError("INVALID_INPUT", "A customer account must be given by its id");
+    }
+    if (typeof input.cashMinor !== "bigint" || typeof input.whishMinor !== "bigint" || input.cashMinor <= 0n || input.whishMinor <= 0n) {
+      throw new DomainError("SPLIT_AMOUNT_INVALID", "Both the cash part and the Whish Money part must be more than zero");
+    }
+    if (input.cashMinor + input.whishMinor !== input.expectedTotalMinor) {
+      throw new DomainError("SPLIT_TOTAL_MISMATCH", "Cash plus Whish Money must equal the total exactly");
+    }
+    // P3 (DEC-35): both parts are money this shop takes.
+    this.assertAcceptedNewSale("cash");
+    this.assertAcceptedNewSale("external");
+    const w = input.whish;
+    if (w === null || w === undefined || typeof w !== "object") {
+      throw new DomainError("INVALID_INPUT", "A Whish Money payment needs its reference and the confirmation that the money arrived");
+    }
+    const reference = cleanPaymentReference(w.reference, "whish");
+    if (reference === null) throw new DomainError("INVALID_INPUT", "This payment method needs a reference");
+    if (w.fundsConfirmed !== true) throw new DomainError("FUNDS_NOT_CONFIRMED", "Confirm that the money was actually received");
+
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify({
+          cashierId: cashier.id,
+          paymentIntent: "split_cash_whish",
+          lines: input.lines.map((l) => [l.productId, l.quantityMilli]),
+          expectedTotalMinor: input.expectedTotalMinor.toString(),
+          cashMinor: input.cashMinor.toString(),
+          whishMinor: input.whishMinor.toString(),
+          whish: reference,
+          ...(customerId === null ? {} : { customerId }),
+        }),
+      )
+      .digest("hex");
+
+    const replay = (): CreateSaleResult | null => {
+      const existing = this.repository.findByIdempotencyKey(input.idempotencyKey);
+      if (!existing) return null;
+      if (existing.fingerprint !== fingerprint) {
+        throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
+      }
+      return { sale: existing.sale, duplicate: true };
+    };
+    const earlier = replay();
+    if (earlier) return earlier;
+
+    const priced = priceCart(this.catalog, input.lines);
+    if (priced.total.minor !== input.expectedTotalMinor) {
+      throw new DomainError("TOTAL_MISMATCH", "The displayed total no longer matches the catalog; please review the cart");
+    }
+    const instant = this.now();
+    const timestamp = instant.toISOString();
+    const saleId = this.newId();
+    const header: NewSaleHeader = {
+      id: saleId,
+      idempotencyKey: input.idempotencyKey,
+      requestFingerprint: fingerprint,
+      sourceType: "pos",
+      invoiceId: null,
+      customerId: null,
+      customerNameSnapshot: null,
+      cashierId: cashier.id,
+      cashierName: cashier.name,
+      currency: priced.currency,
+      subtotalMinor: priced.subtotal.minor,
+      taxMinor: 0n,
+      totalMinor: priced.total.minor,
+      paidMinor: priced.total.minor,
+      balanceDueMinor: 0n,
+      paymentStatus: "paid",
+      paymentMethod: null,
+      externalPayment: null,
+      tenders: [
+        { method: "cash", amountMinor: input.cashMinor },
+        { method: "external", amountMinor: input.whishMinor, provider: "whish", reference },
+      ],
+      businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
+      completedAt: timestamp,
+      createdAt: timestamp,
+    };
+    const lines: NewSaleLine[] = priced.lines.map((l) => ({
+      id: this.newId(),
+      lineNo: l.lineNo,
+      invoiceLineId: null,
+      productId: l.productId,
+      sku: l.sku,
+      productName: l.productName,
+      saleUnit: l.saleUnit,
+      unitLabel: null,
+      quantityMilli: l.quantityMilli,
+      unitPriceMinor: l.unitPrice.minor,
+      lineTotalMinor: l.lineTotal.minor,
+    }));
+    const refusingTakenReference = <T>(write: () => T): T => {
+      try {
+        return write();
+      } catch (err) {
+        if (err instanceof Error && !(err instanceof DomainError) && REFERENCE_TAKEN.test(err.message)) {
+          throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
+        }
+        throw err;
+      }
+    };
+
+    if (customerId === null) {
+      refusingTakenReference(() => this.repository.commitSale(header, lines));
+    } else {
+      // As ACC-2 for a paid sale: the account is re-read ACTIVE inside the same transaction that writes
+      // the sale, and the name snapshot is the one it carries at that instant. Still no debt.
+      const services = this.deps.creditSaleServices?.();
+      const transact = this.deps.transact;
+      if (!services || !transact) {
+        throw new DomainError("NOT_AVAILABLE", "Customer accounts are not available on this terminal");
+      }
+      let raced: CreateSaleResult | null = null;
+      refusingTakenReference(() =>
+        transact(() => {
+          raced = replay();
+          if (raced) return;
+          const customer = services.parties.activeCustomerForSale(customerId);
+          this.repository.commitSaleWithinTransaction(
+            { ...header, customerId: customer.id, customerNameSnapshot: customer.display_name },
+            lines,
+          );
+        }),
+      );
+      if (raced !== null) return raced;
+    }
+    const sale = this.repository.getSale(saleId);
+    if (!sale) throw new DomainError("LEDGER_INTEGRITY", "Committed sale could not be read back");
+    return { sale, duplicate: false };
+  }
+
+  /**
+   * SELL-CUSTOMER-LINK (ACC-2): the PAID till sales linked to one customer, each with its void
+   * flag — the activity half of the owner's statement. OWNER ONLY, like the statement it extends.
+   * Nothing here is owed and nothing here is summed into a balance.
+   */
+  customerPaidSales(customerId: string): ReadonlyArray<{ readonly sale: SaleRecord; readonly voided: boolean }> {
+    this.requireOwner();
+    const sales = this.repository.listPaidSalesForCustomer(customerId);
+    const voids = this.repository.listVoidsForSales(sales.map((s) => s.id));
+    return sales.map((sale) => ({ sale, voided: voids.has(sale.id) }));
+  }
+
+  /**
+   * Owner-authorized POS sale on a customer's account. Its outer transaction is the sole commit
+   * boundary for the sale header, every line, the tender of any down payment and the LedgerService-
+   * posted receivable. Reached from the till through the owner-only `createCustomerCreditSale` channel
+   * (SELL-CREDIT, 2026-11-08).
+   *
+   * SELL-PARTIAL-DEBT (owner, 2026-11-08): with a `downPayment`, the sale is `partial`: ONE tender for
+   * the amount received now (cash, or Whish with its reference — registered, so it can never be used
+   * twice), and ONE receivable for exactly the rest. The received part is a payment and is never a
+   * debt; the rest is a debt and is never a payment. 0 < received < total, always: a sale paid in full
+   * is an ordinary paid sale, and more than the total is refused. Without a down payment nothing at
+   * all changes — the same rows and the same request fingerprint as before.
    */
   createCustomerCreditSale(input: CreateCreditSaleInput): CreateCreditSaleResult {
     const cashier = this.requireCashier();
@@ -2179,6 +2525,7 @@ export class PosService {
     }
 
     this.validateCreditSaleRequestLines(input.lines);
+    const down = this.creditDownPaymentOf(input.downPayment, input.expectedTotalMinor);
 
     // The owner is authorized before this transaction reads any persisted sale or receivable.
     // Existing keys are resolved only from immutable original transaction facts, never today's
@@ -2223,6 +2570,19 @@ export class PosService {
             "The displayed total no longer matches the catalog; please review the cart",
           );
         }
+        // SELL-PARTIAL-DEBT: what is received now, and the debt that is exactly the rest. Re-checked
+        // against the TRUSTED total (the early check used the displayed one).
+        const paidMinor = down?.amountMinor ?? 0n;
+        if (down !== null && paidMinor >= amount.minor) {
+          throw new DomainError(
+            "DOWN_PAYMENT_NOT_PARTIAL",
+            "The amount received now must be less than the total; a sale paid in full is not a debt",
+          );
+        }
+        const balance =
+          down === null ? amount : services.ledger.validateObligationAmount(amount.minor - paidMinor, priced.currency);
+        const paymentStatus = down === null ? "unpaid" : "partial";
+        const paymentMethod: PaymentMethod | null = down?.method ?? null;
         const fingerprint = this.creditSaleFingerprint({
           cashierId: cashier.id,
           customerId: input.customerId,
@@ -2230,11 +2590,12 @@ export class PosService {
           expectedTotalMinor: input.expectedTotalMinor,
           totalMinor: amount.minor,
           currency: priced.currency,
-          paidMinor: 0n,
-          paymentStatus: "unpaid",
-          balanceDueMinor: amount.minor,
-          paymentMethod: null,
+          paidMinor,
+          paymentStatus,
+          balanceDueMinor: balance.minor,
+          paymentMethod,
           taxMinor: 0n,
+          externalReference: down?.whish?.reference ?? null,
         });
         const customer = services.parties.activeCustomerForSale(input.customerId);
         const instant = this.now();
@@ -2269,22 +2630,34 @@ export class PosService {
           subtotalMinor: priced.subtotal.minor,
           taxMinor: 0n,
           totalMinor: amount.minor,
-          paidMinor: 0n,
-          balanceDueMinor: amount.minor,
-          paymentStatus: "unpaid",
-          paymentMethod: null,
+          paidMinor,
+          balanceDueMinor: balance.minor,
+          paymentStatus,
+          paymentMethod,
+          // The repository writes ONE tender for `paidMinor` when > 0 (cash, or Whish with this evidence).
+          externalPayment: down?.whish ?? null,
           businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
           completedAt: timestamp,
           createdAt: timestamp,
         };
-        this.repository.commitSaleWithinTransaction(header, lines);
+        try {
+          this.repository.commitSaleWithinTransaction(header, lines);
+        } catch (err) {
+          // The ledger refuses a Whish reference already used anywhere; the whole transaction rolls back.
+          if (down?.whish && err instanceof Error && !(err instanceof DomainError) && REFERENCE_TAKEN.test(err.message)) {
+            throw new DomainError("DUPLICATE_PAYMENT_REFERENCE", "That payment reference is already recorded");
+          }
+          throw err;
+        }
         const posted = services.ledger.postObligation({
           partyId: customer.id,
           direction: "receivable",
           sourceKind: "sale",
           sourceRef: newSaleId,
           currency: priced.currency,
-          amountMinor: amount.minor,
+          // The debt is exactly the unpaid part — never the received part (the ledger's own trigger
+          // refuses any receivable that differs from the sale's balance due).
+          amountMinor: balance.minor,
         });
         const keyed = this.repository.findByIdempotencyKey(input.idempotencyKey);
         if (!keyed) throw new DomainError("LEDGER_INTEGRITY", "Credit sale disappeared before verification");
@@ -2358,6 +2731,8 @@ export class PosService {
     readonly balanceDueMinor: bigint;
     readonly paymentMethod: PaymentMethod | null;
     readonly taxMinor: bigint;
+    /** SELL-PARTIAL-DEBT: a Whish down payment's reference; appended ONLY when present (see below). */
+    readonly externalReference?: string | null;
   }): string {
     return createHash("sha256")
       .update(
@@ -2375,9 +2750,49 @@ export class PosService {
           paymentStatus: input.paymentStatus,
           balanceDueMinor: input.balanceDueMinor.toString(),
           taxMinor: input.taxMinor.toString(),
+          // 🔴 Appended only when present, so every SELL-CREDIT request keeps its exact fingerprint; the
+          // reference is part of WHAT was paid: the same key with another reference is a conflict.
+          ...(input.externalReference ? { externalReference: input.externalReference } : {}),
         }),
       )
       .digest("hex");
+  }
+
+  /**
+   * SELL-PARTIAL-DEBT: the down payment's SHAPE, checked before anything is read. Amounts against the
+   * trusted total are checked again inside the transaction. Cash or Whish Money only (P3, DEC-35); a
+   * Whish down payment needs its reference (the collection form's own cleaning rule) and an explicit
+   * "the money arrived" — never a default.
+   */
+  private creditDownPaymentOf(given: CreditDownPaymentInput | null | undefined, expectedTotalMinor: bigint): CreditDownPayment | null {
+    if (given === undefined || given === null) return null;
+    if (typeof given !== "object") throw new DomainError("INVALID_INPUT", "The amount received now is malformed");
+    if (typeof given.amountMinor !== "bigint" || given.amountMinor <= 0n) {
+      throw new DomainError("DOWN_PAYMENT_INVALID", "The amount received now must be more than zero");
+    }
+    if (given.amountMinor >= expectedTotalMinor) {
+      throw new DomainError(
+        "DOWN_PAYMENT_NOT_PARTIAL",
+        "The amount received now must be less than the total; a sale paid in full is not a debt",
+      );
+    }
+    if (given.method !== "cash" && given.method !== "external") {
+      // One code, one sentence across the codebase (refusalText criterion a).
+      throw new DomainError("PAYMENT_METHOD_NOT_ACCEPTED", "This shop records new payments in cash or Whish Money only");
+    }
+    this.assertAcceptedNewSale(given.method);
+    const w = given.whish ?? null;
+    if (given.method === "cash") {
+      if (w !== null) throw new DomainError("INVALID_INPUT", "A Whish reference belongs to a Whish Money payment only");
+      return { amountMinor: given.amountMinor, method: "cash", whish: null };
+    }
+    if (w === null || typeof w !== "object") {
+      throw new DomainError("INVALID_INPUT", "A Whish Money payment needs its reference and the confirmation that the money arrived");
+    }
+    const reference = cleanPaymentReference(w.reference, "whish");
+    if (reference === null) throw new DomainError("INVALID_INPUT", "This payment method needs a reference");
+    if (w.fundsConfirmed !== true) throw new DomainError("FUNDS_NOT_CONFIRMED", "Confirm that the money was actually received");
+    return { amountMinor: given.amountMinor, method: "external", whish: { provider: "whish", reference, fundsConfirmed: true } };
   }
 
   /**
@@ -2398,18 +2813,29 @@ export class PosService {
     ) {
       throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key belongs to a different transaction");
     }
+    // Two valid recorded shapes: fully unpaid (SELL-CREDIT) or partial with ONE accepted method
+    // (SELL-PARTIAL-DEBT). Anything else under this key is not a sale on an account.
+    const fullyUnpaid =
+      sale.paymentStatus === "unpaid" &&
+      sale.paymentMethod === null &&
+      sale.paid.minor === 0n &&
+      sale.balanceDue.minor === sale.total.minor;
+    const partial =
+      sale.paymentStatus === "partial" &&
+      (sale.paymentMethod === "cash" || sale.paymentMethod === "external") &&
+      sale.paid.minor > 0n &&
+      sale.balanceDue.minor > 0n &&
+      sale.paid.minor + sale.balanceDue.minor === sale.total.minor &&
+      (sale.paymentMethod === "cash") === (sale.externalPayment === null);
     if (
       sale.customerId === null ||
       sale.customerNameSnapshot === null ||
       sale.customerNameSnapshot.trim().length === 0 ||
-      sale.paymentStatus !== "unpaid" ||
-      sale.paymentMethod !== null ||
-      sale.paid.minor !== 0n ||
+      !(fullyUnpaid || partial) ||
       sale.total.minor <= 0n ||
-      sale.balanceDue.minor !== sale.total.minor ||
       sale.tax.minor !== 0n
     ) {
-      throw new DomainError("LEDGER_INTEGRITY", "The keyed sale is not a valid fully unpaid customer-credit sale");
+      throw new DomainError("LEDGER_INTEGRITY", "The keyed sale is not a valid sale on a customer's account");
     }
 
     const lineSum = sale.lines.reduce((sum, line) => sum + line.lineTotal.minor, 0n);
@@ -2458,11 +2884,22 @@ export class PosService {
           line.productId === sale.lines[index]!.productId &&
           line.quantityMilli === sale.lines[index]!.quantityMilli,
       );
+    // SELL-PARTIAL-DEBT: the replayed request must describe the SAME money received now — none for a
+    // fully unpaid sale; the same amount, method and Whish reference for a partial one.
+    const down = this.creditDownPaymentOf(input.downPayment, input.expectedTotalMinor);
+    const sameDownPayment =
+      down === null
+        ? fullyUnpaid
+        : partial &&
+          down.amountMinor === sale.paid.minor &&
+          down.method === sale.paymentMethod &&
+          (down.whish?.reference ?? null) === (sale.externalPayment?.reference ?? null);
     if (
       cashierId !== sale.cashierId ||
       input.customerId !== sale.customerId ||
       !sameRequestLines ||
-      input.expectedTotalMinor !== sale.total.minor
+      input.expectedTotalMinor !== sale.total.minor ||
+      !sameDownPayment
     ) {
       throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
     }
@@ -2479,6 +2916,7 @@ export class PosService {
       balanceDueMinor: sale.balanceDue.minor,
       paymentMethod: sale.paymentMethod,
       taxMinor: sale.tax.minor,
+      externalReference: sale.externalPayment?.reference ?? null,
     });
     if (keyed.fingerprint !== originalFingerprint) {
       throw new DomainError("IDEMPOTENCY_CONFLICT", "This sale key was already used for a different sale");
@@ -2531,12 +2969,30 @@ export class PosService {
   }
 
   /**
+   * HIST-CURRENT-BALANCE (ACC-3): the current debt of each listed sale, for the OWNER's history.
+   *
+   * 🔴 NULL FOR ANYONE ELSE, AND THE CALLER THEN SENDS NOTHING. `getSaleHistory` is a session channel a
+   * cashier uses; what a debt has been paid is owner-only (like the statement). The role is re-read
+   * from the durable session here, in main — never inferred from what the screen asked for — so a
+   * cashier's response carries no current-debt field at all, not a hidden one. Null as well when the
+   * terminal has no ledger wired: "unknown" is never presented as "no debt".
+   */
+  currentDebtsForHistory(
+    saleIds: ReadonlyArray<string>,
+  ): ReadonlyMap<string, { readonly obligation: ObligationRecord; readonly outstandingMinor: bigint }> | null {
+    if (this.liveSession().role !== "owner") return null;
+    const services = this.deps.creditSaleServices?.();
+    if (!services) return null;
+    return services.ledger.currentSaleDebts(saleIds);
+  }
+
+  /**
    * Voids a completed sale by writing a NEW void record. The sale itself is never touched.
    * Gate 1 rule: only a sale from the current business day can be voided; correcting an older
    * sale is a refund, which is out of scope.
    */
   voidSale(saleId: string, reason: unknown): VoidRecord {
-    const cashier = this.requireCashier();
+    this.requireCashier(); // no session → NOT_LOGGED_IN, before anything else is read
     const cleanReason = normalizeVoidReason(reason);
     const sale = this.repository.getSale(saleId);
     if (!sale) throw new DomainError("SALE_NOT_FOUND", "Sale not found");
@@ -2551,6 +3007,15 @@ export class PosService {
         "This sale comes from a finalized invoice. Invoice cancellation / credit-note workflow is not implemented yet.",
       );
     }
+    // 🔴 VOIDING ANY SALE IS THE OWNER'S ALONE — cash as well as Whish (DEC-35a option A for Whish,
+    // owner 2026-11-08; extended to cash by the owner the same day). Decided HERE, in the service, from
+    // the LIVE operator row; the IPC channel says the same (`voidSale: "owner"`), and neither relies on
+    // the other or on a hidden button. TRANSITION: until this change a cash (or card / other) sale could
+    // be voided at the service by any signed-in operator; only an external sale needed the owner.
+    // The void row written below IS the audit record (who, when, why, which sale; immutable by trigger;
+    // UNIQUE per sale). It cancels the sale in this ledger only: it does NOT say any money went back to
+    // the customer. The sale, its lines, its tender and any registered reference are never edited.
+    const voider: Cashier = this.requireOwner();
     if (this.repository.getVoid(saleId)) throw new DomainError("ALREADY_VOIDED", "This sale is already voided");
     const instant = this.now();
     const today = businessDateOf(instant, this.deps.terminal.timeZone);
@@ -2560,8 +3025,8 @@ export class PosService {
     const record: VoidRecord = {
       id: this.newId(),
       saleId,
-      cashierId: cashier.id,
-      cashierName: cashier.name,
+      cashierId: voider.id,
+      cashierName: voider.name,
       reason: cleanReason,
       businessDate: today,
       createdAt: instant.toISOString(),

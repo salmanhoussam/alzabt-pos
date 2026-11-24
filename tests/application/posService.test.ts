@@ -52,9 +52,11 @@ describe("cashier session", () => {
 describe("completing a sale", () => {
   it("records cashier, payment method, currency, snapshots and exact totals", () => {
     const { db, service } = makeHarness(t.dbPath);
+    // TRANSITION (P2): a new `external` sale now needs its Whish evidence; old request had no `whish`.
     const { sale, duplicate } = service.createSale({
       idempotencyKey: newKey(),
       paymentMethod: "external",
+      whish: { reference: "WH-POS-1083", fundsConfirmed: true },
       lines: [
         { productId: "prod-0002", quantityMilli: 2000 },
         { productId: "prod-0008", quantityMilli: 1000 },
@@ -82,7 +84,8 @@ describe("completing a sale", () => {
   it("assigns consecutive receipt numbers", () => {
     const { db, service } = makeHarness(t.dbPath);
     const a = service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", ...espressoX2 });
-    const b = service.createSale({ idempotencyKey: newKey(), paymentMethod: "card", ...espressoX2 });
+    // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old method here: "card".
+    const b = service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", ...espressoX2 });
     expect([a.sale.receiptNumber, b.sale.receiptNumber]).toEqual([1, 2]);
     db.close();
   });
@@ -196,7 +199,8 @@ describe("E: voids", () => {
       lines: [{ productId: "prod-0007", quantityMilli: 2000 }],
       expectedTotalMinor: 820n,
     });
-    const cancel = service.createSale({ idempotencyKey: newKey(), paymentMethod: "card", ...espressoX2 });
+    // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old method here: "card".
+    const cancel = service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", ...espressoX2 });
     const rawBefore = db.prepare("SELECT * FROM sales WHERE id = ?").get(cancel.sale.id);
     const linesBefore = db.prepare("SELECT * FROM sale_lines WHERE sale_id = ?").all(cancel.sale.id);
 
@@ -250,9 +254,10 @@ describe("persistence across restart", () => {
   it("completed sales and voids are still there after closing and reopening the database", () => {
     const first = makeHarness(t.dbPath);
     const a = first.service.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", ...espressoX2 });
+    // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old method here: "other".
     const b = first.service.createSale({
       idempotencyKey: newKey(),
-      paymentMethod: "other",
+      paymentMethod: "cash",
       lines: [{ productId: "prod-0006", quantityMilli: 4000 }],
       expectedTotalMinor: 600n,
     });

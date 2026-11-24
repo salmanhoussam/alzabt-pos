@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createOwned, endOwned } from "./_owned.mjs";
 
 const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGED = process.env.E2E_EXECUTABLE;
@@ -29,19 +30,23 @@ const assert = (cond, msg) => {
 const sha = (f) => createHash("sha256").update(readFileSync(f)).digest("hex");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function killTree(pid) {
-  try {
-    if (process.platform === "win32") execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
-    else process.kill(pid, "SIGKILL");
-  } catch {
-    // already gone
-  }
-}
+// 🔴 Processes this test starts are recorded BY IDENTITY (pid + executable + OS creation time) and
+// ended ONLY through _owned.mjs, which proves that identity while holding a handle — never by pid
+// alone (Windows reuses pids). The exit handler also runs when an assertion throws.
+const owned = createOwned();
+process.on("exit", () => owned.endAll());
 
 function windowTitle(pid) {
   if (process.platform !== "win32") return null;
   try {
-    return execFileSync("powershell", ["-NoProfile", "-Command", `(Get-Process -Id ${pid}).MainWindowTitle`], { encoding: "utf8" }).trim();
+    // 🔴 UTF-8 OUTPUT, FORCED. Without it PowerShell writes in the console's OEM code page; on a code
+    // page 437 machine the title's em dash arrives as "-" and the exact comparison below fails on a
+    // title that is correct. The comparison itself stays exact.
+    return execFileSync(
+      "powershell",
+      ["-NoProfile", "-Command", `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; (Get-Process -Id ${pid}).MainWindowTitle`],
+      { encoding: "utf8" },
+    ).trim();
   } catch {
     return "";
   }
@@ -49,10 +54,12 @@ function windowTitle(pid) {
 
 async function runFailing(profile, expectedCode) {
   const logFile = join(profile, "logs", "alzabt-pos.log");
+  const tChild = Date.now();
   const child = spawn(ELECTRON, [...EXTRA_ARGS, ...APP_ARGS], {
     env: { ...process.env, ALZABT_POS_USER_DATA: profile, ALZABT_POS_DISABLE_AUTOSTART: "1" },
     stdio: "ignore",
   });
+  const childId = owned.addStartedNear(child.pid, tChild);
   let exited = null;
   child.on("exit", (code) => (exited = code));
   let line = null;
@@ -67,7 +74,7 @@ async function runFailing(profile, expectedCode) {
     title = windowTitle(child.pid);
     if (!title) await sleep(250);
   }
-  killTree(child.pid);
+  endOwned([childId]);
   assert(line !== null, `${expectedCode}: the log records a startup failure`);
   const entry = JSON.parse(line);
   assert(entry.code === expectedCode, `${expectedCode}: the failure is classified as ${expectedCode}`);

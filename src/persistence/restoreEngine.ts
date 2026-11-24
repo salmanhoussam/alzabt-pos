@@ -86,7 +86,7 @@ export const LAST_RESTORE_FILE = "last-restore.json";
  * The live ledger's name. 🔴 DUPLICATED from src/main/ledgerGuard.ts (`LEDGER_FILE_NAME`) because
  * persistence does not import from main; the test pins it to that file's text.
  */
-export const LIVE_LEDGER_FILE = "alzabt-pos-ledger.sqlite";
+export const LIVE_LEDGER_FILE = "alzabt-pos-trial-only-ledger.sqlite";
 /** SQLite's companion files. A stale -wal beside a restored ledger would be replayed into it. */
 const LEDGER_COMPANIONS = ["-wal", "-shm", "-journal"].map((s) => `${LIVE_LEDGER_FILE}${s}`);
 /** Everything a restore moves aside, in this order. ledger.json is deliberately absent. */

@@ -6,12 +6,14 @@ import { HistoryScreen } from "./screens/HistoryScreen";
 import { LoginScreen } from "./screens/LoginScreen";
 import { SetupScreen } from "./screens/SetupScreen";
 import { SellScreen } from "./screens/SellScreen";
+import { type SellDraft, draftFor } from "./sellDraft";
 import { TodayScreen } from "./screens/TodayScreen";
 import { ProductsScreen } from "./screens/ProductsScreen";
 import { InvoicesScreen } from "./screens/InvoicesScreen";
 import { CustomersScreen } from "./screens/CustomersScreen";
 import { ToolsScreen } from "./screens/ToolsScreen";
 import { useT } from "./i18n";
+import { appModalOwner, useAppModalOwner } from "./appModal";
 
 type Tab = "sell" | "today" | "history" | "products" | "customers" | "invoices" | "tools";
 
@@ -54,7 +56,21 @@ export function App() {
   const [tab, setTab] = useState<Tab>("sell");
   // Bumped after a catalog import so the Sell screen reloads the catalog from the main process.
   const [catalogVersion, setCatalogVersion] = useState(0);
+  // Bumped when Sell's tab is clicked while Sell is already open: that click focuses the tab button
+  // and remounts nothing, so the Sell screen is asked to put focus back in its search field (a scan
+  // typed into a tab button would go nowhere).
+  const [sellFocusRequest, setSellFocusRequest] = useState(0);
+  /**
+   * R5 (Abu Abbas F1): while an invoice dialog or an issue in flight owns interaction, the shell is inert AND every shell
+   * action refuses when it runs — a dispatched click still reaches the handler, so `inert` alone is not the guard.
+   */
+  const modalOwner = useAppModalOwner();
+  const shellFree = () => appModalOwner() === null;
   const [importResult, setImportResult] = useState<ImportCatalogResponse | ExportNotice | ErrorNotice | null>(null);
+  // SELL-CART-LOST-ON-TAB: the Sell screen's unfinished cart, kept while another tab is open. Memory
+  // only, ONE operator's — handed back only to them (`draftFor`), dropped on sign-out and on a catalogue
+  // import. See ./sellDraft.ts for what it does and does not keep.
+  const [sellDraft, setSellDraft] = useState<SellDraft | null>(null);
 
   useEffect(() => {
     call(pos().currentCashier())
@@ -63,6 +79,27 @@ export function App() {
   }, []);
 
   const screen = screenFor(cashier, setup);
+
+  // 🔴 DEMO-FALLBACK: ONE app-wide, permanent warning while the sample catalog is live — on EVERY tab
+  // (Sell and its sale confirmation, Today, History, …), because demo sales appear in all of them.
+  // Re-read from the main process on every tab change and after an import, so it disappears the
+  // moment a real product exists. A read failure hides nothing it knows about: it only ever shows
+  // the banner on `demo === true`, which the main process sets under the explicit switch alone.
+  const [demoCatalog, setDemoCatalog] = useState(false);
+  // SHOWCASE MARKER: a separate, display-only banner for a tooling-prepared showcase profile.
+  const [showcaseProfile, setShowcaseProfile] = useState(false);
+  useEffect(() => {
+    if (screen !== "app") return;
+    call(pos().getCatalog())
+      .then((c) => {
+        setDemoCatalog(c.demo === true);
+        setShowcaseProfile(c.showcaseProfile === true);
+      })
+      .catch(() => {
+        setDemoCatalog(false);
+        setShowcaseProfile(false);
+      });
+  }, [screen, tab, catalogVersion]);
 
   // These three stay keyed on `cashier` itself so TypeScript narrows it for the till below, while
   // `screen` is the authority for the one decision that was wrong.
@@ -117,6 +154,8 @@ export function App() {
 
   const logout = async () => {
     await call(pos().logout());
+    // Signing out ends the cart with the session: the next operator never inherits it.
+    setSellDraft(null);
     setCashier(null);
     setSetup(null);
     setTab("sell");
@@ -128,6 +167,8 @@ export function App() {
       if (result.status === "cancelled") return;
       setImportResult(result);
       if (result.status === "imported") {
+        // A new catalogue starts a fresh till, as it always did (the kept cart is dropped with it).
+        setSellDraft(null);
         setCatalogVersion((v) => v + 1);
         setTab("sell");
       }
@@ -158,39 +199,68 @@ export function App() {
 
   return (
     <div className="app">
-      <header className="topbar">
+      <header className="topbar" inert={modalOwner !== null}>
         <strong className="brand">{t("app.name")}</strong>
         <nav className="tabs">
           {(["sell", "today", "history", "products", "customers", "invoices", "tools"] as const).map((name) => (
             <button
               key={name}
               className={tab === name ? "tab active" : "tab"}
-              onClick={() => setTab(name)}
+              onClick={() => {
+                if (!shellFree()) return;
+                if (name === "sell" && tab === "sell") setSellFocusRequest((n) => n + 1);
+                setTab(name);
+              }}
               data-testid={`tab-${name}`}
             >
               {t(`nav.${name}`)}
             </button>
           ))}
         </nav>
-        <span className="muted" dir="auto">
+        <span className="muted" dir="auto" data-testid="session-name">
           {cashier.name}
         </span>
+        {/* DISPLAY ONLY (DEC-35zz++ #7): the LIVE role beside the name, so a seeded owner named «Cashier One» is not read
+            as a cashier. Nothing is renamed; the id and the audit history are untouched; access is decided in main. */}
+        {(cashier.role === "owner" || cashier.role === "cashier") && (
+          <span className={`role-badge role-${cashier.role}`} data-testid="role-badge" data-role={cashier.role}>
+            {t(`ops.role.${cashier.role}`)}
+          </span>
+        )}
         <button
           className="btn ghost"
-          onClick={() => setLanguage(lang === "ar" ? "en" : "ar")}
+          onClick={() => shellFree() && setLanguage(lang === "ar" ? "en" : "ar")}
           data-testid="lang-toggle"
           lang={lang === "ar" ? "en" : "ar"}
         >
           {t("lang.toggle")}
         </button>
-        <button className="btn ghost" onClick={logout} data-testid="logout">
+        <button className="btn ghost" onClick={() => shellFree() && logout()} data-testid="logout">
           {t("action.logout")}
         </button>
       </header>
+      {demoCatalog && (
+        <p className="demo-banner" role="alert" data-testid="demo-banner">
+          {t("sell.demoBanner")}
+        </p>
+      )}
+      {showcaseProfile && (
+        <p className="demo-banner showcase-banner" role="status" data-testid="showcase-banner">
+          {t("app.showcaseBanner")}
+        </p>
+      )}
       <main className="content">
-        {tab === "sell" && <SellScreen key={catalogVersion} />}
-        {tab === "today" && <TodayScreen />}
-        {tab === "history" && <HistoryScreen />}
+        {tab === "sell" && (
+          <SellScreen
+            key={catalogVersion}
+            focusRequest={sellFocusRequest}
+            role={cashier?.role}
+            draft={draftFor(sellDraft, cashier.id)}
+            onDraftChange={(d) => setSellDraft({ operatorId: cashier.id, ...d })}
+          />
+        )}
+        {tab === "today" && <TodayScreen role={cashier?.role} />}
+        {tab === "history" && <HistoryScreen role={cashier?.role} />}
         {tab === "products" && <ProductsScreen operator={cashier} />}
         {tab === "customers" && <CustomersScreen operator={cashier} />}
         {tab === "invoices" && <InvoicesScreen />}

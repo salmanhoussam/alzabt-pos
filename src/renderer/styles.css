@@ -83,6 +83,8 @@ input { user-select: text; }
 h1, h2 { margin: 0 0 12px; }
 .muted { color: var(--muted); }
 .error { color: var(--danger); font-weight: 600; }
+/* QW-COLLECT-TITLE: the "money received" box a confirm attempt found unticked. Highlighted, never ticked. */
+.collect-confirm-funds.missing { outline: 2px solid var(--danger); outline-offset: 4px; border-radius: 6px; }
 .center { display: grid; place-items: center; min-height: 100%; padding: 24px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; }
 
@@ -192,6 +194,8 @@ h1, h2 { margin: 0 0 12px; }
 }
 .product-name { font-weight: 600; }
 .product-sku { font-size: 13px; }
+/* TILL-NAMES: the other stored name, smaller; wraps rather than clipping (RTL and LTR). */
+.product-name-alt { font-size: 13px; overflow-wrap: anywhere; }
 .product-price { margin-top: auto; font-size: 18px; font-variant-numeric: tabular-nums; }
 .cart { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; }
 .lines { list-style: none; padding: 0; margin: 0; flex: 1; overflow: auto; }
@@ -542,7 +546,17 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 
 /* SELL — the search shortcut is a key, not placeholder prose. */
 .search-wrap { position: relative; display: flex; }
-.search-wrap .search { flex: 1; padding-inline-end: 46px; }
+/* The `/` keycap sits at the PAGE's inline end (inset-inline-end on the wrapper), but a search field
+   with dir="auto" takes its own direction from its text: a barcode in the Arabic UI is LTR, and its
+   inline end is the other side. So the room for the keycap is reserved on the keycap's PHYSICAL
+   side, read from the page direction — never from the field's. */
+.search-wrap .search { flex: 1; }
+:root[dir="ltr"] .search-wrap .search { padding-right: 46px; }
+:root[dir="rtl"] .search-wrap .search { padding-left: 46px; }
+/* SB-RISK-01 option A: a typed quantity that is NOT saved yet must not look like a saved one. */
+.qty-input.qty-pending { background: var(--status-warning); border-color: var(--status-warning-text); border-style: dashed; }
+.line-qty-pending { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
+.line-qty-hint { margin: 0; flex-basis: 100%; font-size: 13px; color: var(--status-warning-text); }
 .search-kbd {
   position: absolute; inset-inline-end: 10px; top: 50%; transform: translateY(-50%);
   background: var(--surface-sunken); border: 1px solid var(--border); border-bottom-width: 2px;
@@ -886,5 +900,239 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
   display: flex; flex-direction: column; gap: 6px; }
 .collect-form h4 { margin: 0 0 2px; font-size: 14px; }
 .collect-form label { display: flex; flex-direction: column; gap: 4px; }
+/* DEMO-FALLBACK: the permanent demo warning and the merchant empty state. */
+.demo-banner { margin: 8px 16px 0; padding: 8px 12px; border: 2px solid var(--danger); border-radius: var(--radius);
+  color: var(--danger); font-weight: 600; }
+.empty-catalog { margin: 8px 0; padding: 16px; }
+.empty-catalog h3 { margin: 0 0 6px; }
+/* QW-COLLECT-LAYOUT: the "money received" box sits on the SAME row as its sentence (RTL and LTR), at the
+   start of the text; the hint stays under the sentence. Overrides the column layout above for this label only. */
+.collect-form label.collect-confirm-funds { flex-direction: row; align-items: flex-start; gap: 8px; }
+.collect-form label.collect-confirm-funds > input { flex: none; margin: 3px 0 0; }
+.collect-confirm-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 /* Digits read left-to-right in both languages, and tabular figures keep columns from jittering. */
 .collect-amount { direction: ltr; text-align: start; padding: 6px 8px; font-variant-numeric: tabular-nums; }
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   TILL-CARDS (LAB, owner review, DEC-35h §4) — category chips and photo-first cards.
+   CSS + one toolbar only: the card is still ONE button that adds to the cart, the photo is still its
+   viewer-only SIBLING (now on top instead of in the corner), every data-testid is unchanged.
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
+/* The strip: no scrollbar; an edge that hides chips fades and shows a small arrow (only then). */
+.category-strip { position: relative; flex-shrink: 0; min-inline-size: 0; }
+.category-chips { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; flex-shrink: 0; }
+.category-chips::-webkit-scrollbar { display: none; }
+.category-strip.more-end .category-chips { mask-image: linear-gradient(to var(--chip-end, left), #000 calc(100% - 64px), transparent); }
+.category-strip.more-start .category-chips { mask-image: linear-gradient(to var(--chip-start, right), #000 calc(100% - 64px), transparent); }
+.category-strip.more-start.more-end .category-chips {
+  mask-image: linear-gradient(to left, transparent, #000 64px, #000 calc(100% - 64px), transparent);
+}
+[dir="ltr"] .category-strip { --chip-end: right; --chip-start: left; }
+.chip-arrow {
+  position: absolute; inset-block: 0; z-index: 1; inline-size: 34px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface); font-size: 22px; line-height: 1; cursor: pointer; color: inherit;
+}
+.chip-arrow-start { inset-inline-start: 0; }
+.chip-arrow-end { inset-inline-end: 0; }
+[dir="rtl"] .chip-arrow { transform: scaleX(-1); }
+.chip {
+  flex-shrink: 0; min-block-size: 40px; padding: 0 16px; border-radius: 999px; font-size: 15px;
+  border: 1px solid var(--border); background: var(--surface); color: inherit; cursor: pointer; white-space: nowrap;
+}
+.chip.on { background: var(--primary); border-color: var(--primary); color: var(--primary-text); font-weight: 600; }
+
+.products-cards { grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); }
+.products-cards .product-cell > .product { padding: 0 12px 12px; padding-inline-end: 12px; min-height: 230px; overflow: hidden; }
+/* The photo inside the card, full-bleed across its top. */
+.products-cards .product-photo {
+  display: block; margin: 0 -12px 8px; inline-size: calc(100% + 24px); block-size: 128px;
+  object-fit: cover; object-position: center; background: var(--surface-sunken);
+}
+.products-cards .product-photo-empty { border-block-end: 1px dashed var(--border); }
+/* The viewer: a small corner button over the photo — opens the larger copy, never adds to the cart. */
+/* The viewer: a clear magnifier button in the photo's corner — opens the larger copy, never adds. */
+.products-cards .product-thumb {
+  inset-block-start: 8px; inset-inline-end: 8px; inline-size: 36px; block-size: 36px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text, #1f2430);
+  display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+.products-cards .product-thumb > img { position: absolute; inset: 0; opacity: 0; pointer-events: none; }
+.products-cards .product-thumb:hover, .products-cards .product-thumb:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.product-thumb .zoom-icon { display: none; }
+.products-cards .product-thumb .zoom-icon { display: block; inline-size: 20px; block-size: 20px; }
+/* "No photo": still the visible, labelled marker (role=img), now filling the empty frame — and
+   pointer-events: none, so a tap on it reaches the card underneath and adds to the cart. */
+.products-cards .product-thumb-empty {
+  inset-block-start: 1px; inset-inline: 1px; inline-size: auto; block-size: 127px; border-radius: var(--radius) var(--radius) 0 0;
+  border: 0; background: transparent; pointer-events: none; opacity: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.products-cards .product-thumb-empty::after { content: attr(data-initial); font-size: 44px; font-weight: 700; color: var(--muted); opacity: 0.55; }
+.products-cards .product-name { font-size: 16px; line-height: 1.3; overflow-wrap: anywhere; }
+.products-cards .product-price { font-size: 20px; font-weight: 700; }
+
+/* The pane may shrink below the chip row's natural width, so the chips scroll INSIDE it instead of
+   pushing the cart off a 1024-wide screen (measured: the first lab run did exactly that). */
+.sell > .products-pane { min-inline-size: 0; }
+/* TILL-CARDS · COMPACT BELOW 1280 px WIDE OR 950 px TALL (height is what limits a till grid). Measured on the first lab version: at 1024×768 only 2
+   products were fully visible without scrolling (the current till shows 9). A smaller photo and a
+   shorter card keep the photo-first look while giving the cashier back most of the grid. */
+@media (max-width: 1279px), (max-height: 949px) {
+  .products-cards { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  .products-cards .product-cell > .product { min-height: 0; padding: 0 10px 10px; }
+  .products-cards .product-photo { margin: 0 -10px 6px; inline-size: calc(100% + 20px); block-size: 84px; }
+  .products-cards .product-thumb-empty { block-size: 83px; }
+  .products-cards .product-name { font-size: 14px; }
+  .products-cards .product-name-alt, .products-cards .product-sku { font-size: 12px; }
+  .products-cards .product-price { font-size: 17px; }
+}
+
+/* ── Customer advances (migration 20) ── */
+.receipt.adv-receipt { width: auto; max-width: 560px; }
+.adv-receipt-fields { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 12px 0; }
+.adv-receipt-fields dt { color: var(--muted, #666); }
+.adv-receipt-fields dd { margin: 0; font-weight: 600; }
+.adv-statement .statement-table { width: 100%; border-collapse: collapse; }
+.adv-statement .statement-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.adv-pending { margin: 12px 16px; border: 2px solid var(--warn, #b26b00); }
+.adv-pending li { padding: 6px 0; }
+.adv-pending li .btn { margin-inline-start: 8px; }
+
+/* G2 correction sheet: choices inline, controls their natural size (the global input rule stretches them). */
+.adv-correct fieldset { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; border: 1px solid var(--border); padding: 10px; }
+.adv-correct fieldset label { display: inline-flex; align-items: center; gap: 6px; }
+.adv-correct input[type="radio"], .adv-correct input[type="checkbox"] { width: auto; height: auto; margin: 0; }
+/* DEC-35zz++ REF Option A: the «new refund» confirmation is a normal checkbox beside its sentence, not a 48px field. */
+.ref-today label.collect-confirm-funds { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; }
+.ref-today label.collect-confirm-funds > input[type="checkbox"] { flex: none; width: auto; height: auto; min-height: 0; margin: 3px 0 0; padding: 0; }
+.adv-correct select { width: 100%; }
+
+/* DAILY MONEY IN / OUT (DEC-35x) — owner only, under Today's Sales. One scroll at most: the table's own. */
+.dm-panel { margin-top: 16px; width: 100%; max-width: 780px; display: flex; flex-direction: column; gap: 10px; }
+.dm-head { display: flex; align-items: center; gap: 12px; }
+.dm-head h2 { margin: 0; font-size: 1.1rem; flex: 1; }
+.dm-scroll { overflow-x: auto; }
+.dm-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.dm-table th, .dm-table td { padding: 6px 10px; border-bottom: 1px solid var(--line, #e3e3e3); text-align: end; white-space: nowrap; }
+.dm-table th[scope="row"] { text-align: start; font-weight: 500; }
+.dm-table .dm-sum th, .dm-table .dm-sum td { font-weight: 700; }
+.dm-table .dm-net th, .dm-table .dm-net td { font-weight: 800; border-top: 2px solid currentColor; }
+.dm-table .dm-correction td { font-style: italic; }
+.dm-table thead th:first-child { text-align: start; }
+/* DEC-35x: applications listed under their advance. */
+.adv-stmt-applied { display: block; }
+/* DEC-35x: the advance part of an on-account sale, on its own full line under the amount due. */
+.receipt-advance { display: grid; grid-template-columns: 1fr auto; gap: 4px var(--space-3); margin: 8px 0 0; padding: 0 var(--space-3); }
+.receipt-advance dt { margin: 0; }
+.receipt-advance dd { margin: 0; text-align: end; font-variant-numeric: tabular-nums; }
+
+/* DEC-35zz++ #7: the live role beside the signed-in name (display only). */
+.role-badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border, #ccc); }
+.role-badge.role-owner { background: #fff4d6; border-color: #e0b84a; color: #6b4e00; }
+.role-badge.role-cashier { background: #eef3ff; border-color: #9fb5e6; color: #23407a; }
+
+/* ── OCR-REVIEW-UX (2026-11-12): Photo Invoice window — desktop width, ONE scroller per step ───────────────────
+   The flow used to be a .panel (520px cap, overflow) holding a second .panel plus a photo pane that scrolled on
+   its own: three scroll containers and squeezed rows. Now: a fixed-height window; the row list is the only
+   scroller in the review; the photo pane scrolls only when zoomed in. */
+.overlay > .panel.photo-flow { width: min(1680px, calc(100vw - 32px)); max-width: calc(100vw - 32px); height: calc(100vh - 32px); max-height: calc(100vh - 32px);
+  padding: 0; gap: 0; overflow: hidden; display: flex; flex-direction: column; }
+.photo-flow-step { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; min-height: 0; flex: 1; }
+.photo-flow-body { flex: 1; min-height: 0; flex-direction: column; }
+.photo-flow-starts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.photo-flow-start { text-align: start; display: flex; flex-direction: column; gap: 6px; padding: 16px; min-height: 96px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); cursor: pointer; font: inherit; }
+.photo-flow-start.primary { border-color: var(--primary); border-width: 2px; }
+.photo-flow-start:hover:not(:disabled) { background: var(--surface-sunken); }
+.photo-flow-start:disabled { opacity: 0.6; cursor: default; }
+.photo-flow-start:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
+.error.bilingual { font-weight: 600; background: var(--status-danger); border-radius: var(--radius); padding: 10px 14px; }
+.error.bilingual p { margin: 0; }
+.error.bilingual p + p { margin-top: 4px; font-weight: 500; }
+.pir-none { margin: 12px 24px 0; }
+
+.photo-review { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(320px, 40%) 1fr; }
+.photo-review.no-photo { grid-template-columns: 1fr; }
+.pir-photo { display: flex; flex-direction: column; min-height: 0; border-inline-end: 1px solid var(--border); background: var(--surface-sunken); }
+.pir-photo-tools { display: flex; gap: 6px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.pir-photo-tools > span { margin-inline-end: auto; }
+.pir-photo-view { flex: 1; min-height: 0; overflow: auto; }
+.pir-photo-view img { display: block; max-width: none; }
+.pir-photo-view.fit { overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.pir-photo-view.fit img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.pir-main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.pir-head { padding: 14px 20px 10px; border-bottom: 1px solid var(--border); }
+.pir-head h2 { margin: 0 0 4px; }
+.pir-head p { margin: 0 0 8px; }
+.pir-counts { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: var(--text-small); }
+.pir-count-warn b { color: var(--status-warning-text); }
+.pir-count-bad b { color: var(--danger); }
+.pir-rows { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 20px; display: flex; flex-direction: column; gap: 12px; }
+.pir-row { border: 1px solid var(--border); border-inline-start: 5px solid var(--border); border-radius: var(--radius);
+  padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; background: var(--surface); }
+.pir-row.d-pending { border-inline-start-color: var(--status-warning-text); }
+.pir-row.d-new, .pir-row.d-link { border-inline-start-color: var(--status-success-text); }
+.pir-row.d-skip { opacity: 0.7; }
+.pir-row.has-block:not(.d-pending) { border-inline-start-color: var(--danger); }
+.pir-row-top { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.pir-no { font-weight: 700; min-width: 2ch; }
+.pir-tag { font-size: var(--text-small); background: var(--surface-sunken); border-radius: 6px; padding: 1px 8px; }
+.pir-raw { overflow-wrap: anywhere; }
+.pir-crop { width: 100%; max-height: 110px; object-fit: contain; object-position: center; display: block;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface-sunken); }
+/* minimums sum to 160 + 3×72 + 3×10 = 406px: fits the row column of a 1024-wide window (measured: the old 240/96
+   minimums needed 558px and clipped «المجموع» at 1024×768) */
+.pir-fields { display: grid; grid-template-columns: minmax(160px, 3fr) repeat(3, minmax(72px, 1fr)); gap: 10px; align-items: end; }
+.pir-fields label { display: flex; flex-direction: column; gap: 3px; font-size: var(--text-small); min-width: 0; }
+.pir-fields input, .pir-sale input { width: 100%; min-height: var(--control-h-small); font-size: var(--text-body); }
+/* own class: the app-wide .num (end-aligned, !important) belongs to receipts/history, not to these inputs */
+.pir-num { font-variant-numeric: tabular-nums; }
+.pir-decide { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.pir-decide select { min-height: var(--control-h-small); max-width: 320px; }
+.pir-sale { display: flex; flex-direction: column; gap: 3px; font-size: var(--text-small); min-width: 0; width: 140px; }
+.pir-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pir-note { border-radius: 6px; padding: 4px 10px; }
+.pir-note.warn { background: var(--status-warning); color: var(--status-warning-text); }
+.pir-note.bad { background: var(--status-danger); color: var(--status-danger-text); font-weight: 600; }
+.pir-note.ok { background: var(--status-success); color: var(--status-success-text); }
+.pir-unexplained { border: 1px dashed var(--border); border-radius: var(--radius); padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.pir-unexplained-line { display: flex; flex-direction: column; gap: 4px; }
+.pir-foot { display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--border); background: var(--surface); }
+.pir-spacer { flex: 1; }
+.pf-table { width: 100%; border-collapse: collapse; }
+.pf-table caption { text-align: start; font-weight: 700; padding: 6px 0; }
+.pf-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: start; }
+.pf-table th { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: start; background: var(--thead); font-size: var(--text-small); }
+.pf-table td.pf-num { width: 22%; font-variant-numeric: tabular-nums; } /* the cell follows the header (start side); only the digits run left-to-right (bdi) */
+@media (max-width: 1150px) {
+  .photo-review { grid-template-columns: minmax(260px, 34%) 1fr; }
+}
+@media (max-width: 900px) {
+  .photo-review { grid-template-columns: 1fr; grid-template-rows: 38% 1fr; }
+  .pir-photo { border-inline-end: 0; border-bottom: 1px solid var(--border); }
+  .pir-fields { grid-template-columns: 1fr 1fr; }
+}
+
+/* DEC-35z9: decision buttons + the link search (replaces the dropdown) */
+.pir-choice { min-width: 96px; }
+.pir-choice.is-open { border: 2px dashed var(--primary); } /* search open, nothing linked yet */
+.pir-choice[aria-pressed="true"] { box-shadow: inset 0 0 0 2px var(--primary-text); font-weight: 700; }
+.pir-link { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--primary); border-radius: var(--radius); padding: 8px 10px; background: var(--surface-sunken); }
+.pir-link-search { min-height: var(--control-h-small); font-size: var(--text-body); width: 100%; }
+.pir-link-results { display: flex; flex-wrap: wrap; gap: 6px; max-height: 132px; overflow-y: auto; }
+.pir-link-option.is-on { border-color: var(--primary); font-weight: 700; }
+
+/* DEC-35z16 (PILOT): the phone-invoice review queue */
+.phone-invoice-queue { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 64px); overflow-y: auto; }
+.piq-list { list-style: none; padding: 0; margin: 8px 0; display: flex; flex-direction: column; gap: 8px; }
+.piq-item { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+.piq-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; background: var(--surface-sunken); flex: none; }
+.piq-text { flex: 1 1 200px; min-width: 0; }
+.piq-flag { color: var(--warning, #a15c00); }
+.piq-confirm { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* PHONE-INVOICE-ORIENTATION-01: rotate / re-read controls above the invoice review */
+.photo-rotate-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 12px; }
+.photo-reread-ask { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.trial-label { position: sticky; top: 0; z-index: 2147483647; background: #922; color: white; text-align: center; font-weight: bold; padding: 6px; }

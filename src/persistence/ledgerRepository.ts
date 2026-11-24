@@ -15,6 +15,7 @@
  * in a future slice, never a rewrite of a posted one.
  */
 import type { Db } from "./db";
+import { M19_REF_KEY } from "./migrations";
 import type {
   ObligationDirection,
   ObligationRecord,
@@ -219,6 +220,20 @@ export class LedgerRepository {
     );
   }
 
+  /**
+   * HIST-CURRENT-BALANCE (ACC-3): the debts posted by any of these sales, in ONE query on the
+   * `UNIQUE (source_kind, source_ref)` index — a history page never costs one lookup per row. A sale
+   * that posted no debt is simply absent. Read-only.
+   */
+  findSaleObligations(saleIds: ReadonlyArray<string>): ObligationRecord[] {
+    if (saleIds.length === 0) return [];
+    const marks = saleIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT ${O_COLS} FROM obligations WHERE source_kind = 'sale' AND source_ref IN (${marks}) ORDER BY posted_at, id`)
+      .all(...saleIds) as ObligationRow[];
+    return rows.map((r) => obligation(r) as ObligationRecord);
+  }
+
   /** Every obligation of one party, scoped by direction IN THE QUERY so the two can never mix. */
   listObligations(partyId: string, direction: ObligationDirection): ObligationRecord[] {
     const rows = this.db
@@ -278,6 +293,18 @@ export class LedgerRepository {
   }
 
   /** Migration 17. The settlement already carrying this provider transaction reference, if any. */
+  /**
+   * P2: is this provider reference already in migration 19's registry — a collection, a receipt, a sale's
+   * Whish payment or an advance, live or legacy — compared by the SAME key the triggers compute
+   * (D-REF-1 = B: digits, case, spaces and separators normalised). The unique index stays the backstop;
+   * this read only lets the owner see the right sentence instead of the database's.
+   */
+  isReferenceRegistered(provider: string, reference: string): boolean {
+    return Boolean(
+      this.db.prepare(`SELECT 1 FROM external_references WHERE provider = ? AND ref_key = ${M19_REF_KEY("?")} LIMIT 1`).get(provider, reference),
+    );
+  }
+
   findSettlementByProviderReference(provider: string, reference: string): SettlementRecord | null {
     const row = this.db
       .prepare(`SELECT ${S_COLS} FROM settlements WHERE provider = ? AND reference = ?`)
@@ -309,8 +336,12 @@ export class LedgerRepository {
         `SELECT currency, method, provider, count(*) AS n, sum(amount_minor) AS total FROM (
            SELECT currency, 'external' AS method, provider, amount_minor FROM receipts WHERE business_date = ?
            UNION ALL
-           SELECT currency, method, provider, amount_minor FROM settlements
+           SELECT currency, method, provider, amount_minor FROM settlements AS st
             WHERE business_date = ? AND receipt_id IS NULL
+              -- DEC-35x: a settlement paid FROM an advance is not money collected (it arrived as the ADV-).
+              AND NOT EXISTS (SELECT 1 FROM advance_applications AS aa WHERE aa.settlement_id = st.id)
+              -- and a supplier payment is money OUT, never a collection.
+              AND EXISTS (SELECT 1 FROM obligations AS o WHERE o.id = st.obligation_id AND o.direction = 'receivable')
          )
           GROUP BY currency, method, provider ORDER BY currency, method, provider`,
       )
@@ -360,5 +391,66 @@ export class LedgerRepository {
       .prepare(`SELECT coalesce(sum(amount_minor), 0) AS paid FROM settlements WHERE obligation_id = ?`)
       .get(obligationId) as { paid: bigint | number };
     return minor(row.paid);
+  }
+
+  // ── DEC-35z+ COL: one numbered document per real money arrival (migration 19 collection_documents) ──
+
+  /** Issues the next COL number. MUST run inside the transaction that writes the money (the trigger checks it). */
+  issueCollectionNumber(): number {
+    this.db.prepare(`UPDATE document_numbers SET last_no = last_no + 1 WHERE kind = 'collection'`).run();
+    const row = this.db.prepare(`SELECT last_no FROM document_numbers WHERE kind = 'collection'`).get() as { last_no: bigint | number };
+    return Number(row.last_no);
+  }
+
+  /** Exactly one of settlementId / receiptId (CHECK). */
+  insertCollectionDocument(d: { docNo: number; settlementId: string | null; receiptId: string | null }): void {
+    this.db.prepare(`INSERT INTO collection_documents (doc_no, settlement_id, receipt_id) VALUES (?, ?, ?)`).run(d.docNo, d.settlementId, d.receiptId);
+  }
+
+  findCollectionDocument(docNo: number): { docNo: number; settlementId: string | null; receiptId: string | null } | null {
+    const row = this.db.prepare(`SELECT doc_no, settlement_id, receipt_id FROM collection_documents WHERE doc_no = ?`).get(docNo) as
+      | { doc_no: bigint | number; settlement_id: string | null; receipt_id: string | null }
+      | undefined;
+    return row ? { docNo: Number(row.doc_no), settlementId: row.settlement_id, receiptId: row.receipt_id } : null;
+  }
+
+  collectionNoOfSettlement(settlementId: string): number | null {
+    const row = this.db.prepare(`SELECT doc_no FROM collection_documents WHERE settlement_id = ?`).get(settlementId) as { doc_no: bigint | number } | undefined;
+    return row ? Number(row.doc_no) : null;
+  }
+
+  collectionNoOfReceipt(receiptId: string): number | null {
+    const row = this.db.prepare(`SELECT doc_no FROM collection_documents WHERE receipt_id = ?`).get(receiptId) as { doc_no: bigint | number } | undefined;
+    return row ? Number(row.doc_no) : null;
+  }
+
+  /**
+   * For a statement: the COL number behind each settlement — its own (a direct collection) or its
+   * receipt's (a share of one transfer). Absent = no document (history before COL, an advance
+   * application, a supplier payment).
+   */
+  collectionNumbersOfSettlements(settlementIds: ReadonlyArray<string>): Map<string, number> {
+    const out = new Map<string, number>();
+    const stmt = this.db.prepare(
+      `SELECT coalesce((SELECT doc_no FROM collection_documents WHERE settlement_id = s.id),
+                       (SELECT doc_no FROM collection_documents WHERE receipt_id = s.receipt_id AND s.receipt_id IS NOT NULL)) AS n
+         FROM settlements AS s WHERE s.id = ?`,
+    );
+    for (const id of settlementIds) {
+      const row = stmt.get(id) as { n: bigint | number | null } | undefined;
+      if (row && row.n !== null) out.set(id, Number(row.n));
+    }
+    return out;
+  }
+
+  /** A display name for an operator id, or null when the row is gone. */
+  operatorName(operatorId: string): string | null {
+    const row = this.db.prepare("SELECT name FROM operators WHERE id = ?").get(operatorId) as { name: string } | undefined;
+    return row?.name ?? null;
+  }
+
+  findSettlementById(id: string): SettlementRecord | null {
+    const row = this.db.prepare(`SELECT ${S_COLS} FROM settlements WHERE id = ?`).get(id) as SettlementRow | undefined;
+    return row ? (settlement(row) as SettlementRecord) : null;
   }
 }

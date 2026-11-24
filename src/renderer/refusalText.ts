@@ -64,7 +64,7 @@ export const FORBIDDEN_CODES: readonly string[] = Object.freeze([
 ]);
 
 /**
- * 18 codes. Each line's English original is quoted so a reviewer can check the Arabic against what
+ * 19 codes (18 before P3 added PAYMENT_METHOD_NOT_ACCEPTED). Each line's English original is quoted so a reviewer can check the Arabic against what
  * it replaces without opening three other files.
  */
 const AR: Readonly<Record<string, string>> = Object.freeze({
@@ -105,6 +105,8 @@ const AR: Readonly<Record<string, string>> = Object.freeze({
   SETUP_NOT_REQUIRED: "هذا الحساب مُهيَّأ أصلاً.",
   // "Save the shop's own details first" / "… before issuing an invoice" — one action either way.
   COMPANY_PROFILE_REQUIRED: "احفظ بيانات المتجر أوّلاً.",
+  // "This shop records new payments in cash or Whish Money only" — P3 / DEC-35, one site per path, one meaning.
+  PAYMENT_METHOD_NOT_ACCEPTED: "هذا المحل يسجّل الدفعات الجديدة نقداً أو بويش موني فقط.",
 });
 
 /** Every code this map answers for. Exported so a test can enumerate it rather than restate it. */
@@ -166,6 +168,33 @@ export function customerPaymentOverpaymentRefusal(
   if (lang === "en") return `That is more than is owed; ${amount} remains`;
   if (lang === "ar") {
     return `المبلغ المدخل أكبر من المتبقي على هذا الدَّين. المتبقي: \u2068${amount}\u2069.`;
+  }
+  return null;
+}
+
+/**
+ * I18N-LOGIN-PIN (DEC-33 #3): the Arabic for a PIN refusal, composed from the NUMBERS the main process
+ * sends as context — never parsed out of the English sentence. English returns null, so the English a
+ * merchant reads stays byte-identical to what the main process sent. A context that is not exactly
+ * one of the three known shapes returns null (the English message is shown, as before).
+ */
+export function loginRefusal(lang: Language, code: string, context: unknown): string | null {
+  if (lang !== "ar") return null;
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return null;
+  const r = context as Record<string, unknown>;
+  const keys = Object.keys(r).sort().join(",");
+  const small = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 10_000;
+  const num = (n: number) => `\u2068${n}\u2069`;
+  if (code === "INVALID_CREDENTIALS" && r.reason === "LOGIN_PIN_WRONG" && keys === "attemptsLeft,lockMinutes,reason") {
+    if (!small(r.attemptsLeft) || !small(r.lockMinutes)) return null;
+    return `الرمز غير صحيح. المحاولات المتبقّية قبل إيقاف الدخول مؤقّتاً: ${num(r.attemptsLeft)}. مدّة الإيقاف بالدقائق: ${num(r.lockMinutes)}.`;
+  }
+  if (code === "INVALID_CREDENTIALS" && r.reason === "LOGIN_UNKNOWN_OPERATOR" && keys === "reason") {
+    return "الكاشير أو الرمز غير صحيح.";
+  }
+  if (code === "CASHIER_LOCKED" && r.reason === "LOGIN_PIN_LOCKED" && keys === "minutesRemaining,reason") {
+    if (!small(r.minutesRemaining)) return null;
+    return `أُوقف الدخول مؤقّتاً بعد عدّة محاولات خاطئة. حاول مجدّداً بعد عدد الدقائق: ${num(r.minutesRemaining)}.`;
   }
   return null;
 }

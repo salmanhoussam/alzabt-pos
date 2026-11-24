@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { SaleDto, SaleWithVoidDto } from "../../shared/ipcContract";
 import { call, errorText, fmt, pos } from "../api";
 import { Receipt } from "./Receipt";
+import { LedgerReceipt } from "./LedgerReceipt";
 import { useT } from "../i18n";
 import { stamp } from "../format";
+import { tendersText } from "../tenders";
 
 type T = (key: string) => string;
 
@@ -16,15 +18,62 @@ type T = (key: string) => string;
  */
 function paymentText(sale: SaleDto, t: T): string {
   if (sale.paymentStatus === "unpaid") return t("history.payUnpaid");
-  const method = sale.paymentMethod ? t(`method.${sale.paymentMethod}`) : t("history.payNoMethod");
+  // P2: a Whish Money sale names Whish and its reference; a historic `external` sale keeps its old words.
+  // SELL-SPLIT-CASH-WHISH: a sale paid by several tenders names every part, never "no method".
+  const method = sale.tenders && sale.tenders.length >= 2
+    ? tendersText(sale.tenders, t)
+    : sale.externalPayment?.provider === "whish"
+      ? `${t("method.whish")} · ${sale.externalPayment.reference}`
+      : sale.paymentMethod
+        ? t(`method.${sale.paymentMethod}`)
+        : t("history.payNoMethod");
   const head = sale.paymentStatus === "partial" ? t("history.payPartial") : t("history.payPaid");
   return `${head} — ${method}`;
+}
+
+/**
+ * Which "a void is not a refund" sentence fits THIS sale (text follows the operation): Whish, cash, or —
+ * SELL-SPLIT-CASH-WHISH — both, because a split sale's money arrived both ways.
+ */
+function notRefundKey(sale: SaleDto): string {
+  if (sale.tenders && sale.tenders.length >= 2) return "void.notRefundSplit";
+  return sale.paymentMethod === "external" ? "void.notRefund" : "void.notRefundCash";
 }
 
 /** 🔴 unpaid and partial are WARNING, not danger: an outstanding balance is a commercial state. */
 const paymentTone = (sale: SaleDto) => (sale.paymentStatus === "paid" ? "ok" : "warn");
 
-export function HistoryScreen() {
+/**
+ * HIST-CURRENT-BALANCE (ACC-3): the debt this sale posted, as the ledger holds it NOW.
+ *
+ * 🔴 SHOWN ONLY WHEN MAIN SENT IT. `currentDebt` is present on every row of the OWNER's history and
+ * absent from a cashier's — main decides; this screen hides nothing, it only renders what arrived.
+ * The sale's own status and "due at sale" stay exactly the snapshot of the moment of sale.
+ */
+function currentDebtCell(r: SaleWithVoidDto, t: T) {
+  const d = r.currentDebt;
+  if (d === null || d === undefined) {
+    return (
+      <span className="muted" data-state="none" aria-label={t("history.noDebt")} title={t("history.noDebt")}>
+        —
+      </span>
+    );
+  }
+  if (d.fullyPaid) {
+    return (
+      <span className="badge ok" data-state="settled">
+        {t("history.debtSettled")}
+      </span>
+    );
+  }
+  return (
+    <bdi dir="ltr" data-state="open">
+      {fmt(d.outstanding)}
+    </bdi>
+  );
+}
+
+export function HistoryScreen({ role }: { readonly role?: string }) {
   const { t } = useT();
   const [rows, setRows] = useState<SaleWithVoidDto[] | null>(null);
   const [open, setOpen] = useState<SaleWithVoidDto | null>(null);
@@ -107,7 +156,7 @@ export function HistoryScreen() {
   if (open) {
     return (
       <div>
-        <button className="btn ghost" onClick={() => setOpen(null)}>
+        <button className="btn ghost" onClick={() => setOpen(null)} data-testid="history-back">
           ← {t("history.back")}
         </button>
         {open.void && (
@@ -115,10 +164,19 @@ export function HistoryScreen() {
             {t("history.voidedBy")} {open.void.cashierName}: {open.void.reason}
           </p>
         )}
-        <Receipt sale={open.sale} />
+        {/* DEC-35a: a voided Whish sale never reads as "refunded" — the void is this ledger's record only. */}
+        {open.void && (
+          <p className="notice small" role="note" data-testid="voided-not-refund">
+            {t(notRefundKey(open.sale))}
+          </p>
+        )}
+        {/* TILL-PRINT + F4: read from the ledger by sale id (customer + ADV facts of the sale); reprint marked «نسخة». */}
+        <LedgerReceipt saleId={open.sale.id} copy />
       </div>
     );
   }
+
+  const ownerView = rows !== null && rows.some((r) => r.currentDebt !== undefined);
 
   return (
     <div className="history">
@@ -131,6 +189,11 @@ export function HistoryScreen() {
         )}
       </div>
       {error && <p className="error">{error}</p>}
+      {ownerView && (
+        <p className="muted small" data-testid="history-due-note">
+          {t("history.dueNote")}
+        </p>
+      )}
       {!rows && <p className="muted">{t("common.loading")}</p>}
       {rows && rows.length === 0 && <p className="muted center">{t("history.empty")}</p>}
       {rows && rows.length > 0 && (
@@ -142,7 +205,8 @@ export function HistoryScreen() {
               <th>{t("history.colCashier")}</th>
               <th>{t("history.colPayment")}</th>
               <th className="num">{t("history.colTotal")}</th>
-              <th className="num">{t("history.colBalance")}</th>
+              <th className="num">{ownerView ? t("history.colDueAtSale") : t("history.colBalance")}</th>
+              {ownerView && <th className="num">{t("history.colDueNow")}</th>}
               <th>{t("history.colStatus")}</th>
               <th />
             </tr>
@@ -153,6 +217,7 @@ export function HistoryScreen() {
                 key={r.sale.id}
                 className={r.void ? "voided" : ""}
                 data-testid="history-row"
+                data-sale={r.sale.id}
                 data-source={r.sale.sourceType}
                 data-payment-status={r.sale.paymentStatus}
                 data-payment-method={r.sale.paymentMethod ?? "none"}
@@ -176,6 +241,11 @@ export function HistoryScreen() {
                 <td className="num" data-testid="history-balance">
                   {r.sale.balanceDue.minor === "0" ? "—" : <bdi dir="ltr">{fmt(r.sale.balanceDue)}</bdi>}
                 </td>
+                {ownerView && (
+                  <td className="num" data-testid="history-current">
+                    {currentDebtCell(r, t)}
+                  </td>
+                )}
                 <td>
                   <span className={`badge ${r.void ? "bad" : "state"}`}>
                     {r.void ? t("history.statusVoided") : t("history.statusCompleted")}
@@ -183,13 +253,16 @@ export function HistoryScreen() {
                 </td>
                 <td>
                   <div className="actions">
-                    <button className="btn small" onClick={() => setOpen(r)}>
+                    <button className="btn small" onClick={() => setOpen(r)} data-testid="history-open">
                       {t("history.view")}
                     </button>
                     {/* 🔴 GHOST-DANGER IN A ROW. Filled danger belongs to the final confirmation
                         only; two filled red blocks used to be the strongest objects on a screen
                         whose whole job is looking things up. */}
-                    {!r.void && r.sale.sourceType === "pos" && (
+                    {/* 🔴 OWNER ONLY (DEC-35c). Voiding any sale — cash or Whish — is the owner's;
+                        the bridge and the service refuse anyone else. A cashier is not offered a
+                        button that can only fail. */}
+                    {!r.void && r.sale.sourceType === "pos" && role === "owner" && (
                       <button
                         className="btn danger ghost small"
                         data-testid="history-void"
@@ -228,6 +301,13 @@ export function HistoryScreen() {
               <bdi dir="ltr">{fmt(voiding.sale.total)}</bdi>
             </h2>
             <p className="muted small">{t("void.body")}</p>
+            {/* DEC-35a: voiding a Whish sale is the owner's, and it is NOT a refund. Said before the
+                confirm button, in the shop's language, so nobody takes the void for money returned. */}
+            {/* Owner 2026-11-08: the same is said for a cash sale, in its own words (a different moment:
+                no outside provider, the drawer). */}
+            <p className="notice small" role="note" data-testid="void-not-refund">
+              {t(notRefundKey(voiding.sale))}
+            </p>
             {/* Which receipt this is, so one can be told from another before it is destroyed. */}
             <p className="small">
               <bdi dir="ltr">{stamp(voiding.sale.completedAt)}</bdi> · {voiding.sale.cashierName} ·{" "}

@@ -1,9 +1,9 @@
 {
-  "name": "alzabt-pos",
-  "productName": "Alzabt POS",
+  "name": "alzabt-pos-trial",
+  "productName": "Alzabt POS TRIAL TEST ONLY",
   "version": "0.1.1",
   "private": true,
-  "description": "Alzabt POS — local, offline-first Windows point of sale.",
+  "description": "Alzabt POS isolated trial - TEST ONLY",
   "author": "Alzabt",
   "main": "dist/main/main/main.js",
   "scripts": {
@@ -13,7 +13,7 @@
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer && npm run build:info",
     "start": "npm run build && electron .",
-    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:win": "node scripts/trial-build-blocked.cjs",
     "e2e": "npm run build && node e2e/smoke.mjs",
     "e2e:products": "npm run build && node e2e/product-management.mjs",
     "verify": "npm run typecheck && npm test && npm run build",
@@ -21,7 +21,10 @@
     "pdf:samples": "tsx scripts/invoice-pdf-samples.ts invoice-pdf-samples"
   },
   "dependencies": {
+    "@tesseract.js-data/ara": "1.0.0",
+    "@tesseract.js-data/eng": "1.0.0",
     "better-sqlite3": "^13.0.3",
+    "tesseract.js": "5.1.1",
     "zxing-wasm": "3.1.5"
   },
   "devDependencies": {
@@ -41,8 +44,8 @@
     "vitest": "^5.0.3"
   },
   "build": {
-    "appId": "com.alzabt.pos",
-    "productName": "Alzabt POS",
+    "appId": "com.alzabt.pos.trial.testonly",
+    "productName": "Alzabt POS TRIAL TEST ONLY",
     "npmRebuild": false,
     "directories": {
       "output": "release"
@@ -58,12 +61,21 @@
       "target": "nsis"
     },
     "nsis": {
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "include": "build/installer.nsh",
-      "artifactName": "Alzabt-POS-Setup-${version}.${ext}"
+      "allowToChangeInstallationDirectory": false,
+      "include": "build/trial-installer.nsh",
+      "artifactName": "Alzabt-POS-TRIAL-TEST-ONLY-Setup-${version}.${ext}",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": false,
+      "guid": "d12ac5c3-1e6f-4ff5-a3e9-1fa742309a2e",
+      "allowElevation": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": false
     },
     "publish": null
+  },
+  "overrides": {
+    "wasm-feature-detect": "1.6.1"
   }
 }

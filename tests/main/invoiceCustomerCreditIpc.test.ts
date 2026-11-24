@@ -4,6 +4,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
+import { confirmationDigest } from "../../src/shared/invoiceConfirmation";
+import { toInvoiceViewDto } from "../../src/shared/dto";
 import { type Harness, type TempDir, makeHarness, tempDir } from "../helpers/harness";
 
 let t: TempDir;
@@ -67,6 +69,27 @@ describe("linking through the channel", () => {
 });
 
 describe("issue-on-account through the channel", () => {
+  it("M21 exposes an explicit-tax refusal through IPC before protected issuance", () => {
+    const { id } = prepared();
+    const token = confirmationDigest(toInvoiceViewDto(h.invoices.getInvoice(id)), false);
+    h.invoices.saveCompanyProfile({ nameAr: "Synthetic shop", taxEnabled: true, taxRatePercent: "10", taxLabel: "VAT" });
+    expect(errCode(ipc.finalizeInvoice({ invoiceId: id, confirmedDraft: token }))).toBe("INVOICE_TAX_CONFIRMATION_REQUIRED");
+    expect(Number((h.db.prepare("SELECT count(*) AS n FROM sales").get() as { n: bigint }).n)).toBe(0);
+  });
+  it("M21 carries confirmed identity and refuses different or stripped confirmation through IPC", () => {
+    const { c, id } = prepared();
+    ipc.updateInvoiceHeader({ invoiceId: id, patch: { customerPartyId: c.id } });
+    const token = confirmationDigest(toInvoiceViewDto(h.invoices.getInvoice(id)), true);
+    const req = { invoiceId: id, issueOnAccount: true, confirmedDraft: token };
+    ok(ipc.finalizeInvoice(req));
+    ok(ipc.finalizeInvoice(req));
+    expect(errCode(ipc.finalizeInvoice({ ...req, confirmedDraft: token + " " }))).toBe("IDEMPOTENCY_CONFLICT");
+    expect(errCode(ipc.finalizeInvoice({ invoiceId: id, issueOnAccount: true }))).toBe("INVOICE_CONFIRMATION_REQUIRED");
+    h.service.login("cashier-02", "2222");
+    expect(errCode(ipc.finalizeInvoice(req))).toBe("CREDIT_OWNER_ONLY");
+    expect(Number((h.db.prepare("SELECT count(*) AS n FROM sales").get() as { n: bigint }).n)).toBe(1);
+    expect(Number((h.db.prepare("SELECT count(*) AS n FROM obligations").get() as { n: bigint }).n)).toBe(1);
+  });
   it("must be a real boolean when present, and may be absent for the ordinary path", () => {
     const { c, id } = prepared();
     ipc.updateInvoiceHeader({ invoiceId: id, patch: { customerPartyId: c.id } });

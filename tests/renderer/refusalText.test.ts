@@ -117,7 +117,8 @@ describe("the Arabic refusal map", () => {
       expect(seen.has(text!), `${code} repeats another code's sentence`).toBe(false);
       seen.add(text!);
     }
-    expect(MAPPED_CODES.length).toBe(18);
+    // TRANSITION (P3, DEC-35): + PAYMENT_METHOD_NOT_ACCEPTED. Old value: 18.
+    expect(MAPPED_CODES.length).toBe(19);
   });
 
   it("the specific meaning is the one shown, not a generic refusal", () => {

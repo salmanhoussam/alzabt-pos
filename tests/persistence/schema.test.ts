@@ -94,7 +94,8 @@ describe("ledger constraints enforced by SQLite itself", () => {
     const { sale } = service.createSale({
       idempotencyKey: newKey(),
       lines: [{ productId: "prod-0002", quantityMilli: 2000 }],
-      paymentMethod: "card",
+      // TRANSITION (P3, DEC-35): new payments are cash or Whish only; old method here: "card".
+      paymentMethod: "cash",
       expectedTotalMinor: 750n,
     });
     service.voidSale(sale.id, "customer changed mind");

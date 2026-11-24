@@ -1,0 +1,41 @@
+﻿source_id,name_ar,name_en,price,currency,base_unit,price_needs_review
+CAFE-001,إسبريسو,Espresso,2.50,USD,piece,0
+CAFE-002,كافيه لاتيه,Caffè Latte,3.75,USD,piece,0
+CAFE-003,شاي بالنعناع,Mint Tea,1.99,USD,piece,0
+CAFE-004,مياه 500 مل,Water 500ml,0.75,USD,piece,0
+CAFE-005,كرواسان بالزبدة,Butter Croissant,2.25,USD,piece,0
+CAFE-006,منقوشة زعتر,Zaatar Manousheh,1.50,USD,piece,0
+CAFE-007,عصير برتقال طازج,Fresh Orange Juice,4.10,USD,piece,0
+CAFE-008,قطعة كيك شوكولا,Chocolate Cake Slice,3.33,USD,piece,0
+GRC-001,أرز طويل الحبة 1 كغ,Long Grain Rice 1 kg,2.40,USD,pack,0
+GRC-002,أرز طويل الحبة 5 كغ,Long Grain Rice 5 kg,10.50,USD,pack,0
+GRC-003,سكر أبيض 1 كغ,White Sugar 1 kg,1.30,USD,pack,0
+GRC-004,طحين متعدد الاستخدام 1 كغ,All-Purpose Flour 1 kg,1.10,USD,pack,0
+GRC-005,عدس أحمر 1 كغ,Red Lentils 1 kg,2.30,USD,pack,0
+GRC-006,معكرونة بيني 500 غ,Penne Pasta 500 g,0.95,USD,pack,0
+GRC-007,زيت نباتي 1 ل,Vegetable Oil 1 L,3.90,USD,piece,0
+GRC-008,زيت زيتون بكر 1 ل,Extra Virgin Olive Oil 1 L,8.75,USD,piece,0
+GRC-009,شاي أسود 100 كيس,Black Tea 100 bags,2.80,USD,box,0
+GRC-010,قهوة مطحونة بالهيل 250 غ,Ground Coffee with Cardamom 250 g,4.50,USD,pack,1
+GRC-011,ملح طعام 1 كغ,,0.60,USD,pack,0
+CAN-001,حمّص حب معلّب 400 غ,Canned Chickpeas 400 g,1.20,USD,piece,0
+CAN-002,معجون طماطم 400 غ,Tomato Paste 400 g,1.10,USD,piece,0
+CAN-003,تونة معلّبة 160 غ,Canned Tuna 160 g,1.85,USD,piece,0
+DRY-001,حليب كامل الدسم 1 ل,Whole Milk 1 L,1.20,USD,piece,0
+DRY-002,بيض طازج 12 حبة,Fresh Eggs 12 pcs,3.20,USD,box,0
+DRY-003,جبنة بيضاء 500 غ,White Cheese 500 g,3.50,USD,pack,0
+DRY-004,لبن زبادي 500 غ,Yogurt 500 g,1.45,USD,piece,0
+DRY-005,لبنة 400 غ,Labneh 400 g,2.75,USD,piece,0
+BKR-001,خبز عربي — ربطة,Pita Bread — pack,0.80,USD,pack,0
+PRD-001,طماطم,Tomatoes,1.40,USD,kg,0
+PRD-002,خيار,Cucumbers,0.90,USD,kg,0
+PRD-003,بطاطا,Potatoes,0.85,USD,kg,0
+PRD-004,بصل أحمر,Red Onions,0.70,USD,kg,0
+PRD-005,موز,Bananas,1.50,USD,kg,0
+PRD-006,تفاح أحمر,Red Apples,2.20,USD,kg,0
+PRD-007,برتقال,Oranges,1.80,USD,kg,0
+PRD-008,حامض,Lemons,1.60,USD,kg,0
+PRD-009,فريز,Strawberries,4.00,USD,kg,0
+PRD-010,بقدونس — ربطة,Parsley — bunch,0.40,USD,piece,0
+CLN-001,سائل جلي 750 مل,Dishwashing Liquid 750 ml,2.10,USD,piece,0
+CLN-002,إسفنج جلي 3 قطع,Kitchen Sponges 3 pcs,1.25,USD,pack,0

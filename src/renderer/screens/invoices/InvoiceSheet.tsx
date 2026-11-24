@@ -15,8 +15,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { matchesSearch } from "../../../domain/arabic";
 import type {
   AdminProductDto,
+  CustomerDto,
   InvoiceHeaderPatch,
   InvoiceHeaderPatchKey,
+  InvoiceLineDto,
   InvoiceLineRequest,
   InvoiceViewDto,
   ReconciliationDto,
@@ -26,9 +28,30 @@ import { ApiError, call, errorText, fmt, newIdempotencyKey, pos } from "../../ap
 import { CustomerFinder } from "../CustomerFinder";
 import { useT } from "../../i18n";
 import { DEFAULT_UNIT, UnitCell } from "../../components/UnitCell";
+import { formatDecimal, money, parseDecimal } from "../../../domain/money";
 import { DraftRowStore } from "./draftRowStore";
 import { isTypedTaxRateUnsaved } from "./taxRateDirty";
 import { classifyFlushFailure } from "./flushOutcome";
+import { accountPrefill } from "./accountPrefill";
+import { claimModal, focusedControl, openSheetModals, useModalFocus, type SheetModal } from "./sheetModal";
+import { appModalOwner, claimAppModal, releaseAppModal, useAppModalOwner } from "../../appModal";
+import { confirmationDigest } from "../../../shared/invoiceConfirmation";
+import {
+  createFailureLedger,
+  createSaveQueue,
+  lineInputMatchesStored,
+  paidWriteDecision,
+  type LineInputField,
+  type LineParsers,
+} from "./headerSaveQueue";
+import { cleanText, parseInvoiceQuantity } from "../../../domain/invoice";
+
+/** INV-PAY-METHOD: the issue step's own sentences for the refusals it can meet. */
+const PAY_ERROR_KEY: Readonly<Record<string, string>> = {
+  INVOICE_PAYMENT_METHOD_REQUIRED: "inv.pay.needed",
+  DUPLICATE_PAYMENT_REFERENCE: "pay.whishErr.duplicate",
+  FUNDS_NOT_CONFIRMED: "pay.whishErr.notConfirmed",
+};
 
 const EMPTY_LINE: InvoiceLineRequest = {
   description: null,
@@ -124,6 +147,10 @@ function percentText(basisPoints: number): string {
   return `${whole}.${String(frac).padStart(2, "0").replace(/0$/, "")}`;
 }
 
+// A renderer remount is not proof that an unanswered Main operation has settled.
+// Keep the per-invoice lock for this renderer session; a confirmed final read resolves it.
+const unknownIssueOutcomes = new Set<string>();
+
 export function InvoiceSheet({
   invoiceId,
   onReviewNow,
@@ -180,6 +207,13 @@ export function InvoiceSheet({
   const [pickerFor, setPickerFor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // An issue refusal belongs to the issue attempt, not to a later unrelated field save.
+  // It is cleared only when a newly prepared confirmation is actually opened.
+  const [issueRefusal, setIssueRefusal] = useState<string | null>(() =>
+    unknownIssueOutcomes.has(invoiceId) ? t("inv.sheet.issueOutcomeUnknown") : null,
+  );
+  const [issueOutcomeUncertain, setIssueOutcomeUncertain] = useState(() => unknownIssueOutcomes.has(invoiceId));
+  const preparingIssue = useRef(false);
   /** This document printed without its own archived logo. A warning, never an error — see below. */
   const [logoWarning, setLogoWarning] = useState(false);
   /**
@@ -188,6 +222,17 @@ export function InvoiceSheet({
    */
   const [logoUnverified, setLogoUnverified] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  /**
+   * R3 (Abu Abbas, R2 review — confirmation race): the exact figures the confirmation SHOWED, captured when it opened.
+   *
+   * 🔴 WHY. With the confirmation open, keyboard Tab reached the paid field underneath it; a cashier could confirm
+   * «paid 5.00» while a queued save changed it to 3.00, and the issue went out on 3.00. The background is now inert
+   * while the confirmation is open, AND the issue is bound to these figures: after the final flushes the freshly stored
+   * figures must be identical, or nothing is issued and the operator is asked to confirm again.
+   */
+  const confirmedFigures = useRef<string | null>(null);
+  /** R3: true while the finalize request is in flight — the paid amount is then shown as text, not as an input. */
+  const [issuing, setIssuing] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [exiting, setExiting] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -195,17 +240,107 @@ export function InvoiceSheet({
   /** Migration 16. The linked account's name for DISPLAY only — the link itself is the id on the invoice. */
   const [linkedName, setLinkedName] = useState<string | null>(null);
   const [findingCustomer, setFindingCustomer] = useState(false);
+  /**
+   * R4 (Abu Abbas, R3-1 — the confirmation behind the product picker): ONE modal at a time, the background inert
+   * while any is open, focus kept inside it. `modalsRef` is written by every opener BEFORE React re-renders, so two
+   * openers in one tick cannot both win; each render re-syncs it from state. See sheetModal.ts.
+   */
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const openModals = openSheetModals({
+    finalized: finalized !== null,
+    exit: exiting,
+    discard: discarding,
+    confirm: confirming,
+    customer: findingCustomer,
+    picker: pickerFor !== null,
+  });
+  const modalsRef = useRef<{ value: readonly SheetModal[] }>({ value: [] });
+  modalsRef.current.value = openModals;
+  const modalOpen = openModals.length > 0;
+  /** The control a modal hands focus back to — recorded by the opener, before the background turns inert. */
+  const modalOpener = useRef<HTMLElement | null>(null);
+  /**
+   * R5 (Abu Abbas F2 + R5 contract invariants 1–2): the issue in flight is an OWNER too. From the confirmed «إصدار»
+   * until the answer, no dialog opens and the app shell is inert — the operation stays isolated until it completes or
+   * is refused. `operatingRef` is read synchronously by every gate; `operating` re-renders the shell.
+   */
+  const operatingRef = useRef(false);
+  const [operating, setOperating] = useState(false);
+  /** The app-level owner id this sheet claims while any of its dialogs, or its issue, owns interaction. */
+  const appOwnerId = `invoice:${invoiceId}`;
+  const activeAppOwner = useAppModalOwner();
+  const externalOwner = () => appModalOwner() !== null && appModalOwner() !== appOwnerId;
+  /**
+   * Opens `kind` only when nothing else owns interaction — no other dialog, no issue in flight, and no operator action
+   * still waiting or running (`queue.acting`), unless the opener IS that action (`insideAction`: the confirmation from
+   * «إصدار», the exit question from «خروج», the customer finder from «اختيار حساب»). A refusal says why; false =
+   * nothing opened. Claimed in the sheet's ref AND the app owner synchronously, before React re-renders.
+   */
+  const openModal = (
+    kind: SheetModal,
+    open: () => void,
+    opener: HTMLElement | null = focusedControl(),
+    insideAction = false,
+  ): boolean => {
+    if (externalOwner() || operatingRef.current || (!insideAction && queue.acting)) {
+      setError(t("inv.sheet.actionPending"));
+      return false;
+    }
+    if (!claimModal(modalsRef.current, kind)) {
+      setError(t("inv.sheet.modalOpen"));
+      return false;
+    }
+    claimAppModal(appOwnerId);
+    modalOpener.current = opener;
+    open();
+    return true;
+  };
+  /** Closes `kind` in the ref at once (so the action that follows in the same tick is not refused), then in state. */
+  const closeModal = (kind: SheetModal, close: () => void) => {
+    modalsRef.current.value = modalsRef.current.value.filter((k) => k !== kind);
+    close();
+  };
+  /**
+   * R5: may a write or action requested BY `by` (null = the sheet's background) run now? Only when no dialog is open,
+   * or when the open dialog is the one asking. Checked when it is requested AND again when a queued action runs.
+   */
+  const dialogAllows = (by: SheetModal | null): boolean => {
+    const open = modalsRef.current.value;
+    return open.length === 0 || (open.length === 1 && open[0] === by);
+  };
+  useModalFocus(openModals[0] ?? null, sheetRef, modalOpener);
+  const appOwned = modalOpen || operating;
+  useEffect(() => {
+    if (appOwned) claimAppModal(appOwnerId);
+    else releaseAppModal(appOwnerId);
+  }, [appOwned, appOwnerId]);
+  useEffect(() => () => releaseAppModal(appOwnerId), [appOwnerId]);
   /** Convenience only: the owner-only option is drawn for owners; the service re-reads the live role. */
   const [isOwner, setIsOwner] = useState(false);
   /** Explicit, per attempt, never remembered: issuing on account is a deliberate act every time. */
   const [issueOnAccount, setIssueOnAccount] = useState(false);
+  /**
+   * INV-PAY-METHOD (owner, 2026-11-09): how the amount marked paid arrived, chosen in the confirmation
+   * itself — the one moment before the document becomes immutable. Cash, or Whish Money with its
+   * reference and an explicit (never pre-ticked) "the money arrived". Reset every time it opens.
+   */
+  const [payMethod, setPayMethod] = useState<"cash" | "whish" | null>(null);
+  const [payReference, setPayReference] = useState("");
+  const [payConfirmed, setPayConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   /** The tax-rate input, so Finalize can read what is typed instead of trusting that a blur happened. */
   const taxInput = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     call(pos().getInvoice({ invoiceId }))
-      .then(setView)
+      .then((next) => {
+        if (next.invoice.status === "final") {
+          unknownIssueOutcomes.delete(invoiceId);
+          setIssueOutcomeUncertain(false);
+          setIssueRefusal(null);
+        }
+        setView(next);
+      })
       .catch((e) => setError(errorText(e)));
     call(pos().listProducts())
       .then(setProducts)
@@ -270,6 +405,33 @@ export function InvoiceSheet({
   };
 
   /**
+   * CURRENCY-P1 / Finding C (Abu Abbas, v3 review): has the merchant typed into the paid field since it was rendered?
+   *
+   * 🔴 WHY A TOUCH FLAG AND NOT ONLY A VALUE COMPARISON. The paid input is uncontrolled and was written back from its
+   * own rendering — by its blur and by every full `flushHeader` (save, save-and-leave, issue). Any difference between
+   * the rendering and the stored value (a two-decimal rendering of a 0.100 JOD amount was one) turned an untouched
+   * field into a silent rewrite of money. Now an untouched field is never sent; a touched one is sent only when its
+   * value, parsed by the service's own `parseDecimal` in the invoice currency, differs from the stored minor units.
+   * It is the header counterpart of v3's `touchedLineInputs` for existing lines.
+   */
+  // R2 (Abu Abbas P1-1): no touch flag. The VISIBLE value is compared with the sheet's own exact rendering of the
+  // NEWEST stored amount (`viewRef`), then by value — so a change that fired no `input` event (a `change`-only update,
+  // a programmatic assignment) is still seen, and an untouched field is still never written back.
+  const paidDecision = () => {
+    const inv = viewRef.current?.invoice;
+    const el = fieldRefs.current.paid;
+    if (!inv || !el) return "omit" as const;
+    const rendering = inv.paid.minor === "0" ? "" : paidText(inv.paid.minor, inv.paid.currency);
+    return paidWriteDecision(el.value, rendering, inv.paid.minor, (text) => parseDecimal(text.trim(), inv.paid.currency));
+  };
+  /**
+   * R2 (Invariants A/E): the last check before «محفوظة», «حفظ وخروج» closing, the confirmation and the issue — run
+   * AFTER the flushes. If the paid amount on screen still differs from the stored one at that moment (it changed while
+   * a flush was in flight, by any means), nothing may claim success over it: the action stops and says so.
+   */
+  const verifyPaid = (): string | null => (paidDecision() === "send" ? t("inv.sheet.paidUnverified") : null);
+
+  /**
    * Sends ONLY the keys that changed.
    *
    * 🔴 THIS IS THE FIX FOR A REAL DEFECT, not a tidy-up. This helper used to fill every untouched
@@ -279,7 +441,194 @@ export function InvoiceSheet({
    * invoice, depending only on how fast the operator pressed Tab. Keys that are absent here are
    * absent all the way to the service, which then reads them from the current database row.
    */
-  const header = (patch: InvoiceHeaderPatch) => run(() => call(pos().updateInvoiceHeader({ invoiceId, patch })));
+  /**
+   * INV-FIRST-CLICK (F2-5): background saves and operator actions, in order (`headerSaveQueue.ts`).
+   *
+   * 🔴 A BLUR NEVER DISABLES A BUTTON. It used to go through `run`, whose `setBusy(true)` was committed
+   * between the merchant's mouse press and release, so the very button being pressed was disabled
+   * before its click arrived and the click was lost. Blur saves now go through `background`, which
+   * never touches `busy`; buttons go through `act`, which waits for those saves, stops if one of them
+   * was refused, and ignores a second press while the first is still waiting or running.
+   */
+  const queue = useMemo(() => createSaveQueue(), []);
+  /**
+   * F2-5-R2 (Abu Abbas's review): header and tax refusals that are STILL UNRESOLVED, by field.
+   *
+   * 🔴 A LATER SUCCESS MUST NOT ERASE AN EARLIER REFUSAL. Every save used to clear the one `error`
+   * string as it started, so a refused name followed by an accepted phone left the sheet silent while
+   * the press that depended on them was (correctly) blocked. A refusal now lives here until a save of
+   * the SAME field succeeds — its own blur, the account link, or an action's full `flushHeader` — and
+   * it is shown whenever no newer action error is on screen.
+   *
+   * Existing-LINE edits are deliberately NOT tracked here: their unresolved-failure handling is the
+   * separate, pre-existing finding INV-LINE-EDIT-FAIL, awaiting the owner's decision.
+   */
+  const saveFailures = useMemo(() => createFailureLedger(), []);
+  const [, setFailureVersion] = useState(0);
+  const markSaved = (keys: readonly string[]) => {
+    if (saveFailures.saved(keys)) setFailureVersion((v) => v + 1);
+  };
+  const markRefused = (keys: readonly string[], message: string) => {
+    saveFailures.refused(keys, message);
+    setFailureVersion((v) => v + 1);
+  };
+  const unresolvedFailure = (): string | null => saveFailures.latest();
+  /** `failureKeys`: the header fields (or "tax") this save writes; `null` for a line edit (not tracked). */
+  /**
+   * `failureKeys`: the header fields, "tax", or `line:<id>` this save writes. `describe` turns a refusal
+   * into the text kept for it (default: the refusal as the service worded it).
+   */
+  const background = (
+    action: () => Promise<InvoiceViewDto>,
+    failureKeys: readonly string[] | null,
+    describe: (e: unknown) => string = errorText,
+    /** INV-LINE-EDIT-FAIL v2: when given, decides what a success resolves INSTEAD of clearing `failureKeys`. */
+    resolveOnSuccess?: (next: InvoiceViewDto) => void,
+    /** R5: the dialog this write comes from (the picker's pick); the background passes nothing. */
+    by: SheetModal | null = null,
+  ): Promise<boolean> => {
+    // R5 (Abu Abbas F2): a write REQUESTED while a dialog owns the sheet is refused, not queued. The typed value stays
+    // on screen and every action's own flush re-sends it. A save requested before the dialog opened runs as accepted.
+    if (externalOwner() || operatingRef.current || preparingIssue.current || !dialogAllows(by)) {
+      setError(t(operatingRef.current || preparingIssue.current ? "inv.sheet.actionPending" : "inv.sheet.modalOpen"));
+      return Promise.resolve(false);
+    }
+    return queue.save(async () => {
+      setError(null);
+      try {
+        const next = await action();
+        setView(next);
+        if (resolveOnSuccess) resolveOnSuccess(next);
+        else if (failureKeys) markSaved(failureKeys);
+      } catch (e) {
+        // Shown here; the queue records the failure so a waiting action does not run over it.
+        if (failureKeys) markRefused(failureKeys, describe(e));
+        else setError(errorText(e));
+        throw e;
+      }
+    });
+  };
+
+  /**
+   * INV-LINE-EDIT-FAIL (owner-approved 2026-11-20): the newest refused edit to an EXISTING saved line that
+   * has not been resolved, or null.
+   *
+   * 🔴 WHY THIS EXISTS. An existing line is written ONLY by its own blur (`editLine`); issue, save and
+   * save-and-leave flush draft rows, tax and header, never existing lines. So a refused line edit used to
+   * be cleared from the screen by the next unrelated save, and «إصدار» then issued the OLD line while the
+   * field still showed the merchant's typed value — on an immutable document. A refusal stays here until a
+   * save of the SAME line succeeds (its retry) or the line is removed; issue and save refuse while it does,
+   * and leaving asks first.
+   */
+  const unresolvedLineEdit = (): string | null => saveFailures.latestFor("line:");
+
+  /**
+   * INV-LINE-EDIT-FAIL v2 (Abu Abbas L-R1 / L-R2): unresolved state is kept PER FIELD of a line, at value level.
+   *
+   * Keys: `line:<id>:description|quantity|unitPrice` (typed inputs), `line:<id>:unit` (the unit select) and
+   * `line:<id>:pick` (a catalog pick). For a typed input an entry exists exactly while what the merchant SEES
+   * differs from what is STORED, compared through the service's own parsers (`lineInputMatchesStored`). So a
+   * successful save of ANOTHER field — the same line's description, a header field, anything — cannot resolve
+   * a refused price: only its own accepted retry, an explicit «تراجع», a write that really stored that value,
+   * or removing the line can. The unit and the pick are props-driven (a refused one snaps back on screen), so
+   * they are resolved only by an accepted write of that same kind, «تراجع», or removing the line.
+   */
+  const lineKey = (lineId: string, field: LineInputField | "unit" | "pick") => `line:${lineId}:${field}`;
+  const LINE_PARSERS: LineParsers = {
+    cleanText: (text) => cleanText(text, "description", Number.MAX_SAFE_INTEGER),
+    quantityMilli: (text) => parseInvoiceQuantity(text),
+    priceMinor: (text) => parseDecimal(text.trim(), viewRef.current?.invoice.currency ?? "USD").minor,
+  };
+  /** The typed inputs of existing lines, by `<lineId>:<field>` — read, never controlled. */
+  const lineInputs = useRef(new Map<string, HTMLInputElement>());
+  /**
+   * v3 (Abu Abbas Finding B): the existing-line inputs the merchant has TYPED into and whose value is not yet
+   * confirmed stored, by `<lineId>:<field>`. Set on `input`; cleared only when the value is confirmed stored
+   * (by value), on «تراجع», or when the line is removed.
+   *
+   * 🔴 WHY. v2 treated an input that equals the sheet's own rendering of the stored value as unchanged. That
+   * rendering is LOSSY for a 3-decimal currency (a stored 0.100 JOD renders «1.00»), so a merchant who typed
+   * «1.00» — 1.000 JOD, ten times the price — and was refused looked "unchanged" and the refusal vanished.
+   * The rendering shortcut now applies only to an input nobody typed into; a touched input must match the
+   * stored value through the service's own parser, or it stays unsaved. And an untouched input is never
+   * written on blur at all, so merely focusing a lossy field can no longer send its rendering back.
+   */
+  const touchedLineInputs = useRef(new Set<string>());
+  const touchLineInput = (lineId: string, field: LineInputField) => () => {
+    touchedLineInputs.current.add(`${lineId}:${field}`);
+  };
+  const isTouched = (lineId: string, field: LineInputField) => touchedLineInputs.current.has(`${lineId}:${field}`);
+  const bindLineInput = (lineId: string, field: LineInputField) => (el: HTMLInputElement | null) => {
+    if (el) lineInputs.current.set(`${lineId}:${field}`, el);
+    else lineInputs.current.delete(`${lineId}:${field}`);
+  };
+  const storedOf = (line: InvoiceLineDto) => ({
+    description: line.description,
+    quantityMilli: line.quantityMilli,
+    unitPriceMinor: line.unitPrice.minor,
+  });
+  /**
+   * Re-derives every typed-input entry of the given lines from screen vs store. A mismatch with no entry yet
+   * (a value displayed but never stored — e.g. a pick over an edited input) gets one; a match clears one.
+   */
+  const reconcileLineInputs = (lines: readonly InvoiceLineDto[]) => {
+    for (const line of lines) {
+      for (const field of ["description", "quantity", "unitPrice"] as const) {
+        const input = lineInputs.current.get(`${line.id}:${field}`);
+        if (!input) continue;
+        const key = lineKey(line.id, field);
+        const touched = isTouched(line.id, field);
+        // v3: the sheet's OWN rendering of the stored value counts as "unchanged" ONLY for an input nobody typed
+        // into (a display quirk must not become a false block on an untouched 3-decimal line). A TOUCHED input
+        // is compared by value through the service's parser — never by the lossy rendering (Finding B).
+        const unchanged = !touched && input.value === defaultLineText(line, field);
+        if (unchanged || lineInputMatchesStored(field, input.value, storedOf(line), LINE_PARSERS)) {
+          markSaved([key]);
+          touchedLineInputs.current.delete(`${line.id}:${field}`);
+        } else if (!saveFailures.has(key)) markRefused([key], t("inv.sheet.lineEditUnverified"));
+      }
+    }
+  };
+  /**
+   * The issue / save / leave guard: reconcile EVERY line's inputs against the newest stored view, then report
+   * the newest unresolved line entry. Runs after the queue has drained (every caller is an `act`).
+   */
+  const verifyLines = (): string | null => {
+    reconcileLineInputs(viewRef.current?.lines ?? []);
+    return unresolvedLineEdit();
+  };
+  /** An explicit «تراجع»: show the stored value again; nothing is written, because the store never changed. */
+  const revertLineField = (line: InvoiceLineDto, field: LineInputField | "unit" | "pick") => {
+    if (field === "description" || field === "quantity" || field === "unitPrice") {
+      const input = lineInputs.current.get(`${line.id}:${field}`);
+      if (input) input.value = defaultLineText(line, field);
+      touchedLineInputs.current.delete(`${line.id}:${field}`);
+    }
+    markSaved([lineKey(line.id, field)]);
+  };
+  /**
+   * R5 (Abu Abbas F2): an operator action, gated by ONE rule at the press AND when the queue finally runs it — a
+   * dispatched click on a control behind an open dialog (delete, add row, save, leave, unlink…) changes nothing.
+   * `by` names the dialog an action comes from; the background passes nothing.
+   */
+  const act = (op: () => Promise<void> | void, by: SheetModal | null = null, preparing = false) => {
+    if (externalOwner() || operatingRef.current || preparingIssue.current || !dialogAllows(by)) {
+      setError(t(operatingRef.current || preparingIssue.current ? "inv.sheet.actionPending" : "inv.sheet.modalOpen"));
+      return;
+    }
+    if (preparing && queue.acting) return;
+    if (preparing) preparingIssue.current = true;
+    void queue
+      .action(async () => {
+        if (externalOwner() || !dialogAllows(by)) throw new Error(t("inv.sheet.modalOpen"));
+        await op();
+      })
+      .catch((e) => setError(errorText(e)))
+      .finally(() => { if (preparing) preparingIssue.current = false; });
+  };
+
+  const header = (patch: InvoiceHeaderPatch) =>
+    background(() => call(pos().updateInvoiceHeader({ invoiceId, patch })), Object.keys(patch));
 
   /**
    * Writes EVERY header field as the operator has it typed right now, in one request.
@@ -290,12 +639,27 @@ export function InvoiceSheet({
    */
   const flushHeader = async (): Promise<InvoiceViewDto | null> => {
     const patch: Record<string, string | null> = {};
+    let paidResolved = false;
     for (const key of INVOICE_HEADER_PATCH_KEYS) {
-      if (fieldRefs.current[key]) patch[key] = typed(key);
+      if (!fieldRefs.current[key]) continue;
+      if (key === "paid") {
+        // CURRENCY-P1 / Finding C: the paid amount is NOT re-sent "as typed" unless it really was typed and differs.
+        const decision = paidDecision();
+        if (decision === "omit" || decision === "resolve") {
+          paidResolved = true;
+          continue;
+        }
+      }
+      patch[key] = typed(key);
     }
-    if (Object.keys(patch).length === 0) return viewRef.current;
+    if (Object.keys(patch).length === 0) {
+      if (paidResolved) markSaved(["paid"]);
+      return viewRef.current;
+    }
     const next = await call(pos().updateInvoiceHeader({ invoiceId, patch: patch as InvoiceHeaderPatch }));
     setView(next);
+    // Every bound field was just accepted as typed: no header refusal is unresolved any more.
+    markSaved(paidResolved ? [...Object.keys(patch), "paid"] : Object.keys(patch));
     return next;
   };
 
@@ -308,9 +672,12 @@ export function InvoiceSheet({
    * defaultValue, so "typed" and "stored" are the same kind of thing before they are compared.
    */
   const storedDisplay = (key: (typeof INVOICE_HEADER_PATCH_KEYS)[number]): string => {
-    const inv = view?.invoice;
+    // F2-5-R1: the NEWEST stored row (`viewRef`), never the render this handler was created in. `leave`
+    // now runs after the queued blur-saves; reading `view` here compared the typed text with the row
+    // as it was BEFORE that save, and a draft saved a moment ago was reported unsaved.
+    const inv = viewRef.current?.invoice;
     if (!inv) return "";
-    if (key === "paid") return inv.paid.minor === "0" ? "" : paidText(inv.paid.minor);
+    if (key === "paid") return inv.paid.minor === "0" ? "" : paidText(inv.paid.minor, inv.paid.currency);
     return (inv as unknown as Record<string, string | null>)[key] ?? "";
   };
 
@@ -320,8 +687,9 @@ export function InvoiceSheet({
    */
   const taxDirty = (): boolean => {
     const el = taxInput.current;
-    if (!el || !taxOn || !snapshot) return false;
-    return isTypedTaxRateUnsaved(el.value, snapshot.rateBasisPoints);
+    const stored = viewRef.current?.invoice.taxSnapshot ?? null; // F2-5-R1: newest, as above
+    if (!el || !stored || stored.enabled !== true) return false;
+    return isTypedTaxRateUnsaved(el.value, stored.rateBasisPoints);
   };
 
   /**
@@ -332,11 +700,17 @@ export function InvoiceSheet({
    * onChange would miss a field restored to its original value and would nag for nothing.
    */
   const isDirty = (): boolean => {
-    const inv = view?.invoice;
+    const inv = viewRef.current?.invoice; // F2-5-R1: newest, as above
     if (!inv) return false;
     if (taxDirty()) return true;
+    // INV-LINE-EDIT-FAIL: a refused line edit is unsaved work — leaving asks, never discards silently.
+    if (verifyLines() !== null) return true;
     for (const key of INVOICE_HEADER_PATCH_KEYS) {
       if (!fieldRefs.current[key]) continue;
+      if (key === "paid") {
+        if (paidDecision() === "send") return true;
+        continue;
+      }
       if ((typed(key) ?? "") !== storedDisplay(key)) return true;
     }
     return false;
@@ -348,7 +722,8 @@ export function InvoiceSheet({
   const taxRate = snapshot && snapshot.enabled ? percentText(snapshot.rateBasisPoints) : "";
 
   const applyTax = (enabled: boolean, ratePercent: string) =>
-    run(() =>
+    background(
+      () =>
       call(
         pos().setInvoiceTax({
           invoiceId,
@@ -359,6 +734,7 @@ export function InvoiceSheet({
           label: snapshot?.label ?? null,
         }),
       ),
+      ["tax"],
     );
 
   const saveDraft = () => {
@@ -373,6 +749,18 @@ export function InvoiceSheet({
       if (!next) throw new Error("the draft could not be read back");
       if (rowStore.rows.some(rowUnfinished)) {
         setError(t("inv.sheet.rowsIncomplete"));
+        return next;
+      }
+      // INV-LINE-EDIT-FAIL: everything else is stored, but «محفوظة» would be false while a line edit is not.
+      const lineRefusal = verifyLines();
+      if (lineRefusal !== null) {
+        setError(lineRefusal);
+        return next;
+      }
+      // R2: and never while the paid amount on screen differs from the stored one.
+      const paidRefusal = verifyPaid();
+      if (paidRefusal !== null) {
+        setError(paidRefusal);
         return next;
       }
       setSaved(true);
@@ -439,10 +827,36 @@ export function InvoiceSheet({
     }
   };
 
-  const editLine = (lineId: string, line: InvoiceLineRequest) =>
-    run(() => call(pos().updateInvoiceLine({ invoiceId, lineId, line })));
+  /**
+   * Writes one existing line. `touched` is what THIS write carries from the merchant: one typed field, the
+   * unit, or a pick. A refusal records exactly those fields; a success re-checks the line's typed inputs by
+   * value and resolves only the unit / pick entry this write actually carried.
+   */
+  const editLine = (
+    lineId: string,
+    line: InvoiceLineRequest,
+    touched: LineInputField | "unit" | "pick",
+    by: SheetModal | null = null,
+  ) =>
+    background(
+      () => call(pos().updateInvoiceLine({ invoiceId, lineId, line })),
+      [lineKey(lineId, touched)],
+      (e) => `${t("inv.sheet.lineEditUnsaved")} ${errorText(e)}`,
+      (next) => {
+        if (touched === "unit" || touched === "pick") markSaved([lineKey(lineId, touched)]);
+        reconcileLineInputs(next.lines.filter((l) => l.id === lineId));
+      },
+      by,
+    );
 
-  const removeLine = (lineId: string) => run(() => call(pos().removeInvoiceLine({ invoiceId, lineId })));
+  const removeLine = (lineId: string) =>
+    run(async () => {
+      const next = await call(pos().removeInvoiceLine({ invoiceId, lineId }));
+      // A removed line has no edit left to resolve — every field of THAT line, and no other line's.
+      markSaved(saveFailures.keysWithPrefix(`line:${lineId}:`));
+      for (const field of ["description", "quantity", "unitPrice"] as const) touchedLineInputs.current.delete(`${lineId}:${field}`);
+      return next;
+    });
 
   /**
    * Deletes the draft — AFTER an explicit in-app confirmation.
@@ -478,7 +892,7 @@ export function InvoiceSheet({
   const leave = () => {
     if (isDirty() || rowStore.rows.some((row) => !rowBlank(row.line))) {
       setError(null);
-      setExiting(true);
+      openModal("exit", () => setExiting(true), focusedControl(), true);
       return;
     }
     onClosed();
@@ -495,6 +909,19 @@ export function InvoiceSheet({
       });
       if (rowStore.rows.some(rowUnfinished)) {
         setError(t("inv.sheet.rowsIncomplete"));
+        return;
+      }
+      // INV-LINE-EDIT-FAIL: «حفظ وخروج» must not close over an unsaved line edit; «خروج دون حفظ» stays the
+      // explicit way to discard it.
+      const lineRefusal = verifyLines();
+      if (lineRefusal !== null) {
+        setError(lineRefusal);
+        return;
+      }
+      // R2: nor over a paid amount that differs from the stored one.
+      const paidRefusal = verifyPaid();
+      if (paidRefusal !== null) {
+        setError(paidRefusal);
         return;
       }
       setExiting(false);
@@ -523,8 +950,17 @@ export function InvoiceSheet({
 
   /** The operator's own language for the account refusals; every other error keeps its normal text. */
   const accountErrorText = (e: unknown): string => {
+    // R5: the service found the persisted draft different from the confirmation — the same sentence as the sheet's own.
+    if (e instanceof ApiError && e.code === "INVOICE_CONFIRMATION_STALE") return t("inv.sheet.confirmStale");
+    if (e instanceof ApiError && e.code === "INVOICE_CONFIRMATION_REQUIRED") return t("inv.sheet.confirmIdentityRequired");
+    if (e instanceof ApiError && e.code === "INVOICE_CONFIRMATION_UNVERIFIABLE") return t("inv.sheet.confirmIdentityUnavailable");
+    if (e instanceof ApiError && e.code === "INVOICE_TAX_CONFIRMATION_REQUIRED") return t("inv.sheet.confirmTaxExplicit");
+    if (e instanceof ApiError && e.code === "IDEMPOTENCY_CONFLICT") return t("inv.sheet.confirmIdentityConflict");
+    // INV-PAY-METHOD: the method step's own sentences (text follows the operation).
+    if (e instanceof ApiError && PAY_ERROR_KEY[e.code]) return t(PAY_ERROR_KEY[e.code]!);
     if (e instanceof ApiError && e.code.startsWith("CREDIT_")) {
-      const key = `inv.account.err.${e.code}`;
+      // The cashier cannot tick "on account", so a part-paid refusal tells them who can.
+      const key = e.code === "CREDIT_PARTIAL_NEEDS_ACCOUNT" && !isOwner ? `inv.account.err.${e.code}.cashier` : `inv.account.err.${e.code}`;
       const text = t(key);
       if (text !== key) return text;
     }
@@ -532,21 +968,36 @@ export function InvoiceSheet({
   };
 
   /** Links (or unlinks) an exact account through the ordinary header write, then adopts the answer. */
-  const chooseAccount = async (customerId: string | null, displayName: string | null) => {
+  const chooseAccount = async (account: CustomerDto | null) => {
     setBusy(true);
     setError(null);
     try {
       const previousCustomerId = viewRef.current?.invoice.customerPartyId ?? null;
-      const next = await call(pos().updateInvoiceHeader({ invoiceId, patch: { customerPartyId: customerId } }));
+      // INV-CUSTOMER-PREFILL: the EMPTY printed name, phone and address are filled from the account
+      // in the SAME write as the link (`accountPrefill`), so they are stored with it rather than on
+      // a later blur. Typed values are never replaced; unlinking fills nothing.
+      const fill =
+        account === null
+          ? {}
+          : accountPrefill(account, {
+              customerName: fieldRefs.current.customerName?.value,
+              customerPhone: fieldRefs.current.customerPhone?.value,
+              customerAddress: fieldRefs.current.customerAddress?.value,
+            });
+      const next = await call(
+        pos().updateInvoiceHeader({ invoiceId, patch: { customerPartyId: account?.id ?? null, ...fill } }),
+      );
       setView(next);
-      setLinkedName(displayName);
+      markSaved(["customerPartyId", ...Object.keys(fill)]);
+      setLinkedName(account?.displayName ?? null);
       // A checked credit instruction belongs to the PREVIOUS customer's identity. Changing the
       // account (including unlinking) must require an explicit fresh tick for the new customer.
       if (next.invoice.customerPartyId !== previousCustomerId) setIssueOnAccount(false);
-      // Convenience: an EMPTY printed name is prefilled with the account's name. The printed name
-      // stays its own field — it is a snapshot the operator may edit, and never drives the link.
-      const nameInput = fieldRefs.current.customerName;
-      if (displayName && nameInput && nameInput.value.trim() === "") nameInput.value = displayName;
+      // The inputs are uncontrolled: show in each filled field what the row now holds.
+      for (const key of Object.keys(fill) as (keyof typeof fill)[]) {
+        const input = fieldRefs.current[key];
+        if (input) input.value = next.invoice[key] ?? "";
+      }
     } catch (e) {
       setError(accountErrorText(e));
     } finally {
@@ -569,9 +1020,25 @@ export function InvoiceSheet({
       }),
     );
     setView(next);
+    markSaved(["tax"]);
   };
 
   const prepareFinalize = async () => {
+    // A lost/ambiguous answer needs a fresh read of the invoice, not a second issue from this sheet.
+    if (issueOutcomeUncertain) return;
+    // R4: «إصدار» itself, taken NOW — it is disabled while the flushes below run, which takes its focus away.
+    const issueButton = focusedControl();
+    // R4: the issue confirmation never opens while another dialog is open (it would sit under or over it).
+    if (modalsRef.current.value.length > 0) {
+      setError(t("inv.sheet.modalOpen"));
+      return;
+    }
+    // INV-LINE-EDIT-FAIL: never issue while an edit to an existing line is refused and unresolved.
+    const lineRefusal = verifyLines();
+    if (lineRefusal !== null) {
+      setError(lineRefusal);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -588,13 +1055,44 @@ export function InvoiceSheet({
         await flushTax();
         await flushHeader();
       });
-      // On account means the WHOLE total is owed: refuse here, on the stored values, rather than
-      // after the operator has confirmed.
-      if (issueOnAccount && viewRef.current && viewRef.current.invoice.paid.minor !== "0") {
-        setError(t("inv.account.err.CREDIT_NEEDS_UNPAID"));
+      // v3 (Abu Abbas Finding A): re-verify AFTER the flushes. The guard at the top ran before them; nothing the
+      // merchant can see may differ from the store at the moment the confirmation is offered.
+      const lateLineRefusal = verifyLines();
+      if (lateLineRefusal !== null) {
+        setError(lateLineRefusal);
         return;
       }
-      setConfirming(true);
+      // R2: the confirmation reads the STORED paid amount; it must be the one on screen.
+      const latePaidRefusal = verifyPaid();
+      if (latePaidRefusal !== null) {
+        setError(latePaidRefusal);
+        return;
+      }
+      // INV-PARTIAL-DEBT (Option B): decided here on the STORED values, before the confirmation — and
+      // again by the service, which is the authority. TRANSITION: this used to refuse ANY paid amount
+      // on account (inv.account.err.CREDIT_NEEDS_UNPAID); a part-paid invoice now MUST go on account.
+      const storedView = viewRef.current;
+      const stored = storedView?.invoice;
+      if (stored) {
+        const partlyPaid = stored.paid.minor !== "0" && stored.balanceDue.minor !== "0";
+        if (partlyPaid && !issueOnAccount) {
+          setError(t(isOwner ? "inv.account.err.CREDIT_PARTIAL_NEEDS_ACCOUNT" : "inv.account.err.CREDIT_PARTIAL_NEEDS_ACCOUNT.cashier"));
+          return;
+        }
+        if (issueOnAccount && stored.balanceDue.minor === "0") {
+          setError(t("inv.account.err.CREDIT_NOTHING_OWED"));
+          return;
+        }
+      }
+      setPayMethod(null);
+      setPayReference("");
+      setPayConfirmed(false);
+      // R3: what the confirmation is about to show — the stored figures, read back after every flush above.
+      // R5 (Abu Abbas F3): the COMPLETE draft the confirmation is about to show — every line, not only the totals.
+      confirmedFigures.current = storedView ? confirmationDigest(storedView, issueOnAccount) : null;
+      // R4: re-checked at the moment of opening — a dialog opened while the flushes above ran wins, this refuses.
+      if (!openModal("confirm", () => setConfirming(true), issueButton, true)) return;
+      setIssueRefusal(null);
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -602,10 +1100,49 @@ export function InvoiceSheet({
     }
   };
 
+  /**
+   * R5 (Abu Abbas F3 + R5 contract invariant 3): a confirmation describes ONE stable draft. If the stored draft changes
+   * while it is open — a save accepted earlier landing late, anything — it is WITHDRAWN, not live-updated: a card that
+   * quietly changes under the operator's eyes is not consent. They review the new figures and press «إصدار» again.
+   */
+  useEffect(() => {
+    if (!confirming || !view || confirmedFigures.current === null) return;
+    if (confirmationDigest(view, issueOnAccount) === confirmedFigures.current) return;
+    confirmedFigures.current = null;
+    closeModal("confirm", () => setConfirming(false));
+    setError(t("inv.sheet.confirmWithdrawn"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- closeModal/t are stable in effect; the draft is the trigger
+  }, [view, confirming, issueOnAccount]);
+
+  /** INV-PAY-METHOD: is anything marked paid on the stored draft, and is its method complete? */
+  const paidNow = (view?.invoice.paid.minor ?? "0") !== "0";
+  const payReady =
+    !paidNow || payMethod === "cash" || (payMethod === "whish" && payReference.trim() !== "" && payConfirmed);
+
   const finalize = async () => {
-    setConfirming(false);
+    if (!payReady) return;
+    // R4 (action boundary): issue only from a confirmation that is the ONE open modal. Not a disabled button, a
+    // z-index or the focus trap: a click dispatched on a covered or hidden control still arrives here, and stops.
+    const modals = modalsRef.current.value;
+    if (modals.length !== 1 || modals[0] !== "confirm") {
+      setError(t("inv.sheet.modalOpen"));
+      return;
+    }
+    // INV-LINE-EDIT-FAIL: never issue while an edit to an existing line is refused and unresolved.
+    const lineRefusal = verifyLines();
+    if (lineRefusal !== null) {
+      setError(lineRefusal);
+      return;
+    }
+    // R4: closed NOW in the ref too, so the pre-dispatch check below never sees this confirmation as still open.
+    closeModal("confirm", () => setConfirming(false));
+    // R5: and the issue now OWNS interaction until it answers — no dialog opens, the app shell is inert.
+    operatingRef.current = true;
+    setOperating(true);
+    claimAppModal(appOwnerId);
     setBusy(true);
     setError(null);
+    let issueRequestStarted = false;
     try {
       // 🔴 FLUSH FIRST, AND AWAIT IT. A field the operator typed but never blurred — the commonest
       // case being the last field they touched before reaching for Finalize — would otherwise be
@@ -623,12 +1160,61 @@ export function InvoiceSheet({
         return;
       }
       await flushHeader();
+      // v3 (Abu Abbas Finding A): the last check before the irreversible call, AFTER every flush — an edit made
+      // while the flushes were in flight must stop the issue here, not be overtaken by it.
+      const lateLineRefusal = verifyLines();
+      if (lateLineRefusal !== null) {
+        setError(lateLineRefusal);
+        return;
+      }
+      // R2: and never issue over a paid amount on screen that differs from the stored one.
+      const latePaidRefusal = verifyPaid();
+      if (latePaidRefusal !== null) {
+        setError(latePaidRefusal);
+        return;
+      }
+      // R3: the issue is bound to what the confirmation SHOWED. After every flush, the freshly stored figures (paid,
+      // totals, balance, customer, on-account choice) must be exactly the confirmed ones — or nothing is issued.
+      const freshStored = viewRef.current;
+      if (
+        !freshStored ||
+        confirmedFigures.current === null ||
+        confirmationDigest(freshStored, issueOnAccount) !== confirmedFigures.current
+      ) {
+        setIssueRefusal(t("inv.sheet.confirmStale"));
+        return;
+      }
       // Never silently downgrade a checked on-account instruction to an ordinary unpaid invoice.
       // The service remains the authority and will refuse a missing/inactive account.
       const account = issueOnAccount;
+      // INV-PAY-METHOD: only when something is marked paid; the service refuses a mismatch. Built ONCE
+      // so a verified replay below repeats exactly the same payment (INV-PARTIAL-DEBT).
+      const paymentPart =
+        paidNow && payMethod === "cash"
+          ? { payment: { method: "cash" as const } }
+          : paidNow && payMethod === "whish"
+            ? { payment: { method: "external" as const, whish: { reference: payReference, fundsConfirmed: payConfirmed } } }
+            : {};
       let next: InvoiceViewDto;
+      // R4: the background is live again while the flushes run; a dialog opened meanwhile stops the issue here.
+      if (modalsRef.current.value.length > 0) {
+        setError(t("inv.sheet.modalOpen"));
+        return;
+      }
+      const confirmedDraft = confirmedFigures.current;
+      // R3: from here until the answer, the paid amount is fixed text — nothing on screen can differ from what is sent.
+      setIssuing(true);
       try {
-        next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: account }));
+        issueRequestStarted = true;
+        next = await call(
+          pos().finalizeInvoice({
+            invoiceId,
+            issueOnAccount: account,
+            ...paymentPart,
+            // R5: the service re-checks this exact confirmation against the persisted draft, inside its transaction.
+            confirmedDraft,
+          }),
+        );
       } catch (e) {
         // 🔴 ON ACCOUNT, an unclear outcome is resolved by ASKING the ledger, never by guessing: the
         // same request again verifies the invoice, its sale and its receivable and writes nothing
@@ -637,9 +1223,10 @@ export function InvoiceSheet({
           !(e instanceof ApiError) || e.code === "INVOICE_FINALIZED" || e.code === "INVOICE_STATUS_UNKNOWN" || e.code === "INTERNAL";
         if (!account || !unclear) throw e;
         try {
-          next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: true }));
+          next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: true, ...paymentPart, confirmedDraft }));
         } catch (again) {
-          if (again instanceof ApiError && again.code.startsWith("CREDIT_")) throw again;
+          if (again instanceof ApiError && (again.code.startsWith("CREDIT_") || again.code === "INVOICE_CONFIRMATION_REQUIRED" ||
+            again.code === "INVOICE_CONFIRMATION_UNVERIFIABLE" || again.code === "INVOICE_TAX_CONFIRMATION_REQUIRED" || again.code === "IDEMPOTENCY_CONFLICT")) throw again;
           throw new Error(t("inv.account.unknown"));
         }
       }
@@ -651,8 +1238,17 @@ export function InvoiceSheet({
         onAccountOf: account ? (linkedName ?? undefined) : undefined,
       });
     } catch (e) {
-      setError(accountErrorText(e));
+      const uncertain = issueRequestStarted &&
+        (!(e instanceof ApiError) || e.code === "INVOICE_STATUS_UNKNOWN" || e.code === "INTERNAL" || e.code === "INVOICE_FINALIZED");
+      setIssueRefusal(uncertain ? t("inv.sheet.issueOutcomeUnknown") : accountErrorText(e));
+      if (uncertain) {
+        unknownIssueOutcomes.add(invoiceId);
+        setIssueOutcomeUncertain(true);
+      }
     } finally {
+      operatingRef.current = false;
+      setOperating(false);
+      setIssuing(false);
       setBusy(false);
     }
   };
@@ -692,6 +1288,31 @@ export function InvoiceSheet({
   );
 
   if (!view) return <div className="center muted">{error ?? "…"}</div>;
+  /** F2-5-R2: the newest action error, else the newest header refusal that is still unresolved. */
+  const shownError = [issueRefusal, error ?? unresolvedFailure()].filter(Boolean).join(" ") || null;
+
+  /** L-R2: does this line show any value that is not stored? */
+  const lineHasUnsaved = (line: InvoiceLineDto): boolean => saveFailures.keysWithPrefix(`line:${line.id}:`).length > 0;
+  /** L-R2: the rejected input keeps the merchant's value, is marked invalid and is described by its own note. */
+  const unsavedInputProps = (line: InvoiceLineDto, field: LineInputField) =>
+    saveFailures.has(lineKey(line.id, field))
+      ? { "aria-invalid": true as const, "aria-describedby": `unsaved-${line.id}-${field}` }
+      : {};
+  /** L-R2: the local UNSAVED note — names the STORED value, and offers the explicit «تراجع». */
+  const unsavedNote = (line: InvoiceLineDto, field: LineInputField | "unit" | "pick") =>
+    !readOnly && saveFailures.has(lineKey(line.id, field)) ? (
+      <span className="error small" id={`unsaved-${line.id}-${field}`} data-testid="line-unsaved" data-field={field} role="status">
+        {t("inv.line.unsaved").replace("{saved}", storedText(line, field))}{" "}
+        <button
+          type="button"
+          className="btn ghost small"
+          onClick={() => act(() => revertLineField(line, field))}
+          data-testid="line-revert"
+        >
+          {t("inv.line.revert")}
+        </button>
+      </span>
+    ) : null;
   const inv = view.invoice;
 
   /** Prefills from a catalog product — and leaves every field editable. */
@@ -712,15 +1333,15 @@ export function InvoiceSheet({
     }
     else if (pickerFor) {
       const existing = view.lines.find((l) => l.id === pickerFor);
-      if (existing) void editLine(existing.id, { ...line, quantity: String(existing.quantityMilli / 1000) });
+      if (existing) void editLine(existing.id, { ...line, quantity: String(existing.quantityMilli / 1000) }, "pick", "picker");
     }
     setPickerFor(null);
     setQuery("");
   };
 
   return (
-    <div className="inv-sheet">
-      <header className="inv-sheet-head">
+    <div className="inv-sheet" ref={sheetRef} inert={activeAppOwner !== null && activeAppOwner !== appOwnerId}>
+      <header className="inv-sheet-head" inert={modalOpen}>
         <div className="inv-issuer">
           <strong data-testid="sheet-issuer">{inv.issuer?.nameAr ?? t("inv.company.title")}</strong>
           {inv.issuer?.nameEn && <span dir="ltr" className="muted"> · {inv.issuer.nameEn}</span>}
@@ -746,7 +1367,7 @@ export function InvoiceSheet({
               type="date"
               dir="ltr"
               value={inv.invoiceDate ?? ""}
-              disabled={readOnly}
+              disabled={readOnly || busy}
               ref={bind("invoiceDate")}
               onChange={(e) => void header({ invoiceDate: e.target.value === "" ? null : e.target.value })}
               data-testid="sheet-date"
@@ -757,12 +1378,12 @@ export function InvoiceSheet({
 
       {readOnly && <p className="notice" data-testid="sheet-readonly">{t("inv.sheet.readOnly")}</p>}
 
-      <section className="inv-customer">
+      <section className="inv-customer" inert={modalOpen}>
         <label className="field">
           <span>{t("inv.sheet.customer")}</span>
           <input
             defaultValue={inv.customerName ?? ""}
-            disabled={readOnly}
+            disabled={readOnly || busy}
             ref={bind("customerName")}
             onBlur={(e) => void header({ customerName: e.target.value.trim() === "" ? null : e.target.value })}
             data-testid="sheet-customer"
@@ -772,7 +1393,7 @@ export function InvoiceSheet({
           <span>{t("inv.sheet.address")}</span>
           <input
             defaultValue={inv.customerAddress ?? ""}
-            disabled={readOnly}
+            disabled={readOnly || busy}
             ref={bind("customerAddress")}
             onBlur={(e) => void header({ customerAddress: e.target.value.trim() === "" ? null : e.target.value })}
           />
@@ -782,7 +1403,7 @@ export function InvoiceSheet({
           <input
             dir="ltr"
             defaultValue={inv.customerPhone ?? ""}
-            disabled={readOnly}
+            disabled={readOnly || busy}
             ref={bind("customerPhone")}
             onBlur={(e) => void header({ customerPhone: e.target.value.trim() === "" ? null : e.target.value })}
           />
@@ -791,7 +1412,7 @@ export function InvoiceSheet({
           <span>{t("inv.sheet.notes")}</span>
           <input
             defaultValue={inv.notes ?? ""}
-            disabled={readOnly}
+            disabled={readOnly || busy}
             ref={bind("notes")}
             onBlur={(e) => void header({ notes: e.target.value.trim() === "" ? null : e.target.value })}
           />
@@ -807,10 +1428,12 @@ export function InvoiceSheet({
               <strong dir="auto" data-testid="sheet-account-name">{linkedName ?? "…"}</strong>
               {!readOnly && (
                 <>
-                  <button className="btn ghost small" disabled={busy} onClick={() => setFindingCustomer(true)} data-testid="account-change">
+                  <button className="btn ghost small" disabled={busy} onClick={() => act(() => {
+                    openModal("customer", () => setFindingCustomer(true), focusedControl(), true);
+                  })} data-testid="account-change">
                     {t("inv.account.change")}
                   </button>
-                  <button className="btn ghost small" disabled={busy} onClick={() => void chooseAccount(null, null)} data-testid="account-unlink">
+                  <button className="btn ghost small" disabled={busy} onClick={() => act(() => chooseAccount(null))} data-testid="account-unlink">
                     {t("inv.account.unlink")}
                   </button>
                 </>
@@ -818,7 +1441,9 @@ export function InvoiceSheet({
             </div>
           ) : (
             !readOnly && (
-              <button className="btn ghost small" disabled={busy} onClick={() => setFindingCustomer(true)} data-testid="account-choose">
+              <button className="btn ghost small" disabled={busy} onClick={() => act(() => {
+                    openModal("customer", () => setFindingCustomer(true), focusedControl(), true);
+                  })} data-testid="account-choose">
                 {t("inv.account.choose")}
               </button>
             )
@@ -846,11 +1471,12 @@ export function InvoiceSheet({
           the shop setting on and off around it, and anything finalized in between inherited the
           wrong state. The rate is frozen onto THIS document at finalization. */}
       {!readOnly && (
-        <section className="inv-tax" data-testid="sheet-tax-controls">
+        <section className="inv-tax" data-testid="sheet-tax-controls" inert={modalOpen}>
           <label className="field inline">
             <input
               type="checkbox"
               checked={taxOn}
+              disabled={busy}
               onChange={(e) => void applyTax(e.target.checked, taxRate)}
               data-testid="tax-enabled"
             />
@@ -863,6 +1489,7 @@ export function InvoiceSheet({
                 dir="ltr"
                 inputMode="decimal"
                 defaultValue={taxRate}
+                disabled={busy}
                 ref={taxInput}
                 onBlur={(e) => void applyTax(true, e.target.value)}
                 data-testid="tax-rate"
@@ -873,7 +1500,7 @@ export function InvoiceSheet({
         </section>
       )}
 
-      <div className="inv-lines-scroll">
+      <div className="inv-lines-scroll" inert={modalOpen}>
       <table className="inv-lines" data-testid="sheet-lines">
         <thead>
           <tr>
@@ -895,36 +1522,46 @@ export function InvoiceSheet({
               <td>
                 <input
                   defaultValue={l.description ?? ""}
-                  disabled={readOnly}
+                  disabled={readOnly || busy}
                   onBlur={(e) =>
+                    isTouched(l.id, "description") &&
                     editLine(l.id, {
                       description: e.target.value.trim() === "" ? null : e.target.value,
                       unitLabel: l.unitLabel,
                       canonicalUnit: l.canonicalUnit,
                       productId: l.productId,
                       quantity: String(l.quantityMilli / 1000),
-                      unitPrice: priceText(l.unitPrice.minor),
-                    })
+                      unitPrice: storedPriceForWrite(l),
+                    }, "description")
                   }
+                  ref={bindLineInput(l.id, "description")}
+                  onInput={touchLineInput(l.id, "description")}
+                  {...unsavedInputProps(l, "description")}
                 />
+                {unsavedNote(l, "description")}
               </td>
               <td className="num">
                 <input
                   dir="ltr"
                   inputMode="decimal"
                   defaultValue={l.quantityText}
-                  disabled={readOnly}
+                  disabled={readOnly || busy}
                   onBlur={(e) =>
+                    isTouched(l.id, "quantity") &&
                     editLine(l.id, {
                       description: l.description,
                       unitLabel: l.unitLabel,
                       canonicalUnit: l.canonicalUnit,
                       productId: l.productId,
                       quantity: e.target.value,
-                      unitPrice: priceText(l.unitPrice.minor),
-                    })
+                      unitPrice: storedPriceForWrite(l),
+                    }, "quantity")
                   }
+                  ref={bindLineInput(l.id, "quantity")}
+                  onInput={touchLineInput(l.id, "quantity")}
+                  {...unsavedInputProps(l, "quantity")}
                 />
+                {unsavedNote(l, "quantity")}
               </td>
               <td>
                 {/* The SAME unit list the product form uses. A label this build cannot match —
@@ -933,7 +1570,7 @@ export function InvoiceSheet({
                 <UnitCell
                   unitLabel={l.unitLabel}
                   canonicalUnit={l.canonicalUnit}
-                  disabled={readOnly}
+                  disabled={readOnly || busy}
                   idSuffix={l.id}
                   onChange={(choice) => {
                     // 🔴 An empty «Other» writes NOTHING. The cell shows its own inline validation;
@@ -945,18 +1582,20 @@ export function InvoiceSheet({
                       canonicalUnit: choice.canonicalUnit,
                       productId: l.productId,
                       quantity: String(l.quantityMilli / 1000),
-                      unitPrice: priceText(l.unitPrice.minor),
-                    });
+                      unitPrice: storedPriceForWrite(l),
+                    }, "unit");
                   }}
                 />
+                {unsavedNote(l, "unit")}
               </td>
               <td className="num">
                 <input
                   dir="ltr"
                   inputMode="decimal"
-                  defaultValue={priceText(l.unitPrice.minor)}
-                  disabled={readOnly}
+                  defaultValue={priceText(l.unitPrice.minor, l.unitPrice.currency)}
+                  disabled={readOnly || busy}
                   onBlur={(e) =>
+                    isTouched(l.id, "unitPrice") &&
                     editLine(l.id, {
                       description: l.description,
                       unitLabel: l.unitLabel,
@@ -964,21 +1603,32 @@ export function InvoiceSheet({
                       productId: l.productId,
                       quantity: String(l.quantityMilli / 1000),
                       unitPrice: e.target.value,
-                    })
+                    }, "unitPrice")
                   }
+                  ref={bindLineInput(l.id, "unitPrice")}
+                  onInput={touchLineInput(l.id, "unitPrice")}
+                  {...unsavedInputProps(l, "unitPrice")}
                 />
+                {unsavedNote(l, "unitPrice")}
               </td>
               {/* Read-only, and computed by the service — never by this component. */}
               <td className="num total" data-testid="sheet-line-total">
-                <bdi dir="ltr">{fmt(l.lineTotal)}</bdi>
+                <bdi
+                  dir="ltr"
+                  data-testid="line-total-value"
+                  {...(lineHasUnsaved(l) ? { "aria-describedby": "totals-saved-only" } : {})}
+                >
+                  {fmt(l.lineTotal)}
+                </bdi>
+                {unsavedNote(l, "pick")}
               </td>
               <td className="row-actions">
                 {!readOnly && (
                   <>
-                    <button className="btn ghost small" onClick={() => setPickerFor(l.id)}>
+                    <button className="btn ghost small" onClick={() => openModal("picker", () => setPickerFor(l.id))}>
                       {t("inv.sheet.pick")}
                     </button>
-                    <button className="btn ghost small" onClick={() => void removeLine(l.id)}>
+                    <button className="btn ghost small" onClick={() => act(() => removeLine(l.id))}>
                       {t("inv.sheet.remove")}
                     </button>
                   </>
@@ -1055,7 +1705,7 @@ export function InvoiceSheet({
                   <button
                     className="btn ghost small"
                     disabled={frozenRows.has(r.key)}
-                    onClick={() => setPickerFor(`draft:${r.key}`)}
+                    onClick={() => openModal("picker", () => setPickerFor(`draft:${r.key}`))}
                   >
                     {t("inv.sheet.pick")}
                   </button>
@@ -1084,7 +1734,7 @@ export function InvoiceSheet({
                   {/* 🔴 NO `disabled` ON A FULL SHEET. It is disabled only while a call is in
                       flight. The old condition — disabled whenever a row was open — is the field
                       defect itself. */}
-                  <button className="btn primary" onClick={() => void addRow()} disabled={busy} data-testid="add-row">
+                  <button className="btn primary" onClick={() => act(addRow)} disabled={busy} data-testid="add-row">
                     + {t("inv.sheet.addRow")}
                   </button>
                   <span className="muted small" data-testid="sheet-rows-count">
@@ -1105,12 +1755,18 @@ export function InvoiceSheet({
       </div>
 
       {!readOnly && draftRows.length === 0 && (
-        <div className="inv-actions">
+        <div className="inv-actions" inert={modalOpen}>
           <span className="muted small">{t("inv.sheet.pickHint")}</span>
         </div>
       )}
 
-      <section className="inv-totals">
+      <section className="inv-totals" inert={modalOpen}>
+        {/* L-R2: while any line shows an unsaved value, the totals are the STORED values' — and say so. */}
+        {view.lines.some(lineHasUnsaved) && (
+          <p className="notice" role="note" id="totals-saved-only" data-testid="totals-saved-only">
+            {t("inv.sheet.totalsSavedOnly")}
+          </p>
+        )}
         <table>
           <tbody>
             <tr>
@@ -1131,20 +1787,42 @@ export function InvoiceSheet({
             <tr>
               <th>{t("inv.sheet.paid")}</th>
               <td>
-                {readOnly ? (
-                  <bdi dir="ltr">{fmt(inv.paid)}</bdi>
+                {readOnly || issuing ? (
+                  <bdi dir="ltr" data-testid={issuing ? "sheet-paid-issuing" : undefined}>{fmt(inv.paid)}</bdi>
                 ) : (
                   <input
                     dir="ltr"
                     inputMode="decimal"
-                    defaultValue={inv.paid.minor === "0" ? "" : paidText(inv.paid.minor)}
+                    defaultValue={inv.paid.minor === "0" ? "" : paidText(inv.paid.minor, inv.paid.currency)}
+                    disabled={busy}
                     ref={bind("paid")}
-                    onBlur={(e) => void header({ paid: e.target.value.trim() === "" ? null : e.target.value })}
+                    onBlur={(e) => {
+                      // CURRENCY-P1 / Finding C (R2): a blur writes the paid amount ONLY when the VISIBLE value differs
+                      // from the stored one. An untouched field (its own exact rendering) is never rewritten.
+                      const decision = paidDecision();
+                      if (decision === "send") void header({ paid: e.target.value.trim() === "" ? null : e.target.value });
+                      else markSaved(["paid"]);
+                    }}
                     data-testid="sheet-paid"
                   />
                 )}
               </td>
             </tr>
+            {/* INV-PAY-METHOD: an issued invoice that recorded how it was paid says so; older ones say nothing new. */}
+            {inv.payment && (
+              <tr>
+                <th>{t("inv.pay.method")}</th>
+                <td data-testid="sheet-payment" data-method={inv.payment.method} data-provider={inv.payment.provider ?? "none"}>
+                  {inv.payment.provider === "whish" ? t("method.whish") : t(`method.${inv.payment.method}`)}
+                  {inv.payment.reference && (
+                    <>
+                      {" · "}
+                      <bdi dir="ltr">{inv.payment.reference}</bdi>
+                    </>
+                  )}
+                </td>
+              </tr>
+            )}
             <tr>
               <th>{t("inv.sheet.balance")}</th>
               <td data-testid="sheet-balance"><bdi dir="ltr">{fmt(inv.balanceDue)}</bdi></td>
@@ -1161,7 +1839,7 @@ export function InvoiceSheet({
           already existed and was used by one screen only; the sheet it was written for did not
           have it. Reused because this sheet scrolls inside the same .content scrollport, not
           because the class happened to exist — verified in the installed-app screenshots. */}
-      <div className="inv-actions inv-keep">
+      <div className="inv-actions inv-keep" inert={modalOpen}>
         {/* ════════════════════════════════════════════════════════════════════════════════════
             🔴 FEEDBACK LIVES WITH THE BUTTONS, BECAUSE THAT IS WHERE THE OPERATOR IS LOOKING.
 
@@ -1185,9 +1863,9 @@ export function InvoiceSheet({
 
             aria-live="polite" on the container announces whichever appears, without interrupting.
             ════════════════════════════════════════════════════════════════════════════════════ */}
-        {(error || logoWarning || logoUnverified) && (
+        {(shownError || logoWarning || logoUnverified) && (
           <div className="inv-feedback" role="status" aria-live="polite" data-testid="sheet-feedback">
-            {error && <p className="error" data-testid="sheet-error">{error}</p>}
+            {shownError && <p className="error" data-testid="sheet-error">{shownError}</p>}
             {logoWarning && (
               <p className="small" data-testid="sheet-logo-warning">
                 <span className="badge warn">{t("tools.noticeTag")}</span> {t("inv.sheet.logoMissing")}
@@ -1204,7 +1882,7 @@ export function InvoiceSheet({
           <>
             <button
               className="btn primary"
-              onClick={() => void prepareFinalize()}
+              onClick={() => act(prepareFinalize, null, true)}
               // An invoice whose only rows are still unsaved is finalizable: finalize flushes them
               // first. What it refuses is an INCOMPLETE row, and it says so.
               disabled={busy || (view.lines.length === 0 && !draftRows.some((r) => !rowBlank(r.line)))}
@@ -1217,10 +1895,10 @@ export function InvoiceSheet({
                 writes every field as it is typed right now. */}
             {/* One save, one exit. Two buttons reading "حفظ المسودّة" and "حفظ وخروج" sat side by
                 side and differed only in whether the screen closed. */}
-            <button className="btn" onClick={() => void saveDraft()} disabled={busy} data-testid="save-draft">
+            <button className="btn" onClick={() => act(saveDraft)} disabled={busy} data-testid="save-draft">
               {t("inv.sheet.save")}
             </button>
-            <button className="btn" onClick={leave} disabled={busy} data-testid="leave-draft">
+            <button className="btn" onClick={() => act(leave)} disabled={busy} data-testid="leave-draft">
               {t("inv.sheet.leave")}
             </button>
             {saved && (
@@ -1229,7 +1907,7 @@ export function InvoiceSheet({
               </span>
             )}
             {/* Destructive, separate, and confirmed. Navigating away is NOT this. */}
-            <button className="btn danger ghost" onClick={() => setDiscarding(true)} data-testid="discard">
+            <button className="btn danger ghost" onClick={() => openModal("discard", () => setDiscarding(true))} data-testid="discard">
               {t("inv.sheet.discard")}
             </button>
           </>
@@ -1245,15 +1923,15 @@ export function InvoiceSheet({
         )}
         {/* The way out of a sheet, in every state including read-only. It had no testid, so a
             script could not leave an issued invoice without restarting the application. */}
-        <button className="btn ghost" onClick={readOnly ? onClosed : leave} data-testid="sheet-close">
+        <button className="btn ghost" onClick={readOnly ? onClosed : () => act(leave)} data-testid="sheet-close">
           {t("action.cancel")}
         </button>
       </div>
 
       {/* Finalization is never implicit: the operator reads the figures and confirms. */}
       {confirming && (
-        <div className="overlay">
-          <div className="card dialog" data-testid="finalize-confirm">
+        <div className="overlay" data-sheet-modal="confirm">
+          <div className="card dialog" role="dialog" aria-modal="true" data-testid="finalize-confirm">
             <h2>{t("inv.sheet.confirmTitle")}</h2>
             <dl className="inv-confirm">
               <dt>{t("inv.sheet.customer")}</dt>
@@ -1262,7 +1940,8 @@ export function InvoiceSheet({
                 <>
                   <dt>{t("inv.account.confirmRow")}</dt>
                   <dd data-testid="confirm-account">
-                    <bdi dir="auto">{linkedName ?? "—"}</bdi> — <bdi dir="ltr">{fmt(inv.total)}</bdi>
+                    {/* The REMAINDER owed (INV-PARTIAL-DEBT); equal to the total when nothing is paid. */}
+                    <bdi dir="auto">{linkedName ?? "—"}</bdi> — <bdi dir="ltr">{fmt(inv.balanceDue)}</bdi>
                   </dd>
                 </>
               )}
@@ -1277,12 +1956,68 @@ export function InvoiceSheet({
               <dt>{t("inv.sheet.balance")}</dt>
               <dd dir="ltr">{fmt(inv.balanceDue)}</dd>
             </dl>
+            {/* INV-PAY-METHOD: money marked paid must say how it arrived before the document is frozen. */}
+            {paidNow && (
+              <div className="inv-pay-method" data-testid="confirm-pay">
+                <p className="small">
+                  {t("inv.pay.question")} <bdi dir="ltr">{fmt(inv.paid)}</bdi>
+                </p>
+                <div className="methods">
+                  <button
+                    type="button"
+                    className={payMethod === "cash" ? "btn primary" : "btn"}
+                    aria-pressed={payMethod === "cash"}
+                    onClick={() => setPayMethod("cash")}
+                    data-testid="confirm-pay-cash"
+                  >
+                    {t("method.cash")}
+                  </button>
+                  <button
+                    type="button"
+                    className={payMethod === "whish" ? "btn primary" : "btn"}
+                    aria-pressed={payMethod === "whish"}
+                    onClick={() => setPayMethod("whish")}
+                    data-testid="confirm-pay-whish"
+                  >
+                    {t("method.whish")}
+                  </button>
+                </div>
+                {payMethod === "whish" && (
+                  <>
+                    <label className="field">
+                      <span>{t("pay.whishReference")}</span>
+                      <input
+                        type="text"
+                        dir="auto"
+                        maxLength={64}
+                        value={payReference}
+                        onChange={(e) => setPayReference(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.preventDefault();
+                        }}
+                        data-testid="confirm-pay-reference"
+                      />
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={payConfirmed}
+                        onChange={(e) => setPayConfirmed(e.target.checked)}
+                        data-testid="confirm-pay-confirmed"
+                      />
+                      <span>{t("pay.whishConfirm")}</span>
+                    </label>
+                  </>
+                )}
+                {!payReady && <p className="muted small" data-testid="confirm-pay-needed">{t("inv.pay.needed")}</p>}
+              </div>
+            )}
             <p className="muted small">{t("inv.sheet.confirmNote")}</p>
             <div className="inv-actions">
-              <button className="btn primary" onClick={finalize} data-testid="finalize-confirm-yes">
+              <button className="btn primary" disabled={!payReady} onClick={() => act(finalize, "confirm")} data-testid="finalize-confirm-yes">
                 {t("inv.sheet.finalize")}
               </button>
-              <button className="btn ghost" onClick={() => setConfirming(false)}>
+              <button className="btn ghost" onClick={() => setConfirming(false)} data-modal-initial data-testid="finalize-confirm-no">
                 {t("action.cancel")}
               </button>
             </div>
@@ -1291,7 +2026,7 @@ export function InvoiceSheet({
       )}
 
       {exiting && (
-        <div className="overlay">
+        <div className="overlay" data-sheet-modal="exit">
           <div className="card dialog" role="dialog" aria-modal="true" data-testid="exit-confirm">
             <h2>{t("inv.exit.title")}</h2>
             <p className="muted small">{t("inv.exit.body")}</p>
@@ -1300,7 +2035,7 @@ export function InvoiceSheet({
               <button
                 className="btn primary"
                 disabled={busy}
-                onClick={() => void saveAndLeave()}
+                onClick={() => act(saveAndLeave, "exit")}
                 data-testid="exit-save"
               >
                 {t("inv.exit.saveAndLeave")}
@@ -1318,7 +2053,7 @@ export function InvoiceSheet({
               >
                 {t("inv.exit.leaveWithout")}
               </button>
-              <button className="btn" disabled={busy} onClick={() => setExiting(false)} data-testid="exit-cancel">
+              <button className="btn" disabled={busy} onClick={() => setExiting(false)} data-modal-initial data-testid="exit-cancel">
                 {t("action.cancel")}
               </button>
             </div>
@@ -1327,15 +2062,15 @@ export function InvoiceSheet({
       )}
 
       {discarding && (
-        <div className="overlay">
-          <div className="card dialog" data-testid="discard-confirm">
+        <div className="overlay" data-sheet-modal="discard">
+          <div className="card dialog" role="dialog" aria-modal="true" data-testid="discard-confirm">
             <h2>{t("inv.sheet.discardTitle")}</h2>
             <p className="muted">{t("inv.sheet.discardConfirm")}</p>
             <div className="inv-actions">
-              <button className="btn danger" onClick={() => void discard()} data-testid="discard-confirm-yes">
+              <button className="btn danger" onClick={() => act(discard, "discard")} data-testid="discard-confirm-yes">
                 {t("inv.sheet.discardYes")}
               </button>
-              <button className="btn ghost" onClick={() => setDiscarding(false)} data-testid="discard-confirm-no">
+              <button className="btn ghost" onClick={() => setDiscarding(false)} data-modal-initial data-testid="discard-confirm-no">
                 {t("inv.sheet.discardKeep")}
               </button>
             </div>
@@ -1345,17 +2080,17 @@ export function InvoiceSheet({
 
       {findingCustomer && (
         <CustomerFinder
-          onClose={() => setFindingCustomer(false)}
+          onClose={() => closeModal("customer", () => setFindingCustomer(false))}
           onPick={(c) => {
-            setFindingCustomer(false);
-            void chooseAccount(c.id, c.displayName);
+            closeModal("customer", () => setFindingCustomer(false));
+            act(() => chooseAccount(c));
           }}
         />
       )}
 
       {finalized && (
-        <div className="overlay">
-          <div className="card dialog" data-testid="finalized-notice">
+        <div className="overlay" data-sheet-modal="finalized">
+          <div className="card dialog" role="dialog" aria-modal="true" data-testid="finalized-notice">
             <h2>
               {t("inv.sheet.finalized")} <bdi dir="ltr">#{finalized.number}</bdi>
             </h2>
@@ -1401,11 +2136,12 @@ export function InvoiceSheet({
       )}
 
       {pickerFor && (
-        <div className="overlay">
-          <div className="card dialog" data-testid="product-picker">
+        <div className="overlay" data-sheet-modal="picker">
+          <div className="card dialog" role="dialog" aria-modal="true" data-testid="product-picker">
             <h2>{t("inv.sheet.pick")}</h2>
             <input
               autoFocus
+              data-modal-initial
               type="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -1426,7 +2162,7 @@ export function InvoiceSheet({
               {matches.length === 0 && <li className="muted">{t("products.noMatch")}</li>}
             </ul>
             <p className="muted small">{t("inv.sheet.pickHint")}</p>
-            <button className="btn ghost wide" onClick={() => setPickerFor(null)}>
+            <button className="btn ghost wide" onClick={() => setPickerFor(null)} data-testid="picker-cancel">
               {t("action.cancel")}
             </button>
           </div>
@@ -1437,8 +2173,44 @@ export function InvoiceSheet({
 }
 
 /** Minor units back to the decimal string the service will re-parse. Two decimals, no float math. */
-function priceText(minor: string): string {
-  const digits = minor.padStart(3, "0");
-  return `${digits.slice(0, -2)}.${digits.slice(-2)}`;
+/**
+ * v3 (Abu Abbas Finding B): the STORED unit price, written exactly, for the fields a whole-line write carries over.
+ *
+ * 🔴 NOT `priceText`. Every existing-line write sends the whole line; the fields the merchant did not edit used to
+ * be rebuilt from `priceText`, which always renders two decimals. For a 3-decimal currency that is a different
+ * amount: a description edit on a 0.100 JOD line sent «1.00» and stored 1.000 — ten times the price, silently.
+ * `formatDecimal` renders the stored minor units at the currency's own exponent, so the carried value is the stored
+ * value («1.00» for USD, unchanged; «0.100» for JOD). The DISPLAY is untouched (S-3, an owner decision).
+ */
+function storedPriceForWrite(line: InvoiceLineDto): string {
+  return formatDecimal(money(BigInt(line.unitPrice.minor), line.unitPrice.currency));
+}
+
+/** Exactly the `defaultValue` each existing-line input is rendered with — what «تراجع» puts back. */
+function defaultLineText(line: InvoiceLineDto, field: "description" | "quantity" | "unitPrice"): string {
+  if (field === "description") return line.description ?? "";
+  if (field === "quantity") return line.quantityText;
+  return priceText(line.unitPrice.minor, line.unitPrice.currency);
+}
+
+/** L-R2: a stored line value as the merchant would type it — what «تراجع» restores and the note names. */
+function storedText(line: InvoiceLineDto, field: LineInputField | "unit" | "pick"): string {
+  if (field === "description" || field === "pick") return line.description ?? "—";
+  if (field === "quantity") return line.quantityText;
+  if (field === "unit") return line.unitLabel ?? "—";
+  return priceText(line.unitPrice.minor, line.unitPrice.currency);
+}
+
+/**
+ * CURRENCY-P1: stored minor units rendered at the CURRENCY'S OWN exponent (`formatDecimal`), never a fixed two decimals.
+ *
+ * 🔴 THE OLD BODY PADDED TO TWO DECIMALS FOR EVERY CURRENCY. For USD and LBP (exponent 2, `money.ts`) the output is
+ * byte-identical to before; for a 3-decimal currency it rendered minor 100 (0.100) as «1.00», and every path that
+ * wrote the rendering back (Finding C: the paid field; v3 Finding B: line prices) stored ten times the amount. The
+ * rendering is now the stored value exactly, so writing it back can no longer change it. An unknown currency throws
+ * (`UNKNOWN_CURRENCY`) instead of being shown as a guessed amount.
+ */
+function priceText(minor: string, currency: string): string {
+  return formatDecimal(money(BigInt(minor), currency));
 }
 const paidText = priceText;

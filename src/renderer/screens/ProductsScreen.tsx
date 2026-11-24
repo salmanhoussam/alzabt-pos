@@ -11,6 +11,8 @@
  * no round trip. The normalisation itself is the shared domain function, so the rule the operator
  * experiences is the same one the tests assert.
  */
+import { PhotoInvoiceFlow } from "./PhotoInvoiceFlow";
+import { PhoneInvoiceQueue, PhoneInvoiceSessionDialog } from "./PhoneInvoiceQueue";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BASE_UNITS, FRACTIONAL_SALE_UNITS } from "../../domain/catalog";
 import { matchesSearch } from "../../domain/arabic";
@@ -126,6 +128,23 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
   const [products, setProducts] = useState<AdminProductDto[] | null>(null);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<Editing | null>(null);
+  const [photoFlow, setPhotoFlow] = useState(false);
+  // DEC-35z16 (PILOT): the phone-invoice queue — how many wait, whether the list is open, and the one
+  // queued photo the Photo Invoice flow is reviewing (null = the ordinary file picker).
+  const [phoneInvoiceCount, setPhoneInvoiceCount] = useState(0);
+  const [phoneQueueOpen, setPhoneQueueOpen] = useState(false);
+  const [phoneInvoice, setPhoneInvoice] = useState<{ readonly batchId: string; readonly id: string } | null>(null);
+  const refreshPhoneInvoices = useCallback(async () => {
+    try {
+      setPhoneInvoiceCount((await call(pos().listPhoneInvoices())).length);
+    } catch {
+      setPhoneInvoiceCount(0);
+    }
+  }, []);
+  // Counted when this screen opens (e.g. back from a sale), never pushed over another screen.
+  useEffect(() => {
+    if (mayCreate) void refreshPhoneInvoices();
+  }, [mayCreate, refreshPhoneInvoices]);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [categories, setCategories] = useState<CategoryDto[]>([]);
@@ -212,7 +231,7 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
    * leaving a dialog open over a session that does not exist.
    */
   const openPhone = useCallback(
-    async (action: "NEW_PRODUCT" | "EDIT_PRODUCT", productId: string | null) => {
+    async (action: "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION", productId: string | null) => {
       if (phoneBusy) return;
       setPhoneBusy(true);
       setError("");
@@ -247,6 +266,26 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
 
   return (
     <div className="catalog-admin">
+      {photoFlow && products && (
+        <PhotoInvoiceFlow
+          products={products}
+          phoneInvoice={phoneInvoice ?? undefined}
+          onPhoneReviewed={() => void refreshPhoneInvoices()}
+          onClose={(n) => {
+            setPhotoFlow(false);
+            // DEC-35z16: back to the queue after reviewing a phone photo, so the next one is one click away.
+            if (phoneInvoice) {
+              setPhoneInvoice(null);
+              setPhoneQueueOpen(true);
+            }
+            if (n > 0) void reload();
+          }}
+          onManual={() => {
+            setPhotoFlow(false);
+            setEditing({ mode: "add" });
+          }}
+        />
+      )}
       <header className="admin-head">
         <h2>{t("products.title")}</h2>
         <input
@@ -288,11 +327,21 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
         {mayCreate && (
           <button
             className="btn"
-            onClick={() => void openPhone("NEW_PRODUCT", null)}
+            onClick={() => void openPhone("COMPANION", null)}
             disabled={phoneBusy}
             data-testid="add-product-phone"
           >
             {t("phone.add")}
+          </button>
+        )}
+        {mayCreate && phoneInvoiceCount > 0 && (
+          <button className="btn primary" onClick={() => setPhoneQueueOpen(true)} data-testid="phone-invoice-queue-open">
+            {t("phoneInv.queue").replace("{n}", String(phoneInvoiceCount))}
+          </button>
+        )}
+        {mayCreate && products && (
+          <button className="btn" onClick={() => setPhotoFlow(true)} data-testid="photo-invoice">
+            من صورة فاتورة
           </button>
         )}
         {mayCreate && (
@@ -510,9 +559,41 @@ export function ProductsScreen(props: { readonly operator?: CashierDto | null })
         </div>
       )}
 
-      {phone && (
+      {phone && phone.action === "INVOICE_BATCH" && (
+        <PhoneInvoiceSessionDialog
+          session={phone}
+          onClose={() => {
+            setPhone(null);
+            void refreshPhoneInvoices();
+          }}
+          onReview={() => {
+            setPhone(null);
+            void refreshPhoneInvoices();
+            setPhoneQueueOpen(true);
+          }}
+        />
+      )}
+
+      {phoneQueueOpen && (
+        <PhoneInvoiceQueue
+          onClose={() => {
+            setPhoneQueueOpen(false);
+            void refreshPhoneInvoices();
+          }}
+          onChanged={() => void refreshPhoneInvoices()}
+          onReview={(ref) => {
+            setPhoneQueueOpen(false);
+            setPhoneInvoice(ref);
+            setPhotoFlow(true);
+          }}
+        />
+      )}
+
+      {phone && phone.action !== "INVOICE_BATCH" && (
         <PhoneSessionDialog
           session={phone}
+          // DEC-35z17: the phone chose «تصوير فواتير مورّدين» — the SAME session continues in the invoice dialog.
+          onInvoicePurpose={() => setPhone((cur) => (cur ? { ...cur, action: "INVOICE_BATCH" } : cur))}
           onClose={() => setPhone(null)}
           onSaved={async () => {
             // 🔴 THE LIST REFRESHES FROM THE LEDGER, not from anything the phone sent. The saved
@@ -1234,6 +1315,8 @@ function PhoneSessionDialog(props: {
   readonly session: PhoneSessionDto;
   readonly onClose: () => void;
   readonly onSaved: (productId: string, action: "NEW_PRODUCT" | "EDIT_PRODUCT") => void | Promise<void>;
+  /** DEC-35z17: a COMPANION session whose phone chose invoices is handed to the invoice dialog. */
+  readonly onInvoicePurpose?: () => void;
 }) {
   const { t } = useT();
   const [state, setState] = useState<PhoneSessionState["state"]>("waiting");
@@ -1264,13 +1347,19 @@ function PhoneSessionDialog(props: {
       try {
         const next = await call(pos().phoneSessionState());
         if (cancelled) return;
+        if (next.action === "INVOICE_BATCH" && props.onInvoicePurpose) {
+          cancelled = true;
+          props.onInvoicePurpose();
+          return;
+        }
         setState(next.state);
         // 🔴 GUARDED, because the poll can only report `saved` once but a slow render could land
         // two ticks: the refresh must not run twice and the dialog must not flicker.
         if (next.state === "saved" && next.savedProductId && !saved.current) {
           saved.current = true;
           setDone(true);
-          await props.onSaved(next.savedProductId, next.action ?? props.session.action);
+          // DEC-35z16: `saved` is only ever reported for a product session; INVOICE_BATCH has its own dialog.
+          await props.onSaved(next.savedProductId, (next.action ?? props.session.action) as "NEW_PRODUCT" | "EDIT_PRODUCT");
         }
       } catch {
         // A failed poll is not a failed session; the next tick tries again. Swallowing it here is
@@ -1333,6 +1422,11 @@ function PhoneSessionDialog(props: {
               dangerouslySetInnerHTML={{ __html: props.session.qrSvg }}
             />
             <p className="muted small">{t("phone.explain")}</p>
+            {props.session.action === "COMPANION" && (
+              <p className="small" data-testid="phone-companion-hint">
+                {t("phone.companionChoose")}
+              </p>
+            )}
             {/* 🔴 ONE ISOLATED LTR RUN, NOT TWO. This was
                 `<bdi>{host}</bdi>:<bdi>{port}</bdi>`, and the Windows screenshot showed it
                 rendering as `60310:10.1.0.75` — the address backwards. Two bidi-isolated runs with

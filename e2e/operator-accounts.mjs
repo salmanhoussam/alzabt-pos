@@ -39,7 +39,9 @@ const EXTRA_ARGS = process.platform === "linux" && process.getuid?.() === 0 ? ["
 
 // A fresh profile: this script creates operators and sells, and must never touch a real ledger.
 const home = mkdtempSync(join(tmpdir(), "pos-e2e-operators-"));
-const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData") };
+// TRANSITION (DEMO-FALLBACK, D-DF1): this script sells the bundled sample catalog on a fresh profile, which the
+// merchant default no longer serves; the explicit demo switch keeps that coverage. Old value: no switch.
+const env = { ...process.env, ALZABT_POS_USER_DATA: join(home, "userData"), ALZABT_POS_DEMO_CATALOG: "1" };
 const Database = createRequire(import.meta.url)("better-sqlite3");
 const LEDGER = join(home, "userData", "alzabt-pos-ledger.sqlite");
 
@@ -413,7 +415,13 @@ await tab(page, "tools");
 await page.waitForSelector('[data-testid="about"]');
 await page.screenshot({ path: SHOTS + "OP3-cashier-denied.png" });
 assert((await page.locator('[data-testid="operators-section"]').count()) === 0, "the cashier's Tools has no operator section");
-assert((await page.locator('[data-testid="export-backup"]').count()) >= 0, "(the rest of Tools still renders)");
+// TRANSITION (QW-CASHIER-TOOLS, DEC-33 #4): was `export-backup count >= 0` — the cashier saw every owner-only
+// button and met an English refusal box. Now none renders; the bridge refusals below remain the authority.
+for (const id of ["import-catalog", "export-catalog", "export-backup", "operators-section"]) {
+  assert((await page.locator(`[data-testid="${id}"]`).count()) === 0, `🔴 QW-CASHIER-TOOLS: the cashier's Tools shows no "${id}"`);
+}
+assert(await page.locator('[data-testid="tools-owner-only"]').isVisible(), "the cashier is told these tools are the owner's");
+assert(await page.locator('[data-testid="about"]').isVisible(), "the About card (version, build) still renders for the cashier");
 
 // Each payload below is a SHAPE THE HANDLER WOULD ACCEPT, so a missing guard would let the call
 // through rather than trip payload validation and look like a refusal.
@@ -445,6 +453,8 @@ for (const [channel, payload] of [
   // at all, which threw inside the PRELOAD and never reached the main process to be refused.)
   ["listReconciliationQueue", { filter: "unresolved", limit: 10 }],
   ["createProduct", { draft: { nameAr: "صنف مزيّف", nameEn: null, sku: null, price: "1.00", baseUnit: "piece" } }],
+  // SELL-CREDIT: a cashier can never create a customer debt — a well-formed request, refused by role.
+  ["createCustomerCreditSale", { idempotencyKey: "cashier-credit-0001", lines: [{ productId: "x", quantityMilli: 1000 }], expectedTotalMinor: "100", customerId: "c-1" }],
   // 🔴 SLICE H1/H2 — THE PHONE LAN BRIDGE. These are added to THIS loop rather than given their own
   // because this is the one place the "a cashier cannot reach an owner channel" claim is made
   // against the installed app, and a second copy elsewhere would drift.

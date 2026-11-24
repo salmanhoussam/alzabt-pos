@@ -141,7 +141,8 @@ await page.waitForSelector(".products-pane");
 await page.locator("button.product", { hasText: "E2E-002" }).click();
 const qtyBox = page.locator('[data-testid^="qty-"]').first();
 await qtyBox.fill("2.5");
-await qtyBox.press("Enter");
+// SB-RISK-01 option A: a typed quantity is PENDING until ✓ is used — Enter no longer commits it.
+await page.locator('[data-testid="line-qty-confirm"]').click();
 await page.waitForFunction(() => document.querySelector(".total strong")?.textContent?.includes("6.25"));
 assert(true, "2.5 kg at 2.50 totals 6.25 — a fraction priced exactly");
 await page.locator('[data-testid="complete-sale"]').click();
@@ -196,7 +197,8 @@ await page.waitForSelector(".products-pane");
 await page.locator("button.product", { hasText: "E2E-001" }).click();
 const wholeBox = page.locator('[data-testid^="qty-"]').first();
 await wholeBox.fill("1.5");
-await wholeBox.press("Enter");
+// SB-RISK-01 option A: a typed quantity is PENDING until ✓ is used — Enter no longer commits it.
+await page.locator('[data-testid="line-qty-confirm"]').click();
 await page.waitForSelector(".cart .error");
 const refusal = (await page.locator(".cart .error").innerText()).trim();
 // 🔴 This is the assertion that caught a real defect: errorText() only unwrapped an ApiError, so a
@@ -289,7 +291,9 @@ await app.close();
     // 🔴 TRANSITION 15 -> 16 with migration 16 (invoice_customer_account_link). The old value was 15.
     // 🔴 TRANSITION 16 -> 17 with migration 17 (settlement_collection_details). The old value was 16.
     // 🔴 TRANSITION 17 -> 18 with migration 18 (external_receipt_allocation). The old value was 17.
-    assert(n("SELECT max(version) AS n FROM schema_migrations") === 18, "the installed app's ledger is at schema v18");
+    // 🔴 TRANSITION 18 -> 19 with migration 19 (payment_model_tenders_references_advances). The old value was 18.
+    // 🔴 TRANSITION 19 -> 20 with migration 20 (advance_safety_attempts_voids). The old value was 19.
+    assert(n("SELECT max(version) AS n FROM schema_migrations") === 20, "the installed app's ledger is at schema v20");
 
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY seq").all();
     const types = rows.map((r) => r.event_type);

@@ -161,23 +161,33 @@ describe("the Sell screen keeps its cart", () => {
     expect(pick).not.toContain("setQuery");
   });
 
-  it("🔴 the screen SAYS the customer is not attached to the sale, in both languages", () => {
-    expect(sell).toContain('data-testid="sell-customer-not-attached"');
-    expect(sell).toContain('t("customers.notOnSaleYet")');
-    // The sentence itself must not claim a debt was recorded.
-    const ar = translate("ar", "customers.notOnSaleYet");
-    const en = translate("en", "customers.notOnSaleYet");
-    expect(ar).toContain("لا يُسجّل ديناً");
-    expect(en).toMatch(/records no debt/);
-    expect(ar).not.toBe("customers.notOnSaleYet");
-    expect(en).not.toBe("customers.notOnSaleYet");
+  // 🔴 TRANSITION (ACC-2, owner decision 2026-11-02). This asserted `sell-customer-not-attached` /
+  // `customers.notOnSaleYet` («لا يُسجّل ديناً ولا يُربط بالفاتورة بعد») while a paid sale carried no
+  // customer. It now does, so the honest sentence changed — the invariant it protects did not: a
+  // linked paid sale is NOT a debt and does NOT raise the outstanding balance.
+  it("🔴 the screen SAYS the linked paid sale records no debt, in both languages", () => {
+    expect(sell).toContain('data-testid="sell-customer-paid-link"');
+    expect(sell).toContain('t("sell.customerPaidLink")');
+    expect(sell).not.toContain("customers.notOnSaleYet");
+    const ar = translate("ar", "sell.customerPaidLink");
+    const en = translate("en", "sell.customerPaidLink");
+    expect(ar).toContain("لا تزيد الرصيد المستحق");
+    expect(en).toMatch(/without increasing the outstanding balance/);
+    expect(ar).not.toBe("sell.customerPaidLink");
+    expect(en).not.toBe("sell.customerPaidLink");
   });
 
-  it("🔴 Sell offers no Credit or Whish control — the posting slice has not landed", () => {
+  // TRANSITION (SELL-CREDIT, owner 2026-11-08): this was "Sell offers no Credit control — the posting slice
+  // has not landed" (forbidden: credit, Credit, على الحساب). The slice landed: the control exists, and what
+  // is pinned now is that it is the OWNER's and needs a chosen customer.
+  it("🔴 Sell's on-account control is the owner's alone and needs a chosen customer", () => {
     const body = code(sell);
-    for (const forbidden of ["credit", "whish", "Credit", "Whish", "على الحساب"]) {
-      expect(body, forbidden).not.toContain(forbidden);
-    }
+    // TRANSITION (SELL-SPLIT-CASH-WHISH): the on-account block also hides while the split step is open.
+    // Old text: '{!whishOpen && role === "owner" && ('. The owner-only condition itself is unchanged.
+    expect(body).toContain('{!whishOpen && !splitOpen && role === "owner" && (');
+    expect(body).toContain("disabled={busy || customer === null}");
+    expect(body).toContain("pos().createCustomerCreditSale(");
+    expect(body).not.toContain("paymentMethod: \"credit\""); // never a payment method
     // Positive control: the customer row really IS there, so the test above is not passing by
     // searching a file that has no customer feature in it at all.
     expect(body).toContain('data-testid="sell-choose-customer"');
