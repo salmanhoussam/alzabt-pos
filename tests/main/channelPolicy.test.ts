@@ -253,6 +253,44 @@ describe("a CASHIER session is refused every owner-only channel", () => {
     }
   });
 
+  // M1 review (owner, 2026-11-25; independent review «Unknowns»): the table says releasePhoneInvoice is owner-only;
+  // this proves it by EXECUTION for the case the owner named — a cashier who IS granted «may create products». The
+  // cashier may still LIST the queue (create-products), but the release is refused and the staging release function
+  // is never reached, so the photo file is not deleted.
+  it("🔴 a cashier GRANTED create-products may list phone invoices but cannot release (delete) one", async () => {
+    const t = tempDir();
+    const h = makeHarness(t.dbPath, { login: false });
+    try {
+      h.db.prepare("UPDATE operators SET may_create_products = 1 WHERE id = 'cashier-02'").run();
+      const released: string[] = [];
+      const raw = createIpcHandlers(h.service, {
+        phoneInvoices: {
+          list: () => [],
+          release: (batchId, id) => {
+            released.push(`${batchId}/${id}`);
+            return true;
+          },
+        },
+      });
+      const ipc = syncHandlers(raw);
+      const login = ipc.login({ cashierId: "cashier-02", pin: "2222" }) as { ok: boolean; data?: { mayCreateProducts?: boolean } };
+      expect(login.ok).toBe(true);
+      const list = (await raw.listPhoneInvoices(undefined)) as { ok: boolean };
+      expect(list.ok, "a create-products cashier reviews the queue").toBe(true);
+      const r = (await raw.releasePhoneInvoice({
+        batchId: "00000000-0000-4000-8000-000000000001",
+        id: "00000000-0000-4000-8000-000000000002",
+        why: "discarded",
+      })) as { ok: boolean; error?: { code: string } };
+      expect(r.ok).toBe(false);
+      expect(r.error?.code).toBe("NOT_AUTHORIZED");
+      expect(released, "the staging release (file deletion) must never run").toEqual([]);
+    } finally {
+      h.db.close();
+      t.cleanup();
+    }
+  });
+
   it("🔴 writes NOTHING — the ledger and the catalog are untouched by the attempts", () => {
     const t = tempDir();
     const h = makeHarness(t.dbPath, { login: false });
