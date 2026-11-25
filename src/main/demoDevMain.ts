@@ -1,6 +1,8 @@
 /** Development-only Main adapter. Excluded from distributable artifacts. */
 import {app,dialog,ipcMain,type BrowserWindow} from "electron";
-import {basename} from "node:path";
+import {basename,dirname,join} from "node:path";
+import {existsSync,mkdirSync} from "node:fs";
+import {randomBytes} from "node:crypto";
 import type {PosService} from "../application/posService";
 import {disableDiagnostics} from "./diagnostics";
 import {openSyntheticDevEnvironment} from "./demoDevEntry";
@@ -13,7 +15,27 @@ import {journeyFlag} from "./demoJourneyProbe";
 import {isOwnerPreviewBuild,syntheticBuildAllowed} from "./syntheticBuild";
 
 type Environment=ReturnType<typeof openSyntheticDevEnvironment>;
-export type SyntheticStartup = {kind:"ordinary"}|{kind:"refused"}|{kind:"selected";env:Environment;selected?:SelectedDemoStart};
+export type SyntheticStartup = {kind:"ordinary"}|{kind:"refused"}|
+  {kind:"selected";env:Environment;selected?:SelectedDemoStart;ephemeral?:string};
+
+/**
+ * OWNER PREVIEW: the flag the launcher's relaunch adds for «جرّب النظام» / «تجربة جديدة». It selects a FRESH
+ * in-memory Demo (demoRuntime.startEphemeralDemo). It carries no path and no authority: the identity gate still
+ * decides, and an in-memory shop can only ever be the synthetic seed — there is no profile it could point at.
+ */
+export const EPHEMERAL_DEMO_FLAG="--alzabt-ephemeral-demo";
+
+/**
+ * A brand-new private session folder for ONE ephemeral Demo process: Chromium's own data and the synthetic logo
+ * copy only (the ledger is :memory:). Created exclusively, never reused, under the preview's synthetic storage.
+ */
+function newEphemeralSession(env:Environment):string {
+  const sessions=join(dirname(env.entry),"ephemeral-sessions");
+  if(!existsSync(sessions))mkdirSync(sessions);
+  const dir=join(sessions,"session-"+randomBytes(16).toString("hex"));
+  mkdirSync(dir); // throws if it exists: never reuse a folder
+  return dir;
+}
 /** Called only after obtaining the product lock and before any profile access. */
 export function prepareSyntheticStartup(args:readonly string[]):SyntheticStartup {
   if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock() || app.isReady())return {kind:"ordinary"};
@@ -33,6 +55,15 @@ export function prepareSyntheticStartup(args:readonly string[]):SyntheticStartup
         if(result.kind==="ready")selected=selectVerifiedDemoProfile(result.proof);
       }
     }
+    // OWNER PREVIEW: an ephemeral Demo start. No handover, no slot, nothing reopened.
+    if(isOwnerPreviewBuild() && args.includes(EPHEMERAL_DEMO_FLAG)) {
+      const env=openSyntheticDevEnvironment(false);
+      const dir=newEphemeralSession(env);
+      app.setPath("userData",dir);
+      app.setPath("sessionData",dir);
+      if(app.getPath("userData")!==dir || app.getPath("sessionData")!==dir)throw Error("Invalid session");
+      return {kind:"selected",env,ephemeral:dir};
+    }
     // V8 invalid or replayed handovers return to the real entry. In this
     // development build that entry is always the verified synthetic one.
     const env=openSyntheticDevEnvironment(!selected);
@@ -51,24 +82,29 @@ export function registerSyntheticLifecycle(ports:{
   if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock())throw Error("Synthetic lifecycle unavailable");
   const {env,mode,service}=ports;
   const records=new DemoLaunchRecords(env.control);
+  const ephemeral=isOwnerPreviewBuild();
   const lifecycle=new DemoLifecycle({
-    mode,devEnabled:true,retention:()=>syntheticDemoRetention(env.root),
+    // OWNER PREVIEW: the Demo is ephemeral — nothing is retained, so there is no slot and no five-slot limit.
+    mode,devEnabled:true,retention:()=>ephemeral?{retained:0,max:5,reached:false}:syntheticDemoRetention(env.root),
     confirm:createNativeDemoConfirmation((options)=>{
       const win=ports.getWindow();if(!win||win.isDestroyed())throw Error("Window unavailable");
       return dialog.showMessageBox(win,options);
     }),
     reserve:()=>{
+      if(ephemeral)return "ephemeral";
       try {const r=reserveSyntheticDemoProfile(env.root);return "slot-"+r.slot+"/"+basename(r.path)}
       catch(err){if(err instanceof DemoProfileError && err.reason==="limit")throw new DemoRetentionLimit();throw err}
     },
-    prepare:(action,id)=>records.prepare(action,id,Date.now()),
+    prepare:(action,id)=>ephemeral?{nonce:"",key:""}:records.prepare(action,id,Date.now()),
     endSession:()=>{service?.logout()},closeLedger:ports.closeLedger,
     releaseLock:()=>app.releaseSingleInstanceLock(),
     restart:(credentials)=>{
       // A packaged executable takes its arguments directly; the unpackaged one needs the app path first.
       const args=app.isPackaged?["--alzabt-synthetic-dev"]:[app.getAppPath(),"--alzabt-synthetic-dev"];
       const flag=journeyFlag(process.argv);if(flag)args.push(flag);
-      if(credentials)args.push("--alzabt-synthetic-handover",credentials.nonce,credentials.key);
+      // OWNER PREVIEW: enter/reset start a fresh in-memory Demo; exit returns to the launcher.
+      if(credentials && ephemeral)args.push(EPHEMERAL_DEMO_FLAG);
+      else if(credentials)args.push("--alzabt-synthetic-handover",credentials.nonce,credentials.key);
       app.relaunch({args});
     },
     quit:()=>app.quit(),defer:(fn)=>{setImmediate(fn)},confirmationTimeoutMs:60000,

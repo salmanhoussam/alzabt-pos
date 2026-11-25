@@ -122,3 +122,16 @@ describe("ephemeral Demo: in memory, fresh on every start", () => {
     expect(readFileSync(join(dir, files[0]!)).equals(readFileSync(join(repo, "resources", "demo", "demo-logo.png")))).toBe(true);
   });
 });
+
+describe("ephemeral Demo settings: the LBP rate lives and dies with the session", () => {
+  it("validates, confirms and refuses exactly as on disk — and a new session starts unconfirmed at USD", async () => {
+    const { SettingsStore, memorySettingsFs } = await import("../../src/main/settingsStore");
+    const first = new SettingsStore("C:\\demo-session-a", memorySettingsFs());
+    expect(() => first.setDisplayCurrency("LBP")).toThrow(expect.objectContaining({ code: "LBP_RATE_UNCONFIRMED" }));
+    first.setLbpRate(9_000_000n);
+    expect(first.setDisplayCurrency("LBP")).toMatchObject({ displayCurrency: "LBP", lbpRate: "90000", lbpRateConfirmed: true });
+
+    const next = new SettingsStore("C:\\demo-session-a", memorySettingsFs()); // the app reopened
+    expect(next.get()).toMatchObject({ displayCurrency: "USD", lbpRate: "89000", lbpRateConfirmed: false });
+  });
+});

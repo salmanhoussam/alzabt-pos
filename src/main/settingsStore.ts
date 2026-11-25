@@ -127,3 +127,22 @@ export class SettingsStore {
     return this.cached;
   }
 }
+
+/**
+ * OWNER PREVIEW (ephemeral Demo): a settings "disk" that is only memory. The rate and the display choice behave
+ * exactly as on a real terminal during the Demo session (validated, confirmed, refused), and vanish with it.
+ */
+export function memorySettingsFs(): SettingsFs {
+  const files = new Map<string, string>();
+  return {
+    exists: (path) => files.has(path),
+    read: (path) => {
+      const v = files.get(path);
+      if (v === undefined) throw new Error("not found");
+      return v;
+    },
+    writeAtomic: (path, contents) => {
+      files.set(path, contents);
+    },
+  };
+}

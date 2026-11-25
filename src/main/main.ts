@@ -72,7 +72,7 @@ import { buildLabel, readBuildInfo } from "./buildInfo";
 import { CHANNEL_NAMES, type IpcHandlerOptions, type PickedFile, type SavedFile, createIpcHandlers } from "./ipcHandlers";
 import { type LedgerFs, planLedgerOpen, recordLedger } from "./ledgerGuard";
 import { type Logger, createFileLogger, nullLogger } from "./logger";
-import { SettingsStore } from "./settingsStore";
+import { SettingsStore, memorySettingsFs } from "./settingsStore";
 import { classifyStartupError, startupFailureMessage } from "./startupFailure";
 
 const RENDERER_INDEX = join(__dirname, "..", "..", "renderer", "index.html");
@@ -857,6 +857,7 @@ if (!gotSingleInstanceLock) {
   app.quit();
 } else {
   let selectedSynthetic: import("./demoRuntime").SelectedDemoStart | undefined;
+  let ephemeralDemoSession: string | undefined;
   let handoverRefused = false;
   if (syntheticBuildAllowed()) {
     const dev = require("./demoDevMain") as typeof import("./demoDevMain");
@@ -865,6 +866,7 @@ if (!gotSingleInstanceLock) {
     if (prepared.kind === "selected") {
       syntheticEnvironment = prepared.env;
       selectedSynthetic = prepared.selected;
+      ephemeralDemoSession = prepared.ephemeral;
     }
   }
   if (handoverRefused) {
@@ -874,7 +876,8 @@ if (!gotSingleInstanceLock) {
   const userDataOverride = syntheticEnvironment ? undefined : process.env.ALZABT_POS_USER_DATA;
   if (userDataOverride) app.setPath("userData", userDataOverride);
 
-  log = createFileLogger(join(app.getPath("userData"), "logs"));
+  // OWNER PREVIEW (ephemeral Demo): no log FILE — an operation log is still a record of Demo activity on disk.
+  log = ephemeralDemoSession ? nullLogger : createFileLogger(join(app.getPath("userData"), "logs"));
   log.info("app-start", {
     version: BUILD_INFO.version,
     build: BUILD_INFO.build,
@@ -905,7 +908,8 @@ if (!gotSingleInstanceLock) {
     .whenReady()
     .then(() => {
       diag("ready");
-      if (selectedSynthetic) startSyntheticTill(selectedSynthetic);
+      if (ephemeralDemoSession) startSyntheticTill(undefined, ephemeralDemoSession);
+      else if (selectedSynthetic) startSyntheticTill(selectedSynthetic);
       else {
         session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
         startTill();
@@ -937,10 +941,15 @@ function registerSyntheticLifecycle(service: PosService | null, mode: "real" | "
   });
 }
 /** Start only a consumed reservation; never call the normal backup/phone/autostart path. */
-function startSyntheticTill(selected: import("./demoRuntime").SelectedDemoStart): void {
+function startSyntheticTill(selected: import("./demoRuntime").SelectedDemoStart | undefined, ephemeralSession?: string): void {
   const runtime = require("./demoRuntime") as typeof import("./demoRuntime");
   let started: ReturnType<typeof runtime.startSelectedSyntheticDemo>;
-  try { started = runtime.startSelectedSyntheticDemo(selected); }
+  try {
+    // OWNER PREVIEW: a fresh in-memory Demo; otherwise the (development) reserved Demo, as before.
+    if (ephemeralSession) started = runtime.startEphemeralDemo(ephemeralSession);
+    else if (selected) started = runtime.startSelectedSyntheticDemo(selected);
+    else throw new Error("Synthetic demo unavailable.");
+  }
   catch {
     runtime.installSyntheticSessionRestrictions();
     // The seed authority closes a failed ledger. Expose only a non-session
@@ -970,7 +979,8 @@ function startSyntheticTill(selected: import("./demoRuntime").SelectedDemoStart)
   advanceService = assembled.advanceService;
   saleReceiptService = assembled.saleReceiptService;
   posService = service;
-  const settings = new SettingsStore(app.getPath("userData"));
+  // OWNER PREVIEW (ephemeral Demo): settings — the LBP rate and the toggle — live in MEMORY and reset with the Demo.
+  const settings = ephemeralSession ? new SettingsStore(app.getPath("userData"), memorySettingsFs()) : new SettingsStore(app.getPath("userData"));
   registerIpc(service, {
     invoices, parties, ledger: ledgerService, advances: advanceService,
     dailyMoney: assembled.dailyMoney, saleReceipts: saleReceiptService,
@@ -1239,6 +1249,8 @@ function startTill(): void {
       );
       if (!syntheticEnvironment) return state;
       const {syntheticDemoRetention} = require("./demoProfile") as typeof import("./demoProfile");
+      // OWNER PREVIEW: an ephemeral Demo retains nothing, so there is no limit to report.
+      if (isOwnerPreviewBuild()) return {...state,...require("./entryState").demoAvailability(true,true,()=>({retained:0,max:5 as const,reached:false}))};
       const {demoAvailability} = require("./entryState") as typeof import("./entryState");
       return {...state,...demoAvailability(true,true,()=>syntheticDemoRetention(syntheticEnvironment!.root))};
     },

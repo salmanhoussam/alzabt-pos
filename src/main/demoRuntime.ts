@@ -9,7 +9,7 @@ import {claimVerifiedDemoStart,type VerifiedDemoStart} from "./demoHandoverStart
 import {pendingSyntheticReservationPath,type SyntheticDemoReservation} from "./demoProfile";
 import {installSyntheticRendererBlocker} from "./demoRendererPolicy";
 import {loadSyntheticDemoAssets} from "./demoAssets";
-import {startReservedSyntheticDemo} from "./demoSyntheticStartup";
+import {startEphemeralSyntheticDemo,startReservedSyntheticDemo} from "./demoSyntheticStartup";
 import {syntheticBuildAllowed} from "./syntheticBuild";
 
 declare const selectedBrand:unique symbol;
@@ -45,6 +45,18 @@ export function startSelectedSyntheticDemo(token:SelectedDemoStart) {
   installSyntheticSessionRestrictions();
   // No restore, daily backup, phone service, autostart, file-picker or print ports.
   return startReservedSyntheticDemo(state.reservation,loadSyntheticDemoAssets());
+}
+
+/**
+ * OWNER PREVIEW: start a FRESH in-memory Demo in the session folder demoDevMain created for THIS process.
+ * Called once after app.whenReady. Same restrictions as the reserved Demo; nothing is reopened.
+ */
+export function startEphemeralDemo(sessionDir:string) {
+  if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock() || !app.isReady() ||
+     !same(app.getPath("userData"),sessionDir) || !same(app.getPath("sessionData"),sessionDir))
+    throw Error("Synthetic demo unavailable.");
+  installSyntheticSessionRestrictions();
+  return startEphemeralSyntheticDemo(sessionDir,loadSyntheticDemoAssets());
 }
 
 /** Reapply before any unavailable window if bootstrap failed before installation. */
