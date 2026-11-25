@@ -2,14 +2,14 @@ name: OWNER-ONLY R5 PREVIEW installed validation
 
 on:
   push:
-    branches: [claude/r5-owner-preview-20261125]
+    branches: [owner-preview/r5-20261125-r2]
 
 permissions:
   contents: read
 
 jobs:
   installed-preview:
-    if: github.repository == 'salmanhoussam/alzabt-pos' && github.ref == 'refs/heads/claude/r5-owner-preview-20261125' && github.event.created == true && github.event.forced == false && github.event.deleted == false && github.run_attempt == 1
+    if: github.repository == 'salmanhoussam/alzabt-pos' && github.ref == 'refs/heads/owner-preview/r5-20261125-r2' && github.event.created == true && github.event.forced == false && github.event.deleted == false && github.run_attempt == 1
     runs-on: windows-2022
     timeout-minutes: 60
     defaults:
