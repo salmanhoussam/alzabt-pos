@@ -73,6 +73,9 @@ export const DEMO_CHANNEL_POLICY = Object.freeze({
   phoneSessionState: "deny",
   getSettings: "allow",
   setTerminalLanguage: "allow",
+  // M5: a Demo visitor may switch the indicative display (its own profile's settings); never the owner's rate.
+  setDisplayCurrency: "allow",
+  setLbpRate: "deny",
   getCompanyProfile: "allow",
   saveCompanyProfile: "allow",
   setNextInvoiceNumber: "deny",

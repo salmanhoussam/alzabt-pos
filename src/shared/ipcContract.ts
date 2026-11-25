@@ -92,6 +92,9 @@ export const CHANNELS = {
   phoneSessionState: "pos:phoneSessionState",
   getSettings: "pos:getSettings",
   setTerminalLanguage: "pos:setTerminalLanguage",
+  // M5 (owner 2026-11-25): the LBP display. Display only — no stored money, payload amount or print changes.
+  setDisplayCurrency: "pos:setDisplayCurrency",
+  setLbpRate: "pos:setLbpRate",
   // ── Manual invoices (migration 6) ────────────────────────────────────────────────────────────
   getCompanyProfile: "pos:getCompanyProfile",
   saveCompanyProfile: "pos:saveCompanyProfile",
@@ -920,6 +923,16 @@ export interface ImageIdRequest {
 
 export interface SetTerminalLanguageRequest {
   readonly language: Language;
+}
+
+/** M5: which indicative equivalent the screens show. */
+export interface SetDisplayCurrencyRequest {
+  readonly currency: "USD" | "LBP";
+}
+
+/** M5: the owner's LBP-per-USD rate as typed («89000», «89,000», «89500.5»); main validates it. */
+export interface SetLbpRateRequest {
+  readonly rate: string;
 }
 
 // ── Customer directory (migration 12, slice S1B) ───────────────────────────────────────────────
@@ -2111,6 +2124,8 @@ export interface PosApi {
 
   getSettings(): Promise<IpcResult<TerminalSettings>>;
   setTerminalLanguage(req: SetTerminalLanguageRequest): Promise<IpcResult<TerminalSettings>>;
+  setDisplayCurrency(req: SetDisplayCurrencyRequest): Promise<IpcResult<TerminalSettings>>;
+  setLbpRate(req: SetLbpRateRequest): Promise<IpcResult<TerminalSettings>>;
 
   // ── Manual invoices ──────────────────────────────────────────────────────────────────────────
   getCompanyProfile(): Promise<IpcResult<CompanyProfileDto | null>>;

@@ -171,6 +171,8 @@ const CH = {
   phoneSessionState: "pos:phoneSessionState",
   getSettings: "pos:getSettings",
   setTerminalLanguage: "pos:setTerminalLanguage",
+  setDisplayCurrency: "pos:setDisplayCurrency",
+  setLbpRate: "pos:setLbpRate",
   getCompanyProfile: "pos:getCompanyProfile",
   saveCompanyProfile: "pos:saveCompanyProfile",
   setNextInvoiceNumber: "pos:setNextInvoiceNumber",
@@ -352,6 +354,8 @@ const api: PosApi = {
   phoneSessionState: () => ipcRenderer.invoke(CH.phoneSessionState),
   getSettings: () => ipcRenderer.invoke(CH.getSettings),
   setTerminalLanguage: (req) => ipcRenderer.invoke(CH.setTerminalLanguage, { language: req.language }),
+  setDisplayCurrency: (req) => ipcRenderer.invoke(CH.setDisplayCurrency, { currency: req.currency }),
+  setLbpRate: (req) => ipcRenderer.invoke(CH.setLbpRate, { rate: req.rate }),
 
   // ── Manual invoices ──────────────────────────────────────────────────────────────────────────
   //

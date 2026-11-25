@@ -174,8 +174,8 @@ describe("settings channels", () => {
 
   it("accepts only 'ar' or 'en'", () => {
     const store = {
-      get: () => ({ terminalLanguage: "ar" as const, receiptLanguage: "ar" as const }),
-      setTerminalLanguage: vi.fn((lang: "ar" | "en") => ({ terminalLanguage: lang, receiptLanguage: "ar" as const })),
+      get: () => ({ terminalLanguage: "ar" as const, receiptLanguage: "ar" as const, displayCurrency: "USD" as const, lbpRate: "89000" }),
+      setTerminalLanguage: vi.fn((lang: "ar" | "en") => ({ terminalLanguage: lang, receiptLanguage: "ar" as const, displayCurrency: "USD" as const, lbpRate: "89000" })),
     };
     const service = { currentCashier: () => null } as unknown as PosService;
     const h = syncHandlers(createIpcHandlers(service, { settings: store }));

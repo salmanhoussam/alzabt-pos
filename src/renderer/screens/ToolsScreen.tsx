@@ -4,6 +4,7 @@ import { call, pos } from "../api";
 import { useT } from "../i18n";
 import { BackupRestoreSection } from "./BackupRestoreSection";
 import { OperatorsSection } from "./OperatorsSection";
+import { LbpRateSection } from "../lbpDisplay";
 
 /** Operator tools: catalog import/export, backup export, and installation identity. */
 export function ToolsScreen(props: {
@@ -79,6 +80,8 @@ export function ToolsScreen(props: {
       {isOwner && <BackupRestoreSection />}
       {/* Owner only. The channels are owner-only regardless of whether this renders. */}
       {isOwner && <OperatorsSection selfId={props.operator.id} />}
+      {/* M5: the owner's LBP rate (display only). setLbpRate is owner-only in channelPolicy regardless. */}
+      {isOwner && <LbpRateSection />}
       <section className="card about" data-testid="about">
         <h2>{t("tools.about")}</h2>
         <dl className="stats">

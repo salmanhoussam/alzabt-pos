@@ -29,8 +29,8 @@ function setup() {
 function setupIn(lang: "ar" | "en") {
   const h = makeHarness(t.dbPath, { login: false });
   const settings = {
-    get: () => ({ terminalLanguage: lang, receiptLanguage: lang }) as const,
-    setTerminalLanguage: () => ({ terminalLanguage: lang, receiptLanguage: lang }) as const,
+    get: () => ({ terminalLanguage: lang, receiptLanguage: lang, displayCurrency: "USD", lbpRate: "89000" }) as const,
+    setTerminalLanguage: () => ({ terminalLanguage: lang, receiptLanguage: lang, displayCurrency: "USD", lbpRate: "89000" }) as const,
   };
   return { ...h, ipc: syncHandlers(createIpcHandlers(h.service, { settings })) };
 }
@@ -130,6 +130,9 @@ describe("IPC surface", () => {
         "setProductActive",
         "setProductImage",
         "setTerminalLanguage",
+        // TRANSITION (M5 LBP display): display settings, no path and no money. Old list: without them.
+        "setDisplayCurrency",
+        "setLbpRate",
         "updateProduct",
         "voidSale",
 
@@ -264,7 +267,8 @@ describe("IPC surface", () => {
     // session-classified reads (the service limits a non-owner to History's window). The old value was 100.
     // X1 TRANSITION: 103 -> 104, the named read-only getEntryState channel.
     // TRANSITION (M1, Phone Invoice queue DEC-35z16): 104 -> 106 — listPhoneInvoices, releasePhoneInvoice. The old value was 104.
-    expect(CHANNEL_NAMES).toHaveLength(106);
+    // TRANSITION (M5 LBP display): 106 -> 108 — setDisplayCurrency, setLbpRate (settings.json only). The old value was 106.
+    expect(CHANNEL_NAMES).toHaveLength(108);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.
@@ -538,7 +542,7 @@ describe("IPC surface", () => {
           get: () => {
             throw new Error("settings.json is unreadable");
           },
-          setTerminalLanguage: () => ({ terminalLanguage: "ar", receiptLanguage: "ar" }) as const,
+          setTerminalLanguage: () => ({ terminalLanguage: "ar", receiptLanguage: "ar", displayCurrency: "USD", lbpRate: "89000" }) as const,
         },
       }),
     );

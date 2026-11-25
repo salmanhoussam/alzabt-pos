@@ -41,9 +41,13 @@ function fakeFs(initial?: string) {
 
 describe("parseSettings", () => {
   it("keeps valid languages", () => {
+    // TRANSITION (M5, 2026-11-25): the settings shape gained displayCurrency + lbpRate; absent keys take their
+    // defaults (USD, 89000). Old shape: the two languages only.
     expect(parseSettings({ terminalLanguage: "en", receiptLanguage: "ar" })).toEqual({
       terminalLanguage: "en",
       receiptLanguage: "ar",
+      displayCurrency: "USD",
+      lbpRate: "89000",
     });
   });
 
@@ -62,7 +66,8 @@ describe("parseSettings", () => {
 describe("SettingsStore", () => {
   it("defaults to Arabic on a fresh profile", () => {
     const { fs, seen } = fakeFs();
-    expect(new SettingsStore(PROFILE, fs).get()).toEqual({ terminalLanguage: "ar", receiptLanguage: "ar" });
+    // TRANSITION (M5): a fresh profile also shows USD only, at the default rate. Old shape: languages only.
+    expect(new SettingsStore(PROFILE, fs).get()).toEqual({ terminalLanguage: "ar", receiptLanguage: "ar", displayCurrency: "USD", lbpRate: "89000" });
     expect(seen, "the store must have looked for the file at the platform's own path").toContain(SETTINGS_PATH);
   });
 
@@ -91,5 +96,44 @@ describe("SettingsStore", () => {
     const store = new SettingsStore(PROFILE, fs);
     expect(store.setTerminalLanguage("en").terminalLanguage).toBe("en");
     expect(store.get().terminalLanguage).toBe("en");
+  });
+});
+
+describe("M5 — LBP display settings (display only)", () => {
+  it("a new profile has no saved preference: USD, at the owner's default rate 89000", () => {
+    const { fs } = fakeFs();
+    const got = new SettingsStore(PROFILE, fs).get();
+    expect(got.displayCurrency).toBe("USD");
+    expect(got.lbpRate).toBe("89000");
+  });
+
+  it("remembers the display choice and the rate across a restart (a new store reads the file)", () => {
+    const { fs, files } = fakeFs();
+    const first = new SettingsStore(PROFILE, fs);
+    first.setDisplayCurrency("LBP");
+    first.setLbpRate(8_950_050n); // 89,500.50 LBP per USD
+    expect(files.has(SETTINGS_PATH)).toBe(true);
+    const restarted = new SettingsStore(PROFILE, fs).get();
+    expect(restarted.displayCurrency).toBe("LBP");
+    expect(restarted.lbpRate).toBe("89500.5");
+    // The languages are untouched by the M5 setters.
+    expect(restarted.terminalLanguage).toBe("ar");
+  });
+
+  it("a corrupt or out-of-range rate in the file falls back to the default, never to a guess", () => {
+    for (const bad of ["0", "-1", "1e5", "89500.001", "", "abc", "99999999999", 89000]) {
+      const { fs } = fakeFs(JSON.stringify({ terminalLanguage: "ar", receiptLanguage: "ar", displayCurrency: "LBP", lbpRate: bad }));
+      expect(new SettingsStore(PROFILE, fs).get().lbpRate, String(bad)).toBe("89000");
+    }
+  });
+
+  it("an unknown display currency falls back to USD", () => {
+    const { fs } = fakeFs(JSON.stringify({ displayCurrency: "EUR" }));
+    expect(new SettingsStore(PROFILE, fs).get().displayCurrency).toBe("USD");
+  });
+
+  it("a separator-typed rate stored by an older write is read back canonical", () => {
+    const { fs } = fakeFs(JSON.stringify({ lbpRate: "89,000" }));
+    expect(new SettingsStore(PROFILE, fs).get().lbpRate).toBe("89000");
   });
 });

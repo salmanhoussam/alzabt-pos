@@ -24,6 +24,8 @@
  */
 export const BRAND = "Alzabt POS";
 
+import { DEFAULT_DISPLAY_CURRENCY, DEFAULT_LBP_RATE, type DisplayCurrency } from "../domain/lbpDisplay";
+
 export const LANGUAGES = ["ar", "en"] as const;
 export type Language = (typeof LANGUAGES)[number];
 
@@ -42,11 +44,17 @@ export function dirFor(lang: Language): "rtl" | "ltr" {
 export interface TerminalSettings {
   readonly terminalLanguage: Language;
   readonly receiptLanguage: Language;
+  /** M5: which INDICATIVE equivalent the screens show next to USD. Display only — see src/domain/lbpDisplay.ts. */
+  readonly displayCurrency: DisplayCurrency;
+  /** M5: the owner's LBP-per-USD rate, canonical decimal text («89000»). Never used for any stored amount. */
+  readonly lbpRate: string;
 }
 
 export const DEFAULT_SETTINGS: TerminalSettings = Object.freeze({
   terminalLanguage: DEFAULT_TERMINAL_LANGUAGE,
   receiptLanguage: DEFAULT_RECEIPT_LANGUAGE,
+  displayCurrency: DEFAULT_DISPLAY_CURRENCY,
+  lbpRate: DEFAULT_LBP_RATE,
 });
 
 type Dict = Readonly<Record<string, string>>;
@@ -71,6 +79,17 @@ const AR: Dict = {
   "action.delete": "حذف",
   "action.close": "إغلاق",
   "lang.toggle": "English",
+  // M5 — the LBP display (display only; USD stays the accounting currency).
+  "lbp.toggle.showLbp": "ل.ل.",
+  "lbp.toggle.showUsd": "$ فقط",
+  "lbp.toggle.hint": "عرض السعر التقريبي بالليرة اللبنانية بجانب الدولار. لا يغيّر أيّ سعر أو مبلغ محفوظ أو مطبوع.",
+  "lbp.rate.title": "سعر صرف الدولار بالليرة",
+  "lbp.rate.explain": "يُستعمل للعرض التقريبي فقط: الأسعار والفواتير والدفعات تبقى بالدولار، والطباعة بالدولار.",
+  "lbp.rate.current": "السعر الحالي:",
+  "lbp.rate.new": "سعر جديد (ليرة لكل دولار)",
+  "lbp.rate.save": "حفظ السعر",
+  "lbp.rate.saved": "تمّ الحفظ:",
+  "lbp.rate.invalid": "لم يُحفظ. اكتب رقماً بين 1 و10,000,000، بخانتين عشريّتين على الأكثر، مثل 89000.",
   "products.title": "الأصناف",
   "products.search": "ابحث بالاسم أو الرمز أو الباركود",
   "products.searchHint": "البحث بالاسم أو الرمز أو الباركود. يُوحّد تلقائياً اختلافات الكتابة العربية والأرقام العربية.",
@@ -1131,6 +1150,17 @@ const EN: Dict = {
   "action.delete": "Delete",
   "action.close": "Close",
   "lang.toggle": "العربية",
+  // M5 — the LBP display (display only; USD stays the accounting currency).
+  "lbp.toggle.showLbp": "LBP",
+  "lbp.toggle.showUsd": "USD only",
+  "lbp.toggle.hint": "Show the approximate Lebanese-pound price next to USD. It changes no stored, charged or printed amount.",
+  "lbp.rate.title": "USD to LBP rate",
+  "lbp.rate.explain": "Used for the approximate display only: prices, invoices and payments stay in USD, and prints stay in USD.",
+  "lbp.rate.current": "Current rate:",
+  "lbp.rate.new": "New rate (pounds per dollar)",
+  "lbp.rate.save": "Save rate",
+  "lbp.rate.saved": "Saved:",
+  "lbp.rate.invalid": "Not saved. Type a number between 1 and 10,000,000 with at most 2 decimals, for example 89000.",
   "products.title": "Products",
   "products.search": "Search by name, SKU or barcode",
   "products.searchHint": "Search by name, SKU or barcode. Arabic spelling variants and Arabic-Indic digits are normalized automatically.",

@@ -969,7 +969,12 @@ function startSyntheticTill(selected: import("./demoRuntime").SelectedDemoStart)
     dailyMoney: assembled.dailyMoney, saleReceipts: saleReceiptService,
     appInfo: () => ({ version: BUILD_INFO.version, build: BUILD_INFO.build }),
     entryState: () => ({ profile: "demo", terminalClaimed: true, firstRunEligible: false, demoAvailable: true }),
-    settings: { get: () => settings.get(), setTerminalLanguage: (lang) => settings.setTerminalLanguage(lang) },
+    settings: {
+      get: () => settings.get(),
+      setTerminalLanguage: (lang) => settings.setTerminalLanguage(lang),
+      setDisplayCurrency: (currency) => settings.setDisplayCurrency(currency),
+      setLbpRate: (rate) => settings.setLbpRate(rate),
+    },
   }, "demo");
   if (syntheticEnvironment) registerSyntheticLifecycle(service, "demo");
   mainWindow = createWindow();
@@ -1234,6 +1239,8 @@ function startTill(): void {
     settings: {
       get: () => settings.get(),
       setTerminalLanguage: (lang) => settings.setTerminalLanguage(lang),
+      setDisplayCurrency: (currency) => settings.setDisplayCurrency(currency),
+      setLbpRate: (rate) => settings.setLbpRate(rate),
     },
   }, "real"); // X1: Demo mode selection is not implemented or activated.
   if (syntheticEnvironment) registerSyntheticLifecycle(service, "real");

@@ -13,6 +13,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_SETTINGS, type Language, type TerminalSettings, isLanguage } from "../shared/i18n";
+import { type DisplayCurrency, canonicalLbpRate, isDisplayCurrency, parseLbpRate } from "../domain/lbpDisplay";
 
 export const SETTINGS_FILE = "settings.json";
 
@@ -38,6 +39,13 @@ export function parseSettings(raw: unknown): TerminalSettings {
   return {
     terminalLanguage: isLanguage(r.terminalLanguage) ? r.terminalLanguage : DEFAULT_SETTINGS.terminalLanguage,
     receiptLanguage: isLanguage(r.receiptLanguage) ? r.receiptLanguage : DEFAULT_SETTINGS.receiptLanguage,
+    // M5: an unknown display currency falls back to USD; a missing or invalid rate falls back to the default
+    // rate in canonical form — never to a guessed number.
+    displayCurrency: isDisplayCurrency(r.displayCurrency) ? r.displayCurrency : DEFAULT_SETTINGS.displayCurrency,
+    lbpRate: (() => {
+      const h = parseLbpRate(r.lbpRate);
+      return h === null ? DEFAULT_SETTINGS.lbpRate : canonicalLbpRate(h);
+    })(),
   };
 }
 
@@ -74,6 +82,16 @@ export class SettingsStore {
 
   setReceiptLanguage(lang: Language): TerminalSettings {
     return this.write({ ...this.cached, receiptLanguage: lang });
+  }
+
+  /** M5: the remembered display choice (survives a restart). Display only; no money changes. */
+  setDisplayCurrency(currency: DisplayCurrency): TerminalSettings {
+    return this.write({ ...this.cached, displayCurrency: currency });
+  }
+
+  /** M5: the owner's LBP rate. The caller has already validated it; it is stored in canonical form. */
+  setLbpRate(rateHundredths: bigint): TerminalSettings {
+    return this.write({ ...this.cached, lbpRate: canonicalLbpRate(rateHundredths) });
   }
 
   private write(next: TerminalSettings): TerminalSettings {

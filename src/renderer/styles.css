@@ -1267,3 +1267,7 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .photo-rotate-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 12px; }
 .photo-reread-ask { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
+
+/* M5 — the indicative Lebanese-pound line under a USD amount (display only). */
+.lbp-equivalent { display: block; font-size: 12px; font-weight: 400; opacity: .85; }
+.total .lbp-equivalent { text-align: end; }

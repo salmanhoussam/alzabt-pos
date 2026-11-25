@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { LbpEquivalent } from "../lbpDisplay";
 import { CustomerFinder } from "./CustomerFinder";
 import type { CustomerDto } from "../../shared/ipcContract";
 import { type CartLine, type PricedCart, addProduct, decrement, priceCart, removeProduct } from "../../domain/cart";
@@ -905,6 +906,8 @@ export function SellScreen({
                 {/* One isolated run, amount and currency together — the same shape the cart line
                     and the total use, so a price reads identically wherever it appears. */}
                 <bdi dir="ltr">{`${formatDecimal(p.price)} ${catalog.currency}`}</bdi>
+                {/* M5: indicative ل.ل. only when the toggle is on; the USD price above is unchanged. */}
+                <LbpEquivalent minor={p.price.minor} currency={p.price.currency} testid="product-price-lbp" />
                 {p.baseUnit !== "piece" && <span className="muted"> / {unit(p.baseUnit)}</span>}
                 {p.priceNeedsReview && (
                   <span className="badge warn" data-testid="price-review" title={t("sell.placeholderPrice")}>
@@ -1195,6 +1198,7 @@ export function SellScreen({
                 </div>
                 <span className="line-total">
                   <bdi dir="ltr">{`${formatDecimal(l.lineTotal)} ${catalog.currency}`}</bdi>
+                  <LbpEquivalent minor={l.lineTotal.minor} currency={l.lineTotal.currency} testid="cart-line-lbp" />
                 </span>
                 {pendingQty && (
                   /* 🔴 THE ONLY WAY A TYPED QUANTITY REACHES THE CART. The line total and the cart
@@ -1268,6 +1272,8 @@ export function SellScreen({
             <strong data-testid="cart-total">
               <bdi dir="ltr">{`${priced ? formatDecimal(priced.total) : "0.00"} ${catalog.currency}`}</bdi>
             </strong>
+            {/* M5: outside cart-total, so its text (read by tests and e2e) stays the USD total exactly. */}
+            {priced && <LbpEquivalent minor={priced.total.minor} currency={priced.total.currency} testid="cart-total-lbp" />}
           </div>
           <button className="btn primary big wide" disabled={!priced} data-testid="complete-sale" onClick={() => setPaying(true)}>
             {t("sell.complete")}

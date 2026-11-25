@@ -22,6 +22,7 @@ import { currencyExponent, formatDecimal, money } from "../domain/money";
 import { channelStorage, isCollectionChannel } from "../domain/ledger";
 import type { SaleRecord } from "../domain/sale";
 import { DEFAULT_TERMINAL_LANGUAGE, isLanguage } from "../shared/i18n";
+import { isDisplayCurrency, parseLbpRate } from "../domain/lbpDisplay";
 import { MAX_PARTY_ADDRESS, MAX_PARTY_NAME, MAX_PARTY_NOTE, MAX_PARTY_PHONE } from "../domain/party";
 import type { Language, TerminalSettings } from "../shared/i18n";
 import { saleOutcomeError } from "./saleOutcomeText";
@@ -283,6 +284,8 @@ export interface IpcHandlerOptions {
   readonly settings?: {
     get(): TerminalSettings;
     setTerminalLanguage(lang: "ar" | "en"): TerminalSettings;
+    setDisplayCurrency?(currency: "USD" | "LBP"): TerminalSettings;
+    setLbpRate?(rateHundredths: bigint): TerminalSettings;
   };
 }
 
@@ -1563,13 +1566,29 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     // ── Operator settings ───────────────────────────────────────────────────────────────────────
     getSettings: wrap("getSettings", (p) => {
       noPayload(p);
-      return options.settings?.get() ?? { terminalLanguage: "ar", receiptLanguage: "ar" };
+      return options.settings?.get() ?? { terminalLanguage: "ar", receiptLanguage: "ar", displayCurrency: "USD", lbpRate: "89000" };
     }),
     setTerminalLanguage: wrap("setTerminalLanguage", (p) => {
       const o = exactObject(p, ["language"]);
       if (!isLanguage(o.language)) invalid("'language' must be 'ar' or 'en'");
       if (!options.settings) throw new DomainError("NOT_AVAILABLE", "Settings are not available here");
       return options.settings.setTerminalLanguage(o.language);
+    }),
+    // M5 — display only. Neither channel touches the ledger, a price, a payload amount or a print.
+    setDisplayCurrency: wrap("setDisplayCurrency", (p) => {
+      const o = exactObject(p, ["currency"]);
+      if (!isDisplayCurrency(o.currency)) invalid("'currency' must be 'USD' or 'LBP'");
+      if (!options.settings?.setDisplayCurrency) throw new DomainError("NOT_AVAILABLE", "Settings are not available here");
+      return options.settings.setDisplayCurrency(o.currency);
+    }),
+    setLbpRate: wrap("setLbpRate", (p) => {
+      const o = exactObject(p, ["rate"]);
+      const hundredths = parseLbpRate(o.rate);
+      if (hundredths === null) invalid("'rate' must be a number of pounds per dollar between 1 and 10,000,000, with at most 2 decimals");
+      if (!options.settings?.setLbpRate) throw new DomainError("NOT_AVAILABLE", "Settings are not available here");
+      const next = options.settings.setLbpRate(hundredths);
+      log.info("lbp-rate-set", { rate: next.lbpRate });
+      return next;
     }),
 
     // ── Manual invoices (migration 6) ───────────────────────────────────────────────────────────

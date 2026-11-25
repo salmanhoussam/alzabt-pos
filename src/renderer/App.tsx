@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from "react";
+import { DisplayCurrencyToggle } from "./lbpDisplay";
 import type { CashierDto } from "../shared/ipcContract";
 import { type ImportResult, ImportResultDialog } from "./components/ImportResultDialog";
 import { BuildLine } from "./BuildLine";
@@ -334,6 +335,8 @@ export function App() {
         >
           {t("lang.toggle")}
         </button>
+        {/* M5: the remembered USD / ل.ل. display toggle (display only; prices, totals and prints stay USD). */}
+        <DisplayCurrencyToggle beforeChange={shellFree} />
         {/* F-1: in the demo, logout would leave a login screen where every sign-in is refused (a dead
             end). The demo is left through the banner's «الخروج من التجربة» (main confirms). */}
         {demoShell === "not-demo" && (

@@ -114,6 +114,11 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   logout: "public",
   getSettings: "public",
   setTerminalLanguage: "public",
+  // M5 (owner 2026-11-25): the remembered USD/ل.ل. display toggle — any signed-in operator; it writes only the
+  // terminal's display preference (settings.json), never money.
+  setDisplayCurrency: "session",
+  // M5: the LBP rate is the OWNER's (decision: «manually entered and maintained by an authorized owner»).
+  setLbpRate: "owner",
   // 🔴 RECLASSIFIED 2026-10-29 — the old value was "session". See PUBLIC_REASON.getAppInfo.
   getAppInfo: "public",
 
