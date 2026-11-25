@@ -116,10 +116,11 @@ describe("the create-products set", () => {
   // READS the staged phone photos (thumbnails) and `releasePhoneInvoice` deletes ONE staged photo FILE after review
   // or discard (phoneInvoiceStaging.release: no ledger row, no money). Both serve the same «prepare products from an
   // invoice photo» flow as readInvoicePhoto; every product still goes through createProduct. Old value: three.
-  // ⚠️ Classification made by the Phone Invoice author; flagged for Abu Abbas's confirmation in the M1 review.
-  it("🔴 is EXACTLY these five channels", () => {
+  // M1 REVIEW CORRECTION (owner, 2026-11-25): five -> four. releasePhoneInvoice deletes evidence, so the owner did not
+  // approve it at this level; it is owner-only (see the owner-only set below). listPhoneInvoices stays: it only reads.
+  it("🔴 is EXACTLY these four channels", () => {
     const create = names.filter((n) => CHANNEL_POLICY[n] === "create-products").sort();
-    expect(create).toEqual(["createProduct", "listPhoneInvoices", "readInvoicePhoto", "releasePhoneInvoice", "startPhoneSession"]);
+    expect(create).toEqual(["createProduct", "listPhoneInvoices", "readInvoicePhoto", "startPhoneSession"]);
   });
 });
 
@@ -167,6 +168,8 @@ describe("the owner-only set", () => {
       // inspecting a phone session remain an owner's acts.
       "cancelPhoneSession",
       "phoneSessionState",
+      // M1 review (owner, 2026-11-25): deleting a staged Phone Invoice photo is deleting evidence.
+      "releasePhoneInvoice",
       // Track 2: the whole shop's data out (with logos), and an older state back in.
       "exportFullBackup",
       "inspectRestoreBackup",

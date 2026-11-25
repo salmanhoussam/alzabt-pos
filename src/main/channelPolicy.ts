@@ -226,7 +226,12 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   readInvoicePhoto: "create-products",
   // DEC-35z16 (PILOT): the phone-invoice queue feeds the SAME review, so it carries the same gate.
   listPhoneInvoices: "create-products",
-  releasePhoneInvoice: "create-products",
+  // 🔴 OWNER-ONLY (owner decision, M1 review 2026-11-25): releasing DELETES the staged supplier-invoice photo —
+  // evidence behind products a cashier may have created. Reading and reviewing stay at create-products; a
+  // cashier's «reviewed» release is refused and the photo simply stays in the queue (PhotoInvoiceFlow swallows the
+  // refusal by design, the queue shows the error), so nothing is lost. A separately granted «may discard phone
+  // invoices» capability with a DURABLE audit event is an open design item (needs its own migration).
+  releasePhoneInvoice: "owner",
   updateProduct: "owner",
   setProductActive: "owner",
   // Replaces or exports the whole price list.
