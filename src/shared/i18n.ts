@@ -48,6 +48,11 @@ export interface TerminalSettings {
   readonly displayCurrency: DisplayCurrency;
   /** M5: the owner's LBP-per-USD rate, canonical decimal text («89000»). Never used for any stored amount. */
   readonly lbpRate: string;
+  /**
+   * F8 (owner, 2026-11-25): true only when the OWNER saved this rate and it was read back from disk. A missing or
+   * corrupt settings file, or the untouched preset, reads as false — and LBP display stays off until confirmed.
+   */
+  readonly lbpRateConfirmed: boolean;
 }
 
 export const DEFAULT_SETTINGS: TerminalSettings = Object.freeze({
@@ -55,6 +60,7 @@ export const DEFAULT_SETTINGS: TerminalSettings = Object.freeze({
   receiptLanguage: DEFAULT_RECEIPT_LANGUAGE,
   displayCurrency: DEFAULT_DISPLAY_CURRENCY,
   lbpRate: DEFAULT_LBP_RATE,
+  lbpRateConfirmed: false,
 });
 
 type Dict = Readonly<Record<string, string>>;
@@ -90,6 +96,9 @@ const AR: Dict = {
   "lbp.rate.save": "حفظ السعر",
   "lbp.rate.saved": "تمّ الحفظ:",
   "lbp.rate.invalid": "لم يُحفظ. اكتب رقماً بين 1 و10,000,000، بخانتين عشريّتين على الأكثر، مثل 89000.",
+  "lbp.rate.unconfirmed": "هذا سعر مبدئي غير مؤكَّد. احفظ سعرك (أو احفظ هذا السعر كما هو) لتفعيل العرض بالليرة.",
+  "lbp.toggle.needsRate": "— أكّد سعر الصرف أوّلاً من الأدوات.",
+  "lbp.notSaved": "لم يُحفظ على هذا الكمبيوتر. لم يتغيّر شيء — حاول مرّة ثانية.",
   "products.title": "الأصناف",
   "products.search": "ابحث بالاسم أو الرمز أو الباركود",
   "products.searchHint": "البحث بالاسم أو الرمز أو الباركود. يُوحّد تلقائياً اختلافات الكتابة العربية والأرقام العربية.",
@@ -1172,6 +1181,9 @@ const EN: Dict = {
   "lbp.rate.save": "Save rate",
   "lbp.rate.saved": "Saved:",
   "lbp.rate.invalid": "Not saved. Type a number between 1 and 10,000,000 with at most 2 decimals, for example 89000.",
+  "lbp.rate.unconfirmed": "This is an unconfirmed preset. Save your rate (or save this one as it is) to turn on the LBP display.",
+  "lbp.toggle.needsRate": "— confirm the exchange rate first, in Tools.",
+  "lbp.notSaved": "Not saved on this computer. Nothing changed — please try again.",
   "products.title": "Products",
   "products.search": "Search by name, SKU or barcode",
   "products.searchHint": "Search by name, SKU or barcode. Arabic spelling variants and Arabic-Indic digits are normalized automatically.",

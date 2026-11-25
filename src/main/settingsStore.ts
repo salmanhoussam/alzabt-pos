@@ -14,6 +14,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_SETTINGS, type Language, type TerminalSettings, isLanguage } from "../shared/i18n";
 import { type DisplayCurrency, canonicalLbpRate, isDisplayCurrency, parseLbpRate } from "../domain/lbpDisplay";
+import { DomainError } from "../domain/errors";
 
 export const SETTINGS_FILE = "settings.json";
 
@@ -46,6 +47,8 @@ export function parseSettings(raw: unknown): TerminalSettings {
       const h = parseLbpRate(r.lbpRate);
       return h === null ? DEFAULT_SETTINGS.lbpRate : canonicalLbpRate(h);
     })(),
+    // F8: confirmed only if the file says so AND its rate is valid; anything else is the unconfirmed preset.
+    lbpRateConfirmed: r.lbpRateConfirmed === true && parseLbpRate(r.lbpRate) !== null,
   };
 }
 
@@ -84,14 +87,34 @@ export class SettingsStore {
     return this.write({ ...this.cached, receiptLanguage: lang });
   }
 
-  /** M5: the remembered display choice (survives a restart). Display only; no money changes. */
+  /**
+   * M5: the remembered display choice (survives a restart). Display only; no money changes.
+   * F7/F8 (owner, 2026-11-25): LBP needs a CONFIRMED rate, and the choice is only reported once it is on disk.
+   */
   setDisplayCurrency(currency: DisplayCurrency): TerminalSettings {
-    return this.write({ ...this.cached, displayCurrency: currency });
+    if (currency === "LBP" && !this.cached.lbpRateConfirmed) {
+      throw new DomainError("LBP_RATE_UNCONFIRMED", "Confirm the LBP rate before showing LBP");
+    }
+    return this.writeStrict({ ...this.cached, displayCurrency: currency });
   }
 
-  /** M5: the owner's LBP rate. The caller has already validated it; it is stored in canonical form. */
+  /**
+   * M5: the owner's LBP rate. The caller has already validated it; it is stored in canonical form.
+   * F7: saving it is what CONFIRMS it, and a failed write is an error — never a success held only in memory.
+   */
   setLbpRate(rateHundredths: bigint): TerminalSettings {
-    return this.write({ ...this.cached, lbpRate: canonicalLbpRate(rateHundredths) });
+    return this.writeStrict({ ...this.cached, lbpRate: canonicalLbpRate(rateHundredths), lbpRateConfirmed: true });
+  }
+
+  /** F7: write, and only then adopt. A refused write leaves the settings in force untouched and says so. */
+  private writeStrict(next: TerminalSettings): TerminalSettings {
+    try {
+      this.fs.writeAtomic(this.path, `${JSON.stringify(next, null, 2)}\n`);
+    } catch {
+      throw new DomainError("SETTINGS_NOT_SAVED", "The setting could not be saved on this computer");
+    }
+    this.cached = next;
+    return this.cached;
   }
 
   private write(next: TerminalSettings): TerminalSettings {

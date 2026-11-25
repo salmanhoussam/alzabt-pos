@@ -30,8 +30,8 @@ function setup() {
 function setupIn(lang: "ar" | "en") {
   const h = makeHarness(t.dbPath, { login: false });
   const settings = {
-    get: () => ({ terminalLanguage: lang, receiptLanguage: lang, displayCurrency: "USD", lbpRate: "89000" }) as const,
-    setTerminalLanguage: () => ({ terminalLanguage: lang, receiptLanguage: lang, displayCurrency: "USD", lbpRate: "89000" }) as const,
+    get: () => ({ terminalLanguage: lang, receiptLanguage: lang, displayCurrency: "USD", lbpRate: "89000", lbpRateConfirmed: false }) as const,
+    setTerminalLanguage: () => ({ terminalLanguage: lang, receiptLanguage: lang, displayCurrency: "USD", lbpRate: "89000", lbpRateConfirmed: false }) as const,
   };
   return { ...h, ipc: syncHandlers(createIpcHandlers(h.service, { settings })) };
 }
@@ -547,7 +547,7 @@ describe("IPC surface", () => {
           get: () => {
             throw new Error("settings.json is unreadable");
           },
-          setTerminalLanguage: () => ({ terminalLanguage: "ar", receiptLanguage: "ar", displayCurrency: "USD", lbpRate: "89000" }) as const,
+          setTerminalLanguage: () => ({ terminalLanguage: "ar", receiptLanguage: "ar", displayCurrency: "USD", lbpRate: "89000", lbpRateConfirmed: false }) as const,
         },
       }),
     );

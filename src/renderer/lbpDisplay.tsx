@@ -10,13 +10,17 @@
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { DEFAULT_DISPLAY_CURRENCY, DEFAULT_LBP_RATE, type DisplayCurrency, lbpEquivalent } from "../domain/lbpDisplay";
-import { call, pos } from "./api";
+import { ApiError, call, pos } from "./api";
 import { useT } from "./i18n";
 
 interface LbpDisplayValue {
   readonly displayCurrency: DisplayCurrency;
   readonly lbpRate: string;
+  /** F8: the owner has saved (confirmed) this rate; until then LBP display cannot be turned on. */
+  readonly lbpRateConfirmed: boolean;
   readonly setDisplayCurrency: (next: DisplayCurrency) => void;
+  /** F7: why the last toggle was refused (null when it was not). Shown next to the toggle, never swallowed. */
+  readonly toggleError: "unconfirmed" | "not-saved" | null;
   /** Owner only (main refuses anyone else). Resolves to the canonical rate now in force, or throws the refusal. */
   readonly saveLbpRate: (typed: string) => Promise<string>;
 }
@@ -26,6 +30,8 @@ const LbpDisplayContext = createContext<LbpDisplayValue | null>(null);
 export function LbpDisplayProvider({ children }: { children: ReactNode }) {
   const [displayCurrency, setCurrency] = useState<DisplayCurrency>(DEFAULT_DISPLAY_CURRENCY);
   const [lbpRate, setRate] = useState<string>(DEFAULT_LBP_RATE);
+  const [lbpRateConfirmed, setConfirmed] = useState(false);
+  const [toggleError, setToggleError] = useState<"unconfirmed" | "not-saved" | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,6 +40,7 @@ export function LbpDisplayProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         if (s.displayCurrency === "USD" || s.displayCurrency === "LBP") setCurrency(s.displayCurrency);
         if (typeof s.lbpRate === "string") setRate(s.lbpRate);
+        setConfirmed(s.lbpRateConfirmed === true);
       })
       // An older build or a test harness without the settings channel: USD only, which is the safe default.
       .catch(() => undefined);
@@ -42,20 +49,29 @@ export function LbpDisplayProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // F7/F8 (owner, 2026-11-25): the display changes only AFTER main stored it. A refusal (unconfirmed rate, or a
+  // write the disk refused) leaves the screen as it was and says why — it is never silently ignored.
   const setDisplayCurrency = useCallback((next: DisplayCurrency) => {
-    setCurrency(next);
-    call(pos().setDisplayCurrency({ currency: next })).catch(() => undefined);
+    setToggleError(null);
+    call(pos().setDisplayCurrency({ currency: next }))
+      .then((s) => setCurrency(s.displayCurrency === "LBP" ? "LBP" : "USD"))
+      .catch((e: unknown) => {
+        const code = e instanceof ApiError ? e.code : null;
+        setToggleError(code === "LBP_RATE_UNCONFIRMED" ? "unconfirmed" : "not-saved");
+      });
   }, []);
 
   const saveLbpRate = useCallback(async (typed: string) => {
     const s = await call(pos().setLbpRate({ rate: typed }));
     setRate(s.lbpRate);
+    setConfirmed(s.lbpRateConfirmed === true);
+    setToggleError(null);
     return s.lbpRate;
   }, []);
 
   const value = useMemo<LbpDisplayValue>(
-    () => ({ displayCurrency, lbpRate, setDisplayCurrency, saveLbpRate }),
-    [displayCurrency, lbpRate, setDisplayCurrency, saveLbpRate],
+    () => ({ displayCurrency, lbpRate, lbpRateConfirmed, setDisplayCurrency, toggleError, saveLbpRate }),
+    [displayCurrency, lbpRate, lbpRateConfirmed, setDisplayCurrency, toggleError, saveLbpRate],
   );
   return <LbpDisplayContext.Provider value={value}>{children}</LbpDisplayContext.Provider>;
 }
@@ -97,6 +113,12 @@ export function DisplayCurrencyToggle(props: { readonly beforeChange?: () => boo
       onClick={() => (props.beforeChange ? props.beforeChange() : true) && lbp.setDisplayCurrency(next)}
     >
       {lbp.displayCurrency === "USD" ? t("lbp.toggle.showLbp") : t("lbp.toggle.showUsd")}
+      {lbp.toggleError && (
+        <span className="error small" role="alert" data-testid="display-currency-error">
+          {" "}
+          {t(lbp.toggleError === "unconfirmed" ? "lbp.toggle.needsRate" : "lbp.notSaved")}
+        </span>
+      )}
     </button>
   );
 }
@@ -114,8 +136,10 @@ export function LbpRateSection() {
       const saved = await lbp.saveLbpRate(typed === "" ? lbp.lbpRate : typed);
       setTyped("");
       setMessage({ ok: true, text: `${t("lbp.rate.saved")} ${saved}` });
-    } catch {
-      setMessage({ ok: false, text: t("lbp.rate.invalid") });
+    } catch (e) {
+      // F7: a write the disk refused is its own message — never shown as «invalid number», never as saved.
+      const code = e instanceof ApiError ? e.code : null;
+      setMessage({ ok: false, text: t(code === "SETTINGS_NOT_SAVED" ? "lbp.notSaved" : "lbp.rate.invalid") });
     }
   };
   return (
@@ -125,6 +149,11 @@ export function LbpRateSection() {
       <p>
         {t("lbp.rate.current")} <bdi dir="ltr" data-testid="lbp-rate-current">{`1 USD = ${lbp.lbpRate} ل.ل.`}</bdi>
       </p>
+      {!lbp.lbpRateConfirmed && (
+        <p className="notice small" data-testid="lbp-rate-unconfirmed">
+          {t("lbp.rate.unconfirmed")}
+        </p>
+      )}
       <label className="field">
         <span>{t("lbp.rate.new")}</span>
         <input

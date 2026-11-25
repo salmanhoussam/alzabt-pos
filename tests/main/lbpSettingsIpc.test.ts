@@ -11,7 +11,7 @@ import type { TerminalSettings } from "../../src/shared/i18n";
 import { makeHarness, tempDir } from "../helpers/harness";
 
 function fakeStore() {
-  let s: TerminalSettings = { terminalLanguage: "ar", receiptLanguage: "ar", displayCurrency: "USD", lbpRate: "89000" };
+  let s: TerminalSettings = { terminalLanguage: "ar", receiptLanguage: "ar", displayCurrency: "USD", lbpRate: "89000", lbpRateConfirmed: false };
   const rates: bigint[] = [];
   return {
     rates,

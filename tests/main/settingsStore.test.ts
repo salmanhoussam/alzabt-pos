@@ -48,6 +48,8 @@ describe("parseSettings", () => {
       receiptLanguage: "ar",
       displayCurrency: "USD",
       lbpRate: "89000",
+      // TRANSITION (F8, owner 2026-11-25): a file that never recorded an owner-confirmed rate reads unconfirmed.
+      lbpRateConfirmed: false,
     });
   });
 
@@ -67,7 +69,8 @@ describe("SettingsStore", () => {
   it("defaults to Arabic on a fresh profile", () => {
     const { fs, seen } = fakeFs();
     // TRANSITION (M5): a fresh profile also shows USD only, at the default rate. Old shape: languages only.
-    expect(new SettingsStore(PROFILE, fs).get()).toEqual({ terminalLanguage: "ar", receiptLanguage: "ar", displayCurrency: "USD", lbpRate: "89000" });
+    // TRANSITION (F8, owner 2026-11-25): + lbpRateConfirmed false — the preset is not a confirmed rate.
+    expect(new SettingsStore(PROFILE, fs).get()).toEqual({ terminalLanguage: "ar", receiptLanguage: "ar", displayCurrency: "USD", lbpRate: "89000", lbpRateConfirmed: false });
     expect(seen, "the store must have looked for the file at the platform's own path").toContain(SETTINGS_PATH);
   });
 
@@ -110,8 +113,11 @@ describe("M5 — LBP display settings (display only)", () => {
   it("remembers the display choice and the rate across a restart (a new store reads the file)", () => {
     const { fs, files } = fakeFs();
     const first = new SettingsStore(PROFILE, fs);
-    first.setDisplayCurrency("LBP");
+    // TRANSITION (F8, owner 2026-11-25): LBP display needs a CONFIRMED rate, so the rate is saved first. Old order:
+    // setDisplayCurrency("LBP") then setLbpRate — the first call is now refused (asserted here, not dropped).
+    expect(() => first.setDisplayCurrency("LBP")).toThrow(expect.objectContaining({ code: "LBP_RATE_UNCONFIRMED" }));
     first.setLbpRate(8_950_050n); // 89,500.50 LBP per USD
+    first.setDisplayCurrency("LBP");
     expect(files.has(SETTINGS_PATH)).toBe(true);
     const restarted = new SettingsStore(PROFILE, fs).get();
     expect(restarted.displayCurrency).toBe("LBP");
@@ -135,5 +141,57 @@ describe("M5 — LBP display settings (display only)", () => {
   it("a separator-typed rate stored by an older write is read back canonical", () => {
     const { fs } = fakeFs(JSON.stringify({ lbpRate: "89,000" }));
     expect(new SettingsStore(PROFILE, fs).get().lbpRate).toBe("89000");
+  });
+});
+
+describe("F7 / F8 — a rate is confirmed only once it is ON DISK, and a failed write is never «saved»", () => {
+  function failingFs() {
+    const base = fakeFs();
+    let fail = false;
+    const fs: SettingsFs = {
+      ...base.fs,
+      writeAtomic: (p, c) => {
+        if (fail) throw new Error("disk full");
+        base.fs.writeAtomic(p, c);
+      },
+    };
+    return { fs, files: base.files, failNext: () => (fail = true) };
+  }
+
+  it("a failed RATE write throws SETTINGS_NOT_SAVED and leaves the rate in force unchanged", () => {
+    const f = failingFs();
+    const store = new SettingsStore(PROFILE, f.fs);
+    f.failNext();
+    expect(() => store.setLbpRate(9_000_000n)).toThrow(expect.objectContaining({ code: "SETTINGS_NOT_SAVED" }));
+    expect(store.get()).toMatchObject({ lbpRate: "89000", lbpRateConfirmed: false });
+    expect(f.files.has(SETTINGS_PATH)).toBe(false);
+  });
+
+  it("a failed DISPLAY write throws SETTINGS_NOT_SAVED and the display stays what it was", () => {
+    const f = failingFs();
+    const store = new SettingsStore(PROFILE, f.fs);
+    store.setLbpRate(8_900_000n);
+    f.failNext();
+    expect(() => store.setDisplayCurrency("LBP")).toThrow(expect.objectContaining({ code: "SETTINGS_NOT_SAVED" }));
+    expect(store.get().displayCurrency).toBe("USD");
+  });
+
+  it("saving the rate confirms it, and the confirmation survives a restart", () => {
+    const { fs } = fakeFs();
+    new SettingsStore(PROFILE, fs).setLbpRate(8_900_000n);
+    expect(new SettingsStore(PROFILE, fs).get()).toMatchObject({ lbpRate: "89000", lbpRateConfirmed: true });
+  });
+
+  it("missing, corrupt, or a «confirmed» flag beside an invalid rate → UNCONFIRMED preset, and LBP stays off", () => {
+    for (const content of [undefined, "{not json", JSON.stringify({ lbpRate: "abc", lbpRateConfirmed: true }), JSON.stringify({ lbpRate: "89000" })]) {
+      const store = new SettingsStore(PROFILE, fakeFs(content).fs);
+      expect(store.get()).toMatchObject({ lbpRate: "89000", lbpRateConfirmed: false });
+      expect(() => store.setDisplayCurrency("LBP")).toThrow(expect.objectContaining({ code: "LBP_RATE_UNCONFIRMED" }));
+    }
+  });
+
+  it("USD is always allowed, confirmed or not", () => {
+    const store = new SettingsStore(PROFILE, fakeFs().fs);
+    expect(store.setDisplayCurrency("USD").displayCurrency).toBe("USD");
   });
 });

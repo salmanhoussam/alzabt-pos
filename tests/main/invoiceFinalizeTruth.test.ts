@@ -65,8 +65,8 @@ const LINE = {
 };
 
 const settingsFor = (lang: "ar" | "en") => ({
-  get: (): TerminalSettings => ({ terminalLanguage: lang, receiptLanguage: lang, displayCurrency: "USD", lbpRate: "89000" }),
-  setTerminalLanguage: (): TerminalSettings => ({ terminalLanguage: lang, receiptLanguage: lang, displayCurrency: "USD", lbpRate: "89000" }),
+  get: (): TerminalSettings => ({ terminalLanguage: lang, receiptLanguage: lang, displayCurrency: "USD", lbpRate: "89000", lbpRateConfirmed: false }),
+  setTerminalLanguage: (): TerminalSettings => ({ terminalLanguage: lang, receiptLanguage: lang, displayCurrency: "USD", lbpRate: "89000", lbpRateConfirmed: false }),
 });
 
 /**

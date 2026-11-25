@@ -158,6 +158,10 @@ export type DomainErrorCode =
   | "OWNER_SETUP_REQUIRED"
   // O-1 owner enrollment: refused because the shop already has an owner or already has data (contract v3.1 §2).
   | "ENROLLMENT_NOT_AVAILABLE"
+  // F7 (owner F8 decisions, 2026-11-25): a display setting the disk refused to store is NOT reported as saved.
+  | "SETTINGS_NOT_SAVED"
+  // F8: LBP display needs a rate the owner has confirmed; the preset 89,000 alone does not enable it.
+  | "LBP_RATE_UNCONFIRMED"
   | "DEMO_RESTRICTED";
 
 /** Internal data for the one data-bearing customer-payment refusal; IPC serializes its bigint as text. */
