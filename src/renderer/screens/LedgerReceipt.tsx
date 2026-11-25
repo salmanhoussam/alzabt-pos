@@ -13,13 +13,53 @@ import { call, errorText, pos } from "../api";
 import { useT } from "../i18n";
 import type { SaleReceiptDto } from "../../shared/ipcContract";
 import { Receipt } from "./Receipt";
+import type { NamedProduct } from "../receiptNames";
+import { useDemoMode } from "../demoMode";
 
-export function LedgerReceipt({ saleId, copy, onNewSale }: { saleId: string; copy: boolean; onNewSale?: () => void }) {
+export function LedgerReceipt({
+  saleId,
+  copy,
+  onNewSale,
+  fit,
+}: {
+  saleId: string;
+  copy: boolean;
+  onNewSale?: () => void;
+  /** J1-PHASE5 U-3: layout only, passed to Receipt (History reprint). */
+  fit?: boolean;
+}) {
   const { t } = useT();
+  // O-5 (joint C2): the demo is preview-only — no PDF is saved there, so the button is not offered.
+  const demo = useDemoMode();
   const [receipt, setReceipt] = useState<SaleReceiptDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<{ kind: "ok" | "warn"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * J1-RECEIPT-NAMES: the current catalogue's names, through the existing session read the till already
+   * uses. DISPLAY ONLY. A failure leaves it null and the receipt shows the recorded names, as before.
+   */
+  const [productNames, setProductNames] = useState<ReadonlyMap<string, NamedProduct> | null>(null);
+  useEffect(() => {
+    let live = true;
+    call(pos().getCatalog())
+      .then((c) => {
+        if (!live) return;
+        const map = new Map<string, NamedProduct>();
+        for (const p of c.products) {
+          map.set(p.id, {
+            name: p.name,
+            ...(p.nameAr !== undefined ? { nameAr: p.nameAr } : {}),
+            ...(p.nameEn !== undefined ? { nameEn: p.nameEn } : {}),
+          });
+        }
+        setProductNames(map);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [saleId]);
   useEffect(() => {
     let live = true;
     setReceipt(null);
@@ -54,6 +94,7 @@ export function LedgerReceipt({ saleId, copy, onNewSale }: { saleId: string; cop
   const print = (layout: "thermal80" | "a5") =>
     run(async () => {
       const r = await call(pos().printSaleReceipt({ saleId, layout, copy }));
+      if (r.status === "previewed") return { kind: "ok", text: t("print.previewOpened") };
       if (r.status === "printed") return { kind: "ok", text: t("adv.printed") };
       if (r.status === "no-printer") return { kind: "warn", text: t("print.noPrinter") };
       if (r.status === "unavailable") return { kind: "warn", text: t("print.unavailable") };
@@ -73,6 +114,7 @@ export function LedgerReceipt({ saleId, copy, onNewSale }: { saleId: string; cop
         <button className="btn" disabled={busy} onClick={() => void print("a5")} data-testid="receipt-print-a5">
           {t("print.a5")}
         </button>
+        {!demo && (
         <button
           className="btn"
           disabled={busy}
@@ -86,6 +128,7 @@ export function LedgerReceipt({ saleId, copy, onNewSale }: { saleId: string; cop
         >
           {t("adv.pdf")}
         </button>
+        )}
       </div>
       {note && (
         <p className={note.kind === "warn" ? "warn" : "muted"} data-testid="receipt-print-note" data-kind={note.kind}>
@@ -101,6 +144,8 @@ export function LedgerReceipt({ saleId, copy, onNewSale }: { saleId: string; cop
       advanceApplied={receipt.advanceApplied}
       onNewSale={onNewSale}
       actions={actions}
+      {...(fit !== undefined ? { fit } : {})}
+      {...(productNames !== null ? { productNames } : {})}
     />
   );
 }

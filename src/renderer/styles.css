@@ -111,6 +111,16 @@ h1, h2 { margin: 0 0 12px; }
 .tabs { display: flex; gap: 8px; flex: 1; }
 .tab { min-height: 48px; padding: 0 16px; border: none; background: transparent; font-size: 16px; border-radius: var(--radius); cursor: pointer; }
 .tab.active { background: var(--bg); font-weight: 700; }
+/* J1-TOPBAR: below 1280 px the English labels are wider than the bar. Measured at 1024×768 (EN): the bar
+   overflowed, the page scrolled sideways and «Log out» was off screen; Arabic fitted. Labels never wrap, the
+   gaps and tab padding tighten, and the tabs strip — not the page — is what may scroll as a last resort. */
+.topbar > * { white-space: nowrap; }
+@media (max-width: 1279px) {
+  .topbar { gap: 10px; padding-inline: 12px; }
+  .tabs { gap: 2px; min-inline-size: 0; overflow-x: auto; scrollbar-width: none; }
+  .tab { padding-inline: 10px; font-size: 15px; }
+  .topbar .btn { padding-inline: 12px; }
+}
 .content { flex: 1; overflow: auto; padding: 16px; }
 
 .login { width: 400px; text-align: center; }
@@ -202,6 +212,20 @@ h1, h2 { margin: 0 0 12px; }
 .line { display: grid; grid-template-columns: 1fr auto; gap: 6px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .line-main { display: flex; flex-direction: column; }
 .line-total { grid-column: 2; grid-row: 1; text-align: end; font-variant-numeric: tabular-nums; font-weight: 600; }
+/* J1-CART-THUMBS: the cart line gains a fixed square photo at the inline START (right in Arabic,
+   left in English — logical properties, so RTL needs no second rule). Fixed size with contained images, so a tall or wide photo never changes the line's height. */
+.line.line-with-thumb { grid-template-columns: 48px 1fr auto; column-gap: 10px; align-items: center; }
+.line-with-thumb .line-thumb { grid-column: 1; grid-row: 1; }
+.line-with-thumb .line-main { grid-column: 2; grid-row: 1; min-inline-size: 0; }
+.line-with-thumb .line-total { grid-column: 3; grid-row: 1; }
+.line-with-thumb .qty, .line-with-thumb .line-qty-pending { grid-column: 1 / -1; }
+.line-thumb {
+  inline-size: 48px; block-size: 48px; border-radius: var(--space-1); overflow: hidden;
+  border: 1px solid var(--border); background: var(--surface-sunken); display: block;
+}
+.line-thumb > img { inline-size: 100%; block-size: 100%; object-fit: contain; object-position: center; display: block; }
+.line-thumb-empty { border-style: dashed; display: flex; align-items: center; justify-content: center; }
+.line-thumb-empty::after { content: attr(data-initial); font-size: 20px; font-weight: 700; color: var(--muted); opacity: 0.55; }
 .qty { display: flex; align-items: center; gap: 8px; grid-column: 1 / -1; }
 .qty-n { min-width: 32px; text-align: center; font-size: 18px; }
 .total { display: flex; justify-content: space-between; font-size: 22px; padding: 12px 0; font-variant-numeric: tabular-nums; }
@@ -462,7 +486,8 @@ table.inv-lines td.row-actions button:last-child { margin-block-end: 0; }
 
 /* The data columns keep their own space at every width: the table may scroll horizontally inside
    its own container, and never under the actions column. */
-.inv-lines-scroll { overflow-x: auto; }
+/* J1-PHASE5 U-4: also a viewport-relative maximum height, so a long document scrolls its lines here (see the U-4 block). */
+.inv-lines-scroll { overflow-x: auto; max-block-size: max(16rem, 100vh - 22rem); overflow-y: auto; }
 table.inv-lines td.description, table.inv-lines th.description { min-width: 10rem; }
 
 .inv-new-line { background: var(--hl); }
@@ -974,6 +999,13 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 /* The pane may shrink below the chip row's natural width, so the chips scroll INSIDE it instead of
    pushing the cart off a 1024-wide screen (measured: the first lab run did exactly that). */
 .sell > .products-pane { min-inline-size: 0; }
+/* J1-CART-FOOT: the cart is the OTHER grid item and lacked the same guard. Without it, its automatic
+   minimum height is its whole content: 7 lines put «إتمام البيع» at y=1298 in a 768-high window and the
+   page scrolled instead of the lines. With it, `.lines` (flex: 1; overflow: auto) scrolls and the
+   count, total and Complete Sale stay on screen. Measured in e2e/sell-cart-thumbs.mjs. */
+.sell > .cart { min-block-size: 0; }
+/* J1-RECEIPT-NAMES: the recorded name, under the localized one, so the screen matches the paper. */
+.receipt-line-recorded { display: block; }
 /* TILL-CARDS · COMPACT BELOW 1280 px WIDE OR 950 px TALL (height is what limits a till grid). Measured on the first lab version: at 1024×768 only 2
    products were fully visible without scrolling (the current till shows 9). A smaller photo and a
    shorter card keep the photo-first look while giving the cashier back most of the grid. */
@@ -1121,3 +1153,103 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
 .pir-link-search { min-height: var(--control-h-small); font-size: var(--text-body); width: 100%; }
 .pir-link-results { display: flex; flex-wrap: wrap; gap: 6px; max-height: 132px; overflow-y: auto; }
 .pir-link-option.is-on { border-color: var(--primary); font-weight: 700; }
+
+/* FIRST-RUN WELCOME (joint C1, contract J0-CODEX-1) */
+.login.welcome { width: 460px; max-width: calc(100vw - 32px); }
+.welcome-choices { display: grid; gap: 10px; margin: 14px 0; }
+.welcome-choice { display: flex; flex-direction: column; align-items: stretch; gap: 2px; padding: 12px 14px; text-align: start; }
+.welcome-choice .choice-title { font-weight: 700; font-size: 18px; }
+.welcome-choice .choice-hint { font-size: 13px; font-weight: 400; opacity: .85; }
+.demo-choice { border-style: dashed; }
+.welcome-note { max-width: 460px; margin: 12px auto 0; display: flex; flex-direction: column; gap: 8px; }
+.welcome-note p { margin: 0; }
+.welcome-back-row { display: flex; justify-content: center; margin-top: 12px; }
+
+/* TRY DEMO (joint C2): the demo process banner — reuses .demo-banner (DEMO-FALLBACK) colours */
+.demo-mode-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.demo-mode-banner .demo-hint { font-weight: 400; }
+.demo-mode-banner .demo-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-inline-start: auto; }
+
+/* J1-COMPLETED-FIT (owner Windows run, 2026-11-20) — the completed-sale screen only (Receipt with «new sale»).
+   Measured before: 8 lines at 1366×768 → card 871 px, total at y=764, print row at 875, «بيع جديد» at 951 in a
+   viewport ending at 740 (1015 with the Demo banner). The card is now held to the screen, the LINES scroll
+   inside it, and the heading, total, payment, print row and «new sale» stay visible. The total row is sticky
+   at the bottom of the scrolling lines, so it never scrolls away. History's reprint (no «new sale») is unchanged. */
+.center.receipt-fit { block-size: 100%; min-height: 0; padding: var(--space-2) var(--space-3); }
+.receipt-fit > .receipt { display: flex; flex-direction: column; max-block-size: 100%; min-block-size: 0; }
+.receipt-fit > .receipt > * { flex: none; }
+.receipt-fit > .receipt > .receipt-lines { flex: 0 1 auto; min-block-size: 0; overflow-y: auto; }
+.receipt-fit .receipt-table tfoot th { position: sticky; bottom: 0; background: var(--surface); box-shadow: 0 -1px 0 var(--border); }
+/* The print row had no space above it and touched the payment box (visible in the before/after shots). */
+.receipt-fit .receipt-print { margin-top: var(--space-2); }
+
+/* J1-PHASE5 U-3 (UX-SCALING 2026-11-20) — History reprint. Measured before: total and print row 438–1,081 px below the
+   fold at every size (claude-ux-scaling). The detail is a column: back button and void notices keep their height, the
+   fitted receipt (.receipt-fit, phase 3) takes the rest, and only its lines scroll. Reprint data and «نسخة» unchanged. */
+.history-detail { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); block-size: 100%; min-block-size: 0; }
+.history-detail > * { flex: none; }
+.history-detail > .receipt-fit { flex: 1 1 auto; align-self: stretch; block-size: auto; min-block-size: 0; padding-block: 0; }
+
+/* J1-PHASE5 U-2 (UX-SCALING 2026-11-20) — COMPACT CART on short windows. Measured before, 1366×768 maximized with the
+   Demo banner (content 541 px): the 14-line cart showed 1 line fully (lines box 218 px); a line was 135 px = name+maths
+   52, gap 6, quantity row 56 (56 px touch keys, a 198 px input), padding 20. Below 900 px of height the line becomes two
+   compact rows: photo spanning both | name · total on the first | the maths · [− qty + ✕] on the second. CSS only:
+   DOM order, focus order, keyboard handling, test ids and every number are unchanged. The pending-quantity confirm row
+   (SB-RISK-01) keeps its own full-width row underneath. Taller windows keep the touch-sized layout. */
+@media (max-height: 900px) {
+  .cart { padding: 10px 12px; }
+  .cart-head { padding-bottom: 6px; }
+  .cart-customer { margin: 4px 0 2px; }
+  .cart-foot { padding-top: 6px; }
+  .cart-foot .total { padding: 6px 0; font-size: 20px; }
+  .cart-foot .btn.big { min-height: 52px; }
+  /* the item count sits beside the total instead of on its own row */
+  .cart-foot { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; align-items: center; }
+  .cart-foot > * { grid-column: 1 / -1; }
+  .cart-foot > .cart-count { grid-column: 1; }
+  .cart-foot > .total { grid-column: 2; }
+  .line.line-with-thumb {
+    grid-template-columns: 40px minmax(0, 1fr) auto; grid-template-rows: auto auto;
+    column-gap: 8px; row-gap: 2px; padding: 6px 0; align-items: center;
+  }
+  .line.line-with-thumb .line-thumb { grid-column: 1; grid-row: 1 / span 2; inline-size: 40px; block-size: 40px; }
+  .line.line-with-thumb .line-main { display: contents; }
+  .line.line-with-thumb [data-testid="cart-line-name"] { grid-column: 2; grid-row: 1; min-inline-size: 0; overflow-wrap: anywhere; }
+  .line.line-with-thumb .line-main > .muted { grid-column: 2; grid-row: 2; font-size: 13px; min-inline-size: 0; }
+  .line.line-with-thumb .line-total { grid-column: 3; grid-row: 1; line-height: 1.25; }
+  .line.line-with-thumb [data-testid="cart-line-name"], .line.line-with-thumb .line-main > .muted,
+  .line.line-with-thumb .line-main > .muted *, .line.line-with-thumb .line-total * { line-height: 1.25; }
+  .line.line-with-thumb .qty { grid-column: 3; grid-row: 2; gap: 4px; justify-content: flex-end; }
+  .line.line-with-thumb .qty .btn.key { min-width: 34px; min-height: 34px; inline-size: 34px; block-size: 34px; padding: 0; font-size: 18px; }
+  .line.line-with-thumb .qty .qty-input { inline-size: 52px; min-width: 0; block-size: 34px; padding-inline: 4px; font-size: 16px; }
+  .line.line-with-thumb .qty .line-remove { min-height: 34px; padding-inline: 6px; margin-inline-start: 0; }
+  .line.line-with-thumb .line-qty-pending { grid-column: 1 / -1; grid-row: 3; }
+}
+
+/* J1-PHASE5 U-4 (UX-SCALING 2026-11-20) — LONG INVOICE. Measured before: a 45-line draft put «+ add row» and the totals
+   ≈4,100–4,600 px down the page at every size (Finalize / Save / Save-and-leave were already reachable: their bar is
+   sticky). The lines wrapper already scrolls sideways; it now also has a viewport-relative maximum height, so a long
+   document scrolls its LINES inside it. The column headers stick to its top and the add-row bar to its bottom, and the
+   totals follow right after the box. A short invoice is unchanged (the box is only as tall as its content). Layout only:
+   no row, number, save or finalize logic changes; focusing a row scrolls it into view as before. */
+/* NO z-index on these two: .overlay dialogs (customer finder, finalize) have none, so a z-index here painted the
+   sticky cells OVER every dialog and intercepted its buttons (caught by e2e/invoice-drafts.mjs, customer-save). */
+.inv-lines-scroll table.inv-lines thead th { position: sticky; top: 0; }
+.inv-lines-scroll .inv-add-row td { position: sticky; bottom: 0; box-shadow: 0 -1px 0 var(--line); }
+
+/* J1-PHASE6 PROPOSAL U-4b (2026-11-20) — COMPACT INVOICE HEADER on short windows. Measured in the calibrated harness
+   (its Phase 5 page scroll equals the real app's: 540/604/520/584 px), 1366×768 + Demo banner: the customer section was
+   311 px (three 80 px fields, then notes as its own 80 px row, then the account block 95 px) and the tax box 84 px, above
+   the lines. Below 900 px of height: notes joins the name/address/phone row, the account title, button and hint share
+   one wrapping line, and field margins / the tax box are tighter. Taller windows are unchanged. Every field, button,
+   value and the account rules (choose / change / unlink / owner-only issue) are untouched — layout only. */
+@media (max-height: 900px) {
+  .inv-sheet { gap: 8px; }
+  .inv-customer { gap: 6px 12px; }
+  .inv-customer .field { margin-top: 0; gap: 4px; }
+  .inv-customer .field input { min-height: 40px; }
+  .inv-customer > .field.wide:not(.inv-account) { flex: 1 1 200px; }
+  .inv-customer > .inv-account { flex-direction: row; flex-wrap: wrap; align-items: center; column-gap: 12px; row-gap: 4px; }
+  .inv-tax { padding: 4px 10px; gap: 4px 12px; }
+  .inv-tax .field { margin-top: 0; }
+}

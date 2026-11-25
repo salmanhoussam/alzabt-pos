@@ -11,7 +11,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameS
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, dialog, ipcMain, nativeImage, session } from "electron";
-import { MAX_HISTORY, PosService, startupCatalog } from "../application/posService";
+import { PosService, startupCatalog } from "../application/posService";
 import { PHOTO_EXTENSIONS, createProductPhotoPicker, electronCodec } from "./productPhoto";
 import { writeOnlineCatalogPackage, type PackageFs } from "./onlineCatalogPackage";
 import { PhoneSessionBridge } from "./phoneSessionBridge";
@@ -19,49 +19,34 @@ import { decodeBarcodePhoto } from "./phoneBarcode";
 import { assertStorable, normalizeProductPhoto } from "./photoNormalize";
 import type { OnlineCatalogSnapshot } from "../application/posService";
 import type { OnlineCatalogExportDto } from "../shared/ipcContract";
-import { makeInvoiceCreditPort } from "../application/invoiceCreditPort";
 import { InvoiceService } from "../application/invoiceService";
 import { PartyService } from "../application/partyService";
 import { LedgerService } from "../application/ledgerService";
-import { AdvanceService, formatAdvanceNo } from "../application/advanceService";
+import { AdvanceService } from "../application/advanceService";
 import { SaleReceiptService } from "../application/saleReceiptService";
-import { SaleReceiptRepository } from "../persistence/saleReceiptRepository";
 import { type ReceiptLayout, renderSaleReceiptDocument } from "./saleReceiptDocument";
-import { DailyMoneyService } from "../application/dailyMoneyService";
-import { DailyMoneyRepository } from "../persistence/dailyMoneyRepository";
-import { AdvanceRepository } from "../persistence/advanceRepository";
 import { renderAdvanceDocument } from "./advanceDocument";
 import { advanceDto, correctionDto, refundDto } from "./ipcHandlers";
 import { renderRefundDocument } from "./refundDocument";
 import { renderCollectionDocument } from "./collectionDocument";
 import type { CollectionDocumentDto, SaleReceiptDto } from "../shared/ipcContract";
-import { PartyRepository } from "../persistence/partyRepository";
-import { LedgerRepository } from "../persistence/ledgerRepository";
-import { ReceiptRepository } from "../persistence/receiptRepository";
 import { businessDateOf } from "../domain/businessDay";
 import { MAX_IMPORT_BYTES } from "../domain/catalogImport";
 import { DomainError } from "../domain/errors";
 import { asDemoCatalog, emptyCatalog, loadCatalog } from "../domain/catalog";
 import { decideDemoCatalog, demoCatalogRequested, probeMerchantData } from "./demoCatalog";
 import { readShowcaseMarker } from "./showcaseMarker";
-import { FIXTURE_CASHIERS } from "../fixtures/cashiers";
 import { FIXTURE_CATALOG } from "../fixtures/catalog";
 import { FIXTURE_TERMINAL } from "../fixtures/terminal";
 import { BACKUP_DIR_NAME, createPreMigrationBackup, ensureDailyBackup, snapshotDatabase } from "../persistence/backup";
 import { CatalogRepository } from "../persistence/catalogRepository";
-import { CategoryRepository } from "../persistence/categoryRepository";
-import { ProductImageRepository } from "../persistence/productImageRepository";
 import { type Db, openDatabase, schemaVersion } from "../persistence/db";
 import { MIGRATIONS } from "../persistence/migrations";
-import { AuditRepository } from "../persistence/auditRepository";
-import { CompanyProfileRepository } from "../persistence/companyProfileRepository";
-import { InvoiceRepository } from "../persistence/invoiceRepository";
-import { ReconciliationRepository } from "../persistence/reconciliationRepository";
-import { PinStateRepository } from "../persistence/pinStateRepository";
 import { OperatorRepository } from "../persistence/operatorRepository";
-import { OperatorService } from "../application/operatorService";
-import { SaleRepository } from "../persistence/saleRepository";
 import { CHANNELS } from "../shared/ipcContract";
+import { invokeWithDemoPolicy, restrictDemoIpcOptions } from "./demoPolicy";
+import { createLedgerServices } from "./ledgerServices";
+import { probeEntryData, readRealEntryState } from "./entryState";
 import { toInvoiceViewDto } from "../shared/dto";
 import { loadInvoicePhoto, readInvoiceImage } from "./invoiceOcr";
 import { renderInvoiceDocument } from "./invoiceDocument";
@@ -125,6 +110,7 @@ let log: Logger = nullLogger;
  * and the phone can pair but not save, which fails closed rather than crashing.
  */
 let posService: PosService | null = null;
+let syntheticEnvironment: ReturnType<typeof import("./demoDevEntry").openSyntheticDevEnvironment> | null = null;
 
 const phoneSessions = new PhoneSessionBridge({
   get service() {
@@ -178,7 +164,7 @@ function createWindow(): BrowserWindow {
     backgroundColor: "#f4f5f7",
     show: false,
     webPreferences: {
-      preload: join(__dirname, "..", "preload", "preload.js"),
+      preload: join(__dirname, "..", "preload", syntheticEnvironment ? "preload-demo.js" : "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -816,8 +802,19 @@ function exportOnlineCatalogPackage(
   };
 }
 
-function registerIpc(service: PosService, extra: IpcHandlerOptions): void {
-  const handlers = createIpcHandlers(service, { pickCatalogFile, ...extra });
+function registerIpc(service: PosService, extra: IpcHandlerOptions, runtimeMode: "real" | "demo"): void {
+  let options:IpcHandlerOptions;
+  if(runtimeMode==="demo") {
+    if(app.isPackaged || !db || !extra.invoices)throw new Error("Synthetic demo unavailable.");
+    // This development-only module is excluded from distributable artifacts.
+    // It never receives real print callbacks, renderer HTML or arbitrary paths.
+    const {createSyntheticPreviewPorts}=require("./demoPreviewPorts") as typeof import("./demoPreviewPorts");
+    const preview=createSyntheticPreviewPorts(db,extra.invoices);
+    options={...restrictDemoIpcOptions(extra),printInvoice:preview.printInvoice,printSaleReceipt:preview.printSaleReceipt};
+  } else {
+    options={pickCatalogFile,...extra};
+  }
+  const handlers = createIpcHandlers(service, options);
   for (const name of CHANNEL_NAMES) {
     ipcMain.handle(CHANNELS[name], (event, payload: unknown) => {
       const fromOurWindow =
@@ -828,44 +825,57 @@ function registerIpc(service: PosService, extra: IpcHandlerOptions): void {
       if (!fromOurWindow) {
         return { ok: false, error: { code: "FORBIDDEN", message: "Unknown sender" } };
       }
-      return handlers[name](payload);
+      return invokeWithDemoPolicy(runtimeMode, name, () => handlers[name](payload), payload);
     });
   }
 }
 
-// Optional profile override (tests and support only). Must run before the single-instance lock and
-// before `ready`. Without it, the ledger lives in the OS per-user app-data folder.
-const userDataOverride = process.env.ALZABT_POS_USER_DATA;
-if (userDataOverride) app.setPath("userData", userDataOverride);
-
-log = createFileLogger(join(app.getPath("userData"), "logs"));
-log.info("app-start", {
-  version: BUILD_INFO.version,
-  build: BUILD_INFO.build,
-  packaged: app.isPackaged,
-  platform: process.platform,
-  electron: process.versions.electron,
-  userDataOverride: Boolean(userDataOverride),
-});
-
-diag("main-start", { argv: process.argv, execPath: process.execPath, userData: app.getPath("userData") });
-process.on("uncaughtExceptionMonitor", (err) => {
-  diag("uncaught-exception", { message: String(err) });
-  log.error("uncaught-exception", { error: err });
-});
-process.on("exit", (code) => diag("exit", { code }));
-app.on("child-process-gone", (_e, details) => diag("child-process-gone", { ...details }));
-
+// Acquire the product lock before choosing a profile or opening its logger.
+// Windows behavior and lock-file footprint require independent verification.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
-diag("single-instance-lock", { acquired: gotSingleInstanceLock });
 
 if (!gotSingleInstanceLock) {
-  // One terminal, one process, one writer. Logged, because on Windows leftover helper processes
-  // from a crashed instance can hold the lock and this exit would otherwise be silent.
-  console.error("[pos] single-instance lock not acquired — another Alzabt POS process holds it; exiting");
-  log.warn("single-instance-lock-refused");
+  console.error("[pos] single-instance lock not acquired; exiting");
   app.quit();
 } else {
+  let selectedSynthetic: import("./demoRuntime").SelectedDemoStart | undefined;
+  let handoverRefused = false;
+  if (!app.isPackaged) {
+    const dev = require("./demoDevMain") as typeof import("./demoDevMain");
+    const prepared = dev.prepareSyntheticStartup(process.argv);
+    if (prepared.kind === "refused") handoverRefused = true;
+    if (prepared.kind === "selected") {
+      syntheticEnvironment = prepared.env;
+      selectedSynthetic = prepared.selected;
+    }
+  }
+  if (handoverRefused) {
+    console.error("[pos] synthetic handover unavailable; exiting");
+    app.exit(1);
+  } else {
+  const userDataOverride = syntheticEnvironment ? undefined : process.env.ALZABT_POS_USER_DATA;
+  if (userDataOverride) app.setPath("userData", userDataOverride);
+
+  log = createFileLogger(join(app.getPath("userData"), "logs"));
+  log.info("app-start", {
+    version: BUILD_INFO.version,
+    build: BUILD_INFO.build,
+    packaged: app.isPackaged,
+    platform: process.platform,
+    electron: process.versions.electron,
+    userDataOverride: Boolean(userDataOverride),
+  });
+
+  // Never persist launch arguments: they may contain sensitive one-time authority.
+  diag("main-start", { execPath: process.execPath, userData: app.getPath("userData") });
+  process.on("uncaughtExceptionMonitor", (err) => {
+    diag("uncaught-exception", { message: String(err) });
+    log.error("uncaught-exception", { error: err });
+  });
+  process.on("exit", (code) => diag("exit", { code }));
+  app.on("child-process-gone", (_e, details) => diag("child-process-gone", { ...details }));
+  diag("single-instance-lock", { acquired: true });
+
   app.on("second-instance", () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -877,8 +887,11 @@ if (!gotSingleInstanceLock) {
     .whenReady()
     .then(() => {
       diag("ready");
-      session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-      startTill();
+      if (selectedSynthetic) startSyntheticTill(selectedSynthetic);
+      else {
+        session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+        startTill();
+      }
     })
     .catch((err: unknown) => failStartup(err));
 
@@ -893,6 +906,66 @@ if (!gotSingleInstanceLock) {
     db?.close();
     db = null;
   });
+  }
+}
+
+function registerSyntheticLifecycle(service: PosService | null, mode: "real" | "demo"): void {
+  if (!syntheticEnvironment || app.isPackaged) throw new Error("Synthetic lifecycle unavailable");
+  const dev = require("./demoDevMain") as typeof import("./demoDevMain");
+  dev.registerSyntheticLifecycle({
+    env: syntheticEnvironment, mode, service, rendererUrl: RENDERER_URL,
+    getWindow: () => mainWindow,
+    closeLedger: () => { db?.close(); db = null; },
+  });
+}
+/** Start only a consumed reservation; never call the normal backup/phone/autostart path. */
+function startSyntheticTill(selected: import("./demoRuntime").SelectedDemoStart): void {
+  const runtime = require("./demoRuntime") as typeof import("./demoRuntime");
+  let started: ReturnType<typeof runtime.startSelectedSyntheticDemo>;
+  try { started = runtime.startSelectedSyntheticDemo(selected); }
+  catch {
+    runtime.installSyntheticSessionRestrictions();
+    // The seed authority closes a failed ledger. Expose only a non-session
+    // status and Main-owned exit/reset, never a normal login to the failed slot.
+    registerSyntheticLifecycle(null, "demo");
+    const safe = (event: Electron.IpcMainInvokeEvent): boolean => mainWindow !== null &&
+      event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame &&
+      event.senderFrame?.url === RENDERER_URL;
+    ipcMain.handle(CHANNELS.getEntryState, (event) => safe(event)
+      ? {ok:true,data:{profile:"demo",terminalClaimed:false,firstRunEligible:false,demoAvailable:false}}
+      : {ok:false,error:{code:"FORBIDDEN",message:"Unknown sender"}});
+    ipcMain.handle(CHANNELS.currentCashier, (event) => safe(event)
+      ? {ok:true,data:null} : {ok:false,error:{code:"FORBIDDEN",message:"Unknown sender"}});
+    mainWindow = createWindow();
+    if (syntheticEnvironment) {
+      const probe = require("./demoJourneyProbe") as typeof import("./demoJourneyProbe");
+      probe.runSyntheticJourneyProbe(mainWindow, syntheticEnvironment, "unavailable");
+    }
+    return;
+  }
+  db = started.db;
+  const assembled = started.services;
+  const service = assembled.service;
+  invoices = assembled.invoices;
+  parties = assembled.parties;
+  ledgerService = assembled.ledgerService;
+  advanceService = assembled.advanceService;
+  saleReceiptService = assembled.saleReceiptService;
+  posService = service;
+  const settings = new SettingsStore(app.getPath("userData"));
+  registerIpc(service, {
+    invoices, parties, ledger: ledgerService, advances: advanceService,
+    dailyMoney: assembled.dailyMoney, saleReceipts: saleReceiptService,
+    appInfo: () => ({ version: BUILD_INFO.version, build: BUILD_INFO.build }),
+    entryState: () => ({ profile: "demo", terminalClaimed: true, firstRunEligible: false, demoAvailable: true }),
+    settings: { get: () => settings.get(), setTerminalLanguage: (lang) => settings.setTerminalLanguage(lang) },
+  }, "demo");
+  if (syntheticEnvironment) registerSyntheticLifecycle(service, "demo");
+  mainWindow = createWindow();
+  if (syntheticEnvironment) {
+    const probe = require("./demoJourneyProbe") as typeof import("./demoJourneyProbe");
+    probe.runSyntheticJourneyProbe(mainWindow, syntheticEnvironment, "demo");
+  }
 }
 
 /**
@@ -951,13 +1024,6 @@ function startTill(): void {
   maybeDailyBackup();
 
   const catalogStore = new CatalogRepository(db);
-  // 🔴 MIGRATION 9'S TWO NEW TABLES, WIRED HERE — and until this line existed they were not.
-  // Both dependencies are optional on PosService and both fail CLOSED, so a terminal without
-  // them refused every category assignment with NOT_AVAILABLE rather than corrupting anything:
-  // safe, and completely unusable. ON THE SAME `db` and the same transaction provider as
-  // everything else, because a second connection would not be atomic with the product write.
-  const categoryStore = new CategoryRepository(db);
-  const productImageStore = new ProductImageRepository(db);
   // 🔴 DEMO-FALLBACK (RISK-24). The sample café catalog is served ONLY under the explicit switch AND
   // only on a ledger with no merchant data (src/main/demoCatalog.ts). Otherwise a shop with no active
   // product gets an EMPTY till — never the sample, whose sales used to be recorded as genuine.
@@ -977,171 +1043,22 @@ function startTill(): void {
   const settings = new SettingsStore(userData);
   log.info("settings", { ...settings.get() });
 
-  // Named rather than inlined, because the invoice stack below must share THIS object: one
-  // repository, one connection, one transaction (migration 7).
-  const saleStore = new SaleRepository(db);
-  // ONE audit repository, shared by PosService and the operator service. Two instances would be two
-  // `nextSeq()` readers on the same table, which is safe only because they run inside the same
-  // BEGIN IMMEDIATE — sharing it removes the need to rely on that at all.
-  const auditStore = new AuditRepository(db, {
-    appVersion: BUILD_INFO.version,
-    schemaVersion: MIGRATIONS.length,
-  });
-  const ledger = db;
-  let creditSaleServices: { readonly parties: PartyService; readonly ledger: LedgerService } | null = null;
-  const service = new PosService({
-    repository: saleStore,
-    pinStates: new PinStateRepository(db),
+  const ledgerAtStartup = db;
+  const assembled = createLedgerServices(db, {
     catalog: start.catalog,
     fallbackCatalog,
-    catalogStore,
-    categories: categoryStore,
-    productImages: productImageStore,
-    // 🔴 THE FIXTURE IS NO LONGER THE AUTHORITY. Migration 8 created real `operators` rows — both
-    // fixture accounts preserved BY ID so every historical sales.cashier_id still resolves — and
-    // `operators` below is what `login` and `listCashiers` read. The array stays only because a
-    // terminal whose database predates the table would otherwise have no accounts at all; the
-    // service ignores it whenever `operators` is present.
-    cashiers: FIXTURE_CASHIERS,
-    operators: new OperatorService({
-      operators: new OperatorRepository(db),
-      audit: auditStore,
-      transact: (fn) => {
-        restoreLock.assertOpen();
-        return ledger.transaction(fn).immediate();
-      },
-      terminal: FIXTURE_TERMINAL,
-    }),
-    terminal: FIXTURE_TERMINAL,
-    // The durable audit trail (migration 5) and the transaction that binds it to the business
-    // mutation. Both use THIS connection — there is no second database handle anywhere, because
-    // atomicity across two connections would not be atomicity.
-    auditStore,
-    creditSaleServices: () => creditSaleServices,
-    transact: (fn) => {
-      if (!db) throw new Error("ledger is not open");
-      restoreLock.assertOpen();
-      return db.transaction(fn).immediate();
-    },
-    // The rotating logfile now MIRRORS committed audit rows, for field support. It is no longer the
-    // record — audit_events is — and it rotates, so it must never be treated as one.
+    appVersion: BUILD_INFO.version,
+    logoVault: { freeze: freezeLogo },
+    isCurrentLedger: () => db === ledgerAtStartup,
+    assertOpen: () => restoreLock.assertOpen(),
     audit: (row) => log.info("audit", { ...row }),
   });
-  // The manual-invoice stack (migrations 6 and 7), on THIS connection and THIS transaction provider, with
-  // `service` as its only route to the catalog — so an invoice can never write a product except
-  // through PosService and its migration-5 audit row.
-  invoices = new InvoiceService({
-    invoices: new InvoiceRepository(db),
-    // Migration 16: explicit customer linking and issue-on-account, through the live party and
-    // ledger services (constructed just below, hence lazy).
-    credit: makeInvoiceCreditPort({ session: service, parties: () => parties, ledger: () => ledgerService }),
-    reconciliation: new ReconciliationRepository(db),
-    company: new CompanyProfileRepository(db),
-    catalogStore,
-    products: service,
-    logoVault: { freeze: freezeLogo },
-    // The SAME repository object the till uses, on the same connection: a finalized invoice's sale
-    // goes through the one module that is allowed to write the ledger (migration 7).
-    sales: saleStore,
-    transact: (fn) => {
-      if (!db) throw new Error("ledger is not open");
-      restoreLock.assertOpen();
-      return db.transaction(fn).immediate();
-    },
-    terminal: FIXTURE_TERMINAL,
-  });
-
-  // The customer/supplier directory (migration 12), on THIS connection and THIS transaction
-  // provider. Its actor comes from `service`, which owns the session and re-reads the live role —
-  // so the directory has no session of its own to drift out of step with the till's.
-  parties = new PartyService({
-    parties: new PartyRepository(db),
-    actor: () => {
-      const cashier = service.currentCashier();
-      if (!cashier) return null;
-      const role = service.currentRole();
-      return role === null ? null : { id: cashier.id, name: cashier.name, role };
-    },
-    transact: (fn) => {
-      if (!db) throw new Error("ledger is not open");
-      restoreLock.assertOpen();
-      return db.transaction(fn).immediate();
-    },
-  });
-
-  // The ledger (migration 13), on the SAME connection, the SAME transaction provider and the SAME
-  // actor as the directory above — so "who is acting" cannot drift between the two, and a
-  // statement is read inside the same database session that wrote the rows.
-  ledgerService = new LedgerService({
-    ledger: new LedgerRepository(db),
-    receipts: new ReceiptRepository(db),
-    parties: new PartyRepository(db),
-    actor: () => {
-      const cashier = service.currentCashier();
-      if (!cashier) return null;
-      const role = service.currentRole();
-      return role === null ? null : { id: cashier.id, name: cashier.name, role };
-    },
-    transact: (fn) => {
-      if (!db) throw new Error("ledger is not open");
-      restoreLock.assertOpen();
-      return db.transaction(fn).immediate();
-    },
-    terminal: { timeZone: FIXTURE_TERMINAL.timeZone },
-    saleCurrency: (saleId) => {
-      if (!db) return null;
-      const row = db.prepare("SELECT currency FROM sales WHERE id = ?").get(saleId) as
-        | { currency: string }
-        | undefined;
-      return row?.currency ?? null;
-    },
-  });
-  creditSaleServices = { parties, ledger: ledgerService };
-
-  // Customer advances (migration 20): the SAME connection, the SAME transaction provider and the
-  // SAME live actor as the ledger above. The service owns who may record (owner + cashier) and who
-  // may correct (owner); the triggers enforce both again.
-  advanceService = new AdvanceService({
-    advances: new AdvanceRepository(db),
-    ledger: new LedgerRepository(db),
-    parties: new PartyRepository(db),
-    actor: () => {
-      const cashier = service.currentCashier();
-      if (!cashier) return null;
-      const role = service.currentRole();
-      return role === null ? null : { id: cashier.id, name: cashier.name, role };
-    },
-    transact: (fn) => {
-      if (!db) throw new Error("ledger is not open");
-      restoreLock.assertOpen();
-      return db.transaction(fn).immediate();
-    },
-    terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
-    // DEC-35x: the till's own owner-only credit sale, run inside the advance transaction.
-    creditSale: (input) => service.createCustomerCreditSale(input),
-  });
-
-  // TILL-PRINT (D-TP2): the SAME live role as everything else; History's own window for non-owners.
-  saleReceiptService = new SaleReceiptService({
-    reads: new SaleReceiptRepository(db),
-    getSale: (id) => service.getSale(id),
-    role: () => service.currentRole(),
-    historyWindow: MAX_HISTORY,
-    formatAdvanceNo,
-  });
-
-  // DAILY MONEY IN / OUT (DEC-35x): read-only, the SAME connection and the SAME live actor. No
-  // transaction provider — it never writes.
-  const dailyMoney = new DailyMoneyService({
-    repository: new DailyMoneyRepository(db),
-    actor: () => {
-      const cashier = service.currentCashier();
-      if (!cashier) return null;
-      const role = service.currentRole();
-      return role === null ? null : { id: cashier.id, role };
-    },
-    terminal: { timeZone: FIXTURE_TERMINAL.timeZone, currency: FIXTURE_TERMINAL.currency },
-  });
+  const { service, dailyMoney } = assembled;
+  invoices = assembled.invoices;
+  parties = assembled.parties;
+  ledgerService = assembled.ledgerService;
+  advanceService = assembled.advanceService;
+  saleReceiptService = assembled.saleReceiptService;
 
   // The phone bridge reads this through its getter when a session starts.
   posService = service;
@@ -1219,14 +1136,31 @@ function startTill(): void {
     // refusal, when there is no network, comes from the address selection with a real sentence.
     phoneSessions: phoneSessions,
     appInfo: () => ({ version: BUILD_INFO.version, build: BUILD_INFO.build }),
+    entryState: () => {
+      const state = readRealEntryState(
+        () => { if (!db) throw new Error("Entry state unavailable"); return new OperatorRepository(db).terminalClaimed(); },
+        () => { if (!db) throw new Error("Entry state unavailable"); return probeEntryData(db); },
+      );
+      if (!syntheticEnvironment) return state;
+      const {syntheticDemoRetention} = require("./demoProfile") as typeof import("./demoProfile");
+      const {demoAvailability} = require("./entryState") as typeof import("./entryState");
+      return {...state,...demoAvailability(true,true,()=>syntheticDemoRetention(syntheticEnvironment!.root))};
+    },
     afterSale: maybeDailyBackup,
     logger: log,
     settings: {
       get: () => settings.get(),
       setTerminalLanguage: (lang) => settings.setTerminalLanguage(lang),
     },
-  });
+  }, "real"); // X1: Demo mode selection is not implemented or activated.
+  if (syntheticEnvironment) registerSyntheticLifecycle(service, "real");
   mainWindow = createWindow();
+  if (syntheticEnvironment && !app.isPackaged) {
+    const dev = require("./demoDevMain") as typeof import("./demoDevMain");
+    dev.runSyntheticMainProbe(mainWindow, syntheticEnvironment);
+    const probe = require("./demoJourneyProbe") as typeof import("./demoJourneyProbe");
+    probe.runSyntheticJourneyProbe(mainWindow, syntheticEnvironment, "real");
+  }
 
   // What happened to a restore that ran at this start, told once, in the operator's language.
   const notice = restoreNoticeFor(restore, settings.get().terminalLanguage);

@@ -166,8 +166,9 @@ describe("the merchant-data probe and the till's fallback, on a real ledger", ()
       h.db.close();
     }
     const main = readFileSync(join(__dirname, "../../src/main/main.ts"), "utf8");
-    const ctor = main.slice(main.indexOf("const service = new PosService({"), main.indexOf("const service = new PosService({") + 400);
-    expect(ctor).toMatch(/^\s+fallbackCatalog,$/m);
+    const assembly = readFileSync(join(__dirname, "../../src/main/ledgerServices.ts"), "utf8");
+    expect(main).toMatch(/createLedgerServices\(db,\s*\{[\s\S]*?\bfallbackCatalog,/);
+    expect(assembly).toMatch(/fallbackCatalog:\s*ports\.fallbackCatalog/);
     expect(main).toMatch(
       /decideDemoCatalog\(\s*demoCatalogRequested\(process\.env\),\s*probeMerchantData\(db, FIXTURE_CATALOG\.products\.map\(\(p\) => p\.id\)\),?\s*\)/,
     );

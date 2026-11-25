@@ -105,7 +105,7 @@ export function CollectionReceipt({ doc, duplicate, onClose }: { doc: Collection
               onClick={() =>
                 void run(async () => {
                   const r = await call(pos().printCollectionReceipt({ collectionNo: doc.docNo }));
-                  return r.status === "printed" ? t("adv.printed") : "";
+                  return r.status === "previewed" ? t("print.previewOpened") : r.status === "printed" ? t("adv.printed") : "";
                 })
               }
             >

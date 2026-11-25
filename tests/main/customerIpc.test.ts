@@ -111,7 +111,8 @@ describe("the customer channels", () => {
     // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): 100 -> 103 with getSaleReceipt / printSaleReceipt / saveSaleReceiptPdf —
     // session READS of one till receipt by sale id (the service limits a non-owner to History's window); they write
     // nothing. The old value was 100.
-    expect(Object.keys(CHANNELS)).toHaveLength(103);
+    // X1 TRANSITION: 103 -> 104, read-only getEntryState; no customer capability added.
+    expect(Object.keys(CHANNELS)).toHaveLength(104);
   });
 
   // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".

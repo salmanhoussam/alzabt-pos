@@ -63,7 +63,12 @@ try {
   // ── B · a cashier sells, takes cash, and sees no money panel (same launch: the demo catalog is
   //        only served on a ledger with no merchant data, so a relaunch would have no product) ──────
   await testid(page, "logout").click();
-  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+  // J1: a fresh real profile opens the joint-C1 Welcome first. Take its plain «Sign in» — NEVER welcome-demo.
+  await page.waitForSelector('[data-testid="select-cashier"], [data-testid="welcome-screen"]', { timeout: 30000 });
+  if (await page.locator('[data-testid="welcome-screen"]').count()) {
+    await page.locator('[data-testid="welcome-login"]').click();
+    await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+  }
   await signIn(page, "Cashier Two", "2222");
   const refused = await page.evaluate(async ({ SALE, customerId }) => {
     const must = (r) => {

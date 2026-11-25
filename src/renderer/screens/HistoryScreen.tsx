@@ -4,6 +4,7 @@ import { call, errorText, fmt, pos } from "../api";
 import { Receipt } from "./Receipt";
 import { LedgerReceipt } from "./LedgerReceipt";
 import { useT } from "../i18n";
+import { useDemoMode } from "../demoMode";
 import { stamp } from "../format";
 import { tendersText } from "../tenders";
 
@@ -75,6 +76,8 @@ function currentDebtCell(r: SaleWithVoidDto, t: T) {
 
 export function HistoryScreen({ role }: { readonly role?: string }) {
   const { t } = useT();
+  // Joint C2: the demo policy refuses voiding, so the demo does not offer it.
+  const demo = useDemoMode();
   const [rows, setRows] = useState<SaleWithVoidDto[] | null>(null);
   const [open, setOpen] = useState<SaleWithVoidDto | null>(null);
   const [voiding, setVoiding] = useState<SaleWithVoidDto | null>(null);
@@ -155,7 +158,8 @@ export function HistoryScreen({ role }: { readonly role?: string }) {
 
   if (open) {
     return (
-      <div>
+      // J1-PHASE5 U-3: a column — back button and notices on top, the reprint fills the rest and scrolls its lines.
+      <div className="history-detail" data-testid="history-detail">
         <button className="btn ghost" onClick={() => setOpen(null)} data-testid="history-back">
           ← {t("history.back")}
         </button>
@@ -171,7 +175,7 @@ export function HistoryScreen({ role }: { readonly role?: string }) {
           </p>
         )}
         {/* TILL-PRINT + F4: read from the ledger by sale id (customer + ADV facts of the sale); reprint marked «نسخة». */}
-        <LedgerReceipt saleId={open.sale.id} copy />
+        <LedgerReceipt saleId={open.sale.id} copy fit />
       </div>
     );
   }
@@ -262,7 +266,7 @@ export function HistoryScreen({ role }: { readonly role?: string }) {
                     {/* 🔴 OWNER ONLY (DEC-35c). Voiding any sale — cash or Whish — is the owner's;
                         the bridge and the service refuse anyone else. A cashier is not offered a
                         button that can only fail. */}
-                    {!r.void && r.sale.sourceType === "pos" && role === "owner" && (
+                    {!r.void && r.sale.sourceType === "pos" && role === "owner" && !demo && (
                       <button
                         className="btn danger ghost small"
                         data-testid="history-void"

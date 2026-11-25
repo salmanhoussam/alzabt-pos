@@ -147,6 +147,45 @@ const TAB_IDS = {
   Products: "products",
   Invoices: "invoices",
 };
+
+/**
+ * QW-IMPORT-DIALOG-AR — the import / export result box, read the same way on EVERY build this script drives.
+ * 🔴 OLD AND NEW BUILDS DIFFER HERE, AND BOTH ARE REAL. The seed-* phases run OLD installed builds, whose box is
+ * English-only with no test id; the verify-* phases run the build under test, whose box is translated (Arabic in an
+ * Arabic terminal) and carries data-testid / data-status / data-what and the counts as attributes. So this keys on the
+ * `.import-report` class, which both have, and then asks in whichever vocabulary that build speaks.
+ */
+const LEGACY_REPORT_TITLE = { imported: "Catalog imported", "exported:catalog-export": "Catalog exported" };
+async function waitImportReport(page, status, what) {
+  const box = page.locator(".import-report");
+  await box.waitFor({ state: "visible", timeout: 30000 });
+  if ((await box.getAttribute("data-testid")) === "import-report") {
+    assert((await box.getAttribute("data-status")) === status, `the result box reports ${status}`);
+    if (what) assert((await box.getAttribute("data-what")) === what, `the result box is about ${what}`);
+  } else {
+    const want = LEGACY_REPORT_TITLE[what ? `${status}:${what}` : status];
+    assert((await box.locator("h2").innerText()).trim() === want, `(pre-translation build) the result box says «${want}»`);
+  }
+  return box;
+}
+/** The import counts: attributes on a translated build, the English sentence on an old one; null if neither. */
+async function importCounts(page) {
+  const box = page.locator(".import-report");
+  if ((await box.getAttribute("data-testid")) === "import-report")
+    return box.evaluate((e) => {
+      const count = (k) => {
+        const v = e.getAttribute("data-" + k);
+      // A count is a canonical non-negative integer. Missing, empty, blank or malformed fails HERE, naming the
+      // attribute — never as a silent 0 (Number(null) and Number("") are both 0, which made zero checks pass falsely).
+      if (v === null || !/^(0|[1-9][0-9]*)$/.test(v)) throw new Error(`import-report data-${k} is ${v === null ? "missing" : JSON.stringify(v)}, not a count`);
+      return Number(v);
+      };
+      return { inserted: count("inserted"), updated: count("updated"), unchanged: count("unchanged") };
+    });
+  const m = /(\d+) new, (\d+) updated, (\d+) unchanged/.exec(await box.innerText());
+  return m ? { inserted: Number(m[1]), updated: Number(m[2]), unchanged: Number(m[3]) } : null;
+}
+
 const tab = async (page, name) => {
   await page.waitForSelector(".tabs button"); // the header is rendered in every build, old and new
   const byId = page.locator(`[data-testid="tab-${TAB_IDS[name]}"]`);
@@ -724,8 +763,8 @@ if (PHASE === "seed-v2") {
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
   await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
-  await page.waitForSelector("text=Catalog imported");
-  await page.getByRole("button", { name: "OK" }).click();
+  await waitImportReport(page, "imported");
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click(); // QW-IMPORT-DIALOG-AR: old build «OK», translated build «حسناً»
   await page.waitForSelector("button.product");
   await sell(page, ["مياه", "بيبسي"], "Cash", 4);
   await app.close();
@@ -740,8 +779,8 @@ if (PHASE === "seed-v2") {
   await stub(app, "save", exportFile);
   await tab(page, "Tools");
   await page.locator('[data-testid="export-catalog"]').click();
-  await page.waitForSelector("text=Catalog exported");
-  await page.getByRole("button", { name: "OK" }).click();
+  await waitImportReport(page, "exported", "catalog-export");
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click(); // QW-IMPORT-DIALOG-AR: old build «OK», translated build «حسناً»
   await page.screenshot({ path: SHOTS + "upgrade-a2-after-0.1.1.png" });
   await app.close();
   assert(readFileSync(exportFile, "utf8").includes("2,مياه,,0.50,USD,piece,0"), "catalog export works on the upgraded installation");
@@ -753,8 +792,8 @@ if (PHASE === "seed-v2") {
   const cat = writeCatalog();
   await stub(app, "open", cat.file);
   await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" })); // the field-pilot build's header button
-  await page.waitForSelector("text=Catalog imported");
-  await page.getByRole("button", { name: "OK" }).click();
+  await waitImportReport(page, "imported");
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click(); // QW-IMPORT-DIALOG-AR: old build «OK», translated build «حسناً»
   await page.waitForSelector("button.product");
   await sell(page, ["مياه", "مياه"], "Cash", 1);
   await sell(page, ["بيبسي"], "Card", 2);
@@ -811,13 +850,13 @@ if (PHASE === "seed-v2") {
   await stub(app, "save", exportFile);
   await tab(page, "Tools");
   await page.locator('[data-testid="export-catalog"]').click();
-  await page.waitForSelector("text=Catalog exported");
-  await page.getByRole("button", { name: "OK" }).click();
+  await waitImportReport(page, "exported", "catalog-export");
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click(); // QW-IMPORT-DIALOG-AR: old build «OK», translated build «حسناً»
   await stub(app, "open", exportFile);
   await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
-  await page.waitForSelector("text=Catalog imported");
-  assert(/0 new, 0 updated, 4 unchanged/.test(await page.locator(".import-report").innerText()), "export → re-import changes nothing");
-  await page.getByRole("button", { name: "OK" }).click();
+  await waitImportReport(page, "imported");
+  { const c = await importCounts(page); assert(!!c && c.inserted === 0 && c.updated === 0 && c.unchanged === 4, "export → re-import changes nothing"); }
+  await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click(); // QW-IMPORT-DIALOG-AR: old build «OK», translated build «حسناً»
   await page.screenshot({ path: SHOTS + "upgrade-b2-after-0.1.1.png" });
   await app.close();
   const f = ledgerFacts();
@@ -845,7 +884,7 @@ if (PHASE === "seed-v2") {
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
   await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
-  await page.waitForSelector("text=Catalog imported");
+  await waitImportReport(page, "imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 
   // A product typed by hand on that build — the thing this scenario exists to preserve.
@@ -946,7 +985,7 @@ if (PHASE === "seed-v2") {
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
   await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
-  await page.waitForSelector("text=Catalog imported");
+  await waitImportReport(page, "imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 
   await tab(page, "Products");
@@ -1087,7 +1126,7 @@ if (PHASE === "seed-v2") {
   await stub(app, "open", cat2.file);
   await tab(page, "Tools");
   await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
-  await page.waitForSelector("text=Catalog imported");
+  await waitImportReport(page, "imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
   await app.close();
 
@@ -1125,7 +1164,7 @@ if (PHASE === "seed-v2") {
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
   await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
-  await page.waitForSelector("text=Catalog imported");
+  await waitImportReport(page, "imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 
   // A manual product, sold by weight — so the upgrade has a fractional quantity to preserve.
@@ -1612,7 +1651,7 @@ if (PHASE === "seed-v2") {
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
   await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
-  await page.waitForSelector("text=Catalog imported");
+  await waitImportReport(page, "imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 
   // Two till sales and a void, so the v7 rebuild has real ledger rows to preserve.
@@ -1825,7 +1864,7 @@ if (PHASE === "seed-v2") {
   await stub(app, "open", cat.file);
   await tab(page, "Tools");
   await clickEither(page, "import-catalog", page.getByRole("button", { name: "Import catalog" }));
-  await page.waitForSelector("text=Catalog imported");
+  await waitImportReport(page, "imported");
   await page.getByRole("button", { name: /^(OK|حسناً)$/ }).click();
 
   // Real till rows for migration 8 to inherit: two sales and a void.

@@ -1,0 +1,45 @@
+{
+  "_about": "TRY DEMO profile definition. Synthetic only. The products are a deterministic 22-item SUBSET of the POS's own fixture tests/fixtures/demo-catalog (synthetic GS1-200 barcodes, demonstration prices, CC0 / public-domain photos). The intended '22 products' list was searched for and does not exist anywhere (see the handoff PLAN.md section 1.4); this selection is a proposal (owner decision D-2). Change the list here only; the builder refuses an unknown SKU. | v2 2026-11-19 (owner direction): ready-to-use shop defaults; every value synthetic; no tax or legal identifiers.",
+  "shop": {
+    "nameAr": "متجر الضبط التجريبي",
+    "nameEn": "ALZABT Demo Store",
+    "tagline": "نسخة تجريبية — بيانات للعرض فقط",
+    "address": "عنوان تجريبي للعرض فقط — بيروت، لبنان",
+    "phone1": "00 000 000",
+    "email": "demo@example.invalid",
+    "taxEnabled": false,
+    "startNumber": 1001
+  },
+  "owner": {
+    "name": "المالك التجريبي",
+    "pin": "123456"
+  },
+  "cashier": {
+    "name": "كاشير تجريبي",
+    "pin": "654321"
+  },
+  "skus": [
+    "COF-ESP",
+    "COF-LAT",
+    "TEA-MNT",
+    "CKE-CHO",
+    "WTR-500",
+    "JUC-ORG",
+    "CRS-BTR",
+    "MAN-ZTR",
+    "BKR-PITA-PCK",
+    "GRC-RICE-1KG",
+    "GRC-SUGR-1KG",
+    "GRC-LENT-1KG",
+    "GRC-PAST-500",
+    "GRC-OLIV-1L",
+    "CAN-CHKP-400",
+    "CAN-TUNA-160",
+    "DRY-MILK-1L",
+    "DRY-EGGS-12",
+    "DRY-LABN-400",
+    "VEG-TOMA-KG",
+    "FRT-BANA-KG",
+    "CLN-SPNG-3"
+  ]
+}

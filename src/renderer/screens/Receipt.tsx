@@ -5,6 +5,7 @@ import { fromMoneyDto } from "../../shared/dto";
 import { LineMath } from "../components/LineMath";
 import { useT } from "../i18n";
 import { stamp } from "../format";
+import { type NamedProduct, receiptLineName } from "../receiptNames";
 
 /** On-screen receipt summary (no printing in this gate). */
 export function Receipt({
@@ -13,8 +14,15 @@ export function Receipt({
   onAccountFor = null,
   advanceApplied = null,
   actions = null,
+  productNames,
+  fit: fitProp,
 }: {
   sale: SaleDto;
+  /**
+   * J1-PHASE5 U-3: hold the card to the screen and scroll only the lines. Defaults to «has new sale» (the
+   * completed-sale screen, unchanged); the History reprint passes it explicitly. Layout only — no data changes.
+   */
+  fit?: boolean;
   onNewSale?: () => void;
   /** DEC-35x: part of this on-account sale was paid from an advance (read back from main). Not new money. */
   advanceApplied?: { readonly number: string; readonly applied: MoneyDto; readonly debtLeft: MoneyDto } | null;
@@ -22,10 +30,24 @@ export function Receipt({
   onAccountFor?: string | null;
   /** TILL-PRINT: Print / PDF actions (LedgerReceipt), shown above «new sale». */
   actions?: ReactNode;
+  /**
+   * J1-RECEIPT-NAMES: the current catalogue, for DISPLAY ONLY — each line's name in the screen's
+   * language when it is verifiably the recorded product name (receiptNames.ts). Absent → recorded names.
+   */
+  productNames?: ReadonlyMap<string, NamedProduct>;
 }) {
-  const { t, unit } = useT();
+  const { t, unit, lang } = useT();
+  /**
+   * J1-COMPLETED-FIT (owner Windows run, 2026-11-20): the completed-sale screen is the one with «new
+   * sale». Measured with 8 lines at 1366×768: the card was 871 px tall, and the total, payment, print
+   * buttons and «new sale» all sat below the visible area (e2e/completed-sale-layout.mjs). There the card
+   * is held to the screen and only the LINES scroll — the cart's own pattern.
+   * J1-PHASE5 U-3 (UX-SCALING, 2026-11-20): the History reprint had the same defect (total and print row
+   * 438–1,081 px below the fold at every measured size), so it now opts in through `fit`.
+   */
+  const fit = fitProp ?? onNewSale !== undefined;
   return (
-    <div className="center">
+    <div className={fit ? "center receipt-fit" : "center"} data-testid="receipt-screen" data-fit={fit ? "1" : "0"}>
       <div className="card receipt" data-testid="receipt">
         <div className="receipt-ok">
           <span className="receipt-check" aria-hidden="true">✓</span>
@@ -38,12 +60,26 @@ export function Receipt({
           {" · "}
           {sale.cashierName}
         </p>
+        <div className="receipt-lines" data-testid="receipt-lines">
         <table className="receipt-table">
           <tbody>
             {sale.lines.map((l) => (
               <tr key={l.lineNo}>
                 <td>
-                  <span dir="auto">{l.productName}</span>{" "}
+                  {(() => {
+                    const n = receiptLineName(l, l.productId === null ? undefined : productNames?.get(l.productId), lang);
+                    return (
+                      <>
+                        <span dir="auto" data-testid="receipt-line-name">{n.display}</span>{" "}
+                        {/* The RECORDED name — what the printed / PDF receipt says — kept visible whenever it differs. */}
+                        {n.recorded !== null && (
+                          <span className="muted small receipt-line-recorded" dir="auto" data-testid="receipt-line-recorded">
+                            {n.recorded}
+                          </span>
+                        )}{" "}
+                      </>
+                    );
+                  })()}
                   {l.sku && <span className="muted small"><bdi dir="ltr">{l.sku}</bdi></span>}
                 </td>
                 <td className="num">
@@ -65,6 +101,7 @@ export function Receipt({
             </tr>
           </tfoot>
         </table>
+        </div>
         {/* 🔴 THE METHOD IS TRANSLATED, NOT PRINTED RAW. This cell used to render the enum itself,
             so an Arabic till showed "cash" — the same leak as PENDING in the review queue. */}
         {/* SELL-CREDIT: an unpaid till sale is a debt on a customer's account — never "paid by …". */}

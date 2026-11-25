@@ -379,8 +379,11 @@ describe("the renderer is safe with text an operator typed", () => {
     expect(printMoney({ minor: "47440", currency: "USD" })).toBe('<bdi dir="ltr">474.40&nbsp;USD</bdi>');
     expect(printMoney({ minor: "5", currency: "USD" })).toBe('<bdi dir="ltr">0.05&nbsp;USD</bdi>');
     expect(printMoney({ minor: "0", currency: "USD" })).toBe('<bdi dir="ltr">0.00&nbsp;USD</bdi>');
-    // LBP has no minor unit, so the stored integer prints as whole currency.
-    expect(printMoney({ minor: "150000", currency: "LBP" }, 0)).toBe('<bdi dir="ltr">150000&nbsp;LBP</bdi>');
+    // CURRENCY-P1 — CHANGED EXPECTATION, deliberately. This line pinned the defect: it asserted that stored LBP minor
+    // 150000 prints «150000», i.e. 100 times the amount the domain (`money.ts`: LBP exponent 2), the screens, the sale
+    // receipt and amount-in-words all give the same row (1500.00). The stored-value contract is unchanged; only the
+    // invoice document's reading of it is corrected, and the exponent is no longer a caller's parameter.
+    expect(printMoney({ minor: "150000", currency: "LBP" })).toBe('<bdi dir="ltr">1500.00&nbsp;LBP</bdi>');
   });
 });
 

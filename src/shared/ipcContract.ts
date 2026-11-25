@@ -22,6 +22,7 @@ export const CHANNELS = {
   setOperatorRole: "pos:setOperatorRole",
   setOperatorMayCreateProducts: "pos:setOperatorMayCreateProducts",
   currentCashier: "pos:currentCashier",
+  getEntryState: "pos:getEntryState",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
   createCustomerCreditSale: "pos:createCustomerCreditSale",
@@ -972,7 +973,7 @@ export interface PrintSaleReceiptRequest {
   readonly copy: boolean;
 }
 /** no-printer: Windows has no printer installed — the screen offers «Save PDF» instead. */
-export type PrintSaleReceiptResponse = { readonly status: "printed" | "cancelled" | "unavailable" | "no-printer" };
+export type PrintSaleReceiptResponse = { readonly status: "printed" | "cancelled" | "unavailable" | "no-printer" | "previewed" };
 
 /** DEC-35z+ COL — one COL- document as main read it from the ledger. Every figure is the ledger's own. */
 export interface CollectionDocumentDto {
@@ -1298,6 +1299,16 @@ export interface CustomerPaymentOverpaymentErrorContext {
   readonly currency: string;
 }
 
+/** Read-only routing information; never authority to select a mode or issue a session. */
+export interface EntryStateDto {
+  readonly profile: "real" | "demo";
+  readonly terminalClaimed: boolean;
+  /** UX hint only; not proof of a fresh installation or absence of merchant data. */
+  readonly firstRunEligible: boolean;
+  readonly demoAvailable: boolean;
+  readonly demoRetention?: { readonly retained: number; readonly max: 5; readonly reached: boolean };
+}
+
 export type IpcResult<T> = { readonly ok: true; readonly data: T } | { readonly ok: false; readonly error: IpcError };
 
 // ── Manual invoices (migration 6) ───────────────────────────────────────────────────────────────
@@ -1561,6 +1572,13 @@ export interface FinalizeInvoiceRequest {
    * explicit confirmation. Never Card, Other or bank (P3).
    */
   readonly payment?: InvoicePaymentDto;
+  /**
+   * R5 (Abu Abbas F3): what the issue confirmation SHOWED — `confirmationDigest(view, issueOnAccount)` of the view on
+   * screen. When present, the service recomputes it from the persisted draft inside the finalize transaction and
+   * refuses with INVOICE_CONFIRMATION_STALE on any difference, before a number, sale or payment is written. Optional,
+   * so every earlier caller keeps its exact behaviour.
+   */
+  readonly confirmedDraft?: string;
 }
 
 export type InvoicePaymentDto =
@@ -1713,6 +1731,7 @@ export type PickInvoiceLogoResponse =
 export type PrintInvoiceResponse =
   | { readonly status: "printed"; readonly logoMissing?: boolean; readonly logoUnverified?: boolean }
   | { readonly status: "cancelled"; readonly logoMissing?: boolean; readonly logoUnverified?: boolean }
+  | { readonly status: "previewed"; readonly logoMissing?: boolean; readonly logoUnverified?: boolean }
   | { readonly status: "unavailable" };
 
 /**
@@ -1904,7 +1923,7 @@ export interface CorrectAdvanceResponse {
   readonly duplicate: boolean;
 }
 
-export type PrintAdvanceResponse = { readonly status: "printed" | "cancelled" | "unavailable" };
+export type PrintAdvanceResponse = { readonly status: "printed" | "cancelled" | "unavailable" | "previewed" };
 export type SaveAdvancePdfResponse = { readonly status: "cancelled" } | { readonly status: "saved"; readonly fileName: string };
 
 // ── PHOTO-INVOICE-TO-ITEMS (offline OCR) ─────────────────────────────────────────────────────────
@@ -1945,6 +1964,8 @@ export type ReadInvoicePhotoResponse =
 
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
+  /** Present only in the isolated, unpackaged synthetic development window. */
+  requestDemoLifecycle?(req: {readonly action:"enter"|"exit"|"reset"}): Promise<IpcResult<{readonly status:"restarting"|"cancelled"}>>;
   listCashiers(): Promise<IpcResult<CashierDto[]>>;
   login(req: LoginRequest): Promise<IpcResult<LoginResponse>>;
   logout(): Promise<IpcResult<null>>;
@@ -1957,6 +1978,7 @@ export interface PosApi {
   setOperatorRole(req: SetOperatorRoleRequest): Promise<IpcResult<OperatorDto>>;
   setOperatorMayCreateProducts(req: SetOperatorMayCreateProductsRequest): Promise<IpcResult<OperatorDto>>;
   currentCashier(): Promise<IpcResult<CashierDto | null>>;
+  getEntryState(): Promise<IpcResult<EntryStateDto>>;
   getCatalog(): Promise<IpcResult<CatalogDto>>;
   createSale(req: CreateSaleRequest): Promise<IpcResult<CreateSaleResponse>>;
   createCustomerCreditSale(req: CreateCustomerCreditSaleRequest): Promise<IpcResult<CreateCustomerCreditSaleResponse>>;

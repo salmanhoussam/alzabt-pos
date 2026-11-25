@@ -87,7 +87,9 @@ describe("the sheet's wiring (source-level)", () => {
     expect(SHEET).toContain('e.code === "INVOICE_FINALIZED"');
     // TRANSITION · INV-PARTIAL-DEBT: the replay repeats the SAME payment (was no payment at all), so a
     // part-paid issue is verified against the tender it recorded.
-    expect(SHEET).toContain("finalizeInvoice({ invoiceId, issueOnAccount: true, ...paymentPart })");
+    // TRANSITION (R5, Abu Abbas F3): and it carries the SAME confirmation, so the service verifies the replay against the
+    // draft the operator confirmed (a committed issue is verified before any comparison, never falsely refused).
+    expect(SHEET).toContain("finalizeInvoice({ invoiceId, issueOnAccount: true, ...paymentPart, confirmedDraft })");
     expect(SHEET).toContain('t("inv.account.unknown")');
   });
   it("the confirmation and the issued notice name the account", () => {

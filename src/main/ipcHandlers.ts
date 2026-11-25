@@ -18,7 +18,7 @@ import { DomainError } from "../domain/errors";
 import type { OnlineCatalogSnapshot } from "../application/posService";
 import { MAX_QUANTITY_MILLI } from "../domain/quantity";
 import { type PaymentMethod, assertPaymentMethod } from "../domain/sale";
-import { formatDecimal, money } from "../domain/money";
+import { currencyExponent, formatDecimal, money } from "../domain/money";
 import { channelStorage, isCollectionChannel } from "../domain/ledger";
 import type { SaleRecord } from "../domain/sale";
 import { DEFAULT_TERMINAL_LANGUAGE, isLanguage } from "../shared/i18n";
@@ -72,6 +72,7 @@ import { MAX_UNIT_LABEL } from "../domain/invoiceUnits";
 import type { ReconciliationRow } from "../persistence/reconciliationRepository";
 import {
   type AppInfoDto,
+  type EntryStateDto,
   CHANNELS,
   type ChannelName,
   type CustomerPaymentOverpaymentErrorContext,
@@ -89,6 +90,7 @@ import {
   type PhoneSessionState,
 } from "../shared/ipcContract";
 import { type Logger, nullLogger } from "./logger";
+import { CONFIRMATION_DIGEST_MAX } from "../shared/invoiceConfirmation";
 import { accessFor } from "./channelPolicy";
 
 /**
@@ -183,6 +185,8 @@ export interface IpcHandlerOptions {
   readonly phoneSessions?: PhoneSessionBridge;
   /** Version/build identity of this installation. */
   readonly appInfo?: () => AppInfoDto;
+  /** Read-only routing hint; absence must not grant setup authority. */
+  readonly entryState?: () => EntryStateDto;
   /** Called after a NEW sale is committed (the daily-backup trigger). Must not throw. */
   readonly afterSale?: () => void;
   readonly logger?: Logger;
@@ -204,7 +208,7 @@ export interface IpcHandlerOptions {
    */
   readonly printInvoice?: (
     invoiceId: string,
-  ) => Promise<{ readonly status: "printed" | "cancelled"; readonly logoMissing: boolean; readonly logoUnverified: boolean }>;
+  ) => Promise<{ readonly status: "printed" | "cancelled" | "previewed"; readonly logoMissing: boolean; readonly logoUnverified: boolean }>;
   /** Save-as dialog + printToPDF of the frozen invoice. Null when the operator cancelled. */
   readonly saveInvoicePdf?: (
     invoiceId: string,
@@ -259,7 +263,7 @@ export interface IpcHandlerOptions {
   /** TILL-PRINT: the ONE read model of a till receipt (absent → NOT_AVAILABLE). */
   readonly saleReceipts?: SaleReceiptService;
   /** TILL-PRINT: print / save the receipt DTO built HERE from the ledger by sale id; no markup crosses. */
-  readonly printSaleReceipt?: (doc: SaleReceiptDto, layout: "thermal80" | "a5", copy: boolean) => Promise<"printed" | "cancelled" | "no-printer">;
+  readonly printSaleReceipt?: (doc: SaleReceiptDto, layout: "thermal80" | "a5", copy: boolean) => Promise<"printed" | "cancelled" | "no-printer" | "previewed">;
   readonly saveSaleReceiptPdf?: (doc: SaleReceiptDto, layout: "thermal80" | "a5", copy: boolean) => Promise<SavedFile | null>;
   /** Operator settings (language). Absent (tests, headless) means the defaults are reported. */
   readonly settings?: {
@@ -1133,6 +1137,11 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       service.assertOwner();
       return backupRestore().applyRestore({ manifestSha256: o.manifestSha256, acceptMissingAssets: o.acceptMissingAssets });
     }),
+    getEntryState: wrap("getEntryState", (p) => {
+      noPayload(p);
+      if (!options.entryState) throw new DomainError("NOT_AVAILABLE", "Entry state is unavailable");
+      return options.entryState();
+    }),
     getAppInfo: wrap("getAppInfo", (p) => {
       noPayload(p);
       return options.appInfo?.() ?? { version: "unknown", build: "unknown" };
@@ -1691,11 +1700,14 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       // INV-PAY-METHOD: `payment` is the second optional key — exactly { method: "cash" } or
       // { method: "external", whish: { reference, fundsConfirmed } }. The service decides whether one
       // is required (something marked paid) and refuses Card / Other / bank.
-      const o = objectWithOptional(p, ["invoiceId"], ["issueOnAccount", "payment"]);
+      // R5: `confirmedDraft` is the third optional key — the exact confirmation the operator saw; the service compares it
+      // with the persisted draft inside the transaction.
+      const o = objectWithOptional(p, ["invoiceId"], ["issueOnAccount", "payment", "confirmedDraft"]);
       if ("issueOnAccount" in o && typeof o.issueOnAccount !== "boolean") invalid("'issueOnAccount' must be true or false");
       const view = invoices().finalizeInvoice(str(o.invoiceId, "invoiceId", 100), {
         issueOnAccount: o.issueOnAccount === true,
         ...("payment" in o ? { payment: invoicePayment(o.payment) } : {}),
+        ...("confirmedDraft" in o ? { confirmedDraft: str(o.confirmedDraft, "confirmedDraft", CONFIRMATION_DIGEST_MAX) } : {}),
       });
       log.info("invoice-finalized", {
         id: view.invoice.id,
@@ -2087,7 +2099,10 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       }
       if (reading === null) return { status: "cancelled" as const };
       const currency = service.getCatalog().currency;
-      const exponent = currency === "LBP" ? 0 : 2;
+      // CURRENCY-P1: the reading's minor units use the catalog currency's OWN exponent (`money.ts`), the same contract
+      // every stored amount uses. It said `LBP ? 0 : 2`, so a read «1,500» LBP became minor 1500 = 15.00 LBP, 100 times
+      // too small against the domain, the review screen (`formatDecimal`) and the catalog prices it is compared with.
+      const exponent = currencyExponent(currency);
       const r = rowsFromPositioned(reading.lines, exponent);
       log.info("invoice-photo-read", { mode, rows: r.rows.length, unexplained: r.unexplained.length, ms: reading.ms });
       return {

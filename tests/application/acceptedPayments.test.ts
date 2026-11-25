@@ -265,10 +265,12 @@ describe("🔴 the stand-in for an older build exists ONLY in tests", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("main.ts builds the PLAIN services", () => {
+  it("main delegates to the shared assembly of PLAIN services", () => {
     const main = code(readFileSync("src/main/main.ts", "utf8"));
-    expect(main).toMatch(/new PosService\(/);
-    expect(main).toMatch(/new LedgerService\(/);
-    expect(main).not.toMatch(/pre-dec35|PreDec35/);
+    const assembly = code(readFileSync("src/main/ledgerServices.ts", "utf8"));
+    expect(main).toMatch(/createLedgerServices\(db,/);
+    expect(assembly).toMatch(/new PosService\(/);
+    expect(assembly).toMatch(/new LedgerService\(/);
+    expect(main + assembly).not.toMatch(/pre-dec35|PreDec35/);
   });
 });

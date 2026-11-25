@@ -1,3 +1,4 @@
+import type { SeedActor } from "./seedActor";
 /**
  * InvoiceService — the manual invoice's business operations, and the one path by which reviewing an
  * invoice may change the catalog.
@@ -62,6 +63,8 @@ import type { NewSaleLine, NewSaleHeader } from "../persistence/saleRepository";
 import { type SaleRecord, paymentStatusFor } from "../domain/sale";
 import { cleanPaymentReference } from "../domain/ledger";
 import type { TerminalConfig } from "../fixtures/terminal";
+import { toInvoiceViewDto } from "../shared/dto";
+import { confirmationDigest } from "../shared/invoiceConfirmation";
 
 /** Where a reconciliation edit says it came from, in audit metadata. */
 /** 100% in basis points. A rate above this is refused, not clamped. */
@@ -175,6 +178,7 @@ export interface ObligationFacts {
 }
 
 export interface InvoiceServiceDeps {
+  readonly seedActor?: SeedActor;
   readonly invoices: InvoiceRepository;
   /** Migration 16. Absent on a terminal without the ledger services; linking and credit then refuse. */
   readonly credit?: InvoiceCreditPort;
@@ -343,6 +347,19 @@ export class InvoiceService {
     readonly startNumber?: unknown;
   }): CompanyProfileRow {
     this.requireCashier();
+    return this.saveCompanyProfileValidated(input);
+  }
+
+  /** Main-only seed path; the same validator and transaction are used. */
+  seedSaveCompanyProfile(input: Parameters<InvoiceService["saveCompanyProfile"]>[0]): CompanyProfileRow {
+    const seed = this.deps.seedActor;
+    if (!seed) throw new DomainError("NOT_AVAILABLE", "Seed authority unavailable");
+    seed.verifyOwner();
+    return this.saveCompanyProfileValidated(input);
+  }
+
+  /** Shared body; callers must establish authority before entering it. */
+  private saveCompanyProfileValidated(input: Parameters<InvoiceService["saveCompanyProfile"]>[0]): CompanyProfileRow {
     const instant = this.now();
 
     const taxEnabled = input.taxEnabled === true;
@@ -369,7 +386,10 @@ export class InvoiceService {
     };
 
     const start = this.parseStartNumber(input.startNumber);
-    return this.deps.transact(() => this.deps.company.save(profile, instant, start));
+    return this.deps.transact(() => {
+      this.deps.seedActor?.verifyOwner();
+      return this.deps.company.save(profile, instant, start);
+    });
   }
 
   private parseStartNumber(value: unknown): number {
@@ -659,6 +679,19 @@ export class InvoiceService {
     }
 
     const productId = cleanText(draft.productId, "product_id", 100);
+    // CURRENCY-P1: a line linked to a catalog product must be in that product's currency. The line's price is parsed
+    // in the INVOICE currency; linking it to a product priced in another one would later let reconciliation and the
+    // sale snapshot read one currency's minor units as another's. Refused before anything is written, never relabelled.
+    // A product id that no longer resolves keeps today's behaviour (the line is not a foreign key).
+    if (productId !== null) {
+      const product = this.deps.catalogStore.findById(productId);
+      if (product && product.currency !== currency) {
+        throw new DomainError(
+          "MIXED_CURRENCY",
+          `This product is priced in ${product.currency} and this invoice is in ${currency}; nothing was changed`,
+        );
+      }
+    }
     return {
       description,
       unitLabel,
@@ -823,7 +856,12 @@ export class InvoiceService {
    */
   finalizeInvoice(
     invoiceId: string,
-    options?: { readonly issueOnAccount?: boolean; readonly payment?: InvoicePaymentInput | null },
+    options?: {
+      readonly issueOnAccount?: boolean;
+      readonly payment?: InvoicePaymentInput | null;
+      /** R5: the confirmation the operator saw (`confirmationDigest`); compared inside the transaction when given. */
+      readonly confirmedDraft?: string;
+    },
   ): InvoiceView {
     const cashier = this.requireCashier();
     const instant = this.now();
@@ -837,7 +875,7 @@ export class InvoiceService {
     const payment = this.invoicePaymentOf(options?.payment);
 
     try {
-      return this.finalizeWithin(invoiceId, cashier, instant, credit, payment);
+      return this.finalizeWithin(invoiceId, cashier, instant, credit, payment, options?.confirmedDraft);
     } catch (err) {
       // A Whish reference already used anywhere: the tender's registration aborts the WHOLE issue —
       // no number, no sale, no tender — and the operator reads the same sentence as everywhere else.
@@ -880,6 +918,7 @@ export class InvoiceService {
     instant: Date,
     credit: InvoiceCreditPort | null,
     payment: InvoicePayment | null,
+    confirmedDraft?: string,
   ): InvoiceView {
     return this.deps.transact((): InvoiceView => {
       if (credit) {
@@ -890,7 +929,28 @@ export class InvoiceService {
       }
       // 1 · reread from the database; whatever the UI believed is irrelevant
       const invoice = this.requireDraft(invoiceId);
+      // CURRENCY-P1: an invoice is issued only in the terminal's currency. Issuing it records a SALE in the invoice's
+      // currency, and the daily money summary and the sales report refuse a day holding two currencies
+      // (`dailyMoney.ts`, `report.ts`: MIXED_CURRENCY) — one such issue would break that day's reports. A draft in
+      // another currency (only a restored or synthetic ledger can hold one) stays a draft, untouched.
+      if (invoice.currency !== this.deps.terminal.currency) {
+        throw new DomainError(
+          "MIXED_CURRENCY",
+          `This invoice is in ${invoice.currency} and this terminal records ${this.deps.terminal.currency}; it was not issued`,
+        );
+      }
       const lines = this.deps.invoices.listLines(invoiceId);
+      // R5 (Abu Abbas F3): the issue is bound to the COMPLETE draft the confirmation showed — every line's identity and
+      // content, every printed header field, the money and the account choice — compared HERE, inside the same
+      // IMMEDIATE transaction that will write the number, the sale and the payment. A row deleted or substituted after
+      // the confirmation opened, even one that changes no total, refuses the issue and writes nothing. A verified
+      // on-account replay of an issue that already committed returned above and is never compared (no false failure).
+      if (confirmedDraft !== undefined && confirmationDigest(toInvoiceViewDto({ invoice, lines }), credit !== null) !== confirmedDraft) {
+        throw new DomainError(
+          "INVOICE_CONFIRMATION_STALE",
+          "This invoice changed after its confirmation was shown; it was not issued. Check it and confirm again",
+        );
+      }
       let accountCustomerId: string | null = null;
       if (credit) {
         if (!invoice.customer_party_id) {
@@ -1531,6 +1591,18 @@ export class InvoiceService {
       return this.markCreated(row, row.matched_product_id, cashier);
     }
 
+    // CURRENCY-P1 (Abu Abbas's risk): a new catalog product is priced in the catalog's currency, which is the terminal's
+    // (`PosService` refuses any other). The price comes from the invoice line, so the line's invoice must be in that
+    // same currency; otherwise its minor units would be relabelled as the catalog's. Refused, nothing created.
+    const sourceInvoice = this.deps.invoices.findById(line.invoice_id);
+    if (!sourceInvoice) throw new DomainError("INVOICE_NOT_FOUND", "The invoice behind this item is gone");
+    if (sourceInvoice.currency !== this.deps.terminal.currency) {
+      throw new DomainError(
+        "MIXED_CURRENCY",
+        `This invoice is in ${sourceInvoice.currency} and the catalog is in ${this.deps.terminal.currency}; no product was created`,
+      );
+    }
+
     const baseUnit =
       cleanText(input.baseUnit, "base_unit", MAX_SKU) ??
       (line.canonical_unit ?? (line.unit_label ? canonicalUnitFor(line.unit_label) : null));
@@ -1546,7 +1618,9 @@ export class InvoiceService {
       // 🔴 Never inferred from the description. Absent stays absent.
       nameEn: cleanText(input.nameEn, "name_en", MAX_PRODUCT_NAME),
       sku: cleanText(input.sku, "sku", MAX_SKU),
-      price: priceText(line.unit_price_minor, this.deps.terminal.currency),
+      // CURRENCY-P1: the line's minor units are formatted in the INVOICE's currency — they were formatted in the
+      // terminal's, which reads one currency's integers as another's whenever the two differ.
+      price: priceText(line.unit_price_minor, sourceInvoice.currency),
       baseUnit,
     };
 
@@ -1608,6 +1682,19 @@ export class InvoiceService {
     }
     const current = this.deps.catalogStore.findById(row.matched_product_id);
     if (!current) throw new DomainError("PRODUCT_NOT_FOUND", "That product no longer exists");
+    // CURRENCY-P1 (Abu Abbas's risk): accepting the invoice PRICE copies the line's minor units into the product, which
+    // `targetState` formats in the PRODUCT's currency. Unless the invoice is in that same currency, that relabels the
+    // amount. Refused before any write; name/unit-only updates carry no money and are unaffected.
+    if (fields.includes("selling_price_minor")) {
+      const sourceInvoice = this.deps.invoices.findById(line.invoice_id);
+      if (!sourceInvoice) throw new DomainError("INVOICE_NOT_FOUND", "The invoice behind this item is gone");
+      if (sourceInvoice.currency !== current.currency) {
+        throw new DomainError(
+          "MIXED_CURRENCY",
+          `This invoice is in ${sourceInvoice.currency} and the product is priced in ${current.currency}; the price was not changed`,
+        );
+      }
+    }
 
     const target = this.targetState(fields, selection, line, current);
 

@@ -1,0 +1,50 @@
+import {mkdtempSync,writeFileSync} from "node:fs";
+import {basename,join} from "node:path";
+import {expect,it} from "vitest";
+import {adoptVerifiedSyntheticReservation,createSyntheticDemoRoot,isFreshSyntheticReservation,openNewSyntheticDemoLedger,reserveSyntheticDemoProfile} from "../../src/main/demoProfile";
+import {DemoLaunchRecords} from "../../src/main/demoLaunchRecords";
+it("accepts only a genuinely empty reserved synthetic slot before first open",()=>{
+  const parent=mkdtempSync(join(process.cwd(),"node_modules","synthetic-fresh-check-"));
+  const root=createSyntheticDemoRoot(parent);
+  const r=reserveSyntheticDemoProfile(root);
+  const id="slot-"+r.slot+"/"+basename(r.path);
+  expect(isFreshSyntheticReservation(root,id)).toBe(true);
+  expect(isFreshSyntheticReservation(root,"../"+id)).toBe(false);
+  expect(isFreshSyntheticReservation(root,"slot-2/"+basename(r.path))).toBe(false);
+  writeFileSync(join(r.path,"partial-synthetic"),"x",{flag:"wx"});
+  expect(isFreshSyntheticReservation(root,id)).toBe(false);
+});
+
+it("adopts only a consumed one-use proof and opens one fresh synthetic ledger",()=>{
+  const parent=mkdtempSync(join(process.cwd(),"node_modules","synthetic-handover-"));
+  const control=mkdtempSync(join(parent,"control-"));
+  const root=createSyntheticDemoRoot(parent);
+  const old=reserveSyntheticDemoProfile(root);
+  const id="slot-"+old.slot+"/"+basename(old.path);
+  const records=new DemoLaunchRecords(control);
+  const launch=records.prepare("enter",id,1000);
+  const proof=records.consume(launch.nonce,launch.key,1001,(value)=>isFreshSyntheticReservation(root,value));
+  expect(proof).not.toBeNull();
+  const adopted=adoptVerifiedSyntheticReservation(root,proof!);
+  expect(adopted.reservation.path).toBe(old.path);
+  expect(()=>adoptVerifiedSyntheticReservation(root,proof!)).toThrow();
+  const db=openNewSyntheticDemoLedger(adopted.reservation);
+  expect(db.open).toBe(true);
+  expect(()=>openNewSyntheticDemoLedger(adopted.reservation)).toThrow();
+  db.close();
+  expect(records.consume(launch.nonce,launch.key,1001,()=>true)).toBeNull();
+});
+it("fails closed if a slot changes after records are consumed",()=>{
+  const parent=mkdtempSync(join(process.cwd(),"node_modules","synthetic-handover-race-"));
+  const control=mkdtempSync(join(parent,"control-"));
+  const root=createSyntheticDemoRoot(parent);
+  const r=reserveSyntheticDemoProfile(root);
+  const id="slot-"+r.slot+"/"+basename(r.path);
+  const records=new DemoLaunchRecords(control);
+  const launch=records.prepare("reset",id,1000);
+  const proof=records.consume(launch.nonce,launch.key,1001,(value)=>isFreshSyntheticReservation(root,value));
+  expect(proof).not.toBeNull();
+  writeFileSync(join(r.path,"partial-synthetic"),"x",{flag:"wx"});
+  expect(()=>adoptVerifiedSyntheticReservation(root,proof!)).toThrow();
+  expect(()=>adoptVerifiedSyntheticReservation(root,proof!)).toThrow();
+});

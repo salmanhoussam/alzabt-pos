@@ -1,3 +1,4 @@
+import type { SeedActor } from "./seedActor";
 /**
  * PosService — the business operations the UI may ask for. Nothing else is exposed over IPC.
  *
@@ -165,6 +166,8 @@ function imageDiff(before: ProductImageMeta | null, after: ProductImageMeta | nu
 export type LoginResult = OperatorLoginOutcome;
 
 export interface PosServiceDeps {
+  /** Trusted Main-only seed instances are never authenticated POS instances. */
+  readonly seedActor?: SeedActor;
   readonly repository: SaleRepository;
   readonly pinStates: PinStateRepository;
   readonly catalog: Catalog;
@@ -463,6 +466,18 @@ export interface OnlineCatalogSnapshot {
   readonly images: ReadonlyArray<{ readonly file: string; readonly imageId: string; readonly sha256: string }>;
 }
 
+/** Internal snapshot produced only by an existing live authorization guard. */
+type ActingOperator = Cashier & { readonly role: OperatorRole };
+
+/**
+ * Capture the identity checked by the guard, and re-read its role at audit time.
+ * The callback is supplied only by a trusted producer; normal POS uses liveSession.
+ * This preserves the existing rollback if an operator is deactivated during a write.
+ */
+function actingOperator(live: ActingOperator, verifyRole: () => OperatorRole): ActingOperator {
+  return { id: live.id, name: live.name, get role() { return verifyRole(); } };
+}
+
 export class PosService {
   private readonly repository: SaleRepository;
   private readonly now: () => Date;
@@ -510,6 +525,7 @@ export class PosService {
    * downstream — `requireCashier` included — can be reached with a bootstrap credential.
    */
   login(cashierId: string, pin: string): LoginResult {
+    if (this.deps.seedActor) throw new DomainError("NOT_AVAILABLE", "Seed instance cannot sign in");
     const account = this.credentialFor(cashierId);
     if (!account) {
       throw new DomainError("INVALID_CREDENTIALS", "Cashier or PIN is incorrect", "LOGIN_UNKNOWN_OPERATOR", {
@@ -563,6 +579,7 @@ export class PosService {
 
   /** Finishes mandatory setup and opens the session it was blocking. */
   completeBootstrapSetup(ticket: string, name: string, pin: string): Cashier {
+    if (this.deps.seedActor) throw new DomainError("NOT_AVAILABLE", "Seed instance cannot sign in");
     if (!this.deps.operators) throw new DomainError("NOT_AVAILABLE", "Operator accounts are not available");
     const session = this.deps.operators.completeSetup(ticket, name, pin);
     this.cashier = { id: session.id, name: session.name };
@@ -686,14 +703,38 @@ export class PosService {
     return { id: row.id, name: row.name, role: row.role, mayCreateProducts: row.mayCreateProducts };
   }
 
+  /** Main-only seed entry points reuse the same validated, transactional bodies. */
+  private seedOperator(): ActingOperator {
+    const seed = this.deps.seedActor;
+    if (!seed) throw new DomainError("NOT_AVAILABLE", "Seed authority unavailable");
+    const owner = seed.verifyOwner();
+    return actingOperator(owner, () => seed.verifyOwner().role);
+  }
+
+  seedImportCatalogCsv(...args: Parameters<PosService["importCatalogCsv"]>): CatalogImportResult {
+    return this.importCatalogCsvAs(this.seedOperator(), ...args);
+  }
+
+  seedUpdateProduct(...args: Parameters<PosService["updateProduct"]>): AdminProductRow {
+    return this.updateProductAs(this.seedOperator(), args[0], args[1], args[2], args[3] ?? MANUAL_PROVENANCE);
+  }
+
+  seedCreateCategory(...args: Parameters<PosService["createCategory"]>): CategoryRow {
+    return this.createCategoryAs(this.seedOperator(), ...args);
+  }
+
+  seedSetProductPrimaryImage(input: Parameters<PosService["setProductPrimaryImage"]>[0]): ProductImageMeta {
+    return this.writeProductPrimaryImage(this.seedOperator(), input);
+  }
+
   /** The live role, for the channel guard. Throws exactly as `liveSession` does. */
   requireLiveRole(): OperatorRole {
     return this.liveSession().role;
   }
 
-  private requireCashier(): Cashier {
+  private requireCashier(): ActingOperator {
     const live = this.liveSession();
-    return { id: live.id, name: live.name };
+    return actingOperator(live, () => this.liveSession().role);
   }
 
   // ── Catalog ─────────────────────────────────────────────────────────────────────────────────────
@@ -718,7 +759,11 @@ export class PosService {
    * existing TOTAL_MISMATCH / PRODUCT_NOT_FOUND guards, so a mid-sale import cannot mis-charge.
    */
   importCatalogCsv(fileName: string, bytes: Uint8Array): CatalogImportResult {
-    const cashier = this.requireCashier();
+    return this.importCatalogCsvAs(this.requireCashier(), fileName, bytes);
+  }
+
+  /** Shared body; callers must establish authority before entering it. */
+  private importCatalogCsvAs(cashier: ActingOperator, fileName: string, bytes: Uint8Array): CatalogImportResult {
     const { store, auditStore, transact } = this.requireProductStack();
     const currency = this.deps.terminal.currency;
     const { rows, rejected } = validateImport(decodeUtf8Strict(bytes), currency);
@@ -956,12 +1001,11 @@ export class PosService {
    * An independent review found the two trails disagreeing: an operator event recorded the real
    * role while a product event, written seconds later by the same person, recorded 'unspecified'.
    *
-   * The role is read from `liveSession()` rather than passed in, so it cannot drift from the role
-   * the authorization guard just enforced. Rows written before migration 8 keep 'unspecified' and
-   * are never rewritten — that boundary is the point, not a limitation.
+   * The trusted context supplies the role after a live recheck at audit time.
+   * Rows written before migration 8 keep unspecified and are never rewritten.
    */
   private auditDraft(
-    cashier: Cashier,
+    cashier: ActingOperator,
     eventType: AuditEventType,
     entityType: "product" | "catalog" | "category" | "product_image",
     entityId: string,
@@ -975,7 +1019,7 @@ export class PosService {
       entityId,
       actorId: cashier.id,
       actorName: cashier.name,
-      actorTier: this.liveSession().role,
+      actorTier: cashier.role,
       occurredAt: instant,
       businessDate: businessDateOf(instant, this.deps.terminal.timeZone),
       changes,
@@ -1170,7 +1214,13 @@ export class PosService {
     isActive: boolean,
     provenance: ProductWriteProvenance = MANUAL_PROVENANCE,
   ): AdminProductRow {
-    const cashier = this.requireCashier();
+    return this.updateProductAs(this.requireCashier(), id, draft, isActive, provenance);
+  }
+
+  /** Shared body; callers must establish authority before entering it. */
+  private updateProductAs(
+    cashier: ActingOperator, id: string, draft: ProductDraft, isActive: boolean, provenance: ProductWriteProvenance,
+  ): AdminProductRow {
     const { store, auditStore, transact } = this.requireProductStack();
     const instant = this.now();
     const written: AuditRow[] = [];
@@ -1311,14 +1361,14 @@ export class PosService {
   }
 
   /** The live owner, or a refusal. Re-reads the durable role, exactly as `requireLiveRole` does. */
-  private requireOwner(): Cashier {
+  private requireOwner(): ActingOperator {
     const live = this.liveSession();
     if (live.role !== "owner") {
       // The SAME code and the SAME sentence the channel guard uses, so an operator cannot tell
       // which of the two layers refused them — and so there is one message to translate.
       throw new DomainError("NOT_AUTHORIZED", "Only the shop owner can do that");
     }
-    return { id: live.id, name: live.name };
+    return actingOperator(live, () => this.liveSession().role);
   }
 
   /**
@@ -1366,14 +1416,14 @@ export class PosService {
    * act is not owner-only any more. A cashier who has not been granted the permission is told what
    * is actually true, and is not invited to guess which layer refused them.
    */
-  private requireProductCreator(): Cashier {
+  private requireProductCreator(): ActingOperator {
     const live = this.liveSession();
     const permitted =
       live.role === "owner" || !this.hasOperatorDirectory() || live.mayCreateProducts === true;
     if (!permitted) {
       throw new DomainError("NOT_AUTHORIZED", "You are not allowed to add products");
     }
-    return { id: live.id, name: live.name };
+    return actingOperator(live, () => this.liveSession().role);
   }
 
   private requireCategories(): CategoryRepository {
@@ -1701,7 +1751,11 @@ export class PosService {
    * catch the second — as a raw constraint failure the owner cannot act on.
    */
   createCategory(nameAr: string, nameEn: string | null): CategoryRow {
-    const owner = this.requireOwner();
+    return this.createCategoryAs(this.requireOwner(), nameAr, nameEn);
+  }
+
+  /** Shared body; callers must establish owner authority before entering it. */
+  private createCategoryAs(owner: ActingOperator, nameAr: string, nameEn: string | null): CategoryRow {
     const categories = this.requireCategories();
     const { auditStore, transact } = this.requireAuditedStack();
     const instant = this.now();
@@ -1987,7 +2041,7 @@ export class PosService {
    * ════════════════════════════════════════════════════════════════════════════════════════════
    */
   private writeInitialPhoto(
-    actor: Cashier,
+    actor: ActingOperator,
     input: {
       readonly productId: string;
       readonly bytes: Buffer;
@@ -2001,7 +2055,7 @@ export class PosService {
   }
 
   private writeProductPrimaryImage(
-    owner: Cashier,
+    owner: ActingOperator,
     input: {
       readonly productId: string;
       readonly bytes: Buffer;

@@ -80,9 +80,9 @@ assert(buildLine === `Alzabt POS ${EXPECTED.version} · Build ${EXPECTED.build}`
 await pickFile(app, BAD);
 await tools(page);
 await page.locator('[data-testid="import-catalog"]').click();
-await page.waitForSelector("text=Catalog NOT imported");
-assert(await page.locator(".import-report").getByText("Line 2").isVisible(), "a malformed price is rejected with its line number");
-await page.getByRole("button", { name: "OK" }).click();
+await page.waitForSelector('[data-testid="import-report"][data-status="rejected"]'); // QW-IMPORT-DIALOG-AR: language-free
+assert(await page.locator('[data-testid="import-report-rejected-row"][data-line="2"]').isVisible(), "a malformed price is rejected with its line number");
+await page.locator('[data-testid="import-report-ok"]').click();
 await page.locator('[data-testid="tab-sell"]').click();
 await product(page, "Espresso").waitFor({ state: "visible", timeout: 10000 });
 assert((await page.locator("button.product").count()) === 8, "rejected import changed nothing (8 demo products)");
@@ -90,12 +90,24 @@ assert((await page.locator("button.product").count()) === 8, "rejected import ch
 await pickFile(app, GOOD);
 await tools(page);
 await page.locator('[data-testid="import-catalog"]').click();
-await page.waitForSelector("text=Catalog imported");
+await page.waitForSelector('[data-testid="import-report"][data-status="imported"]');
 const report = await page.locator(".import-report").innerText();
 log("import report:", report.replace(/\s+/g, " "));
-assert(/4 products in the file: 4 new/.test(report), "4 products imported");
-assert(/1 products have a placeholder price/.test(report), "placeholder price flagged");
-await page.getByRole("button", { name: "OK" }).click();
+const counts = async () =>
+  page.locator('[data-testid="import-report"]').evaluate((e) => {
+    const count = (k) => {
+      const v = e.getAttribute("data-" + k);
+      // A count is a canonical non-negative integer. Missing, empty, blank or malformed fails HERE, naming the
+      // attribute — never as a silent 0 (Number(null) and Number("") are both 0, which made zero checks pass falsely).
+      if (v === null || !/^(0|[1-9][0-9]*)$/.test(v)) throw new Error(`import-report data-${k} is ${v === null ? "missing" : JSON.stringify(v)}, not a count`);
+      return Number(v);
+    };
+    return Object.fromEntries(["rows", "inserted", "updated", "unchanged", "deactivated", "placeholder-prices"].map((k) => [k, count(k)]));
+  });
+const c1 = await counts();
+assert(c1.rows === 4 && c1.inserted === 4, "4 products imported");
+assert(c1["placeholder-prices"] === 1 && (await page.locator('[data-testid="import-report-placeholders"]').count()) === 1, "placeholder price flagged");
+await page.locator('[data-testid="import-report-ok"]').click();
 await page.waitForSelector("button.product");
 assert((await product(page, "Espresso").count()) === 0, "demo fixture replaced by the local catalog");
 assert((await page.locator("button.product").count()) === 4, "grid shows exactly the 4 imported products");
@@ -148,24 +160,25 @@ const EXPORT = join(home, "exported-catalog.csv");
 await saveTo(app, EXPORT);
 await tools(page);
 await page.locator('[data-testid="export-catalog"]').click();
-await page.waitForSelector("text=Catalog exported");
-await page.getByRole("button", { name: "OK" }).click();
+await page.waitForSelector('[data-testid="import-report"][data-status="exported"][data-what="catalog-export"]');
+await page.locator('[data-testid="import-report-ok"]').click();
 const exported = readFileSync(EXPORT, "utf8");
 assert(exported.startsWith("\uFEFF") && exported.includes("بيبسي 330 مل") && exported.includes("4,شيبس,,0.01,USD,piece,1"), "exported CSV has a BOM and the Arabic names exactly");
 await pickFile(app, EXPORT);
 await page.locator('[data-testid="import-catalog"]').click();
-await page.waitForSelector("text=Catalog imported");
+await page.waitForSelector('[data-testid="import-report"][data-status="imported"]');
 const reimport = await page.locator(".import-report").innerText();
-assert(/0 new, 0 updated, 4 unchanged/.test(reimport), "re-importing the exported file changes nothing");
-await page.getByRole("button", { name: "OK" }).click();
+const c2 = await counts();
+assert(c2.inserted === 0 && c2.updated === 0 && c2.unchanged === 4, "re-importing the exported file changes nothing");
+await page.locator('[data-testid="import-report-ok"]').click();
 
 // ── Export backup: a verified, consistent copy of the live ledger ──────────────────────────────
 const BACKUP = join(home, "exported-backup.sqlite");
 await saveTo(app, BACKUP);
 await tools(page);
 await page.locator('[data-testid="export-backup"]').click();
-await page.waitForSelector("text=Backup exported");
-await page.getByRole("button", { name: "OK" }).click();
+await page.waitForSelector('[data-testid="import-report"][data-status="exported"][data-what="backup-export"]');
+await page.locator('[data-testid="import-report-ok"]').click();
 await app.close();
 
 const copy = new Database(BACKUP, { readonly: true });

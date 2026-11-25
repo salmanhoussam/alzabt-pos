@@ -53,6 +53,8 @@ export type DomainErrorCode =
   | "INVOICE_NOT_FOUND"
   | "INVOICE_NOT_DRAFT"
   | "INVOICE_NOT_FINALIZABLE"
+  /** R5: the persisted draft is not the one the issue confirmation showed (`shared/invoiceConfirmation.ts`). */
+  | "INVOICE_CONFIRMATION_STALE"
   | "COMPANY_PROFILE_REQUIRED"
   | "INVOICE_NUMBERING_LOCKED"
   | "RECONCILIATION_NOT_FOUND"
@@ -150,7 +152,8 @@ export type DomainErrorCode =
   // 🔴 The install/upgrade ceremony: while the seeded bootstrap owner has not claimed this
   // terminal, nobody else gets a session OR a setup ticket. Distinct from SETUP_REQUIRED, which is
   // about one operator missing a valid ticket; this is about the TERMINAL not being claimed yet.
-  | "OWNER_SETUP_REQUIRED";
+  | "OWNER_SETUP_REQUIRED"
+  | "DEMO_RESTRICTED";
 
 /** Internal data for the one data-bearing customer-payment refusal; IPC serializes its bigint as text. */
 export interface CustomerPaymentOverpaymentContext {

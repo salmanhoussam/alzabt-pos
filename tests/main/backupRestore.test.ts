@@ -605,16 +605,19 @@ describe("🔴 P0 — after a restore is staged, nothing can change the data unt
     expect(save).toContain("this.requireAuditedStack()");
   });
 
-  it("🔴 main.ts checks the lock in EVERY transaction provider it hands out", () => {
-    const main = readFileSync("src/main/main.ts", "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-    const providers = main.match(/transact: \(fn\) => \{[^}]*\}/g) ?? [];
-    // TRANSITION (migration 20): 5 → 6. The sixth is `AdvanceService`'s provider (customer advances),
-    // and the loop below holds it to the same rule as the other five: the lock is checked first.
+  it("🔴 shared service assembly checks the restore lock in EVERY transaction provider", () => {
+    const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    const main = strip(readFileSync("src/main/main.ts", "utf8"));
+    const assembly = strip(readFileSync("src/main/ledgerServices.ts", "utf8"));
+    expect(main).toMatch(/createLedgerServices\(db,\s*\{/);
+    expect(main).toMatch(/assertOpen:\s*\(\)\s*=>\s*restoreLock\.assertOpen\(\)/);
+    const providers = assembly.match(/transact: \(fn\) => \{[^}]*\}/g) ?? [];
     expect(providers.length).toBe(6);
-    for (const p of providers) expect(p).toMatch(/restoreLock\.assertOpen\(\);[\s\S]*\.transaction\(fn\)\.immediate\(\)/);
-    expect(main.match(/\.transaction\(fn\)\.immediate\(\)/g)).toHaveLength(6);
+    for (const p of providers) {
+      expect(p).toMatch(/ports\.isCurrentLedger\(\)/);
+      expect(p).toMatch(/ports\.assertOpen\(\);[\s\S]*\.transaction\(fn\)\.immediate\(\)/);
+    }
   });
-
   it("normal operation is untouched while nothing is staged — including after a REFUSED restore", () => {
     const b = open("shop b");
     const sale = () => b.ipc.createSale({ idempotencyKey: newKey(), paymentMethod: "cash", lines: [{ productId: "prod-0003", quantityMilli: 1000 }], expectedTotalMinor: "199" });

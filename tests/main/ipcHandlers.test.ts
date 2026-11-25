@@ -110,6 +110,8 @@ describe("IPC surface", () => {
         // Slice G3. An OWNER channel; it names no path in either direction.
         "exportOnlineCatalog",
         "getAppInfo",
+        // X1 TRANSITION: one read-only entry-state routing hint; no setup/session authority.
+        "getEntryState",
         "getCatalog",
         "getSaleHistory",
         "getProductImageBytes",
@@ -257,7 +259,8 @@ describe("IPC surface", () => {
     // 🔴 TRANSITION (OCR × Advances integration, DEC-35zz+): 99 -> 100 = the advances chain's 99 + OCR's readInvoicePhoto. Old values: 99 (advances) / 82 (OCR).
     // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): 100 -> 103 — getSaleReceipt, printSaleReceipt, saveSaleReceiptPdf,
     // session-classified reads (the service limits a non-owner to History's window). The old value was 100.
-    expect(CHANNEL_NAMES).toHaveLength(103);
+    // X1 TRANSITION: 103 -> 104, the named read-only getEntryState channel.
+    expect(CHANNEL_NAMES).toHaveLength(104);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.

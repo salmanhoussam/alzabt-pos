@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { _electron as electron } from "playwright-core";
 import { signIn } from "./_signin.mjs";
 import { createOwned, endOwned, identifyStartedNear, identifyTree, stillRunning } from "./_owned.mjs";
+import { observedSyntheticLockRefusal } from "./_crashRefusal.mjs";
 
 const APP = join(dirname(fileURLToPath(import.meta.url)), "..");
 const EXE = process.env.E2E_EXECUTABLE;
@@ -61,26 +62,21 @@ const alive = (pid) => {
   }
 };
 
-function listProcesses() {
-  const ps = `Get-CimInstance Win32_Process -Filter "Name='${IMAGE}'" | Select-Object ProcessId,ParentProcessId,SessionId,CommandLine | ConvertTo-Json -Compress`;
-  const raw = execFileSync("powershell", ["-NoProfile", "-Command", ps], { encoding: "utf8" }).trim();
-  if (!raw) return [];
-  const parsed = JSON.parse(raw);
-  return (Array.isArray(parsed) ? parsed : [parsed]).map((p) => {
-    const cmd = p.CommandLine ?? "";
-    return {
-      pid: p.ProcessId,
-      ppid: p.ParentProcessId,
-      session: p.SessionId,
-      type: /--type=(\S+)/.exec(cmd)?.[1] ?? "browser(main)",
-      subType: /--utility-sub-type=(\S+)/.exec(cmd)?.[1] ?? null,
-      cmd: cmd.length > 600 ? cmd.slice(0, 600) + "…" : cmd,
-    };
-  });
+function listProcesses(pids) {
+  const ids=[...new Set(pids)].filter((id)=>Number.isSafeInteger(id) && id>0);
+  if(!ids.length)return [];
+  const filter=ids.map((id)=>"ProcessId="+id).join(" OR ");
+  const ps = 'Get-CimInstance Win32_Process -Filter "'+filter+'" | Select-Object ProcessId,ParentProcessId,SessionId | ConvertTo-Json -Compress';
+  const raw=execFileSync("powershell",["-NoProfile","-Command",ps],{encoding:"utf8"}).trim();
+  if(!raw)return [];
+  const parsed=JSON.parse(raw);
+  return (Array.isArray(parsed)?parsed:[parsed]).map((p)=>({
+    pid:p.ProcessId,ppid:p.ParentProcessId,session:p.SessionId,type:"owned",subType:null,
+  }));
 }
 
 function processName(pid) {
-  const ps = `Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" | Select-Object Name,CommandLine | ConvertTo-Json -Compress`;
+  const ps = `Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" | Select-Object Name | ConvertTo-Json -Compress`;
   const raw = execFileSync("powershell", ["-NoProfile", "-Command", ps], { encoding: "utf8" }).trim();
   return raw ? JSON.parse(raw) : null;
 }
@@ -94,7 +90,7 @@ function readDiag(file) {
       try {
         return JSON.parse(l);
       } catch {
-        return { event: "unparseable", raw: l };
+        return { event: "unparseable" };
       }
     });
 }
@@ -110,8 +106,14 @@ async function waitFor(fn, timeoutMs) {
 
 function startLikeAMerchant(env) {
   const t = Date.now();
-  const child = spawn(EXE, [], { env, detached: true, stdio: "ignore" });
-  const info = { pid: child.pid, startedAt: Date.now(), exit: null, identity: null };
+  const child = spawn(EXE, [], { env, detached: true, stdio: ["ignore","ignore","pipe"] });
+  const info = { pid: child.pid, startedAt: Date.now(), exit: null, identity: null, refusalMarker:false, stderrClosed:false };
+  let stderrTail="";
+  child.stderr.on("data",(data)=>{
+    stderrTail=(stderrTail+data.toString("utf8")).slice(-4096);
+    if(stderrTail.includes("[pos] single-instance lock not acquired; exiting")) info.refusalMarker=true;
+  });
+  child.stderr.on("close",()=>{info.stderrClosed=true});
   info.identity = owned.addStartedNear(child.pid, t);
   child.on("exit", (code, signal) => {
     info.exit = { code, signal, afterMs: Date.now() - info.startedAt };
@@ -133,7 +135,7 @@ function instanceProcesses(rootPid) {
   const tree = identifyTree(rootPid);
   for (const i of tree) owned.add(i);
   const pids = new Set(tree.map((i) => i.pid));
-  return listProcesses().filter((p) => pids.has(p.pid));
+  return listProcesses([...pids]);
 }
 /** The deliberate action, applied to the PROVEN process only; fails the check if it did not reach it. */
 function act(identity, mode, tree, label) {
@@ -144,7 +146,7 @@ function act(identity, mode, tree, label) {
 }
 
 function newProfile(name) {
-  const profile = mkdtempSync(join(tmpdir(), `pos-crash-${name}-`));
+  const profile = mkdtempSync(join(APP, "node_modules", `pos-crash-${name}-`));
   const diagFile = join(profile, "diag.log");
   const env = {
     ...process.env,
@@ -168,6 +170,7 @@ async function merchantRelaunch(env, diagFile) {
       readDiag(diagFile).some((e) => e.pid === relaunch.pid && e.event === "window-ready"),
     30000,
   );
+  if(relaunch.exit!==null) await waitFor(()=>relaunch.stderrClosed,3000);
   const events = readDiag(diagFile)
     .filter((e) => e.pid === relaunch.pid)
     .map((e) => ({ ...e, msAfterRelaunch: e.t - relaunch.startedAt }));
@@ -178,6 +181,7 @@ async function merchantRelaunch(env, diagFile) {
     exit: relaunch.exit,
     events,
     lockAcquired: ev("single-instance-lock")?.acquired ?? null,
+    refusalMarker: relaunch.refusalMarker,
     ledger: ev("ledger-open") ?? null,
     windowMs: ev("window-ready") ? Math.round(ev("window-ready").msAfterRelaunch) : null,
   };
@@ -315,19 +319,24 @@ for (const [name, action] of [
   const launcherPid = app.process().pid;
   const launcherId = owned.addStartedNear(launcherPid, tN);
   owned.addStartedNear(mainPid, tN);
-  const mainInfo = listProcesses().find((p) => p.pid === mainPid);
+  const mainInfo = listProcesses([mainPid]).find((p) => p.pid === mainPid);
   const parent = mainInfo ? processName(mainInfo.ppid) : null;
   const launcher = processName(launcherPid);
   console.log(`CONTROL launcher pid ${launcherPid} = ${launcher?.Name} ; real main pid ${mainPid}, parent ${mainInfo?.ppid} = ${parent?.Name}`);
   const before = instanceProcesses(mainPid);
   const actionOutput = act(launcherId, "kill", false, "N"); // the PROVEN wrapper only
   await sleep(2000);
-  const relaunch = await merchantRelaunch(env, diagFile);
+  // The refused process gets its own fresh synthetic profile.
+  const refused = newProfile("N-refused");
+  const relaunch = await merchantRelaunch(refused.env, refused.diagFile);
   const r = { name: "N-negative-control-kill-wrapper-only", action: "kill-launcher", actionOutput, mainPid, launcherPid, launcherName: launcher?.Name, mainParentName: parent?.Name, before, goneAfterMs: {}, relaunch, mainStillAlive: alive(mainPid) };
   report(r);
   check(launcherPid !== mainPid, `N: on Windows Playwright's app.process() (${launcherPid}, ${launcher?.Name}) is not the Electron main (${mainPid})`);
   check(r.mainStillAlive, "N: killing only the wrapper leaves the POS running (not a crash)");
-  check(r.relaunch.lockAcquired === false && r.relaunch.windowMs === null, "N: the detector reports NOT recovered — relaunch is refused by the lock while the POS still runs");
+  check(observedSyntheticLockRefusal({firstAlive:r.mainStillAlive,exit:r.relaunch.exit,
+    refusalMarker:r.relaunch.refusalMarker,windowMs:r.relaunch.windowMs,
+    profileExists:existsSync(refused.env.ALZABT_POS_USER_DATA),diagExists:existsSync(refused.diagFile)}),
+    "N: lock refusal observed from owned process stderr/exit with no second-profile writes");
   await Promise.race([app.close().catch(() => {}), sleep(10000)]);
   killAll();
 }

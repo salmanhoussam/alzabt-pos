@@ -14,6 +14,7 @@
  * Pure (no Electron import), so it is tested in plain Node.
  */
 import type { InvoiceLineDto, InvoiceViewDto, MoneyDto } from "../shared/ipcContract";
+import { currencyExponent } from "../domain/money";
 
 export interface InvoiceDocumentOptions {
   /** A file:// or data: URL for the logo. Absent prints the issuer's name alone. */
@@ -98,10 +99,25 @@ export function percentFromBasisPoints(basisPoints: number): string {
   return `${whole}.${String(frac).padStart(2, "0").replace(/0$/, "")}`;
 }
 
-export function printMoney(m: MoneyDto, exponent = 2): string {
-  const digits = m.minor.padStart(exponent + 1, "0");
+/**
+ * CURRENCY-P1: stored minor units as a plain decimal at the CURRENCY'S OWN exponent (`money.ts`), exactly.
+ *
+ * 🔴 THE EXPONENT COMES FROM THE CURRENCY, NEVER FROM THE CALLER. The invoice document used to print LBP with exponent
+ * 0 while the domain, the screens, amount-in-words and the sale receipt all read LBP with exponent 2 — so one stored
+ * LBP amount printed 100 times larger on an invoice than everywhere else. And every other currency was printed with
+ * 2, so a 3-decimal amount printed wrong too. There is one rule now: `currencyExponent`. An unknown currency throws
+ * (`UNKNOWN_CURRENCY`) rather than printing a guessed amount. A leading "-" is kept (a receipt's negative line).
+ */
+export function printDecimalOf(m: MoneyDto): string {
+  const exponent = currencyExponent(m.currency);
+  const neg = m.minor.startsWith("-");
+  const digits = (neg ? m.minor.slice(1) : m.minor).padStart(exponent + 1, "0");
   const decimal = exponent === 0 ? digits : `${digits.slice(0, -exponent)}.${digits.slice(-exponent)}`;
-  return `<bdi dir="ltr">${escape(decimal)}&nbsp;${escape(m.currency)}</bdi>`;
+  return `${neg ? "-" : ""}${decimal}`;
+}
+
+export function printMoney(m: MoneyDto): string {
+  return `<bdi dir="ltr">${escape(printDecimalOf(m))}&nbsp;${escape(m.currency)}</bdi>`;
 }
 
 /**
@@ -112,15 +128,15 @@ export function printMoney(m: MoneyDto, exponent = 2): string {
  * this is a display of one number, not a second source of truth. The DISCOUNT column the reference
  * document carries is deliberately absent — there is no discount in this product, at any layer.
  */
-function row(line: InvoiceLineDto, exponent: number, taxRate: string | null): string {
+function row(line: InvoiceLineDto, taxRate: string | null): string {
   const taxCell = taxRate === null ? "" : `\n  <td class="n taxcell"><bdi dir="ltr">${escape(taxRate)}</bdi></td>`;
   return `<tr>
   <td class="n idx"><bdi dir="ltr">${line.lineNo}</bdi></td>
   <td class="desc">${escape(line.description ?? "")}</td>
   <td class="n"><bdi dir="ltr">${escape(line.quantityText)}</bdi></td>
   <td class="unit">${escape(line.unitLabel ?? "")}</td>
-  <td class="money">${printMoney(line.unitPrice, exponent)}</td>${taxCell}
-  <td class="money">${printMoney(line.lineTotal, exponent)}</td>
+  <td class="money">${printMoney(line.unitPrice)}</td>${taxCell}
+  <td class="money">${printMoney(line.lineTotal)}</td>
 </tr>`;
 }
 
@@ -147,8 +163,6 @@ function identifierRows(view: InvoiceViewDto): string {
 export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocumentOptions = {}): string {
   const inv = view.invoice;
   const issuer = inv.issuer;
-  // LBP has no minor unit; the exponent decides how the stored integer prints.
-  const exponent = inv.currency === "LBP" ? 0 : 2;
   const taxEnabled = inv.taxSnapshot?.enabled === true;
   const taxLabel = inv.taxSnapshot?.label ?? "ضريبة / Tax";
   // Exact basis points to a percentage, by integer arithmetic. 1100 -> "11%", 1150 -> "11.5%".
@@ -171,21 +185,21 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
   const totals: string[] = [];
   if (taxEnabled) {
     totals.push(
-      `<tr><th>${escape(LABELS.subtotal[0])} / ${escape(LABELS.subtotal[1])}</th><td>${printMoney(inv.subtotal, exponent)}</td></tr>`,
+      `<tr><th>${escape(LABELS.subtotal[0])} / ${escape(LABELS.subtotal[1])}</th><td>${printMoney(inv.subtotal)}</td></tr>`,
       // Tax prints only when the shop configured one. No rate is hard-coded anywhere in this build.
-      `<tr><th>${escape(taxLabel)}</th><td>${printMoney(inv.tax, exponent)}</td></tr>`,
-      `<tr class="grand"><th>${escape(LABELS.total[0])} / ${escape(LABELS.total[1])}</th><td>${printMoney(inv.total, exponent)}</td></tr>`,
+      `<tr><th>${escape(taxLabel)}</th><td>${printMoney(inv.tax)}</td></tr>`,
+      `<tr class="grand"><th>${escape(LABELS.total[0])} / ${escape(LABELS.total[1])}</th><td>${printMoney(inv.total)}</td></tr>`,
     );
   } else {
     totals.push(
-      `<tr class="grand"><th>${escape(LABELS.subtotal[0])} / ${escape(LABELS.subtotal[1])}</th><td>${printMoney(inv.total, exponent)}</td></tr>`,
+      `<tr class="grand"><th>${escape(LABELS.subtotal[0])} / ${escape(LABELS.subtotal[1])}</th><td>${printMoney(inv.total)}</td></tr>`,
     );
   }
   totals.push(
-    `<tr class="paid"><th>${escape(LABELS.paid[0])} / ${escape(LABELS.paid[1])}</th><td>${printMoney(inv.paid, exponent)}</td></tr>`,
+    `<tr class="paid"><th>${escape(LABELS.paid[0])} / ${escape(LABELS.paid[1])}</th><td>${printMoney(inv.paid)}</td></tr>`,
     ...paymentMethodRow(inv.payment),
     // The one figure the customer acts on, so it is the one figure in red.
-    `<tr class="balance"><th>${escape(LABELS.balance[0])} / ${escape(LABELS.balance[1])}</th><td>${printMoney(inv.balanceDue, exponent)}</td></tr>`,
+    `<tr class="balance"><th>${escape(LABELS.balance[0])} / ${escape(LABELS.balance[1])}</th><td>${printMoney(inv.balanceDue)}</td></tr>`,
   );
 
   return `<!doctype html>
@@ -358,7 +372,7 @@ export function renderInvoiceDocument(view: InvoiceViewDto, options: InvoiceDocu
       <th>${escape(LABELS.lineTotal[0])}<br /><bdi dir="ltr">${escape(LABELS.lineTotal[1])}</bdi></th>
     </tr></thead>
     <tbody>
-${view.lines.map((l) => row(l, exponent, taxRateText)).join("\n")}
+${view.lines.map((l) => row(l, taxRateText)).join("\n")}
     </tbody>
   </table>
 

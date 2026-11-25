@@ -45,7 +45,7 @@ describe("every channel is classified", () => {
 describe("the public set", () => {
   const publicChannels = names.filter((n) => CHANNEL_POLICY[n] === "public").sort();
 
-  it("🔴 is EXACTLY these eight, each with a stated reason", () => {
+  it("🔴 is EXACTLY these nine, each with a stated reason", () => {
     // Salman asked for three — listCashiers, login, completeBootstrapSetup. Three is not
     // achievable: the renderer also calls getSettings (the app reads its language before it can
     // render anything, the login screen included), setTerminalLanguage (the PRE-AUTH language
@@ -58,6 +58,7 @@ describe("the public set", () => {
       "completeBootstrapSetup",
       "currentCashier",
       "getAppInfo",
+      "getEntryState",
       "getSettings",
       "listCashiers",
       "login",

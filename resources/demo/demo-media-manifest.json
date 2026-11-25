@@ -1,0 +1,181 @@
+{
+  "_about": "Pinned, reviewed media manifest for the 22 TRY DEMO products (joint C2; BR-C-05 V3 §2). Generated from tests/fixtures/demo-catalog/images/ and image-credits.json; tests/main/demoContent.test.ts re-derives every hash and credit and fails on any drift. Synthetic demo only; licences CC0 / public domain per the fixture credits.",
+  "media": [
+    {
+      "sku": "COF-ESP",
+      "file": "COF-ESP.jpg",
+      "sha256": "c60844a24a66cc416d9e0cb5230d76e8a4213901a50855f1fafea82a3f1a30cd",
+      "bytes": 37873,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Espresso_BW_1.jpg",
+      "licence": "Public domain"
+    },
+    {
+      "sku": "COF-LAT",
+      "file": "COF-LAT.jpg",
+      "sha256": "4427082166668479455635318ed43fc6d687b0cc9011165f2a20c48c8f3296c9",
+      "bytes": 47499,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Di_Simo_Caff%C3%A8_e_Vino,_N%C3%BCrnberg_(Unsplash).jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "TEA-MNT",
+      "file": "TEA-MNT.jpg",
+      "sha256": "fa86e83362aebb209df7706971ffc6234052436274fa955c64945e8fdfbd03b6",
+      "bytes": 84766,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:%D9%85%D8%B4%D8%B1%D9%88%D8%A8_%D8%B4%D8%A7%D9%89_%D8%A7%D9%84%D9%86%D8%B9%D9%86%D8%A7%D8%B9.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "CKE-CHO",
+      "file": "CKE-CHO.jpg",
+      "sha256": "820811a154b06aecda5303d99b7ea0a6f62d7e23cafcc81f8dc390f29ecc32d6",
+      "bytes": 70904,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Baileys_Chocolate_Cake_-_Cafe_Coho_2026-01-08.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "WTR-500",
+      "file": "WTR-500.jpg",
+      "sha256": "fa41c0c7277b4a723cd0dabe2c3b4497b076b6cb4aabe6d4b5f3d714a62e45a5",
+      "bytes": 34837,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Bottle_of_Water.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "JUC-ORG",
+      "file": "JUC-ORG.jpg",
+      "sha256": "5065ee8b4cc56dbfb4021c8ba24e56c262719911ab47134444a9f0ef7896417d",
+      "bytes": 58976,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Orange_juice_1_edit1.jpg",
+      "licence": "Public domain"
+    },
+    {
+      "sku": "CRS-BTR",
+      "file": "CRS-BTR.jpg",
+      "sha256": "01bad1368e9129081b15e94bbb0d5aec7d28f4e8f68c9ea55a0758491066a6db",
+      "bytes": 52566,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Croissant-newspaper-and-tea.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "MAN-ZTR",
+      "file": "MAN-ZTR.jpg",
+      "sha256": "62a06d448f2d8d0e16c9183d86094b0052f6c47152e9a36c75b1cebd8db77f49",
+      "bytes": 99285,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Middle_Eastern_Kalaji_-_FilFil_2023-10-12.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "BKR-PITA-PCK",
+      "file": "BKR-PITA-PCK.jpg",
+      "sha256": "8960c3362e58b6b10f373d726d7c20ce023b8b59603ee2938859ac7030164a39",
+      "bytes": 70693,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Arabic_Bread_Pita.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "GRC-RICE-1KG",
+      "file": "GRC-RICE-1KG.jpg",
+      "sha256": "833dd8d50fced965bf3fe760f717c55bbd775fb09f1d0f31951bf8a77404ff96",
+      "bytes": 110793,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Brun_ris.jpg",
+      "licence": "Public domain"
+    },
+    {
+      "sku": "GRC-SUGR-1KG",
+      "file": "GRC-SUGR-1KG.jpg",
+      "sha256": "02c2b1c3624f62d9506e855358dcc7a7d403f38a0cc3d6056ff64cb7e541316c",
+      "bytes": 35380,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Sugarcubes.jpg",
+      "licence": "Public domain"
+    },
+    {
+      "sku": "GRC-LENT-1KG",
+      "file": "GRC-LENT-1KG.jpg",
+      "sha256": "76f1209c2f17add0709b62f0a214eac5429ea2887b8d727117ea19c6d28ce673",
+      "bytes": 53539,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Red_lentils.JPG",
+      "licence": "Public domain"
+    },
+    {
+      "sku": "GRC-PAST-500",
+      "file": "GRC-PAST-500.jpg",
+      "sha256": "ef5699a8b137e91e40035f73bbdce4274e9a649b2bfec63f89bc650b9a91b936",
+      "bytes": 62084,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Barilla_penne_2.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "GRC-OLIV-1L",
+      "file": "GRC-OLIV-1L.jpg",
+      "sha256": "04f96a1294951e89191bec883acd5dafc477382c0c4ca72b674ca9c8c85e1a6f",
+      "bytes": 24306,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Bottle_of_olive_oil.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "CAN-CHKP-400",
+      "file": "CAN-CHKP-400.jpg",
+      "sha256": "d8aa8d937c3f1ab05947ad2b34be407c05be15aacef9e552a67f44c7ad8cddf3",
+      "bytes": 141279,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Chickpeas%F0%9F%AB%98.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "CAN-TUNA-160",
+      "file": "CAN-TUNA-160.jpg",
+      "sha256": "d7d812fa7bb769f42d96783f85e6bf40855029275ffa0c06077d888bbcfcd663",
+      "bytes": 90573,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Tuna_dishes_of_the_Philippines.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "DRY-MILK-1L",
+      "file": "DRY-MILK-1L.jpg",
+      "sha256": "d03e22a4198f6f21245317112ca5f4ec466d4a9610325d9e53158a4c0b366974",
+      "bytes": 32704,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Milk_2.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "DRY-EGGS-12",
+      "file": "DRY-EGGS-12.jpg",
+      "sha256": "2302c19f248e3c5468149efc0387d4efdf3a753e65fca7106219b754554faf08",
+      "bytes": 51347,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:6-Pack-Chicken-Eggs.jpg",
+      "licence": "Public domain"
+    },
+    {
+      "sku": "DRY-LABN-400",
+      "file": "DRY-LABN-400.jpg",
+      "sha256": "868aba5b148edd9c74735ebbd983168b01ad5a5c82011333ace21321c498ad78",
+      "bytes": 67802,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Strained_yogurt_(20250302).jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "VEG-TOMA-KG",
+      "file": "VEG-TOMA-KG.jpg",
+      "sha256": "f4cdc752f925cc4bcedc6d3217ecbd735d8f58533aa918fd5bd073a89b9ead94",
+      "bytes": 83680,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Tomatoes_for_sale.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "FRT-BANA-KG",
+      "file": "FRT-BANA-KG.jpg",
+      "sha256": "690ed8b05c9a2d141b6151b6959dad390a259cfd6b6f05c5dce20f04b5dcf205",
+      "bytes": 89222,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Bunch_of_bananas_on_sale.jpg",
+      "licence": "CC0"
+    },
+    {
+      "sku": "CLN-SPNG-3",
+      "file": "CLN-SPNG-3.jpg",
+      "sha256": "984981f102b7c97e686f7d070e0fe47054ed119f31fd9408b143b29ed099190e",
+      "bytes": 47567,
+      "sourcePage": "https://commons.wikimedia.org/wiki/File:Cleaning_sponge.jpg",
+      "licence": "CC0"
+    }
+  ]
+}

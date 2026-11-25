@@ -137,7 +137,7 @@ export function RefundReceipt({
           onClick={() =>
             void run(async () => {
               const r = await call(pos().printAdvanceRefund({ refundId: refund.id }));
-              return r.status === "printed" ? t("adv.printed") : "";
+              return r.status === "previewed" ? t("print.previewOpened") : r.status === "printed" ? t("adv.printed") : "";
             })
           }
         >

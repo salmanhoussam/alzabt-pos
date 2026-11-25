@@ -47,7 +47,12 @@ const footprint = () => {
 
 const app = await electron.launch({ executablePath: ELECTRON, args: [...EXTRA_ARGS, ...APP_ARGS], env });
 const page = await app.firstWindow();
-await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+// J1: a fresh real profile opens the joint-C1 Welcome first. Take its plain «Sign in» — NEVER welcome-demo.
+await page.waitForSelector('[data-testid="select-cashier"], [data-testid="welcome-screen"]', { timeout: 30000 });
+if (await page.locator('[data-testid="welcome-screen"]').count()) {
+  await page.locator('[data-testid="welcome-login"]').click();
+  await page.waitForSelector('[data-testid="select-cashier"]', { timeout: 30000 });
+}
 assert((await app.evaluate(({ app }) => app.getPath("userData"))) === env.ALZABT_POS_USER_DATA, "throw-away profile, never a real ledger");
 
 const product = (name) => page.locator("button.product", { hasText: name });

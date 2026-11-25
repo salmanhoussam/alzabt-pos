@@ -118,7 +118,7 @@ export function AdvanceReceipt({ advance, duplicate, onClose }: { advance: Advan
           onClick={() =>
             void run(async () => {
               const r = await call(pos().printAdvance({ advanceId: advance.id }));
-              return r.status === "printed" ? t("adv.printed") : "";
+              return r.status === "previewed" ? t("print.previewOpened") : r.status === "printed" ? t("adv.printed") : "";
             })
           }
         >

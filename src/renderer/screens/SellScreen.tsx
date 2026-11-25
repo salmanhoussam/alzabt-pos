@@ -11,11 +11,13 @@ import { fromCatalogDto } from "../../shared/dto";
 import type { AdminProductDto, AdvanceStatementLineDto, CategoryDto, MoneyDto, SaleDto } from "../../shared/ipcContract";
 import { ApiError, call, errorText, newIdempotencyKey, pos } from "../api";
 import { useThumbnails } from "../useThumbnails";
+import { sellCartPhotoKey, sellCartPhotoIds, sellPhotoRows } from "../thumbnails";
 import { type SellDraft, keepSellableLines } from "../sellDraft";
 import { LineMath } from "../components/LineMath";
 import { Receipt } from "./Receipt";
 import { LedgerReceipt } from "./LedgerReceipt";
 import { useT } from "../i18n";
+import { useDemoMode } from "../demoMode";
 import {
   PAY_SCAN_MESSAGE_KEY,
   SCAN_MESSAGE_KEY,
@@ -93,6 +95,8 @@ export function SellScreen({
   readonly onDraftChange?: (next: Omit<SellDraft, "operatorId">) => void;
 } = {}) {
   const { t, unit, lang } = useT();
+  // Joint C2: the demo policy refuses split sales, so the demo does not offer them.
+  const demo = useDemoMode();
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [clearing, setClearing] = useState(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -257,7 +261,14 @@ export function SellScreen({
    * than multiplying it, and a keystroke that reveals nothing new fetches nothing.
    */
   const visibleIds = useMemo(() => new Set(visible.map((p) => p.id)), [visible]);
-  const visiblePhotos = useMemo(() => photoMeta.filter((row) => visibleIds.has(row.id)), [photoMeta, visibleIds]);
+  /**
+   * J1-CART-THUMBS: the cart is on screen too. A line stays in the cart after a search, a chip or a
+   * scan takes its product off the grid, and it must keep its photo. Keyed on the id LIST, so a
+   * quantity change (same products) re-runs nothing; the shared hook's rules still decide every read.
+   */
+  const cartKey = sellCartPhotoKey(cart.map((l) => l.productId));
+  const cartIds = useMemo(() => sellCartPhotoIds(cartKey), [cartKey]);
+  const visiblePhotos = useMemo(() => sellPhotoRows(photoMeta, visibleIds, cartIds), [photoMeta, visibleIds, cartIds]);
   const thumbs = useThumbnails(visiblePhotos);
 
   /** The product whose photo is open full size. Viewing only — it touches no cart and no data. */
@@ -1051,7 +1062,27 @@ export function SellScreen({
                 focusSearchAfterRender(false);
               };
               return (
-              <li key={l.productId} className="line">
+              <li key={l.productId} className="line line-with-thumb">
+                {(() => {
+                  /* J1-CART-THUMBS: decorative — the name beside it is the line's label, so the
+                     image is aria-hidden. Viewing only: no click handler, nothing here edits the cart. */
+                  const thumb = thumbs.get(l.productId);
+                  const prod = catalog.byId.get(l.productId);
+                  const label = prod ? nameForLanguage(prod, lang) : l.productName;
+                  return thumb?.kind === "ready" ? (
+                    <span className="line-thumb" aria-hidden="true" data-testid="cart-line-thumb" data-product={l.productId}>
+                      <img src={thumb.url} alt="" draggable={false} />
+                    </span>
+                  ) : (
+                    <span
+                      className="line-thumb line-thumb-empty"
+                      aria-hidden="true"
+                      data-testid="cart-line-thumb-empty"
+                      data-product={l.productId}
+                      data-initial={label.trim().charAt(0)}
+                    />
+                  );
+                })()}
                 <div className="line-main">
                   {/* Display only, in the screen's language. The sale line still snapshots
                       `productName` (the catalog's snapshot rule) — main reprices and records it. */}
@@ -1335,7 +1366,7 @@ export function SellScreen({
                 active customer it stays disabled and says why. */}
             {/* SELL-SPLIT-CASH-WHISH: the whole total paid by cash AND Whish Money — any signed-in operator, like
                 every paid sale; it can never leave a debt. Disabled while the owner types a part-payment. */}
-            {!whishOpen && !splitOpen && (
+            {!whishOpen && !splitOpen && !demo && (
               <button
                 className="btn big wide"
                 disabled={busy || partial.kind !== "none"}

@@ -15,7 +15,7 @@
  */
 import type { MoneyDto, SaleReceiptDto } from "../shared/ipcContract";
 import { instantIn } from "./advanceDocument";
-import { escape, printMoney } from "./invoiceDocument";
+import { escape, printDecimalOf, printMoney } from "./invoiceDocument";
 
 export type ReceiptLayout = "thermal80" | "a5";
 
@@ -142,9 +142,10 @@ ${row(t("البائع", "Cashier"), `<bdi data-field="cashier">${escape(s.cashie
 </body></html>`;
 }
 
-/** A unit price as a plain decimal (no currency) for the "qty × price" line. */
-function printDecimal(m: MoneyDto, exponent = 2): string {
-  const neg = m.minor.startsWith("-");
-  const digits = (neg ? m.minor.slice(1) : m.minor).padStart(exponent + 1, "0");
-  return `${neg ? "-" : ""}${digits.slice(0, -exponent)}.${digits.slice(-exponent)}`;
+/**
+ * A unit price as a plain decimal (no currency) for the "qty × price" line.
+ * CURRENCY-P1: at the currency's own exponent (`printDecimalOf`), like every other printed amount — it was a fixed 2.
+ */
+function printDecimal(m: MoneyDto): string {
+  return printDecimalOf(m);
 }

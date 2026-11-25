@@ -128,6 +128,7 @@ const CH = {
   setOperatorRole: "pos:setOperatorRole",
   setOperatorMayCreateProducts: "pos:setOperatorMayCreateProducts",
   currentCashier: "pos:currentCashier",
+  getEntryState: "pos:getEntryState",
   getCatalog: "pos:getCatalog",
   createSale: "pos:createSale",
   createCustomerCreditSale: "pos:createCustomerCreditSale",
@@ -245,6 +246,7 @@ const api: PosApi = {
       mayCreateProducts: req.mayCreateProducts,
     }),
   currentCashier: () => ipcRenderer.invoke(CH.currentCashier),
+  getEntryState: () => ipcRenderer.invoke(CH.getEntryState),
   getCatalog: () => ipcRenderer.invoke(CH.getCatalog),
   createSale: (req) => ipcRenderer.invoke(CH.createSale, req),
   createCustomerCreditSale: (req) => ipcRenderer.invoke(CH.createCustomerCreditSale, req),
@@ -415,6 +417,8 @@ const api: PosApi = {
       invoiceId: req.invoiceId,
       issueOnAccount: req.issueOnAccount === true,
       ...(req.payment === undefined ? {} : { payment: req.payment }),
+      // R5: forwarded only when given, like `payment`; the service binds the issue to it.
+      ...(req.confirmedDraft === undefined ? {} : { confirmedDraft: req.confirmedDraft }),
     }),
 
   listInvoices: (req) => ipcRenderer.invoke(CH.listInvoices, { term: req.term, limit: req.limit }),

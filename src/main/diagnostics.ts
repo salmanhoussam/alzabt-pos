@@ -6,9 +6,12 @@
  */
 import { appendFileSync } from "node:fs";
 
-const target = process.env.ALZABT_POS_DIAG_LOG;
+let target = process.env.ALZABT_POS_DIAG_LOG;
 
-export const diagEnabled = Boolean(target);
+export let diagEnabled = Boolean(target);
+
+/** Disable inherited diagnostic destinations before synthetic profile I/O. */
+export function disableDiagnostics(): void { target = undefined; diagEnabled = false; }
 
 export function diag(event: string, data: Record<string, unknown> = {}): void {
   if (!target) return;

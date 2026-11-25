@@ -17,6 +17,7 @@ import { useEffect, useState } from "react";
 import type { CompanyProfileDto, SaveCompanyProfileRequest } from "../../../shared/ipcContract";
 import { call, errorText, pos } from "../../api";
 import { useT } from "../../i18n";
+import { useDemoMode } from "../../demoMode";
 
 const EMPTY: SaveCompanyProfileRequest = {
   nameAr: "",
@@ -58,6 +59,7 @@ function formOf(p: CompanyProfileDto): SaveCompanyProfileRequest {
 
 export function CompanyProfileForm({ onSaved }: { onSaved?: (p: CompanyProfileDto) => void }) {
   const { t } = useT();
+  const demo = useDemoMode();
   const [form, setForm] = useState<SaveCompanyProfileRequest>(EMPTY);
   const [saved, setSaved] = useState<CompanyProfileDto | null>(null);
   const [loading, setLoading] = useState(true);
@@ -139,10 +141,10 @@ export function CompanyProfileForm({ onSaved }: { onSaved?: (p: CompanyProfileDt
           <span>{t("inv.company.nameEn")}</span>
           <input dir="ltr" value={form.nameEn ?? ""} onChange={(e) => text("nameEn", e.target.value)} />
         </label>
-        <label className="field">
+        {!demo && <label className="field">
           <span>{t("inv.company.legalName")}</span>
           <input value={form.legalName ?? ""} onChange={(e) => text("legalName", e.target.value)} />
-        </label>
+        </label>}
         <label className="field">
           <span>{t("inv.company.tagline")}</span>
           <input value={form.tagline ?? ""} onChange={(e) => text("tagline", e.target.value)} />
@@ -168,20 +170,27 @@ export function CompanyProfileForm({ onSaved }: { onSaved?: (p: CompanyProfileDt
       <section className="inv-fieldset">
         <h3>{t("inv.company.logo")}</h3>
         <div className="inv-logo-row">
-          <span className="muted" dir="ltr" data-testid="company-logo-name">
-            {form.logoPath ?? t("inv.company.logoNone")}
-          </span>
-          <button className="btn" onClick={chooseLogo} data-testid="company-logo-choose">
-            {t("inv.company.logoChoose")}
-          </button>
-          {form.logoPath && (
-            <button className="btn ghost" onClick={() => set("logoPath", null)}>
-              {t("inv.company.logoRemove")}
-            </button>
+          {/* J1-DEMO-LOGO: the Demo shows the fixed-logo sentence, not an internal file name
+              ("synthetic-demo-logo.png") the customer has no use for. The real shop is unchanged. */}
+          {!demo && (
+            <span className="muted" dir="ltr" data-testid="company-logo-name">
+              {form.logoPath ?? t("inv.company.logoNone")}
+            </span>
           )}
+          {demo ? <span className="muted small" data-testid="company-logo-fixed">{t("inv.company.demoLogoFixed")}</span> : <>
+            <button className="btn" onClick={chooseLogo} data-testid="company-logo-choose">
+              {t("inv.company.logoChoose")}
+            </button>
+            {form.logoPath && (
+              <button className="btn ghost" onClick={() => set("logoPath", null)}>
+                {t("inv.company.logoRemove")}
+              </button>
+            )}
+          </>}
         </div>
       </section>
 
+      {!demo && <>
       <section className="inv-fieldset">
         <h3>{t("inv.company.ids")}</h3>
         {/* Three separate fields, three separate labels. */}
@@ -235,6 +244,8 @@ export function CompanyProfileForm({ onSaved }: { onSaved?: (p: CompanyProfileDt
         )}
       </section>
 
+      </>}
+
       <section className="inv-fieldset">
         <h3>{t("inv.company.numbering")}</h3>
         <label className="field">
@@ -243,12 +254,12 @@ export function CompanyProfileForm({ onSaved }: { onSaved?: (p: CompanyProfileDt
             dir="ltr"
             inputMode="numeric"
             value={nextNumber}
-            disabled={issued}
+            disabled={issued || demo}
             onChange={(e) => setNextNumber(e.target.value)}
             data-testid="company-next-number"
           />
         </label>
-        {issued ? (
+        {!demo && (issued ? (
           <p className="muted small" data-testid="numbering-locked">
             {t("inv.company.numberingLocked")}
           </p>
@@ -259,7 +270,7 @@ export function CompanyProfileForm({ onSaved }: { onSaved?: (p: CompanyProfileDt
           <button className="btn" onClick={applyNumbering} disabled={!saved} data-testid="company-numbering-save">
             {t("action.save")}
           </button>
-        )}
+        ))}
       </section>
 
       {/* The header as it will print. Not a mock: the same fields, in the same order as the PDF. */}

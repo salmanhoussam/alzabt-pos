@@ -40,12 +40,18 @@ export function useThumbnails(visible: readonly AdminProductDto[]): ThumbnailCac
   const latest = useRef(cache);
   latest.current = cache;
 
+  // Row changes must not abandon in-flight reads; only unmount ends this consumer.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
   useEffect(() => {
     // Every row handed to this hook is on screen. A virtualised list would pass only the rendered
     // window; today the table renders what it filters, so `shown` IS the visible set.
     const wanted = thumbnailsToFetch(visible, new Set(visible.map((p) => p.id)), latest.current);
     if (wanted.length === 0) return;
-    let live = true;
 
     // Mark them loading in one update, so a second render cannot start the same fetch again.
     setCache((prev) => {
@@ -58,18 +64,22 @@ export function useThumbnails(visible: readonly AdminProductDto[]): ThumbnailCac
       void (async () => {
         try {
           const got = await call(pos().getProductImageBytes({ imageId: request.imageId }));
-          if (!live) return;
+          if (!mounted.current) return;
           const url = dataUrlFrom(new Uint8Array(got.bytes), got.meta.mime);
           setCache((prev) => {
+            const held = prev.get(request.productId);
+            if (held?.kind !== "loading" || held.version !== request.version) return prev;
             const next = new Map(prev);
             next.set(request.productId, { kind: "ready", version: request.version, url });
             return next;
           });
         } catch {
-          if (!live) return;
+          if (!mounted.current) return;
           // 🔴 The placeholder, remembered. Not rethrown: one unreadable photo must not take down
           // the products screen, and the row below falls back to the ordinary empty state.
           setCache((prev) => {
+            const held = prev.get(request.productId);
+            if (held?.kind !== "loading" || held.version !== request.version) return prev;
             const next = new Map(prev);
             next.set(request.productId, { kind: "failed", version: request.version });
             return next;
@@ -77,10 +87,6 @@ export function useThumbnails(visible: readonly AdminProductDto[]): ThumbnailCac
         }
       })();
     }
-
-    return () => {
-      live = false;
-    };
   }, [visible]);
 
   return cache;

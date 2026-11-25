@@ -117,3 +117,24 @@ export function dataUrlFrom(bytes: Uint8Array, mime: string): string {
   }
   return `data:${mime};base64,${btoa(binary)}`;
 }
+
+/**
+ * J1-CART-THUMBS: the Sell screen's photo rows — the grid's products AND the cart's.
+ *
+ * Both are on screen. A cart line outlives its product's place on the grid (a typed search, a
+ * category chip or a scan narrows the grid; the line stays), and without this the line had no
+ * photo to show. A row is included once even when it is in both; a product with no photo is still
+ * returned only as metadata, and `thumbnailsToFetch` rule 1 still refuses to read it.
+ */
+export function sellPhotoRows(
+  photoMeta: readonly AdminProductDto[],
+  gridIds: ReadonlySet<string>,
+  cartIds: ReadonlySet<string>,
+): AdminProductDto[] {
+  return photoMeta.filter((row) => gridIds.has(row.id) || cartIds.has(row.id));
+}
+
+/** Stable and lossless even if a legacy product ID contains a delimiter. */
+export function sellCartPhotoKey(ids: readonly string[]): string { return JSON.stringify(ids); }
+/** Accept only keys generated locally by sellCartPhotoKey. */
+export function sellCartPhotoIds(key: string): ReadonlySet<string> { return new Set(JSON.parse(key) as string[]); }

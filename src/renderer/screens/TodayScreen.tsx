@@ -5,7 +5,7 @@ import { useT } from "../i18n";
 import { DailyMoneyPanel } from "./DailyMoneyPanel";
 
 /** Every figure here is read from the ledger by the main process — nothing is computed in the UI. */
-export function TodayScreen({ role }: { role?: string } = {}) {
+export function TodayScreen({ role }: { role?: string; demo?: boolean } = {}) {
   const { t } = useT();
   const [report, setReport] = useState<TodaySalesDto | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,6 +77,8 @@ export function TodayScreen({ role }: { role?: string } = {}) {
           </div>
         </div>
         {/* DEC-35x: the day's money per channel and per operator — OWNER ONLY (the channel refuses anyone else). */}
+        {/* The shared read-only money panel is available to synthetic Demo owners too.
+            Main still enforces the owner role. */}
         {role === "owner" && <DailyMoneyPanel />}
       </div>
     </div>
