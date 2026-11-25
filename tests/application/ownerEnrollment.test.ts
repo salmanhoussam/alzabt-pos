@@ -158,6 +158,38 @@ describe("enrollOwner — every refusal leaves the shop unchanged", () => {
     expect(operators.terminalClaimed()).toBe(false);
   });
 
+  it("🔴 a PLANTED extra operator (owner or cashier) makes it not a new shop — it cannot survive into the claimed shop", () => {
+    // Independent review 2026-11-25 (IMPORTANT): `operators` is a SYSTEM table, so emptiness alone does not see it.
+    for (const role of ["owner", "cashier"]) {
+      db.prepare(
+        `INSERT INTO operators (id, name, role, pin_salt_hex, pin_hash_hex, must_reset_pin, is_active, created_at, updated_at)
+         VALUES ('planted', 'مزروع', ?, 'aaaaaaaaaaaaaaaa', ?, 0, 1, '2026-01-01', '2026-01-01')`,
+      ).run(role, "b".repeat(64));
+      const before = shopState();
+      expect(refusal(() => service().enrollOwner("حسين", "482613"))).toEqual({
+        code: "ENROLLMENT_NOT_AVAILABLE",
+        message: "This shop's accounts are not in their initial state",
+      });
+      expect(shopState()).toEqual(before);
+      db.prepare("DELETE FROM operators WHERE id = 'planted'").run();
+    }
+    // The seeded cashier promoted by hand is not the initial state either.
+    db.prepare("UPDATE operators SET role = 'owner' WHERE id = 'cashier-02'").run();
+    expect(refusal(() => service().enrollOwner("حسين", "482613")).code).toBe("ENROLLMENT_NOT_AVAILABLE");
+    expect(operators.terminalClaimed()).toBe(false);
+  });
+
+  it("🔴 no transaction wired: NOT_AVAILABLE (the re-reads must be inside one)", () => {
+    const svc = new OperatorService({
+      operators: new OperatorRepository(db),
+      audit: new AuditRepository(db, { appVersion: "test", schemaVersion: 21 }),
+      terminal: FIXTURE_TERMINAL,
+      ledgerEmpty: () => ledgerEmptiness(db).empty,
+    });
+    expect(refusal(() => svc.enrollOwner("حسين", "482613")).code).toBe("NOT_AVAILABLE");
+    expect(operators.terminalClaimed()).toBe(false);
+  });
+
   it("🔴 SECOND CONNECTION: two connections to the same file enroll one after the other — the second is refused by the in-transaction re-read", () => {
     const second = openDatabase(t.dbPath);
     try {

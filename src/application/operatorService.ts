@@ -357,7 +357,11 @@ export class OperatorService {
    */
   enrollOwner(name: string, pin: string): OperatorSession {
     const ledgerEmpty = this.deps.ledgerEmpty;
-    if (!ledgerEmpty) throw new DomainError("NOT_AVAILABLE", "Owner enrollment is not available on this terminal");
+    // Fail closed (review note, 2026-11-25): without a transaction the in-transaction re-reads below would be a
+    // check-then-act; without an emptiness check there is no answer to trust. Either missing ⇒ not available.
+    if (!ledgerEmpty || !this.deps.transact) {
+      throw new DomainError("NOT_AVAILABLE", "Owner enrollment is not available on this terminal");
+    }
     const cleanName = this.requireFreeName(name, BOOTSTRAP_OWNER_ID);
     assertValidPin(pin);
     if (PUBLISHED_DEFAULT_PINS.has(pin)) throw new DomainError("INVALID_PIN", "This PIN is published; choose another");
@@ -372,6 +376,19 @@ export class OperatorService {
       const row = this.deps.operators.findById(BOOTSTRAP_OWNER_ID);
       if (!row || row.role !== "owner" || row.is_active !== 1) {
         throw new DomainError("ENROLLMENT_NOT_AVAILABLE", "This shop's owner account is not in its initial state");
+      }
+      // 🔴 Independent review 2026-11-25 (IMPORTANT): `operators` is a SYSTEM table, so emptiness does not see an
+      // extra row. A planted operator (hand-written, or carried by a crafted «empty» backup) would survive enrollment
+      // and sign in as soon as the real owner claims. A NEW shop has exactly the two seeded accounts, so anything
+      // else — an extra row, or the seeded cashier in another role — makes this not a new shop.
+      const accounts = this.deps.operators.listAll();
+      const seededCashierRow = accounts.find((a) => a.id === SEEDED_CASHIER_ID);
+      if (
+        accounts.length > 2 ||
+        accounts.some((a) => a.id !== BOOTSTRAP_OWNER_ID && a.id !== SEEDED_CASHIER_ID) ||
+        (seededCashierRow !== undefined && seededCashierRow.role !== "cashier")
+      ) {
+        throw new DomainError("ENROLLMENT_NOT_AVAILABLE", "This shop's accounts are not in their initial state");
       }
       const actor = { id: row.id, name: cleanName, role: row.role };
       if (cleanName !== row.name) {

@@ -432,9 +432,14 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
       /waiting for the shop owner/,
     );
     expect(claimed()).toBe(false);
-    // And the seeded owner still claims it.
-    claimTerminal();
-    expect(operators.terminalClaim()!.byOperatorId).toBe("cashier-01");
+    // TRANSITION (independent review 2026-11-25, IMPORTANT finding): was «and the seeded owner still claims it»
+    // (via 1111 setup, then via enrollOwner). A ledger carrying an extra operator is NOT a new shop: enrollment would
+    // leave the planted owner active and able to sign in once the terminal is claimed. So NOBODY claims it — the
+    // planted owner is refused by the ceremony (above) and the new-shop enrollment refuses the ledger (below). The
+    // legitimate route for such a ledger is the signed recovery (Phase 3).
+    expect(() => claimTerminal()).toThrow(/accounts are not in their initial state/);
+    expect(claimed()).toBe(false);
+    expect(operators.terminalClaim()).toBeNull();
   });
 
   it("🔴 a DEACTIVATED seeded owner leaves the terminal unclaimable — it fails CLOSED", () => {
