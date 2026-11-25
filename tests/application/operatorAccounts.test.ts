@@ -9,6 +9,13 @@
  *
  * Synthetic throughout. `cashier-01`/`cashier-02` and the PINs 1111/2222 are the product's own
  * published test fixtures, which is precisely why migration 8 exists.
+ *
+ * TRANSITION (O-1 Phase 1, P1 + D-O1/D-O2, owner R9, 2026-11-25). The published PINs no longer authenticate, so
+ * nothing reaches a setup ticket through 1111/2222 any more. Each test keeps its subject and reaches its state
+ * through a path that still exists: the first owner through `enrollOwner` (new-shop enrollment), and the
+ * setup-ticket mechanics through an operator the owner CREATED (a created account is pending, so its temporary
+ * PIN yields a ticket). The test that asserted «1111 yields a ticket» is FLIPPED to its refusal. Register:
+ * CLAUDE-TAKEOVER-2026-11-25/p1-tests/transition-register.md.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
@@ -17,6 +24,7 @@ import { AuditRepository } from "../../src/persistence/auditRepository";
 import { OperatorRepository } from "../../src/persistence/operatorRepository";
 import { type Db, openDatabase } from "../../src/persistence/db";
 import { FIXTURE_TERMINAL } from "../../src/fixtures/terminal";
+import { ledgerEmptiness } from "../../src/persistence/ledgerEmptiness";
 import { type TempDir, tempDir } from "../helpers/harness";
 
 let t: TempDir;
@@ -40,6 +48,7 @@ beforeEach(() => {
     terminal: FIXTURE_TERMINAL,
     now: () => new Date("2026-10-10T12:00:00.000Z"),
     newId: () => `id-${++ids}`,
+    ledgerEmpty: () => ledgerEmptiness(db).empty,
   });
 });
 afterEach(() => {
@@ -73,11 +82,24 @@ function secondOwner(name = "شريك", pin = "567812") {
   return svc.setRole(OWNER, created.id, "owner");
 }
 
-/** Signs the owner in with the bootstrap PIN and finishes setup. Returns the session. */
+/**
+ * The shop's first owner. TRANSITION (O-1 P1): was «authenticate(cashier-01, 1111) → completeSetup», which P1 now
+ * refuses. A new shop's owner is enrolled through `enrollOwner` (renames + sets the PIN of the seeded owner row,
+ * retires the seeded cashier (D-O2), claims the terminal), so tests that need «an owner» start here.
+ */
 function bootstrapOwner(name = "حسين", pin = "431987") {
-  const outcome = svc.authenticate("cashier-01", "1111");
+  return svc.enrollOwner(name, pin);
+}
+
+/**
+ * An operator in mandatory setup, holding a ticket: the owner creates them with a temporary PIN, and that
+ * temporary PIN yields a setup ticket — the ticket mechanics these tests are about, reached without 1111.
+ */
+function pendingOperator(name = "جعفر", tempPin = "567812") {
+  const created = svc.create(OWNER, { name, role: "cashier", pin: tempPin });
+  const outcome = svc.authenticate(created.id, tempPin);
   if (outcome.kind !== "setup") throw new Error("expected setup");
-  return svc.completeSetup(outcome.ticket, name, pin);
+  return { id: created.id, ticket: outcome.ticket, tempPin };
 }
 
 describe("the two migrated accounts", () => {
@@ -105,15 +127,24 @@ describe("the two migrated accounts", () => {
     ]);
   });
 
-  it("🔴 a correct bootstrap PIN yields a SETUP TICKET and NO session", () => {
-    const outcome = svc.authenticate("cashier-01", "1111");
-    expect(outcome.kind).toBe("setup");
-    if (outcome.kind !== "setup") return;
-    expect(outcome.operatorId).toBe("cashier-01");
-    expect(outcome.ticket).toMatch(/^[0-9a-f]{48}$/);
-    // There is no session field to read, in the type or at runtime: a bootstrap credential cannot
-    // produce one, which is the whole point.
-    expect("session" in outcome).toBe(false);
+  it("🔴 FLIPPED (O-1 P1): the published bootstrap PIN yields NEITHER a session NOR a setup ticket", () => {
+    // TRANSITION. Was: «a correct bootstrap PIN yields a SETUP TICKET and NO session». The «no session» half is
+    // kept and strengthened: the published PIN now yields nothing at all, with the generic wrong-PIN message.
+    const refusal = (id: string, pin: string) => {
+      try {
+        svc.authenticate(id, pin);
+      } catch (e) {
+        return { code: (e as DomainError).code, message: (e as DomainError).message };
+      }
+      return null;
+    };
+    const wrongPin = refusal("cashier-01", "0000");
+    expect(wrongPin?.code).toBe("INVALID_CREDENTIALS");
+    expect(refusal("cashier-01", "1111")).toEqual(wrongPin);
+    expect(refusal("cashier-02", "2222")).toEqual(wrongPin);
+    // And no ticket slot was armed: there is nothing for completeSetup to consume.
+    expect(() => svc.completeSetup("0".repeat(48), "x", "431987")).toThrow(/Sign in again/);
+    expect(operators.findById("cashier-01")!.must_reset_pin).toBe(1);
   });
 
   it("a wrong PIN is refused with the generic message", () => {
@@ -161,16 +192,18 @@ describe("mandatory setup", () => {
   });
 
   it("🔴 the ticket is consumed — it cannot be replayed to rewrite the PIN", () => {
-    const outcome = svc.authenticate("cashier-01", "1111");
-    if (outcome.kind !== "setup") throw new Error("expected setup");
-    svc.completeSetup(outcome.ticket, "حسين", "431987");
-    expect(() => svc.completeSetup(outcome.ticket, "مهاجم", "9999")).toThrow(/Sign in again/);
+    // REACH (O-1 P1): the ticket comes from a created operator's temporary PIN, not from 1111.
+    bootstrapOwner();
+    const op = pendingOperator();
+    svc.completeSetup(op.ticket, "جعفر", "431987");
+    expect(() => svc.completeSetup(op.ticket, "مهاجم", "9999")).toThrow(/Sign in again/);
     // And the PIN the attacker tried does not work.
-    expect(() => svc.authenticate("cashier-01", "9999")).toThrow(/incorrect/);
+    expect(() => svc.authenticate(op.id, "9999")).toThrow(/incorrect/);
   });
 
   it("a forged or stale ticket is refused", () => {
-    svc.authenticate("cashier-01", "1111");
+    bootstrapOwner();
+    pendingOperator(); // REACH (O-1 P1): a real ticket is held, and a forged one is still refused
     expect(() => svc.completeSetup("f".repeat(48), "x", "431987")).toThrow(/Sign in again/);
   });
 
@@ -186,60 +219,74 @@ describe("mandatory setup", () => {
     if (first.kind !== "setup") throw new Error("expected setup");
     // A second bootstrap login replaces the single slot, so the first ticket dies. The ticket names
     // its operator, so there is no field in which to substitute a different one.
-    const second = svc.authenticate("cashier-02", "2222");
+    // REACH (O-1 P1): the second operator was cashier-02 with 2222; enrollment retired that row (D-O2) and 2222
+    // is a wrong PIN, so the second operator is another created account. The subject (one slot) is unchanged.
+    const other = svc.create(OWNER, { name: "سمير", role: "cashier", pin: "246824" });
+    const second = svc.authenticate(other.id, "246824");
     if (second.kind !== "setup") throw new Error("expected setup");
     expect(() => svc.completeSetup(first.ticket, "x", "431987")).toThrow(/Sign in again/);
 
     svc.completeSetup(second.ticket, "سمير", "778899");
-    // Only cashier-02 was set up. The operator whose ticket died is still waiting.
+    // Only the second operator was set up. The operator whose ticket died is still waiting.
     expect(operators.findById(created.id)!.must_reset_pin).toBe(1);
-    expect(operators.findById("cashier-02")!.must_reset_pin).toBe(0);
+    expect(operators.findById(other.id)!.must_reset_pin).toBe(0);
   });
 
   it("a restart does not bypass the reset — the flag is on disk, the ticket is not", () => {
-    svc.authenticate("cashier-01", "1111");
+    // REACH (O-1 P1): a created operator's pending state, not the published 1111.
+    bootstrapOwner();
+    const op = pendingOperator();
     // A fresh service is a fresh process: the in-memory ticket is gone.
     const restarted = new OperatorService({
       operators,
       transact: (fn) => db.transaction(fn).immediate(),
       terminal: FIXTURE_TERMINAL,
     });
-    expect(restarted.authenticate("cashier-01", "1111").kind).toBe("setup");
-    expect(operators.findById("cashier-01")!.must_reset_pin).toBe(1);
+    expect(restarted.authenticate(op.id, op.tempPin).kind).toBe("setup");
+    expect(operators.findById(op.id)!.must_reset_pin).toBe(1);
+    // And a restart does not revive the published PIN either.
+    expect(() => restarted.authenticate("cashier-01", "1111")).toThrow(/incorrect/);
   });
 
   it("refuses a PIN that is not 6-8 digits, and leaves the account in setup", () => {
-    const outcome = svc.authenticate("cashier-01", "1111");
-    if (outcome.kind !== "setup") throw new Error("expected setup");
+    bootstrapOwner();
+    const op = pendingOperator(); // REACH (O-1 P1)
     for (const bad of ["123", "123456789", "12a4", "", "12 34", " 1234"]) {
-      expect(() => svc.completeSetup(outcome.ticket, "حسين", bad)).toThrow(DomainError);
+      expect(() => svc.completeSetup(op.ticket, "جعفر", bad)).toThrow(DomainError);
     }
-    expect(operators.findById("cashier-01")!.must_reset_pin).toBe(1);
+    expect(operators.findById(op.id)!.must_reset_pin).toBe(1);
     // 🔴 The ticket SURVIVES a refused PIN, so a typo does not send the operator back to login.
-    expect(() => svc.completeSetup(outcome.ticket, "حسين", "431987")).not.toThrow();
+    expect(() => svc.completeSetup(op.ticket, "جعفر", "431987")).not.toThrow();
   });
 
   it("refuses an empty name", () => {
-    const outcome = svc.authenticate("cashier-01", "1111");
-    if (outcome.kind !== "setup") throw new Error("expected setup");
-    expect(() => svc.completeSetup(outcome.ticket, "   ", "431987")).toThrow(/needs a name/);
+    bootstrapOwner();
+    const op = pendingOperator(); // REACH (O-1 P1)
+    expect(() => svc.completeSetup(op.ticket, "   ", "431987")).toThrow(/needs a name/);
   });
 
   it("🔴 writes TWO events when the name changed — a rename and a reset, not one ambiguous act", () => {
-    bootstrapOwner("حسين رقا", "431987");
-    const rows = auditRows();
+    // REACH (O-1 P1): the setup is a created operator's; only the rows that setup wrote are inspected.
+    bootstrapOwner();
+    const op = pendingOperator("جعفر");
+    const before = auditRows().length;
+    svc.completeSetup(op.ticket, "جعفر صالح", "431987");
+    const rows = auditRows().slice(before);
     expect(rows.map((r) => r.type)).toEqual(["OPERATOR_RENAMED", "OPERATOR_PIN_RESET"]);
-    expect(rows.every((r) => r.target === "cashier-01")).toBe(true);
+    expect(rows.every((r) => r.target === op.id)).toBe(true);
     expect(rows.every((r) => JSON.parse(r.meta!).origin === "bootstrap_setup")).toBe(true);
     // The rename says what it changed, from what, to what.
     expect(JSON.parse(rows[0]!.changed!)).toEqual({
-      name: { before: "Cashier One", after: "حسين رقا" },
+      name: { before: "جعفر", after: "جعفر صالح" },
     });
   });
 
   it("writes ONLY the reset when the operator kept the name — no empty rename", () => {
-    bootstrapOwner("Cashier One", "431987");
-    expect(auditRows().map((r) => r.type)).toEqual(["OPERATOR_PIN_RESET"]);
+    bootstrapOwner();
+    const op = pendingOperator("جعفر"); // REACH (O-1 P1)
+    const before = auditRows().length;
+    svc.completeSetup(op.ticket, "جعفر", "431987");
+    expect(auditRows().slice(before).map((r) => r.type)).toEqual(["OPERATOR_PIN_RESET"]);
   });
 
   it("🔴 a PIN reset's audit row carries NO credential material at all", () => {
@@ -311,8 +358,10 @@ describe("operator management", () => {
     svc.setActive(OWNER, op.id, false);
     svc.setActive(OWNER, op.id, true);
     expect(auditRows().map((r) => r.type)).toEqual([
+      // TRANSITION (O-1 P1, D-O2): enrollment writes three rows: the rename, the PIN, and retiring the seeded cashier.
       "OPERATOR_RENAMED",
       "OPERATOR_PIN_RESET",
+      "OPERATOR_DEACTIVATED",
       "OPERATOR_CREATED",
       "OPERATOR_RENAMED",
       "OPERATOR_PIN_RESET",
@@ -410,7 +459,14 @@ describe("operator management", () => {
  * writes roll back.
  */
 describe("completeSetup atomicity", () => {
-  /** A service whose audit repository throws on the Nth append. */
+  /**
+   * A service whose audit repository throws on the Nth append.
+   *
+   * REACH (O-1 P1, 2026-11-25): these tests used to drive the OWNER's bootstrap setup through 1111, which P1 now
+   * refuses. The subject is completeSetup's transaction, so they now drive a CREATED operator's setup (the
+   * remaining path into completeSetup) on a terminal whose owner was enrolled first. The injected failure counts
+   * only this service's own appends, so N means the same step it always meant.
+   */
   function serviceFailingAuditAt(n: number) {
     let calls = 0;
     const real = new AuditRepository(db, { appVersion: "0.1.1", schemaVersion: 8 });
@@ -428,73 +484,133 @@ describe("completeSetup atomicity", () => {
       terminal: FIXTURE_TERMINAL,
       now: () => new Date("2026-10-10T12:00:00.000Z"),
       newId: () => `id-${++ids}`,
+      ledgerEmpty: () => ledgerEmptiness(db).empty,
     });
   }
 
-  const snapshot = () => {
-    const r = operators.findById("cashier-01")!;
+  /** An enrolled owner, and a created operator with a temporary PIN, ready to authenticate on any service. */
+  function created(tempPin = "567812") {
+    bootstrapOwner("حسين", "431987");
+    const op = svc.create(OWNER, { name: "جعفر", role: "cashier", pin: tempPin });
+    return { id: op.id, tempPin, rowsBefore: auditRows().length };
+  }
+
+  const snapshot = (id: string) => {
+    const r = operators.findById(id)!;
     return { name: r.name, salt: r.pin_salt_hex, hash: r.pin_hash_hex, flag: r.must_reset_pin };
   };
 
   it("🔴 rolls back EVERYTHING when the final audit append fails", () => {
-    const before = snapshot();
+    const op = created();
+    const before = snapshot(op.id);
     // The name changes, so the flow is: rename -> audit(1) -> setPin -> audit(2). Failing at 2 is
     // the case where the rename AND the new credential are already written in this transaction.
     const failing = serviceFailingAuditAt(2);
-    const outcome = failing.authenticate("cashier-01", "1111");
+    const outcome = failing.authenticate(op.id, op.tempPin);
     if (outcome.kind !== "setup") throw new Error("expected setup");
-    expect(() => failing.completeSetup(outcome.ticket, "حسين رقا", "431987")).toThrow(/injected audit failure/);
+    expect(() => failing.completeSetup(outcome.ticket, "جعفر صالح", "431988")).toThrow(/injected audit failure/);
 
     // Nothing moved: not the name, not the credential, not the flag.
-    expect(snapshot()).toEqual(before);
+    expect(snapshot(op.id)).toEqual(before);
     // No audit row survived either — not even the rename that had already been appended.
-    expect(auditRows()).toEqual([]);
-    // And the OLD bootstrap PIN still works, while the attempted new one does not. This is the
-    // assertion that matters: a half-applied setup would have made 4321 live with the flag set, or
-    // left 1111 live with the flag cleared.
-    expect(failing.authenticate("cashier-01", "1111").kind).toBe("setup");
-    expect(() => failing.authenticate("cashier-01", "431987")).toThrow(/incorrect/);
+    expect(auditRows().length).toBe(op.rowsBefore);
+    // And the OLD temporary PIN still leads to setup, while the attempted new one does not. This is the
+    // assertion that matters: a half-applied setup would have made the new PIN live with the flag set, or
+    // left the old one live with the flag cleared.
+    expect(failing.authenticate(op.id, op.tempPin).kind).toBe("setup");
+    expect(() => failing.authenticate(op.id, "431988")).toThrow(/incorrect/);
   });
 
   it("rolls back when the FIRST audit append fails, before the credential is written", () => {
-    const before = snapshot();
+    const op = created();
+    const before = snapshot(op.id);
     const failing = serviceFailingAuditAt(1);
-    const outcome = failing.authenticate("cashier-01", "1111");
+    const outcome = failing.authenticate(op.id, op.tempPin);
     if (outcome.kind !== "setup") throw new Error("expected setup");
-    expect(() => failing.completeSetup(outcome.ticket, "حسين رقا", "431987")).toThrow();
-    expect(snapshot()).toEqual(before);
-    expect(auditRows()).toEqual([]);
+    expect(() => failing.completeSetup(outcome.ticket, "جعفر صالح", "431988")).toThrow();
+    expect(snapshot(op.id)).toEqual(before);
+    expect(auditRows().length).toBe(op.rowsBefore);
   });
 
   it("🔴 the ticket SURVIVES a rolled-back attempt, so the operator is not locked out", () => {
+    const op = created();
     const failing = serviceFailingAuditAt(2);
-    const outcome = failing.authenticate("cashier-01", "1111");
+    const outcome = failing.authenticate(op.id, op.tempPin);
     if (outcome.kind !== "setup") throw new Error("expected setup");
-    expect(() => failing.completeSetup(outcome.ticket, "حسين", "431987")).toThrow();
-    // A crash in the app's own audit layer must not strand the shop at a login screen whose only
+    expect(() => failing.completeSetup(outcome.ticket, "جعفر صالح", "431988")).toThrow();
+    // A crash in the app's own audit layer must not strand the operator at a login screen whose only
     // credential leads to a flow that already failed. The same ticket still works.
+    expect(failing.completeSetup(outcome.ticket, "جعفر", "431988").role).toBe("cashier");
+    // And a fresh process (no ticket in memory) can still start the setup over with the temporary PIN.
     const working = new OperatorService({
       operators,
       audit: new AuditRepository(db, { appVersion: "0.1.1", schemaVersion: 8 }),
       transact: (fn) => db.transaction(fn).immediate(),
       terminal: FIXTURE_TERMINAL,
     });
-    const retry = working.authenticate("cashier-01", "1111");
-    if (retry.kind !== "setup") throw new Error("expected setup");
-    expect(working.completeSetup(retry.ticket, "حسين", "431987").role).toBe("owner");
+    expect(working.authenticate(op.id, "431988").kind).toBe("session");
   });
 
   it("a rolled-back setup leaves the audit sequence unbroken for the next real write", () => {
+    const op = created();
     const failing = serviceFailingAuditAt(1);
-    const o1 = failing.authenticate("cashier-01", "1111");
+    const o1 = failing.authenticate(op.id, op.tempPin);
     if (o1.kind !== "setup") throw new Error("expected setup");
-    expect(() => failing.completeSetup(o1.ticket, "حسين", "431987")).toThrow();
+    expect(() => failing.completeSetup(o1.ticket, "جعفر صالح", "431988")).toThrow();
     // seq is allocated as max(seq)+1 inside the transaction, so a rolled-back append must not have
     // consumed a number.
-    bootstrapOwner("حسين", "431987");
+    const retry = svc.authenticate(op.id, op.tempPin);
+    if (retry.kind !== "setup") throw new Error("expected setup");
+    svc.completeSetup(retry.ticket, "جعفر صالح", "431988");
     const seqs = (db.prepare("SELECT seq FROM audit_events ORDER BY seq").all() as Array<{ seq: bigint }>).map(
       (r) => Number(r.seq),
     );
-    expect(seqs).toEqual([1, 2]);
+    expect(seqs).toEqual(seqs.map((_, i) => i + 1));
+    expect(seqs.length).toBe(op.rowsBefore + 2);
   });
+});
+
+/**
+ * NEW (O-1 Phase 1, 2026-11-25): `enrollOwner` is ONE transaction — the rename, the PIN, retiring the seeded
+ * cashier (D-O2) and the claim. A failure at any audit append must leave the shop exactly as it was: unclaimed,
+ * both seeded rows untouched, no audit row, and enrollment still possible afterwards.
+ */
+describe("enrollOwner atomicity", () => {
+  function failingAt(n: number) {
+    let calls = 0;
+    const real = new AuditRepository(db, { appVersion: "0.1.1", schemaVersion: 8 });
+    return new OperatorService({
+      operators,
+      audit: {
+        append: (draft: Parameters<AuditRepository["append"]>[0], id: string) => {
+          calls += 1;
+          if (calls === n) throw new Error("injected audit failure");
+          return real.append(draft, id);
+        },
+      } as unknown as AuditRepository,
+      transact: (fn) => db.transaction(fn).immediate(),
+      terminal: FIXTURE_TERMINAL,
+      now: () => new Date("2026-10-10T12:00:00.000Z"),
+      newId: () => `id-${++ids}`,
+      ledgerEmpty: () => ledgerEmptiness(db).empty,
+    });
+  }
+  const state = () => ({
+    owner: { ...operators.findById("cashier-01")! },
+    cashier: { ...operators.findById("cashier-02")! },
+    claimed: operators.terminalClaimed(),
+    audit: auditRows().length,
+  });
+
+  for (const n of [1, 2, 3]) {
+    it(`🔴 a failure at audit append ${n} of 3 rolls back everything, and enrollment can be retried`, () => {
+      const before = state();
+      expect(before.claimed).toBe(false);
+      expect(() => failingAt(n).enrollOwner("حسين رقا", "431987")).toThrow(/injected audit failure/);
+      expect(state()).toEqual(before);
+      // Retried on a working service, it completes.
+      expect(svc.enrollOwner("حسين رقا", "431987")).toEqual({ id: "cashier-01", name: "حسين رقا", role: "owner" });
+      expect(operators.terminalClaimed()).toBe(true);
+    });
+  }
 });
