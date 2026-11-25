@@ -583,6 +583,19 @@ export class PosService {
     return { kind: "session", session: { id: account.id, name: account.name, role: "cashier" } };
   }
 
+  /**
+   * O-1 Phase 1: enrolls a NEW shop's first owner (OperatorService.enrollOwner decides eligibility inside its
+   * transaction) and opens that owner's session. Refused on a seed instance, like every other sign-in.
+   */
+  enrollOwner(name: string, pin: string): Cashier {
+    if (this.deps.seedActor) throw new DomainError("NOT_AVAILABLE", "Seed instance cannot sign in");
+    if (!this.deps.operators) throw new DomainError("NOT_AVAILABLE", "Operator accounts are not available");
+    const session = this.deps.operators.enrollOwner(name, pin);
+    this.cashier = { id: session.id, name: session.name };
+    this.role = session.role;
+    return this.cashier;
+  }
+
   /** Finishes mandatory setup and opens the session it was blocking. */
   completeBootstrapSetup(ticket: string, name: string, pin: string): Cashier {
     if (this.deps.seedActor) throw new DomainError("NOT_AVAILABLE", "Seed instance cannot sign in");

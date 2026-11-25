@@ -21,6 +21,12 @@ export function probeEntryData(db: CountReader): EntryDataProbe {
 export function readRealEntryState(
   readClaimed: () => boolean,
   readProbe: () => EntryDataProbe,
+  /**
+   * O-1 Phase 1: the SAME emptiness rule `enrollOwner` enforces (persistence/ledgerEmptiness.ts). When given, the
+   * Welcome «إنشاء حساب» is offered only where enrollment would be accepted; false or a throw ⇒ not eligible.
+   * Still a hint: enrollOwner re-reads it inside its own transaction.
+   */
+  readLedgerEmpty?: () => boolean,
 ): EntryStateDto {
   let terminalClaimed: boolean;
   try {
@@ -36,7 +42,9 @@ export function readRealEntryState(
       const probe = readProbe();
       const counts = [probe.productRows, probe.parties, probe.invoices, probe.merchantSaleLines, probe.salesRows];
       firstRunEligible = counts.every((count) => Number.isSafeInteger(count) && count === 0);
+      if (firstRunEligible && readLedgerEmpty) firstRunEligible = readLedgerEmpty() === true;
     } catch {
+      firstRunEligible = false;
       // Route to legacy login if the hint is unavailable.
     }
   }

@@ -4,8 +4,8 @@
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  * 🔴 A UX ROUTING HINT, NEVER AUTHORITY. Main computes this DTO; the renderer only chooses which
  * screen to draw from it. `firstRunEligible` is NOT proof of a fresh install or of the absence of
- * merchant data, and nothing here grants a ticket, a session or a profile. While O-1 is open the
- * Welcome screen's «إنشاء حساب» leads to the EXISTING setup path — no new authentication exists.
+ * merchant data, and nothing here grants a ticket, a session or a profile. The Welcome screen's «إنشاء حساب»
+ * leads to «محل جديد» (`enrollOwner`), which main refuses unless the ledger is unclaimed AND empty.
  *
  * 🔴 IT FAILS CLOSED TO THE LEGACY LOGIN. Until X1 binds `getEntryState` (owned by Codex in
  * ipcContract.ts / preload.ts), the channel does not exist and this adapter answers LEGACY_ENTRY —
@@ -124,7 +124,7 @@ export interface EntryUi {
   /** undefined = being (re-)read; the shell shows Loading, bounded by ENTRY_STATE_TIMEOUT_MS. */
   readonly entry: EntryState | undefined;
   readonly preLogin: PreLogin | null;
-  /** The operator came from «إنشاء حساب» (O-1 open: the existing setup path, with its note). */
+  /** The operator came from «إنشاء حساب»: the «محل جديد» screen (O-1 Phase 1, `enrollOwner`). */
   readonly fromCreate: boolean;
 }
 
@@ -158,8 +158,11 @@ export function entryUiReducer(state: EntryUi, event: EntryUiEvent): EntryUi {
   }
 }
 
-/** Whether the Create Account note shows above the plain login. */
-export function showsCreateNote(ui: EntryUi): boolean {
+/**
+ * Whether the «محل جديد» screen shows (O-1 Phase 1). TRANSITION: was `showsCreateNote` — the note that pointed to
+ * the published setup code on the sign-in screen, a path P1 closed. Same routing condition, new destination.
+ */
+export function showsNewShop(ui: EntryUi): boolean {
   return ui.entry !== undefined && ui.fromCreate && preLoginScreen(ui.entry, null) === "welcome";
 }
 

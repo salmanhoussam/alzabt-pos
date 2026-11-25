@@ -886,6 +886,13 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
         ),
       );
     }),
+    // O-1 Phase 1 (contract v3.1, owner R9). PUBLIC, and it decides nothing: name and PIN are only bounded here;
+    // OperatorService.enrollOwner refuses unless the terminal is unclaimed AND the ledger is empty, re-read inside
+    // its own transaction, and refuses a published or out-of-rule PIN. On success the new owner is signed in.
+    enrollOwner: wrap("enrollOwner", (p) => {
+      const o = exactObject(p, ["name", "pin"]);
+      return cashierDto(service.enrollOwner(str(o.name, "name", 60), str(o.pin, "pin", 16)));
+    }),
     listOperators: wrap("listOperators", (p) => {
       noPayload(p);
       return operators().listAll();

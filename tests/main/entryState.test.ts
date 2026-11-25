@@ -42,3 +42,17 @@ describe("read-only real entry routing hint", () => {
     } finally { h.db.close(); t.cleanup(); }
   });
 });
+
+describe("O-1 Phase 1 · the Welcome hint agrees with enrollOwner (ledgerEmptiness)", () => {
+  it("offers «إنشاء حساب» only when the SAME emptiness rule enrollment enforces says empty", () => {
+    expect(readRealEntryState(() => false, () => empty, () => true).firstRunEligible).toBe(true);
+    // The partial probe says empty, but the closed list does not (e.g. an audit row or an unclassified table).
+    expect(readRealEntryState(() => false, () => empty, () => false).firstRunEligible).toBe(false);
+  });
+  it("fails closed when the emptiness check throws, and never consults it on a claimed terminal", () => {
+    expect(readRealEntryState(() => false, () => empty, () => { throw new Error("private"); }).firstRunEligible).toBe(false);
+    const readEmpty = vi.fn(() => true);
+    expect(readRealEntryState(() => true, () => empty, readEmpty).firstRunEligible).toBe(false);
+    expect(readEmpty).not.toHaveBeenCalled();
+  });
+});

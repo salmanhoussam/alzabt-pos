@@ -7,8 +7,9 @@ import { call, errorText, pos } from "./api";
 import { HistoryScreen } from "./screens/HistoryScreen";
 import { LoginScreen } from "./screens/LoginScreen";
 import { SetupScreen } from "./screens/SetupScreen";
-import { CreateAccountLegacyNote, WelcomeScreen } from "./screens/WelcomeScreen";
-import { EntryStateLoader, INITIAL_ENTRY_UI, entryUiReducer, offersDemo, preLoginScreen, readEntryState, showsCreateNote } from "./entryState";
+import { WelcomeScreen } from "./screens/WelcomeScreen";
+import { NewShopScreen } from "./screens/NewShopScreen";
+import { EntryStateLoader, INITIAL_ENTRY_UI, entryUiReducer, offersDemo, preLoginScreen, readEntryState, showsNewShop } from "./entryState";
 import { type DemoAction, type DemoLifecycleOutcome, demoLifecycleAvailable, demoShellFor, requestDemoLifecycle } from "./demoControl";
 import { DemoBanner, DemoUnavailable } from "./components/DemoBanner";
 import { DemoModeProvider } from "./demoMode";
@@ -224,11 +225,29 @@ export function App() {
 
   const welcomeEligible = preLoginScreen(entry, null) === "welcome";
 
+  // «محل جديد» (O-1 Phase 1): from «إنشاء حساب» on a first-run-eligible terminal. Main's `enrollOwner` decides.
+  if (cashier === null && showsNewShop(entryUi))
+    return (
+      <div className="app">
+        <main className="content">
+          <NewShopScreen
+            onReady={(c) => {
+              setCashier(c);
+              // This terminal is claimed now; drop any start-up hint still in flight (as after setup).
+              entryLoader.current!.invalidate();
+              dispatchEntry({ type: "setup-complete" });
+            }}
+            onBack={() => dispatchEntry({ type: "back" })}
+          />
+        </main>
+        <BuildLine />
+      </div>
+    );
+
   if (cashier === null)
     return (
       <div className="app">
         <main className="content">
-          {showsCreateNote(entryUi) && <CreateAccountLegacyNote onBack={() => dispatchEntry({ type: "back" })} />}
           {welcomeEligible && !entryUi.fromCreate && (
             <div className="welcome-back-row">
               <button type="button" className="btn small" data-testid="welcome-back" onClick={() => dispatchEntry({ type: "back" })}>

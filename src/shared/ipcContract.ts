@@ -14,6 +14,9 @@ export const CHANNELS = {
   // Migration 8 — operator accounts. `completeBootstrapSetup` is PUBLIC and takes a one-operator
   // setup ticket; the six management channels are owner-only (src/main/channelPolicy.ts).
   completeBootstrapSetup: "pos:completeBootstrapSetup",
+  // O-1 Phase 1 (contract v3.1, owner R9): PUBLIC new-shop owner enrollment, refused unless the ledger is
+  // unclaimed AND empty (decided by main inside the transaction, never by the renderer).
+  enrollOwner: "pos:enrollOwner",
   listOperators: "pos:listOperators",
   createOperator: "pos:createOperator",
   renameOperator: "pos:renameOperator",
@@ -197,6 +200,12 @@ export type LoginResponse =
 
 export interface CompleteSetupRequest {
   readonly ticket: string;
+  readonly name: string;
+  readonly pin: string;
+}
+
+/** O-1 Phase 1: a NEW shop's first owner. No ticket and no old credential: main accepts it only on an unclaimed, empty ledger. */
+export interface EnrollOwnerRequest {
   readonly name: string;
   readonly pin: string;
 }
@@ -2027,6 +2036,7 @@ export interface PosApi {
   login(req: LoginRequest): Promise<IpcResult<LoginResponse>>;
   logout(): Promise<IpcResult<null>>;
   completeBootstrapSetup(req: CompleteSetupRequest): Promise<IpcResult<CashierDto>>;
+  enrollOwner(req: EnrollOwnerRequest): Promise<IpcResult<CashierDto>>;
   listOperators(): Promise<IpcResult<ReadonlyArray<OperatorDto>>>;
   createOperator(req: CreateOperatorRequest): Promise<IpcResult<OperatorDto>>;
   renameOperator(req: RenameOperatorRequest): Promise<IpcResult<OperatorDto>>;

@@ -88,6 +88,8 @@ export const PUBLIC_REASON: Readonly<Record<string, string>> = Object.freeze({
   listCashiers: "the login screen must offer who to sign in as; returns {id, name} and nothing else",
   login: "the door itself",
   completeBootstrapSetup: "mandatory first-run setup, reachable only with a one-operator setup ticket",
+  enrollOwner:
+    "O-1 Phase 1 (owner R9): a NEW shop's first owner, before any session can exist; refused in main unless the ledger is unclaimed AND empty (ledgerEmptiness, inside the transaction)",
   currentCashier: "App.tsx asks at startup whether anyone is signed in; 'no' is a valid answer",
   getEntryState: "read-only entry routing hint; no credentials, paths, data rows or authority",
   getSettings: "the app reads its language before it can render anything, including the login screen",
@@ -109,6 +111,8 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   listCashiers: "public",
   login: "public",
   completeBootstrapSetup: "public",
+  // O-1 Phase 1 (2026-11-25): NINE public. See PUBLIC_REASON.enrollOwner.
+  enrollOwner: "public",
   currentCashier: "public",
   getEntryState: "public",
   logout: "public",

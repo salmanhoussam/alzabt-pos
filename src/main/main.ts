@@ -49,6 +49,7 @@ import { CHANNELS } from "../shared/ipcContract";
 import { invokeWithDemoPolicy, restrictDemoIpcOptions } from "./demoPolicy";
 import { createLedgerServices } from "./ledgerServices";
 import { probeEntryData, readRealEntryState } from "./entryState";
+import { ledgerEmptiness } from "../persistence/ledgerEmptiness";
 import { toInvoiceViewDto } from "../shared/dto";
 import { loadInvoicePhoto, readInvoiceImage } from "./invoiceOcr";
 import { renderInvoiceDocument } from "./invoiceDocument";
@@ -1228,6 +1229,7 @@ function startTill(): void {
       const state = readRealEntryState(
         () => { if (!db) throw new Error("Entry state unavailable"); return new OperatorRepository(db).terminalClaimed(); },
         () => { if (!db) throw new Error("Entry state unavailable"); return probeEntryData(db); },
+        () => { if (!db) throw new Error("Entry state unavailable"); return ledgerEmptiness(db).empty; },
       );
       if (!syntheticEnvironment) return state;
       const {syntheticDemoRetention} = require("./demoProfile") as typeof import("./demoProfile");

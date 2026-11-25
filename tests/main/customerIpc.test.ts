@@ -116,7 +116,9 @@ describe("the customer channels", () => {
     // (create-products level; a staged photo FILE, no customer capability). The old value was 104.
     // TRANSITION (M5 LBP display, owner 2026-11-25): 106 -> 108 with setDisplayCurrency (session) and setLbpRate (owner);
     // display settings only — no customer capability, no money. The old value was 106.
-    expect(Object.keys(CHANNELS)).toHaveLength(108);
+    // TRANSITION (O-1 Phase 1, owner R9, 2026-11-25): 108 -> 109 with enrollOwner (PUBLIC new-shop owner enrollment,
+    // refused in main unless the ledger is unclaimed AND empty) — no customer capability, no money. The old value was 108.
+    expect(Object.keys(CHANNELS)).toHaveLength(109);
   });
 
   // TRANSITION (SELL-CREDIT, owner 2026-11-08): this test was named "… and still no way to CREATE a debt".

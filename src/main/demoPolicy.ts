@@ -22,6 +22,9 @@ export const DEMO_CHANNEL_POLICY = Object.freeze({
   // A separately reviewed main-owned exit flow must close the session instead.
   logout: "deny",
   completeBootstrapSetup: "deny",
+  // O-1 Phase 1: the Demo's accounts are seeded by main (demoSeedAccounts → enrollOwner in-process); the renderer
+  // never enrolls an owner in Demo.
+  enrollOwner: "deny",
   listOperators: "deny",
   createOperator: "deny",
   renameOperator: "deny",

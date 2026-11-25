@@ -12,7 +12,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { translate } from "../../src/shared/i18n";
 import { I18nProvider } from "../../src/renderer/i18n";
-import { CreateAccountLegacyNote, WelcomeScreen } from "../../src/renderer/screens/WelcomeScreen";
+import { WelcomeScreen } from "../../src/renderer/screens/WelcomeScreen";
+import { NewShopScreen } from "../../src/renderer/screens/NewShopScreen";
 import {
   ENTRY_STATE_TIMEOUT_MS,
   EntryStateLoader,
@@ -25,7 +26,7 @@ import {
   parseEntryState,
   preLoginScreen,
   readEntryState,
-  showsCreateNote,
+  showsNewShop,
 } from "../../src/renderer/entryState";
 
 const FRESH: EntryState = { profile: "real", terminalClaimed: false, firstRunEligible: true, demoAvailable: false };
@@ -116,15 +117,24 @@ describe("P6 — the Welcome screen", () => {
     expect(html).toContain(translate("ar", "welcome.demo"));
   });
 
-  it("the Create-Account note explains the existing setup path without revealing any code", () => {
-    const html = render(createElement(CreateAccountLegacyNote, { onBack: noop }));
-    expect(html).toContain('data-testid="create-legacy-note"');
-    expect(html).toContain(translate("ar", "welcome.createLegacyNote"));
-    for (const lang of ["ar", "en"] as const) expect(translate(lang, "welcome.createLegacyNote")).not.toMatch(/[0-9٠-٩]/);
+  // TRANSITION (O-1 Phase 1, owner R9, 2026-11-25): was «the Create-Account note explains the existing setup path
+  // without revealing any code» — that note pointed to the published setup code, which P1 no longer accepts. The
+  // destination is now the «محل جديد» form; the «reveals no code» property is kept, asserted on the new screen.
+  it("«محل جديد» renders its own Arabic form (name, PIN, confirm) and reveals no code", () => {
+    const html = render(createElement(NewShopScreen, { onReady: noop, onBack: noop }));
+    expect(html).toContain('data-testid="new-shop-screen"');
+    for (const key of ["newShop.title", "newShop.why", "newShop.name", "newShop.pin", "newShop.confirm", "newShop.submit"])
+      expect(html).toContain(translate("ar", key));
+    expect(html).not.toMatch(/1111|2222/);
+    for (const lang of ["ar", "en"] as const)
+      for (const key of ["newShop.title", "newShop.why", "newShop.notNew", "newShop.unavailable"]) {
+        expect(translate(lang, key), `${lang}:${key}`).not.toBe(key);
+        expect(translate(lang, key)).not.toMatch(/[0-9٠-٩]/);
+      }
   });
 
   it("no welcome text claims an isolation guarantee (rule E) or contains digits a code could hide in", () => {
-    const keys = ["welcome.title", "welcome.subtitle", "welcome.create", "welcome.createHint", "welcome.createLegacyNote", "welcome.login",
+    const keys = ["welcome.title", "welcome.subtitle", "welcome.create", "welcome.createHint", "welcome.login",
       "welcome.loginHint", "welcome.demo", "welcome.demoHint", "welcome.local", "welcome.back"];
     for (const lang of ["ar", "en"] as const) {
       for (const key of keys) {
@@ -193,10 +203,10 @@ describe("C1-R2 — no stale Welcome / Create Account after setup, logout or a c
   it("«إنشاء حساب» → plain login with the note; «رجوع» → Welcome again", () => {
     const created = run([{ type: "loaded", entry: FRESH }, { type: "choose-create" }]);
     expect(preLoginScreen(created.entry!, created.preLogin)).toBe("login");
-    expect(showsCreateNote(created)).toBe(true);
+    expect(showsNewShop(created)).toBe(true);
     const back = entryUiReducer(created, { type: "back" });
     expect(preLoginScreen(back.entry!, back.preLogin)).toBe("welcome");
-    expect(showsCreateNote(back)).toBe(false);
+    expect(showsNewShop(back)).toBe(false);
   });
 
   it("after the owner's setup completes, neither Welcome nor the note can come back from the start-up hint", () => {
@@ -204,7 +214,7 @@ describe("C1-R2 — no stale Welcome / Create Account after setup, logout or a c
     expect(ui.entry).toBe(LEGACY_ENTRY);
     expect(ui.fromCreate).toBe(false);
     expect(preLoginScreen(ui.entry!, ui.preLogin)).toBe("login");
-    expect(showsCreateNote(ui)).toBe(false);
+    expect(showsNewShop(ui)).toBe(false);
   });
 
   it("setup → logout → the hint is re-read (Loading), and a claimed answer gives the plain login, no note", () => {
@@ -213,7 +223,7 @@ describe("C1-R2 — no stale Welcome / Create Account after setup, logout or a c
     expect(afterLogout.fromCreate).toBe(false);
     const reread = entryUiReducer(afterLogout, { type: "loaded", entry: { ...FRESH, terminalClaimed: true, firstRunEligible: false } });
     expect(preLoginScreen(reread.entry!, reread.preLogin)).toBe("login");
-    expect(showsCreateNote(reread)).toBe(false);
+    expect(showsNewShop(reread)).toBe(false);
   });
 
   it("logout clears an earlier route choice, so the next operator is routed only by the fresh hint", () => {

@@ -3,8 +3,9 @@
  *
  * 🔴 PRESENTATION ONLY. This component calls no channel and decides nothing about security. App draws
  * it only when main's entry state says so (./entryState.ts, which fails closed to the plain login).
- *   - «إنشاء حساب»: while O-1 is open, App takes the operator to the EXISTING setup path (sign-in
- *     screen) with an explanation — no new authentication path exists. This is a declared product gap.
+ *   - «إنشاء حساب»: App opens the «محل جديد» screen (NewShopScreen → main's `enrollOwner`, O-1 Phase 1).
+ *     TRANSITION: it used to send the operator to the sign-in screen to type the published setup code, which
+ *     no longer signs in (P1).
  *   - «جرّب النظام»: drawn only when `onDemo` is supplied, i.e. when main reports the demo available.
  *     Starting the demo is main's job (X2/C2), not this screen's.
  */
@@ -94,19 +95,6 @@ export function WelcomeScreen({
           </p>
         )}
       </div>
-    </div>
-  );
-}
-
-/** Shown above the plain login when the operator came from «إنشاء حساب» (O-1 open: the existing path). */
-export function CreateAccountLegacyNote({ onBack }: { readonly onBack: () => void }) {
-  const { t } = useT();
-  return (
-    <div className="card welcome-note" role="note" data-testid="create-legacy-note">
-      <p>{t("welcome.createLegacyNote")}</p>
-      <button type="button" className="btn small" onClick={onBack} data-testid="welcome-back">
-        {t("welcome.back")}
-      </button>
     </div>
   );
 }

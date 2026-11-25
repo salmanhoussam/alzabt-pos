@@ -46,7 +46,9 @@ describe("every channel is classified", () => {
 describe("the public set", () => {
   const publicChannels = names.filter((n) => CHANNEL_POLICY[n] === "public").sort();
 
-  it("🔴 is EXACTLY these nine, each with a stated reason", () => {
+  // TRANSITION (O-1 Phase 1, owner R9, 2026-11-25): nine -> TEN with `enrollOwner` (a new shop's first owner, before
+  // any session can exist; refused in main unless unclaimed AND empty). Old title/list: «these nine», without it.
+  it("🔴 is EXACTLY these ten, each with a stated reason", () => {
     // Salman asked for three — listCashiers, login, completeBootstrapSetup. Three is not
     // achievable: the renderer also calls getSettings (the app reads its language before it can
     // render anything, the login screen included), setTerminalLanguage (the PRE-AUTH language
@@ -58,6 +60,7 @@ describe("the public set", () => {
     expect(publicChannels).toEqual([
       "completeBootstrapSetup",
       "currentCashier",
+      "enrollOwner",
       "getAppInfo",
       "getEntryState",
       "getSettings",

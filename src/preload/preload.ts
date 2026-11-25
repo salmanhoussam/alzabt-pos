@@ -120,6 +120,7 @@ const CH = {
   login: "pos:login",
   logout: "pos:logout",
   completeBootstrapSetup: "pos:completeBootstrapSetup",
+  enrollOwner: "pos:enrollOwner",
   listOperators: "pos:listOperators",
   createOperator: "pos:createOperator",
   renameOperator: "pos:renameOperator",
@@ -234,6 +235,7 @@ const api: PosApi = {
   // object cannot smuggle an extra property across the bridge.
   completeBootstrapSetup: (req) =>
     ipcRenderer.invoke(CH.completeBootstrapSetup, { ticket: req.ticket, name: req.name, pin: req.pin }),
+  enrollOwner: (req) => ipcRenderer.invoke(CH.enrollOwner, { name: req.name, pin: req.pin }),
   listOperators: () => ipcRenderer.invoke(CH.listOperators),
   createOperator: (req) =>
     ipcRenderer.invoke(CH.createOperator, { name: req.name, role: req.role, pin: req.pin }),

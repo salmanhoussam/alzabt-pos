@@ -153,6 +153,9 @@ describe("IPC surface", () => {
         // exists to catch a channel nobody meant to expose, so each new one is declared here
         // deliberately. `completeBootstrapSetup` is the only PUBLIC one of the seven.
         "completeBootstrapSetup",
+        // TRANSITION (O-1 Phase 1, owner R9, 2026-11-25): one more PUBLIC name — new-shop owner enrollment, refused
+        // in main unless the ledger is unclaimed AND empty. Old list: without it.
+        "enrollOwner",
         "createOperator",
         "listOperators",
         "renameCategory",
@@ -269,7 +272,8 @@ describe("IPC surface", () => {
     // X1 TRANSITION: 103 -> 104, the named read-only getEntryState channel.
     // TRANSITION (M1, Phone Invoice queue DEC-35z16): 104 -> 106 — listPhoneInvoices, releasePhoneInvoice. The old value was 104.
     // TRANSITION (M5 LBP display): 106 -> 108 — setDisplayCurrency, setLbpRate (settings.json only). The old value was 106.
-    expect(CHANNEL_NAMES).toHaveLength(108);
+    // TRANSITION (O-1 Phase 1, owner R9, 2026-11-25): 108 -> 109 — enrollOwner (public, refused unless unclaimed AND empty). The old value was 108.
+    expect(CHANNEL_NAMES).toHaveLength(109);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.
