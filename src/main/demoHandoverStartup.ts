@@ -8,7 +8,7 @@ import {verifiedSyntheticTestHome} from "./demoDevGate";
 import {DemoLaunchRecords} from "./demoLaunchRecords";
 import {adoptVerifiedSyntheticReservation,isFreshSyntheticReservation} from "./demoProfile";
 import type {SyntheticDemoReservation} from "./demoProfile";
-import {syntheticBuildAllowed} from "./syntheticBuild";
+import {syntheticBuildAllowed,syntheticStorageName} from "./syntheticBuild";
 
 declare const readyBrand: unique symbol;
 export interface VerifiedDemoStart {readonly [readyBrand]:true}
@@ -33,7 +33,7 @@ export function resolveVerifiedSyntheticHandover(requested:boolean, nonce:string
   if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock())return {kind:"real"};
   const home=verifiedSyntheticTestHome(!syntheticBuildAllowed(),requested);
   if(!home)return {kind:"real"};
-  const base=join(home,"AppData","Local","Alzabt-Synthetic-Development");
+  const base=join(home,"AppData","Local",syntheticStorageName());
   const demoRoot=join(base,"synthetic-demo-root-v1");
   try {
     const records=new DemoLaunchRecords(join(base,"control"));

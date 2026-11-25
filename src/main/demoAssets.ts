@@ -8,8 +8,14 @@ import {join,parse,resolve} from "node:path";
 import {nativeImage} from "electron";
 import {electronCodec} from "./productPhoto";
 import type {startReservedSyntheticDemo} from "./demoSyntheticStartup";
-const STAGE="C:/dev/alzabt-agent-collaboration/c2-demo-assets-staging-2026-11-18";
-const COMPANY="C:/dev/alzabt-agent-collaboration/c2-demo-company-defaults-2026-11-19/config/demo-profile.json";
+import {isOwnerPreviewBuild} from "./syntheticBuild";
+// Development: the reviewed, hash-verified staging copy. OWNER PREVIEW: the SAME bytes shipped inside the installer
+// (build/preview.electron-builder.cjs extraResources -> <resources>/demo-assets). The seed verifies every file
+// against its pinned hash either way, so a changed byte is refused, whichever folder it came from.
+const PREVIEW_ROOT=()=>join(process.resourcesPath,"demo-assets");
+const STAGE_PATH=()=>isOwnerPreviewBuild()?PREVIEW_ROOT():"C:/dev/alzabt-agent-collaboration/c2-demo-assets-staging-2026-11-18";
+const COMPANY_PATH=()=>isOwnerPreviewBuild()?join(PREVIEW_ROOT(),"config","demo-profile.json"):
+  "C:/dev/alzabt-agent-collaboration/c2-demo-company-defaults-2026-11-19/config/demo-profile.json";
 function file(path:string,maximum:number):Buffer {
   const full=resolve(path);let part=parse(full).root;
   for(const segment of full.slice(part.length).split(/[\\\\/]+/).filter(Boolean)) {
@@ -27,6 +33,7 @@ function file(path:string,maximum:number):Buffer {
 }
 export function loadSyntheticDemoAssets():Parameters<typeof startReservedSyntheticDemo>[1] {
   try {
+    const STAGE=STAGE_PATH(), COMPANY=COMPANY_PATH();
     return {
       csv:file(join(STAGE,"catalog","demo-22-import.csv"),100000),
       mapping:file(join(STAGE,"catalog","product-image-mapping.json"),100000),

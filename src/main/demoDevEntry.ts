@@ -10,7 +10,7 @@ import {verifiedSyntheticTestHome} from "./demoDevGate";
 import {syntheticDemoRetention} from "./demoProfile";
 import {DemoLaunchRecords} from "./demoLaunchRecords";
 import {LEDGER_FILE_NAME} from "./ledgerGuard";
-import {syntheticBuildAllowed} from "./syntheticBuild";
+import {isOwnerPreviewBuild,syntheticBuildAllowed,syntheticStorageName} from "./syntheticBuild";
 
 function checkedDirectory(path:string):string {
   const full=resolve(path);let current=parse(full).root;
@@ -25,9 +25,18 @@ export function openSyntheticDevEnvironment(prepareEntry=true) {
   if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock() || app.isReady())throw Error("Synthetic environment unavailable.");
   const home=verifiedSyntheticTestHome(false,true);
   if(!home)throw Error("Synthetic environment unavailable.");
-  // These two directories were created by the owner-run disposable V8 probe.
-  // An absent or unrecognised root is refused; no existing directory is reset.
-  const base=checkedDirectory(join(home,"AppData","Local","Alzabt-Synthetic-Development"));
+  // Development: these two directories were created by the owner-run disposable V8 probe; an absent or
+  // unrecognised root is refused; no existing directory is reset.
+  // OWNER PREVIEW: its OWN folder (never the development one, never a shop's), created on first start one level at
+  // a time with a NON-recursive mkdir under the verified LocalAppData, then checked exactly like the development one.
+  const local=join(home,"AppData","Local");
+  const baseName=syntheticStorageName();
+  if(isOwnerPreviewBuild()) {
+    checkedDirectory(local);
+    for(const dir of [join(local,baseName),join(local,baseName,"synthetic-demo-root-v1"),join(local,baseName,"control")])
+      if(!existsSync(dir))mkdirSync(dir);
+  }
+  const base=checkedDirectory(join(local,baseName));
   const root=checkedDirectory(join(base,"synthetic-demo-root-v1"));
   syntheticDemoRetention(root);
   const control=checkedDirectory(join(base,"control"));

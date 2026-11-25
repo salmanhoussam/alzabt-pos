@@ -46,3 +46,11 @@ export function isOwnerPreviewBuild(): boolean {
 export function syntheticBuildAllowed(): boolean {
   return !app.isPackaged || isOwnerPreviewBuild();
 }
+
+/**
+ * The synthetic storage folder under the verified LocalAppData: the preview's OWN folder, never the development one.
+ * demoDevEntry (creates/opens it) and demoHandoverStartup (verifies a Demo handover in it) MUST agree, so both ask here.
+ */
+export function syntheticStorageName(): string {
+  return isOwnerPreviewBuild() ? "Alzabt-R5-Owner-Preview" : "Alzabt-Synthetic-Development";
+}
