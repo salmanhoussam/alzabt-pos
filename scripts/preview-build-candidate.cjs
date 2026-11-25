@@ -11,7 +11,7 @@ const { applyToLocalBuilder } = require('./preview-template-candidate.cjs');
 const { inventory, makeInclude } = require('./preview-owned-payload.cjs');
 
 const digest = (data) => crypto.createHash('sha256').update(data).digest('hex');
-const REF = 'refs/heads/owner-preview/r5-20261125-r2';
+const REF = 'refs/heads/owner-preview/r5-20261125-r3';
 
 function requireReady({ platform, env, source, head, status }) {
   if (platform !== 'win32' || env.GITHUB_ACTIONS !== 'true' || env.RUNNER_ENVIRONMENT !== 'github-hosted' ||

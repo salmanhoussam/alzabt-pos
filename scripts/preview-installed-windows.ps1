@@ -254,6 +254,11 @@ try {
   # sale with exact USD totals, the LBP line with stored USD unchanged), the reset on reopen, and that no Demo ledger
   # or sale id is left on disk (e2e/preview-demo-smoke.mjs).
   $env:APPDATA = $roaming
+  # On a smoke failure the screenshot + sanitized visible state go here; the supervisor granted this account Modify on
+  # exactly this folder and copies it into the uploaded evidence even when the lifecycle fails.
+  $smokeEvidence = Join-Path $WorkRoot 'evidence'
+  if (-not (Test-Path -LiteralPath $smokeEvidence -PathType Container)) { throw 'Smoke evidence directory missing' }
+  $env:ALZABT_PREVIEW_EVIDENCE_DIR = $smokeEvidence
   & $NodeExe e2e/preview-demo-smoke.mjs
   if ($LASTEXITCODE -ne 0) { throw "Installed preview Demo smoke failed: $LASTEXITCODE" }
   # The preview's data folder (and nothing of the R3 trial or the shop product) is what the app created.
