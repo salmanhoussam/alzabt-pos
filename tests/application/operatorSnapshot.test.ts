@@ -18,6 +18,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type Harness, type TempDir, makeHarness, newKey, tempDir } from "../helpers/harness";
+import { TEST_CASHIER_PIN, TEST_OWNER_PIN } from "../helpers/testCredentials";
 
 let t: TempDir;
 let h: Harness;
@@ -53,7 +54,7 @@ const saleRow = (id: string) =>
 describe("a sale snapshots the operator who made it", () => {
   it("A-D · records the REAL operator id and their name at the moment of sale", () => {
     // A · a real operator signs in — cashier-02 is a real `operators` row, not a fixture lookup.
-    const outcome = h.service.login("cashier-02", "2222");
+    const outcome = h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(outcome.kind).toBe("session");
 
     // B · a real sale.
@@ -64,13 +65,13 @@ describe("a sale snapshots the operator who made it", () => {
   });
 
   it("🔴 E-G · renaming the operator does NOT touch a sale already recorded", () => {
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const before = sell();
     const asRecorded = saleRow(before);
     expect(asRecorded.name).toBe("Cashier Two");
 
     // E · the owner renames them.
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     h.operators.rename(OWNER, "cashier-02", "جعفر صالح");
     expect(h.operators.listAll().find((o) => o.id === "cashier-02")!.name).toBe("جعفر صالح");
 
@@ -81,14 +82,14 @@ describe("a sale snapshots the operator who made it", () => {
   });
 
   it("🔴 H-I · a sale made AFTER the rename carries the same id and the NEW name", () => {
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const before = sell();
 
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     h.operators.rename(OWNER, "cashier-02", "جعفر صالح");
 
     // The operator signs in again and sells.
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const after = sell();
 
     expect(saleRow(after)).toEqual({ id: "cashier-02", name: "جعفر صالح" });
@@ -101,7 +102,7 @@ describe("a sale snapshots the operator who made it", () => {
   it("🔴 a rename DURING a session reaches the next sale — the snapshot is the act, not the login", () => {
     // The operator stays signed in while the owner renames them from another surface. Reading the
     // name from the SESSION would snapshot what was true at login, hours and one rename ago.
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const early = sell();
 
     // Rename without that operator signing in again.
@@ -119,14 +120,14 @@ describe("a sale snapshots the operator who made it", () => {
     // longer exists must stop working, and "the sale is refused" is the correct answer here rather
     // than a regrettable one. The old expectation was
     // `{ id: "cashier-02", name: "Cashier Two" }`.
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     h.db.prepare("DELETE FROM operators WHERE id = 'cashier-02'").run();
     expect(() => sell()).toThrow(/no longer exists/);
     expect(h.db.prepare("SELECT count(*) AS n FROM sales").get()).toEqual({ n: 0n });
   });
 
   it("🔴 FAILS CLOSED the moment the operator is deactivated — no logout needed", () => {
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const before = sell();
     expect(saleRow(before).id).toBe("cashier-02");
 
@@ -141,11 +142,11 @@ describe("a sale snapshots the operator who made it", () => {
 
 describe("a void snapshots its own actor the same way", () => {
   it("records the owner who voided, and a later rename does not alter it", () => {
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const saleId = sell();
 
     // Voiding is an owner act.
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     h.service.voidSale(saleId, "wrong item rung up");
 
     const voidRow = () =>
@@ -163,7 +164,7 @@ describe("a void snapshots its own actor the same way", () => {
 
 describe("audit rows snapshot the actor too", () => {
   it("an operator event keeps the actor name it was written with", () => {
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     const created = h.operators.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
 
     const row = () =>
@@ -183,7 +184,7 @@ describe("audit rows snapshot the actor too", () => {
 
 describe("the application no longer depends on the bundled fixtures", () => {
   it("🔴 listCashiers comes from the TABLE — a row the fixtures never had is offered", () => {
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     const created = h.operators.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
     const offered = h.service.listCashiers();
     expect(offered.some((c) => c.id === created.id)).toBe(true);
@@ -203,7 +204,7 @@ describe("the application no longer depends on the bundled fixtures", () => {
   });
 
   it("a PIN set through the repository authenticates, which the fixture array cannot explain", () => {
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     const created = h.operators.create(OWNER, { name: "جعفر", role: "cashier", pin: "567812" });
     const setup = h.service.login(created.id, "567812");
     if (setup.kind !== "setup") throw new Error("expected setup");

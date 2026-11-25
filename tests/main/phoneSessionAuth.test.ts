@@ -25,10 +25,11 @@ import { PHONE_SESSION_TTL_MS } from "../../src/domain/phoneSession";
 import { networkInterfaces as realInterfaces } from "node:os";
 import type { NetworkInterfaceMap } from "../../src/main/lanAddress";
 import { makeHarness, tempDir } from "../helpers/harness";
+import { TEST_CASHIER_PIN, TEST_OWNER_PIN } from "../helpers/testCredentials";
 
 /** `cashier-01` is the OWNER in every harness; `cashier-02` is a real cashier. */
-const OWNER = { cashierId: "cashier-01", pin: "1111" };
-const CASHIER = { cashierId: "cashier-02", pin: "2222" };
+const OWNER = { cashierId: "cashier-01", pin: TEST_OWNER_PIN };
+const CASHIER = { cashierId: "cashier-02", pin: TEST_CASHIER_PIN };
 
 /**
  * The address these tests bind.
@@ -284,6 +285,7 @@ describe("the channel's answer", () => {
       const json = JSON.stringify(dto);
       expect(json).not.toContain(TOKEN);
       expect(json).not.toContain("cashier-01");
+      expect(json).not.toContain(TEST_OWNER_PIN); // the PIN actually used to sign in (TRANSITION O-1 P1)
       expect(json).not.toContain("1111");
       expect(Object.keys(dto).sort()).toEqual(
         ["action", "addressAmbiguous", "addressCandidates", "expiresAt", "host", "port", "qrSvg"].sort(),
