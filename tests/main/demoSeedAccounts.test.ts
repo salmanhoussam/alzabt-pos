@@ -78,7 +78,10 @@ describe("main-private synthetic setup ceremony", () => {
     setBootstrap(repo, "cashier-01", initial);
     const setup = createSyntheticAccountSetup(db, (id) => id === "cashier-01" ? initial : "wrong");
     expect(setup.completeOwner({ name: "Synthetic owner", pin: code() })).toEqual({ operatorId: "cashier-01" });
-    expect(() => setup.completeCashier({ name: "Synthetic cashier", pin: code() })).toThrow(SyntheticAccountSetupError);
+    // TRANSITION (O-1 P1, owner R9): the ceremony no longer signs in with a bootstrap credential, so a WRONG
+    // credential cannot be the injected failure any more. The later failure is now a PIN production refuses
+    // (too short); the property under test — no retry, ledger closed and consumed — is unchanged.
+    expect(() => setup.completeCashier({ name: "Synthetic cashier", pin: "12" })).toThrow(SyntheticAccountSetupError);
     expect(db.open).toBe(false);
     expect(() => createSyntheticAccountSetup(db, () => "")).toThrow();
   });
@@ -94,7 +97,8 @@ describe("main-private synthetic setup ceremony", () => {
   it("closes and consumes the fresh synthetic ledger on setup failure", () => {
     const db = fresh();
     const setup = createSyntheticAccountSetup(db, () => "not-a-real-credential");
-    expect(() => setup.completeOwner({ name: "Synthetic owner", pin: code() })).toThrow(SyntheticAccountSetupError);
+    // TRANSITION (O-1 P1): the injected failure is a PIN production refuses (the bootstrap credential is unused now).
+    expect(() => setup.completeOwner({ name: "Synthetic owner", pin: "12" })).toThrow(SyntheticAccountSetupError);
     expect(db.open).toBe(false);
     expect(() => createSyntheticAccountSetup(db, () => "")).toThrow();
     expect(() => setup.completeOwner({ name: "Synthetic owner", pin: code() })).toThrow(SyntheticAccountSetupError);

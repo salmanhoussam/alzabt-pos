@@ -26,6 +26,8 @@ export type OperatorRole = "owner" | "admin" | "cashier";
  * ownership is a role, held by whoever the owner says, and this id has no standing privilege.
  */
 export const BOOTSTRAP_OWNER_ID = "cashier-01";
+/** O-1 D-O2: the seeded cashier row whose published PIN (2222) is public; retired at owner enrollment. */
+export const SEEDED_CASHIER_ID = "cashier-02";
 
 export interface OperatorRow {
   readonly id: string;

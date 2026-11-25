@@ -1,3 +1,4 @@
+import { ledgerEmptiness } from "../persistence/ledgerEmptiness";
 import type { SeedActor } from "../application/seedActor";
 import { MAX_HISTORY, PosService } from "../application/posService";
 import { makeInvoiceCreditPort } from "../application/invoiceCreditPort";
@@ -84,6 +85,8 @@ export function createLedgerServices(db: Db, ports: LedgerServicePorts) {
         return ledger.transaction(fn).immediate();
       },
       terminal: FIXTURE_TERMINAL,
+      // O-1 new-shop enrollment: the enumerated emptiness rule, read inside the enrollment transaction.
+      ledgerEmpty: () => ledgerEmptiness(db).empty,
     }),
     terminal: FIXTURE_TERMINAL,
     // The durable audit trail (migration 5) and the transaction that binds it to the business

@@ -32,7 +32,7 @@ import { businessDateOf } from "../domain/businessDay";
 import { DomainError } from "../domain/errors";
 import { PUBLISHED_DEFAULT_PINS, assertValidPin } from "../domain/pinRule";
 import { SCRYPT, pinMatches } from "./cashierAuth";
-import { BOOTSTRAP_OWNER_ID } from "../persistence/operatorRepository";
+import { BOOTSTRAP_OWNER_ID, SEEDED_CASHIER_ID } from "../persistence/operatorRepository";
 import type { OperatorRepository, OperatorRole } from "../persistence/operatorRepository";
 import type { OperatorRow } from "../persistence/operatorRepository";
 import type { AuditRepository } from "../persistence/auditRepository";
@@ -75,6 +75,11 @@ export interface OperatorServiceDeps {
   readonly newId?: () => string;
   /** Random salt bytes. Injectable so a test can make a hash reproducible; never for production. */
   readonly salt?: () => string;
+  /**
+   * O-1 (contract v3.1 §2, review R4): «is this an EMPTY shop?» — `ledgerEmptiness(db).empty`, evaluated INSIDE the
+   * enrollment transaction. Absent ⇒ enrollment is unavailable (fail closed): no wiring, no new owner.
+   */
+  readonly ledgerEmpty?: () => boolean;
 }
 
 export function toOperatorView(row: OperatorRow): OperatorView {
@@ -335,6 +340,57 @@ export class OperatorService {
   /** Forgets any outstanding ticket. Called on logout, so a ticket never outlives its screen. */
   clearSetup(): void {
     this.ticket = null;
+  }
+
+  /**
+   * 🔴 O-1 NEW-SHOP OWNER ENROLLMENT (owner D-O1/D-O2, contract v3.1 §2). The ONLY way to create the first owner of an
+   * EMPTY, UNCLAIMED shop — no published PIN, no setup ticket, no bypass for tests, Demo or development.
+   *
+   * In ONE transaction, with both eligibility facts re-checked inside it (so a sale or a claim that lands between
+   * the Welcome screen's hint and this call is seen): the seeded owner row is updated IN PLACE (its id is kept — sales
+   * and the claim snapshot use ids), it gets the owner's name and own PIN, the terminal is claimed, the seeded
+   * «Cashier Two» — whose published PIN is public — is deactivated (D-O2; the owner creates real cashiers), and the
+   * audit rows are written. Any failure rolls all of it back.
+   *
+   * A shop WITH data is refused here on purpose: it is a restored or legacy shop, and only the signed ownership
+   * binding (Phase 3) may give it an owner. Until Phase 3 ships, Phase 1 does not ship (owner decision R9).
+   */
+  enrollOwner(name: string, pin: string): OperatorSession {
+    const ledgerEmpty = this.deps.ledgerEmpty;
+    if (!ledgerEmpty) throw new DomainError("NOT_AVAILABLE", "Owner enrollment is not available on this terminal");
+    const cleanName = this.requireFreeName(name, BOOTSTRAP_OWNER_ID);
+    assertValidPin(pin);
+    if (PUBLISHED_DEFAULT_PINS.has(pin)) throw new DomainError("INVALID_PIN", "This PIN is published; choose another");
+    const instant = this.now();
+    const session = this.inTransaction(() => {
+      if (this.deps.operators.terminalClaimed()) {
+        throw new DomainError("ENROLLMENT_NOT_AVAILABLE", "This shop already has an owner");
+      }
+      if (!ledgerEmpty()) {
+        throw new DomainError("ENROLLMENT_NOT_AVAILABLE", "This shop already has data; it cannot be enrolled as a new shop");
+      }
+      const row = this.deps.operators.findById(BOOTSTRAP_OWNER_ID);
+      if (!row || row.role !== "owner" || row.is_active !== 1) {
+        throw new DomainError("ENROLLMENT_NOT_AVAILABLE", "This shop's owner account is not in its initial state");
+      }
+      const actor = { id: row.id, name: cleanName, role: row.role };
+      if (cleanName !== row.name) {
+        const renamed = this.deps.operators.rename(row.id, cleanName, instant.toISOString());
+        this.writeAudit("OPERATOR_RENAMED", renamed, row, instant, actor, "owner_enrollment");
+      }
+      const withPin = this.deps.operators.setPin(row.id, ...this.hash(pin), instant.toISOString(), { mustResetPin: false });
+      this.writeAudit("OPERATOR_PIN_RESET", withPin, withPin, instant, actor, "owner_enrollment");
+      // D-O2: the seeded cashier's credential is published; it must not stay an active account nobody chose.
+      const seededCashier = this.deps.operators.findById(SEEDED_CASHIER_ID);
+      if (seededCashier && seededCashier.is_active === 1) {
+        const retired = this.deps.operators.setActive(SEEDED_CASHIER_ID, false, instant.toISOString());
+        this.writeAudit("OPERATOR_DEACTIVATED", retired, seededCashier, instant, actor, "owner_enrollment");
+      }
+      this.deps.operators.claimTerminal(withPin.id, instant.toISOString());
+      return { id: withPin.id, name: withPin.name, role: withPin.role };
+    });
+    this.ticket = null;
+    return session;
   }
 
   // ── Management (owner-only; the channel guard has already refused anyone else) ─────────────────

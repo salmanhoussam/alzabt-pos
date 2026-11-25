@@ -6,6 +6,7 @@
  * must also prove the parent is trusted and synthetic-only (O-2 remains open).
  * This component is not wired into the app's startup.
  */
+import { ledgerEmptiness } from "../persistence/ledgerEmptiness";
 import { OperatorService } from "../application/operatorService";
 import { assertValidPin } from "../domain/pinRule";
 import { FIXTURE_TERMINAL } from "../fixtures/terminal";
@@ -91,7 +92,10 @@ export function createSyntheticAccountSetup(
   const operator = new OperatorService({
     operators: store, audit, terminal: FIXTURE_TERMINAL,
     transact: (fn) => db.transaction(fn).immediate(),
+    // O-1 P1: the Demo's fresh synthetic ledger gets its owner through the SAME enrollment as a real new shop.
+    ledgerEmpty: () => ledgerEmptiness(db).empty,
   });
+  let ownerSession: { readonly id: string; readonly name: string; readonly role: "owner" } | null = null;
   let stage: "owner" | "cashier" | "done" | "issued" | "failed" = "owner";
   const stop = (): never => {
     stage = "failed";
@@ -107,13 +111,33 @@ export function createSyntheticAccountSetup(
     try {
       if (stage !== role || schemaVersion(db) !== MIGRATIONS.length) return stop();
       assertValidPin(input.pin);
-      verify(id, role, true);
+      // The cashier row is checked AFTER the owner reactivates it (below); enrollment retired it (D-O2).
+      if (role === "owner") verify(id, role, true);
       if (store.terminalClaimed() !== (role === "cashier")) return stop();
-      const auth = operator.authenticate(id, bootstrapCredential(id));
-      if (auth.kind !== "setup" || auth.operatorId !== id) return stop();
-      // This returns an OperatorSession-shaped value but OperatorService holds
-      // no session. Do not create or populate a PosService here.
-      const completed = operator.completeSetup(auth.ticket, input.name, input.pin);
+      // 🔴 O-1 P1 (owner R9, 2026-11-25): NO published PIN and NO bypass, also in the Demo. The previous version
+      // signed in with the published bootstrap credential (`bootstrapCredential`) and set up the seeded cashier after
+      // the claim — the very gap R-A2 closes. Now the Demo walks the production paths a real shop uses:
+      //   owner   -> OperatorService.enrollOwner (empty + unclaimed, re-checked in its transaction)
+      //   cashier -> the OWNER reactivates the seeded cashier row and sets its PIN (resetPin => must_reset_pin = 1),
+      //              then the cashier signs in with that PIN and completes their own setup.
+      // ⚠️ Codex-owned module: flagged for Abu Abbas's review.
+      let completed: { readonly id: string; readonly role: string };
+      if (role === "owner") {
+        const enrolled = operator.enrollOwner(input.name, input.pin);
+        if (enrolled.role !== "owner") return stop();
+        ownerSession = { id: enrolled.id, name: enrolled.name, role: "owner" };
+        completed = enrolled;
+      } else {
+        if (!ownerSession) return stop();
+        operator.setActive(ownerSession, id, true);
+        operator.resetPin(ownerSession, id, input.pin);
+        verify(id, role, true);
+        const auth = operator.authenticate(id, input.pin);
+        if (auth.kind !== "setup" || auth.operatorId !== id) return stop();
+        // This returns an OperatorSession-shaped value but OperatorService holds
+        // no session. Do not create or populate a PosService here.
+        completed = operator.completeSetup(auth.ticket, input.name, input.pin);
+      }
       if (completed.id !== id || completed.role !== role) return stop();
       verify(id, role, false);
       if (store.terminalClaim()?.byOperatorId !== BOOTSTRAP_OWNER_ID) return stop();

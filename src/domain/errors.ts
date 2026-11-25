@@ -156,6 +156,8 @@ export type DomainErrorCode =
   // terminal, nobody else gets a session OR a setup ticket. Distinct from SETUP_REQUIRED, which is
   // about one operator missing a valid ticket; this is about the TERMINAL not being claimed yet.
   | "OWNER_SETUP_REQUIRED"
+  // O-1 owner enrollment: refused because the shop already has an owner or already has data (contract v3.1 §2).
+  | "ENROLLMENT_NOT_AVAILABLE"
   | "DEMO_RESTRICTED";
 
 /** Internal data for the one data-bearing customer-payment refusal; IPC serializes its bigint as text. */
