@@ -8,6 +8,7 @@ import {verifiedSyntheticTestHome} from "./demoDevGate";
 import {DemoLaunchRecords} from "./demoLaunchRecords";
 import {adoptVerifiedSyntheticReservation,isFreshSyntheticReservation} from "./demoProfile";
 import type {SyntheticDemoReservation} from "./demoProfile";
+import {syntheticBuildAllowed} from "./syntheticBuild";
 
 declare const readyBrand: unique symbol;
 export interface VerifiedDemoStart {readonly [readyBrand]:true}
@@ -29,8 +30,8 @@ export function claimVerifiedDemoStart(proof:VerifiedDemoStart):SyntheticDemoRes
  * test home. Electron's native lock must already belong to this process.
  */
 export function resolveVerifiedSyntheticHandover(requested:boolean, nonce:string, key:string, now:number):HandoverResolution {
-  if(app.isPackaged || !app.hasSingleInstanceLock())return {kind:"real"};
-  const home=verifiedSyntheticTestHome(app.isPackaged,requested);
+  if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock())return {kind:"real"};
+  const home=verifiedSyntheticTestHome(!syntheticBuildAllowed(),requested);
   if(!home)return {kind:"real"};
   const base=join(home,"AppData","Local","Alzabt-Synthetic-Development");
   const demoRoot=join(base,"synthetic-demo-root-v1");

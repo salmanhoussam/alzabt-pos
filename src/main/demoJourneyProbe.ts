@@ -4,6 +4,7 @@ import {app,BrowserWindow} from "electron";
 import {existsSync,lstatSync,readFileSync,realpathSync,writeFileSync} from "node:fs";
 import {dirname,join,resolve} from "node:path";
 import type {openSyntheticDevEnvironment} from "./demoDevEntry";
+import {syntheticBuildAllowed} from "./syntheticBuild";
 type Environment=ReturnType<typeof openSyntheticDevEnvironment>;
 const PREFIX="--alzabt-synthetic-journey=";
 export function journeyFlag(args:readonly string[]):string|null {
@@ -19,7 +20,7 @@ function location(env:Environment,flag:string):string {
   return dir;
 }
 export function runSyntheticJourneyProbe(win:BrowserWindow,env:Environment,mode:"real"|"demo"|"unavailable"):void {
-  if(app.isPackaged || !app.hasSingleInstanceLock())return;
+  if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock())return;
   const flag=journeyFlag(process.argv);if(!flag)return;
   let dir:string;
   try{dir=location(env,flag)}catch{return}

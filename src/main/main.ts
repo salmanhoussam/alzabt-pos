@@ -49,6 +49,8 @@ import { CHANNELS } from "../shared/ipcContract";
 import { invokeWithDemoPolicy, restrictDemoIpcOptions } from "./demoPolicy";
 import { createLedgerServices } from "./ledgerServices";
 import { probeEntryData, readRealEntryState } from "./entryState";
+import { isOwnerPreviewBuild, syntheticBuildAllowed } from "./syntheticBuild";
+import { invokeWithPreviewPolicy } from "./previewPolicy";
 import { ledgerEmptiness } from "../persistence/ledgerEmptiness";
 import { toInvoiceViewDto } from "../shared/dto";
 import { loadInvoicePhoto, readInvoiceImage } from "./invoiceOcr";
@@ -817,7 +819,7 @@ function exportOnlineCatalogPackage(
 function registerIpc(service: PosService, extra: IpcHandlerOptions, runtimeMode: "real" | "demo"): void {
   let options:IpcHandlerOptions;
   if(runtimeMode==="demo") {
-    if(app.isPackaged || !db || !extra.invoices)throw new Error("Synthetic demo unavailable.");
+    if(!syntheticBuildAllowed() || !db || !extra.invoices)throw new Error("Synthetic demo unavailable.");
     // This development-only module is excluded from distributable artifacts.
     // It never receives real print callbacks, renderer HTML or arbitrary paths.
     const {createSyntheticPreviewPorts}=require("./demoPreviewPorts") as typeof import("./demoPreviewPorts");
@@ -837,7 +839,11 @@ function registerIpc(service: PosService, extra: IpcHandlerOptions, runtimeMode:
       if (!fromOurWindow) {
         return { ok: false, error: { code: "FORBIDDEN", message: "Unknown sender" } };
       }
-      return invokeWithDemoPolicy(runtimeMode, name, () => handlers[name](payload), payload);
+      // OWNER PREVIEW: the preview's non-demo entry is a launcher only (previewPolicy.ts allowlist); Demo processes
+      // keep their own DEMO_CHANNEL_POLICY. Every other build passes straight through.
+      return invokeWithPreviewPolicy(isOwnerPreviewBuild(), runtimeMode, name, () =>
+        invokeWithDemoPolicy(runtimeMode, name, () => handlers[name](payload), payload),
+      );
     });
   }
 }
@@ -852,7 +858,7 @@ if (!gotSingleInstanceLock) {
 } else {
   let selectedSynthetic: import("./demoRuntime").SelectedDemoStart | undefined;
   let handoverRefused = false;
-  if (!app.isPackaged) {
+  if (syntheticBuildAllowed()) {
     const dev = require("./demoDevMain") as typeof import("./demoDevMain");
     const prepared = dev.prepareSyntheticStartup(process.argv);
     if (prepared.kind === "refused") handoverRefused = true;
@@ -922,7 +928,7 @@ if (!gotSingleInstanceLock) {
 }
 
 function registerSyntheticLifecycle(service: PosService | null, mode: "real" | "demo"): void {
-  if (!syntheticEnvironment || app.isPackaged) throw new Error("Synthetic lifecycle unavailable");
+  if (!syntheticEnvironment || !syntheticBuildAllowed()) throw new Error("Synthetic lifecycle unavailable");
   const dev = require("./demoDevMain") as typeof import("./demoDevMain");
   dev.registerSyntheticLifecycle({
     env: syntheticEnvironment, mode, service, rendererUrl: RENDERER_URL,
@@ -1247,7 +1253,7 @@ function startTill(): void {
   }, "real"); // X1: Demo mode selection is not implemented or activated.
   if (syntheticEnvironment) registerSyntheticLifecycle(service, "real");
   mainWindow = createWindow();
-  if (syntheticEnvironment && !app.isPackaged) {
+  if (syntheticEnvironment && syntheticBuildAllowed()) {
     const dev = require("./demoDevMain") as typeof import("./demoDevMain");
     dev.runSyntheticMainProbe(mainWindow, syntheticEnvironment);
     const probe = require("./demoJourneyProbe") as typeof import("./demoJourneyProbe");
@@ -1288,7 +1294,8 @@ function startTill(): void {
     markerPath: join(app.getPath("userData"), AUTO_START_MARKER_FILE),
     executablePath: process.execPath,
     platform: process.platform,
-    isPackaged: app.isPackaged,
+    // OWNER PREVIEW: never registers a login item (it is an owner-only test build, not the shop's till).
+    isPackaged: app.isPackaged && !isOwnerPreviewBuild(),
     env: process.env,
     now: () => new Date(),
   });

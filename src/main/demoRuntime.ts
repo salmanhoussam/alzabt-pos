@@ -10,6 +10,7 @@ import {pendingSyntheticReservationPath,type SyntheticDemoReservation} from "./d
 import {installSyntheticRendererBlocker} from "./demoRendererPolicy";
 import {loadSyntheticDemoAssets} from "./demoAssets";
 import {startReservedSyntheticDemo} from "./demoSyntheticStartup";
+import {syntheticBuildAllowed} from "./syntheticBuild";
 
 declare const selectedBrand:unique symbol;
 export interface SelectedDemoStart {readonly [selectedBrand]:true}
@@ -20,7 +21,7 @@ function same(a:string,b:string):boolean {
 }
 /** Must execute after the product lock but before app.whenReady/renderer/Db. */
 export function selectVerifiedDemoProfile(proof:VerifiedDemoStart):SelectedDemoStart {
-  if(app.isPackaged || !app.hasSingleInstanceLock() || app.isReady())throw Error("Synthetic demo unavailable.");
+  if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock() || app.isReady())throw Error("Synthetic demo unavailable.");
   const reservation=claimVerifiedDemoStart(proof);
   if(!reservation)throw Error("Synthetic demo unavailable.");
   const path=pendingSyntheticReservationPath(reservation);
@@ -38,7 +39,7 @@ export function startSelectedSyntheticDemo(token:SelectedDemoStart) {
   const state=selected.get(token);
   if(!state)throw Error("Synthetic demo unavailable.");
   selected.delete(token);
-  if(app.isPackaged || !app.hasSingleInstanceLock() || !app.isReady() ||
+  if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock() || !app.isReady() ||
      !same(app.getPath("userData"),state.path) || !same(app.getPath("sessionData"),state.path))
     throw Error("Synthetic demo unavailable.");
   installSyntheticSessionRestrictions();
@@ -48,7 +49,7 @@ export function startSelectedSyntheticDemo(token:SelectedDemoStart) {
 
 /** Reapply before any unavailable window if bootstrap failed before installation. */
 export function installSyntheticSessionRestrictions():void {
-  if(app.isPackaged || !app.hasSingleInstanceLock() || !app.isReady())throw Error("Synthetic demo unavailable.");
+  if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock() || !app.isReady())throw Error("Synthetic demo unavailable.");
   const active=session.defaultSession;
   installSyntheticRendererBlocker(active.webRequest,join(__dirname,"..","..","renderer"));
   active.setPermissionRequestHandler((_wc,_permission,callback)=>callback(false));

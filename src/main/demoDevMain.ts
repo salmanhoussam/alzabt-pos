@@ -10,15 +10,18 @@ import {DemoLifecycle,DemoRetentionLimit,createNativeDemoConfirmation} from "./d
 import {DemoProfileError,reserveSyntheticDemoProfile,syntheticDemoRetention} from "./demoProfile";
 import {DemoLaunchRecords} from "./demoLaunchRecords";
 import {journeyFlag} from "./demoJourneyProbe";
+import {isOwnerPreviewBuild,syntheticBuildAllowed} from "./syntheticBuild";
 
 type Environment=ReturnType<typeof openSyntheticDevEnvironment>;
 export type SyntheticStartup = {kind:"ordinary"}|{kind:"refused"}|{kind:"selected";env:Environment;selected?:SelectedDemoStart};
 /** Called only after obtaining the product lock and before any profile access. */
 export function prepareSyntheticStartup(args:readonly string[]):SyntheticStartup {
-  if(app.isPackaged || !app.hasSingleInstanceLock() || app.isReady())return {kind:"ordinary"};
+  if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock() || app.isReady())return {kind:"ordinary"};
   const flag="--alzabt-synthetic-handover";
   const positions=args.flatMap((arg,index)=>arg===flag?[index]:[]);
-  const requested=positions.length>0 || args.includes("--alzabt-synthetic-dev");
+  // OWNER PREVIEW: the packaged preview IS the synthetic entry (no flag); if its identity gate refuses, the
+  // preview refuses to start (kind "refused" -> exit) instead of opening an ordinary, real-looking ledger.
+  const requested=positions.length>0 || args.includes("--alzabt-synthetic-dev") || isOwnerPreviewBuild();
   if(!requested)return {kind:"ordinary"};
   disableDiagnostics();
   try {
@@ -45,7 +48,7 @@ export function registerSyntheticLifecycle(ports:{
   env:Environment; mode:"real"|"demo"; service:PosService|null;
   getWindow:()=>BrowserWindow|null; rendererUrl:string; closeLedger:()=>void;
 }):void {
-  if(app.isPackaged || !app.hasSingleInstanceLock())throw Error("Synthetic lifecycle unavailable");
+  if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock())throw Error("Synthetic lifecycle unavailable");
   const {env,mode,service}=ports;
   const records=new DemoLaunchRecords(env.control);
   const lifecycle=new DemoLifecycle({
@@ -62,7 +65,8 @@ export function registerSyntheticLifecycle(ports:{
     endSession:()=>{service?.logout()},closeLedger:ports.closeLedger,
     releaseLock:()=>app.releaseSingleInstanceLock(),
     restart:(credentials)=>{
-      const args=[app.getAppPath(),"--alzabt-synthetic-dev"];
+      // A packaged executable takes its arguments directly; the unpackaged one needs the app path first.
+      const args=app.isPackaged?["--alzabt-synthetic-dev"]:[app.getAppPath(),"--alzabt-synthetic-dev"];
       const flag=journeyFlag(process.argv);if(flag)args.push(flag);
       if(credentials)args.push("--alzabt-synthetic-handover",credentials.nonce,credentials.key);
       app.relaunch({args});
@@ -78,7 +82,7 @@ export function registerSyntheticLifecycle(ports:{
 }
 /** Fixed one-shot Main/IPC observation. No debugger server or remote control. */
 export function runSyntheticMainProbe(win:BrowserWindow,env:Environment):void {
-  if(app.isPackaged || !app.hasSingleInstanceLock() || !process.argv.includes("--alzabt-synthetic-main-probe"))return;
+  if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock() || !process.argv.includes("--alzabt-synthetic-main-probe"))return;
   let done=false;
   const finish=(result:Record<string,unknown>)=>{
     if(done)return;done=true;clearTimeout(timeout);

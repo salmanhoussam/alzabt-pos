@@ -10,6 +10,7 @@ import {verifiedSyntheticTestHome} from "./demoDevGate";
 import {syntheticDemoRetention} from "./demoProfile";
 import {DemoLaunchRecords} from "./demoLaunchRecords";
 import {LEDGER_FILE_NAME} from "./ledgerGuard";
+import {syntheticBuildAllowed} from "./syntheticBuild";
 
 function checkedDirectory(path:string):string {
   const full=resolve(path);let current=parse(full).root;
@@ -21,7 +22,7 @@ function checkedDirectory(path:string):string {
   return full;
 }
 export function openSyntheticDevEnvironment(prepareEntry=true) {
-  if(app.isPackaged || !app.hasSingleInstanceLock() || app.isReady())throw Error("Synthetic environment unavailable.");
+  if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock() || app.isReady())throw Error("Synthetic environment unavailable.");
   const home=verifiedSyntheticTestHome(false,true);
   if(!home)throw Error("Synthetic environment unavailable.");
   // These two directories were created by the owner-run disposable V8 probe.

@@ -78,7 +78,10 @@ export const DEMO_CHANNEL_POLICY = Object.freeze({
   setTerminalLanguage: "allow",
   // M5: a Demo visitor may switch the indicative display (its own profile's settings); never the owner's rate.
   setDisplayCurrency: "allow",
-  setLbpRate: "deny",
+  // TRANSITION (owner R5 preview, 2026-11-25): was "deny". F8 makes LBP display require an owner-CONFIRMED rate,
+  // so a Demo that could not set one could never show LBP. In Demo it writes only that Demo profile's own
+  // settings.json (the Demo's own storage root), never the shop's; main still requires the owner role.
+  setLbpRate: "allow",
   getCompanyProfile: "allow",
   saveCompanyProfile: "allow",
   setNextInvoiceNumber: "deny",
