@@ -359,5 +359,5 @@
 ; customRemoveFiles macro removes only known files, never RMDir /r. Missing
 ; generated inventory fails compilation; the top-level safety barrier remains.
 !ifdef BUILD_UNINSTALLER
-  !include "${BUILD_RESOURCES_DIR}\trial-payload-generated.nsh"
+  !include "${BUILD_RESOURCES_DIR}\preview-payload-generated.nsh"
 !endif

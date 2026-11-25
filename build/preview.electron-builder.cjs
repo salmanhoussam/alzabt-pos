@@ -32,7 +32,8 @@ module.exports = {
     alzabtFlavor: "owner-preview",
   },
   npmRebuild: false,
-  directories: { output: "release-preview" },
+  // Same folder the reviewed hosted pipeline reads (scripts/preview-build-candidate.cjs); the runner is fresh.
+  directories: { output: "release" },
   files: ["dist/**/*", "package.json"],
   asarUnpack: ["node_modules/better-sqlite3/**"],
   extraResources: [
