@@ -23,3 +23,6 @@ field-data/
 
 # Rendered invoice samples for visual review — produced by CI, never committed.
 invoice-pdf-samples/
+
+# local --dir packaging check of the owner preview (never committed)
+release-preview-local/
