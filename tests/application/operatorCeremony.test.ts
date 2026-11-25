@@ -42,8 +42,10 @@ import { type Db, openDatabase } from "../../src/persistence/db";
 import { FIXTURE_TERMINAL } from "../../src/fixtures/terminal";
 import { PIN_MAX_DIGITS, PIN_MIN_DIGITS } from "../../src/domain/pinRule";
 import { type TempDir, tempDir } from "../helpers/harness";
+import { TEST_CREDENTIALS } from "../helpers/testCredentials";
+import { ledgerEmptiness } from "../../src/persistence/ledgerEmptiness";
 import { scryptSync } from "node:crypto";
-import { SCRYPT } from "../../src/application/cashierAuth";
+import { SCRYPT, pinMatches } from "../../src/application/cashierAuth";
 
 let t: TempDir;
 let db: Db;
@@ -88,6 +90,7 @@ function newService(): OperatorService {
     transact: (fn) => db.transaction(fn).immediate(),
     terminal: FIXTURE_TERMINAL,
     now: () => new Date("2026-10-11T09:00:00.000Z"),
+    ledgerEmpty: () => ledgerEmptiness(db).empty,
     newId: () => {
       if (nextOpId !== null) {
         const held = nextOpId;
@@ -112,11 +115,27 @@ afterEach(() => {
   t.cleanup();
 });
 
-/** The owner claims the terminal. Every ordinary test needs this to have happened. */
+/**
+ * The owner claims the terminal. Every ordinary test needs this to have happened.
+ *
+ * TRANSITION (O-1 Phase 1, P1 + D-O1/D-O2, owner R9, 2026-11-25): was «authenticate(cashier-01, 1111) →
+ * completeSetup», which P1 refuses. A new shop is claimed through `enrollOwner`, which also retires the seeded
+ * cashier (D-O2). Register: CLAUDE-TAKEOVER-2026-11-25/p1-tests/transition-register.md.
+ */
 function claimTerminal(pin = OWNER_PIN) {
-  const outcome = svc.authenticate("cashier-01", "1111");
-  if (outcome.kind !== "setup") throw new Error("expected setup");
-  return svc.completeSetup(outcome.ticket, "حسين رقا", pin);
+  return svc.enrollOwner("حسين رقا", pin);
+}
+
+/**
+ * Puts a PRIVATE credential on a seeded row through the repository seam (the same seam the harness uses), with
+ * the production scrypt. The published 1111/2222 never authenticate any more (P1), so a test whose subject is
+ * what happens AFTER a correct credential (the OWNER SETUP REQUIRED gate, the setup ticket) needs a correct
+ * credential that is not published. This writes a row state; it bypasses no check in the product.
+ */
+function givePrivateCredential(id: "cashier-01" | "cashier-02", mustResetPin = true): string {
+  const c = TEST_CREDENTIALS[id]!;
+  operators.setPin(id, c.pinSaltHex, c.pinHashHex, "2026-10-11T09:00:00.000Z", { mustResetPin });
+  return c.pin;
 }
 
 const flagOf = (id: string) => operators.findById(id)!.must_reset_pin;
@@ -145,7 +164,11 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
   });
 
   it("🔴 the OTHER operator cannot sign in at all — not even with the correct credential", () => {
-    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/waiting for the shop owner/);
+    // REACH (O-1 P1): the published 2222 is now a WRONG PIN, refused before the ceremony check is reached. So the
+    // gate itself is exercised with a correct PRIVATE credential on the row — still refused, by the ceremony.
+    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/Operator or PIN is incorrect/);
+    const pin = givePrivateCredential("cashier-02");
+    expect(() => svc.authenticate("cashier-02", pin)).toThrow(/waiting for the shop owner/);
   });
 
   it("🔴 and cannot obtain a setup ticket, so it cannot begin its own setup either", () => {
@@ -163,8 +186,14 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
   });
 
   it("the owner MAY authenticate, and gets a setup ticket rather than a session", () => {
-    const outcome = svc.authenticate("cashier-01", "1111");
-    expect(outcome.kind).toBe("setup");
+    // TRANSITION (O-1 P1). FLIP: the published 1111 no longer reaches the owner's setup; a new shop is claimed
+    // through `enrollOwner`. REACH: the seeded owner WITH a correct non-published pending credential (the only
+    // way this branch is still reachable: a written row, e.g. the Phase 3 signed recovery) still gets a ticket,
+    // never a session — that property is unchanged.
+    expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/Operator or PIN is incorrect/);
+    const pin = givePrivateCredential("cashier-01");
+    expect(svc.authenticate("cashier-01", pin).kind).toBe("setup");
+    expect(claimed()).toBe(false);
   });
 
   it("🔴 claiming the terminal sets the durable flag, and then the other operator may set up", () => {
@@ -181,8 +210,15 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
     expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/Operator or PIN is incorrect/);
     expect(svc.authenticate("cashier-01", OWNER_PIN).kind).toBe("session");
 
-    // cashier-02 is still a bootstrap account, so it gets setup — but now it is allowed to.
-    const second = svc.authenticate("cashier-02", "2222");
+    // TRANSITION (O-1 P1 + D-O2). Was: «cashier-02 is still a bootstrap account, so 2222 gets setup». Now the
+    // enrollment RETIRED cashier-02 and 2222 is a wrong PIN; the other operator is brought back by the OWNER
+    // (re-activate + a temporary PIN), and then may set up — the subject «after the claim, others may set up».
+    expect(operators.findById("cashier-02")!.is_active).toBe(0);
+    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/Operator or PIN is incorrect/);
+    const owner = { id: "cashier-01", name: session.name, role: "owner" as const };
+    svc.setActive(owner, "cashier-02", true);
+    svc.resetPin(owner, "cashier-02", "246824");
+    const second = svc.authenticate("cashier-02", "246824");
     expect(second.kind).toBe("setup");
     if (second.kind !== "setup") throw new Error("unreachable");
     svc.completeSetup(second.ticket, "جعفر صالح", "567812");
@@ -411,7 +447,15 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
     expect(claimed()).toBe(false);
     expect(operators.countActiveOwners()).toBe(0);
     expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/Operator or PIN is incorrect/);
-    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/waiting for the shop owner/);
+    // REACH (O-1 P1): 1111/2222 are wrong PINs now, so each refusal is re-proved with a correct PRIVATE
+    // credential: the inactive owner is refused as inactive, and cashier-02 by the ceremony.
+    const ownerPin = givePrivateCredential("cashier-01");
+    db.prepare("UPDATE operators SET is_active = 0 WHERE id = 'cashier-01'").run();
+    expect(() => svc.authenticate("cashier-01", ownerPin)).toThrow(/Operator or PIN is incorrect/);
+    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/Operator or PIN is incorrect/);
+    const cashierPin = givePrivateCredential("cashier-02");
+    expect(() => svc.authenticate("cashier-02", cashierPin)).toThrow(/waiting for the shop owner/);
+    expect(() => svc.enrollOwner("Stranger", "482613")).toThrow(/not in its initial state/);
     expect(claimed()).toBe(false);
   });
 
@@ -445,12 +489,15 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
     // close as "this operator no longer needs setup" — must not be able to open an unclaimed till.
     // ══════════════════════════════════════════════════════════════════════════════════════════
     expect(claimed()).toBe(false);
-    // The credential stays the real bootstrap one; ONLY the account flag is forged.
+    // REACH (O-1 P1): the published 1111 is now refused BEFORE this guard, so it would no longer exercise it. The
+    // row gets a correct PRIVATE credential, and ONLY the account flag is forged.
+    const pin = givePrivateCredential("cashier-01", true);
     db.prepare("UPDATE operators SET must_reset_pin = 0 WHERE id = 'cashier-01'").run();
     expect(operators.findById("cashier-01")!.must_reset_pin).toBe(0);
 
     // 🔴 Without the guard this returns `{kind: "session"}` — a till open on an unclaimed terminal.
-    expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/has not been claimed by its owner/);
+    expect(() => svc.authenticate("cashier-01", pin)).toThrow(/has not been claimed by its owner/);
+    expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/Operator or PIN is incorrect/);
     expect(claimed()).toBe(false);
   });
 
@@ -466,7 +513,12 @@ describe("1 · OWNER SETUP REQUIRED — the install/upgrade ceremony", () => {
     expect(claimed()).toBe(false);
     expect(operators.terminalClaim()).toBeNull();
     // And the terminal behaves as unclaimed: nobody but the seeded owner gets in.
-    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/waiting for the shop owner/);
+    // REACH (O-1 P1 + D-O2): cashier-02 was retired by enrollment and 2222 is a wrong PIN, so the row is made
+    // active with a correct PRIVATE credential — and the ceremony still refuses it.
+    expect(() => svc.authenticate("cashier-02", "2222")).toThrow(/Operator or PIN is incorrect/);
+    operators.setActive("cashier-02", true, "2026-10-11T09:00:00.000Z");
+    const pin = givePrivateCredential("cashier-02");
+    expect(() => svc.authenticate("cashier-02", pin)).toThrow(/waiting for the shop owner/);
   });
 
   it("🔴 the claim is one-way IN SQL — a second claimTerminal cannot re-attribute it", () => {
@@ -618,14 +670,22 @@ describe("3 · the real PIN length — six to eight, chosen; four, typed", () =>
     expect(PIN_MAX_DIGITS).toBe(8);
   });
 
-  it("🔴 the legacy four-digit bootstrap credential still VERIFIES — or upgrade day locks the shop out", () => {
-    // This is the assertion that stands between a security improvement and a field disaster.
-    const outcome = svc.authenticate("cashier-01", "1111");
-    expect(outcome.kind).toBe("setup");
+  it("🔴 the legacy four-digit bootstrap credential still VERIFIES — but P1 refuses it as a sign-in (FLIPPED)", () => {
+    // TRANSITION (O-1 P1, owner decisions D-O1 + R9, 2026-11-25). Was: «1111 → setup — or upgrade day locks the shop
+    // out». The VERIFICATION half is kept: the stored four-digit hash is intact and still matches, so the refusal is
+    // a POLICY (P1), never a corrupted credential. The SIGN-IN half is flipped: 1111 is a wrong PIN.
+    // 🔴 The field risk this test guarded is real and is NOT closed here: an upgraded shop that never set up its
+    // owner can no longer sign in with 1111. That is why R9 forbids shipping Phase 1 without Phase 3 (the signed
+    // recovery for legitimate existing owners).
+    const row = operators.findById("cashier-01")!;
+    expect(row.must_reset_pin).toBe(1);
+    expect(pinMatches({ pinSaltHex: row.pin_salt_hex, pinHashHex: row.pin_hash_hex }, "1111")).toBe(true);
+    expect(() => svc.authenticate("cashier-01", "1111")).toThrow(/Operator or PIN is incorrect/);
   });
 
   it("🔴 but four digits is refused as a NEWLY CHOSEN PIN, in setup", () => {
-    const outcome = svc.authenticate("cashier-01", "1111");
+    // REACH (O-1 P1): the owner's pending setup is reached with a correct PRIVATE pending credential, not 1111.
+    const outcome = svc.authenticate("cashier-01", givePrivateCredential("cashier-01"));
     if (outcome.kind !== "setup") throw new Error("expected setup");
     expect(() => svc.completeSetup(outcome.ticket, "حسين", "4321")).toThrow(/between 6 and 8 digits/);
     // 🔴 AND THE TERMINAL IS STILL UNCLAIMED. A refused setup must not half-happen.
