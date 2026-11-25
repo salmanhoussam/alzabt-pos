@@ -31,7 +31,7 @@ import {
 import { businessDateOf } from "../domain/businessDay";
 import { DomainError } from "../domain/errors";
 import { PUBLISHED_DEFAULT_PINS, assertValidPin } from "../domain/pinRule";
-import { SCRYPT, pinMatches } from "./cashierAuth";
+import { SCRYPT, pinCheckWithoutAccount, pinMatches } from "./cashierAuth";
 import { BOOTSTRAP_OWNER_ID, SEEDED_CASHIER_ID } from "../persistence/operatorRepository";
 import type { OperatorRepository, OperatorRole } from "../persistence/operatorRepository";
 import type { OperatorRow } from "../persistence/operatorRepository";
@@ -194,6 +194,8 @@ export class OperatorService {
     // The generic refusal for both "no such operator" and "inactive": the login screen must not
     // become a way to enumerate who exists.
     if (!row || row.is_active !== 1) {
+      // P1-T (O-14g): the same scrypt work as a real check before the neutral refusal.
+      pinCheckWithoutAccount(pin);
       throw new DomainError("INVALID_CREDENTIALS", "Operator or PIN is incorrect");
     }
     // 🔴 O-1 P1 (owner D-O1/D-O2, contract v3.1 §1 + review R3): a PUBLISHED default PIN never authenticates — not

@@ -84,7 +84,7 @@ import {
 import type { AuditRepository } from "../persistence/auditRepository";
 import type { PinStateRepository } from "../persistence/pinStateRepository";
 import type { NewSaleHeader, NewSaleLine, SaleRepository } from "../persistence/saleRepository";
-import { type Cashier, pinMatches } from "./cashierAuth";
+import { type Cashier, pinCheckWithoutAccount, pinMatches } from "./cashierAuth";
 import { PUBLISHED_DEFAULT_PINS } from "../domain/pinRule";
 import type { LoginOutcome as OperatorLoginOutcome, OperatorService } from "./operatorService";
 import type { OperatorRole } from "../persistence/operatorRepository";
@@ -529,6 +529,8 @@ export class PosService {
     if (this.deps.seedActor) throw new DomainError("NOT_AVAILABLE", "Seed instance cannot sign in");
     const account = this.credentialFor(cashierId);
     if (!account) {
+      // P1-T (O-14g): the same scrypt work as a real check, so an unknown or inactive id does not answer early.
+      pinCheckWithoutAccount(pin);
       throw new DomainError("INVALID_CREDENTIALS", "Cashier or PIN is incorrect", "LOGIN_UNKNOWN_OPERATOR", {
         reason: "LOGIN_UNKNOWN_OPERATOR",
       });
