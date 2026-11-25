@@ -161,6 +161,31 @@ export function openNewSyntheticDemoLedger(reservation: SyntheticDemoReservation
 }
 
 /**
+ * EPHEMERAL DEMO (owner decision 2026-11-25): a Demo shop that lives ONLY in memory.
+ *
+ * `:memory:` — no ledger file, no -wal / -journal (SQLite reports journal_mode "memory"), nothing to back up or
+ * recover. The same migrations and the same validated services run on it as on a real ledger. It is registered as a
+ * FRESH synthetic ledger so the existing seed safeguards (one consumer, branding binding) apply unchanged.
+ *
+ * `brandingParent` is the session folder that receives ONLY the synthetic logo copy (the logo vault reads files);
+ * it must be a new, private, synthetic-only folder chosen by Main. No business data is ever written there.
+ */
+export function openEphemeralSyntheticDemoLedger(brandingParent: string): Db {
+  const parent = checkPath(brandingParent);
+  const db = openDatabase(":memory:");
+  try {
+    const mode = String(db.pragma("journal_mode", { simple: true })).toLowerCase();
+    if (db.memory !== true || mode !== "memory") throw new Error("not in memory");
+  } catch {
+    db.close();
+    throw new DemoProfileError("unavailable");
+  }
+  freshSyntheticLedgers.add(db);
+  syntheticLedgerProfiles.set(db, parent);
+  return db;
+}
+
+/**
  * One Main-private consumer can claim a newly opened synthetic ledger for
  * account setup. This object identity is not profile authority by itself; Main
  * still must prove its synthetic-only parent and preconditions before calling.

@@ -8,7 +8,8 @@ import { randomBytes, randomInt, scryptSync } from "node:crypto";
 import { assertValidPin } from "../domain/pinRule";
 import { SCRYPT } from "../application/cashierAuth";
 import { OperatorRepository } from "../persistence/operatorRepository";
-import { openNewSyntheticDemoLedger, type SyntheticDemoReservation } from "./demoProfile";
+import { openEphemeralSyntheticDemoLedger, openNewSyntheticDemoLedger, type SyntheticDemoReservation } from "./demoProfile";
+import type { Db } from "../persistence/db";
 import { createSyntheticAccountSetup } from "./demoSeedAccounts";
 import { bootstrapSyntheticSeed } from "./demoSeedBootstrap";
 
@@ -19,12 +20,24 @@ function newPin():string {
   }
   throw new Error("Synthetic credential generation failed.");
 }
+type SeedAssets = Omit<Parameters<typeof bootstrapSyntheticSeed>[2],"ownerPin">;
+
 /** Uses one newly reserved ledger; no existing profile is opened or migrated. */
-export function startReservedSyntheticDemo(
-  reservation:SyntheticDemoReservation,
-  assets:Omit<Parameters<typeof bootstrapSyntheticSeed>[2],"ownerPin">,
-) {
-  const db=openNewSyntheticDemoLedger(reservation);
+export function startReservedSyntheticDemo(reservation:SyntheticDemoReservation, assets:SeedAssets) {
+  return seedFreshSyntheticDemo(openNewSyntheticDemoLedger(reservation), assets);
+}
+
+/**
+ * EPHEMERAL DEMO (owner decision 2026-11-25): a brand-new in-memory shop on every start — the original 22 products,
+ * photos, categories, stock and USD prices, seeded through the SAME validated paths. Nothing of it survives the
+ * process: closing the app IS the reset.
+ */
+export function startEphemeralSyntheticDemo(brandingParent:string, assets:SeedAssets) {
+  return seedFreshSyntheticDemo(openEphemeralSyntheticDemoLedger(brandingParent), assets);
+}
+
+/** The one seeding routine for a FRESH synthetic ledger, whichever storage it lives in. */
+function seedFreshSyntheticDemo(db:Db, assets:SeedAssets) {
   try {
     const credentials = new Set<string>();
     const uniquePin=():string => {
@@ -53,8 +66,9 @@ export function startReservedSyntheticDemo(
     setup.completeCashier({name:"Synthetic cashier",pin:cashierPin});
     const services=bootstrapSyntheticSeed(db,setup.takeSeedAuthority(),{...assets,ownerPin});
     return {db,services};
-  } catch {
+  } catch (cause) {
     if(db.open)db.close();
-    throw new Error("Synthetic demo startup failed.");
+    // Generic message for every caller; the underlying cause is kept for Main's log and for tests.
+    throw new Error("Synthetic demo startup failed.", { cause });
   }
 }

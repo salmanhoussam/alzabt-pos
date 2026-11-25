@@ -99,11 +99,11 @@ export function createSyntheticSeedAssembly(authority: SyntheticSeedAuthority, d
             throw new Error("synthetic owner login failed");
           }
           return normal;
-        } catch {
+        } catch (cause) {
           state = "failed";
           guard.revoke();
           if (db.open) db.close();
-          throw new Error("Synthetic demo seed verification failed.");
+          throw new Error("Synthetic demo seed verification failed.", { cause });
         }
       },
       cancel,

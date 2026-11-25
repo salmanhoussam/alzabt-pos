@@ -77,8 +77,8 @@ export function bootstrapSyntheticSeed(db:Db, authority:SyntheticSeedAuthority, 
     writer.saveCompanyProfile({...profile.shop,logoPath:logoName});
     return writer.finish({csv:input.csv,mapping:input.mapping,manifest:input.manifest,profile:input.profile,
       sourceImage:input.sourceImage,logoName,codec:input.codec},input.ownerPin);
-  } catch {
+  } catch (cause) {
     writer.cancel();
-    throw new Error("Synthetic demo bootstrap failed.");
+    throw new Error("Synthetic demo bootstrap failed.", { cause });
   }
 }
