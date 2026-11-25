@@ -51,6 +51,8 @@ export interface InvoiceRow {
   readonly created_at: string;
   readonly updated_at: string;
   readonly finalized_at: string | null;
+  /** M21: identity of the verified confirmation, or null when none was recorded. */
+  readonly confirmed_request_identity: string | null;
 }
 
 export interface InvoiceLineRow {
@@ -102,11 +104,12 @@ export interface InvoiceFinalization {
   readonly issuerSnapshotJson: string;
   readonly taxSnapshotJson: string;
   readonly finalizedAt: string;
+  readonly confirmedRequestIdentity: string | null;
 }
 
 const INVOICE_COLUMNS = `id, status, invoice_number, invoice_date, currency, customer_name,
   customer_address, customer_phone, customer_party_id, notes, subtotal_minor, tax_minor, total_minor, paid_minor,
-  balance_due_minor, amount_in_words, issuer_snapshot_json, tax_snapshot_json, created_by_id,
+  balance_due_minor, amount_in_words, issuer_snapshot_json, tax_snapshot_json, confirmed_request_identity, created_by_id,
   created_by_name, created_at, updated_at, finalized_at`;
 
 const LINE_COLUMNS = `id, invoice_id, line_no, description, unit_label, canonical_unit, product_id,
@@ -133,7 +136,7 @@ export class InvoiceRepository {
       .prepare(
         `INSERT INTO invoices (${INVOICE_COLUMNS})
          VALUES (@id, 'draft', NULL, NULL, @currency, NULL, NULL, NULL, NULL, NULL,
-                 0, 0, 0, 0, 0, NULL, NULL, NULL, @byId, @byName, @now, @now, NULL)`,
+                 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, @byId, @byName, @now, @now, NULL)`,
       )
       .run({ id, currency, byId: createdBy.id, byName: createdBy.name, now: stamp });
     return this.requireById(id);
@@ -234,7 +237,8 @@ export class InvoiceRepository {
                 subtotal_minor = @subtotal, tax_minor = @tax, total_minor = @total,
                 paid_minor = @paid, balance_due_minor = @balance,
                 amount_in_words = @words, issuer_snapshot_json = @issuer,
-                tax_snapshot_json = @taxSnapshot, finalized_at = @finalizedAt, updated_at = @now
+                tax_snapshot_json = @taxSnapshot, confirmed_request_identity = @confirmedRequestIdentity,
+                finalized_at = @finalizedAt, updated_at = @now
           WHERE id = @id AND status = 'draft'`,
       )
       .run({
@@ -249,6 +253,7 @@ export class InvoiceRepository {
         words: f.amountInWords,
         issuer: f.issuerSnapshotJson,
         taxSnapshot: f.taxSnapshotJson,
+        confirmedRequestIdentity: f.confirmedRequestIdentity,
         finalizedAt: f.finalizedAt,
         now: now.toISOString(),
       });

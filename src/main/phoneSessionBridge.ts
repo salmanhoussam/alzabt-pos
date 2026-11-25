@@ -19,6 +19,7 @@ import { phonePhotoRefusalText } from "./phoneMediaText";
 import {
   PHONE_SESSION_TOKEN_BYTES,
   createSession,
+  effectiveAction,
   isLive,
   sessionUrl,
   type PhoneSession,
@@ -34,6 +35,9 @@ import {
   type RunningPhoneSessionServer,
 } from "./phoneSessionServer";
 import { renderPhoneFormPage } from "./phonePage";
+import { renderPhoneInvoicePage, renderPhoneLandingPage } from "./phoneInvoicePage";
+import { PHONE_INVOICE_MAX_PER_BATCH } from "../domain/phoneInvoiceBatch";
+import type { PhoneInvoiceStaging } from "./phoneInvoiceStaging";
 import { parsePhoneSubmission } from "../domain/phoneSubmission";
 import type { MasterForm } from "../shared/productMasterForm";
 import type { PhoneFormData, PosService, StagedPhonePhoto } from "../application/posService";
@@ -60,6 +64,8 @@ const PAIRED_WITHOUT_FORM_HTML = `<!doctype html>
 `;
 
 export interface PhoneSessionBridgeDeps {
+  /** Synthetic hosted-runner trial only; binds exclusively to this runner's loopback. */
+  readonly trialLoopback?: boolean;
   /**
    * The authoritative Product Master service. Slice H2.
    *
@@ -90,6 +96,8 @@ export interface PhoneSessionBridgeDeps {
   readonly normalizePhoto?: (bytes: Buffer) => NormalizedPhoto;
   /** Slice I1. zxing's reader, injected so a test need not load a megabyte of WebAssembly. */
   readonly decodeBarcode?: (bytes: Buffer) => Promise<BarcodeScan>;
+  /** DEC-35z16 (PILOT). Absent means an INVOICE_BATCH session is refused as NOT_AVAILABLE. */
+  readonly invoiceStaging?: PhoneInvoiceStaging;
   /** Fixed port for tests; production passes nothing and the OS picks a free one. */
   readonly port?: number;
 }
@@ -116,6 +124,10 @@ export class PhoneSessionBridge {
    * accumulating.
    */
   private stagedPhoto: StagedPhonePhoto | null = null;
+  /** DEC-35z16: the open invoice batch of the live session, if it is one. */
+  private batch: { readonly id: string; finished: boolean } | null = null;
+  /** DEC-35z16: how the last invoice batch ended, kept until the desktop reads it (once). */
+  private lastBatch: { readonly count: number; readonly finished: boolean } | null = null;
 
   constructor(private readonly deps: PhoneSessionBridgeDeps = {}) {}
 
@@ -128,7 +140,9 @@ export class PhoneSessionBridge {
     await this.cancel();
 
     const interfaces = (this.deps.interfaces ?? networkInterfaces)() as NetworkInterfaceMap;
-    const selection = selectLanAddress(interfaces);
+    const selection = this.deps.trialLoopback
+      ? { kind: "single" as const, chosen: { interfaceName: "synthetic runner loopback", address: "127.0.0.1", rank: 0, note: "test only" } }
+      : selectLanAddress(interfaces);
     if (selection.kind === "none") {
       // 🔴 NO LOOPBACK FALLBACK. A QR pointing at 127.0.0.1 resolves, on the phone, to the phone —
       // a blank page with nothing to explain it. Refusing with a sentence the merchant can act on
@@ -140,24 +154,39 @@ export class PhoneSessionBridge {
       this.deps.randomToken ?? (() => randomBytes(PHONE_SESSION_TOKEN_BYTES).toString("hex"));
     const session = createSession(spec, this.now(), randomToken);
 
+    // DEC-35z16 (PILOT): an invoice batch takes its own path BEFORE any product form is read, so the
+    // product path below is untouched line for line.
+    if (spec.action === "INVOICE_BATCH") return this.startInvoiceBatch(session, selection);
+
     // 🔴 THE FORM DATA IS READ ONCE, HERE, BEFORE THE SOCKET OPENS — and `servedMaster` is kept so
     // a later save can be diffed against WHAT THE PHONE WAS SHOWN rather than against storage as
     // it stands at save time. Diffing against current storage would revert any field changed at
     // the till while the phone was open, which is the exact failure the desktop's own patch
     // builder documents.
     const service = this.deps.service;
+    // DEC-35z17: a COMPANION is a NEW_PRODUCT session for the product half — the SAME save path, the same
+    // spec shape — whose form is read when the phone CHOOSES «إضافة صنف», not before (nothing is shown
+    // to a phone that has not chosen). For every other session `productSpec` IS `spec`.
+    const companion = spec.action === "COMPANION";
+    const productSpec: PhoneSessionSpec = companion ? { action: "NEW_PRODUCT", productId: null, operatorId: spec.operatorId } : spec;
     let form: PhoneFormData | null = null;
     let servedMaster: MasterForm | null = null;
-    if (service) {
+    if (service && !companion) {
       form = service.phoneSessionForm(spec);
       servedMaster = form.master;
     }
+    const staging = this.deps.invoiceStaging;
 
     const running = await startPhoneSessionServer({
       session,
       host: selection.chosen.address,
       port: this.deps.port,
-      renderPage: () => {
+      renderPage: (view) => {
+        // DEC-35z17: the landing page until the phone chooses; the invoice page once it chose invoices.
+        if (companion && view.action === "COMPANION") return renderPhoneLandingPage();
+        if (companion && view.action === "INVOICE_BATCH" && staging && this.batch) {
+          return renderPhoneInvoicePage({ items: staging.items(this.batch.id), maxPerBatch: PHONE_INVOICE_MAX_PER_BATCH });
+        }
         if (!form) {
           // Pairing without a service: there is no form to render and no save to perform. Honest
           // rather than a half-page with dead inputs.
@@ -176,8 +205,8 @@ export class PhoneSessionBridge {
                 // 🔴 THE STAGED PHOTO JOINS THE SAVE HERE, and the service commits both in ONE
                 // transaction. No staged photo means the product's existing photo is untouched —
                 // absent is not null, for media as much as for text.
-                const row = service.savePhoneProduct(spec, submission, servedMaster, this.stagedPhoto);
-                this.lastSaved = { id: row.id, action: spec.action };
+                const row = service.savePhoneProduct(productSpec, submission, servedMaster, this.stagedPhoto);
+                this.lastSaved = { id: row.id, action: productSpec.action };
                 return { ok: true };
               } catch (err) {
                 if (err instanceof DomainError) {
@@ -259,6 +288,28 @@ export class PhoneSessionBridge {
               : {}),
           }
         : {}),
+      // DEC-35z17: the companion's invoice half, and its one choice. The server gates every route by the
+      // LOCKED purpose, so a product-locked companion never reaches these and vice versa.
+      ...(companion && staging
+        ? {
+            ...this.invoiceCallbacks(staging, () => this.batch),
+            choosePurpose: (purpose: "NEW_PRODUCT" | "INVOICE_BATCH") => {
+              if (purpose === "NEW_PRODUCT") {
+                if (!service) return { ok: false as const, code: "NOT_AVAILABLE", message: "إدخال الأصناف غير متاح على هذا الصندوق." };
+                try {
+                  form = service.phoneSessionForm(productSpec);
+                  servedMaster = form.master;
+                } catch (err) {
+                  if (err instanceof DomainError) return { ok: false as const, code: err.code, message: "تعذّر فتح نموذج الصنف. اطلب رمزاً جديداً من الكمبيوتر." };
+                  throw err;
+                }
+                return { ok: true as const, data: { purpose } };
+              }
+              this.batch = { id: staging.openBatch(), finished: false };
+              return { ok: true as const, data: { purpose } };
+            },
+          }
+        : {}),
       now: this.now,
       logger: this.deps.logger,
       onEnded: (reason) => this.forget(reason),
@@ -266,7 +317,9 @@ export class PhoneSessionBridge {
 
     // 🔴 THE URL IS BUILT AFTER `listen`, because the port is only real once the OS has assigned
     // it. Encoding a QR from the REQUESTED port would silently produce `:0` in production.
-    const url = sessionUrl(running.host, running.port, session.token);
+    const url = this.deps.trialLoopback
+      ? sessionUrl("192.0.2.1", running.port, session.token).replace("192.0.2.1", "127.0.0.1")
+      : sessionUrl(running.host, running.port, session.token);
     const renderQr = this.deps.renderQr ?? renderSessionQrSvg;
 
     let qrSvg: string;
@@ -296,6 +349,94 @@ export class PhoneSessionBridge {
               note: c.note,
             }))
           : [],
+    };
+  }
+
+  /**
+   * DEC-35z16 (owner, PILOT): one phone session → several supplier-invoice photos → «إنهاء» → the till's
+   * review queue. Photos are staged ON DISK (`PhoneInvoiceStaging`) the moment they arrive; the phone
+   * is told «استُلمت» only after the write. Nothing here creates a product or touches the ledger.
+   *
+   * The QR / DTO tail repeats the product path's few lines on purpose: that path stays byte-for-byte
+   * as it was, and this one can be removed in one place if the pilot is not accepted.
+   */
+  private async startInvoiceBatch(
+    session: PhoneSession,
+    selection: Exclude<ReturnType<typeof selectLanAddress>, { kind: "none" }>,
+  ): Promise<PhoneSessionDto> {
+    const staging = this.deps.invoiceStaging;
+    if (!staging) throw new DomainError("NOT_AVAILABLE", "Supplier invoices from a phone are not available on this terminal");
+    const batchId = staging.openBatch();
+    const batch = { id: batchId, finished: false };
+    let running: RunningPhoneSessionServer;
+    try {
+      running = await startPhoneSessionServer({
+        session,
+        host: selection.chosen.address,
+        port: this.deps.port,
+        renderPage: () => renderPhoneInvoicePage({ items: staging.items(batchId), maxPerBatch: PHONE_INVOICE_MAX_PER_BATCH }),
+        ...this.invoiceCallbacks(staging, () => batch),
+        now: this.now,
+        logger: this.deps.logger,
+        onEnded: (reason) => this.forget(reason),
+      });
+    } catch (err) {
+      staging.abandon(batchId);
+      throw err;
+    }
+    const url = this.deps.trialLoopback
+      ? sessionUrl("192.0.2.1", running.port, session.token).replace("192.0.2.1", "127.0.0.1")
+      : sessionUrl(running.host, running.port, session.token);
+    let qrSvg: string;
+    try {
+      qrSvg = await (this.deps.renderQr ?? renderSessionQrSvg)(url);
+    } catch (err) {
+      await running.stop("cancelled");
+      throw err;
+    }
+    this.running = running;
+    this.session = session;
+    this.batch = batch;
+    return {
+      action: session.action,
+      host: running.host,
+      port: running.port,
+      expiresAt: new Date(session.expiresAtMs).toISOString(),
+      qrSvg,
+      addressAmbiguous: selection.kind === "ambiguous",
+      addressCandidates:
+        selection.kind === "ambiguous"
+          ? selection.candidates.map((c) => ({ interfaceName: c.interfaceName, address: c.address, note: c.note }))
+          : [],
+    };
+  }
+
+  /** DEC-35z16/17: the three invoice routes' callbacks, shared by an INVOICE_BATCH session and a companion locked to invoices. */
+  private invoiceCallbacks(staging: PhoneInvoiceStaging, getBatch: () => { readonly id: string; finished: boolean } | null) {
+    const closed = { ok: false as const, code: "SESSION_CLOSED", message: "انتهت هذه الدفعة. ابدأ دفعة جديدة من الكمبيوتر." };
+    return {
+      receiveInvoice: (body: Buffer, captureKey: string) => {
+        const batch = getBatch();
+        if (!batch) return closed;
+        const r = staging.add(batch.id, body, captureKey);
+        return r.ok ? { ok: true as const, data: { id: r.id, count: r.count, replay: r.replay } } : r;
+      },
+      deleteInvoice: (invoiceId: string) => {
+        const batch = getBatch();
+        if (!batch) return closed;
+        const r = staging.removeFromOpen(batch.id, invoiceId);
+        return r.ok ? { ok: true as const, data: { id: r.id, count: r.count } } : r;
+      },
+      finishBatch: () => {
+        const batch = getBatch();
+        if (!batch) return closed;
+        if (staging.items(batch.id).length === 0) {
+          return { ok: false as const, code: "EMPTY", message: "لم تُرسَل أي فاتورة بعد. صوّر فاتورة أولاً." };
+        }
+        const count = staging.finish(batch.id);
+        batch.finished = true;
+        return { ok: true as const, data: { count } };
+      },
     };
   }
 
@@ -335,6 +476,16 @@ export class PhoneSessionBridge {
   }
 
   private forget(_reason: PhoneSessionEndReason): void {
+    // DEC-35z16: a batch the phone did not finish (timeout, cancel, quit, malformed budget) is KEPT as
+    // `incomplete` — its photos wait in the queue; nothing is dropped. Reported to the dialog once.
+    const batch = this.batch;
+    if (batch && this.deps.invoiceStaging) {
+      const count = batch.finished
+        ? this.deps.invoiceStaging.items(batch.id).length
+        : this.deps.invoiceStaging.abandon(batch.id);
+      this.lastBatch = { count, finished: batch.finished };
+    }
+    this.batch = null;
     this.running = null;
     this.session = null;
     // 🔴 THE STAGED PHOTO DIES WITH THE SESSION, whatever ended it.
@@ -356,6 +507,29 @@ export class PhoneSessionBridge {
   status(): PhoneSessionState {
     const session = this.session;
     const saved = this.lastSaved;
+    const lastBatch = this.lastBatch;
+    if (lastBatch) {
+      // DEC-35z16: the batch's end is reported exactly once, like a product save.
+      this.lastBatch = null;
+      return {
+        state: lastBatch.finished ? "batch_ready" : "closed",
+        savedProductId: null,
+        action: "INVOICE_BATCH",
+        expiresAt: null,
+        claimed: false,
+        invoiceCount: lastBatch.count,
+      };
+    }
+    if (session && this.batch && this.deps.invoiceStaging && isLive(session, this.now())) {
+      return {
+        state: session.boundClient === null ? "waiting" : "claimed",
+        savedProductId: null,
+        action: effectiveAction(session) ?? "COMPANION",
+        expiresAt: new Date(session.expiresAtMs).toISOString(),
+        claimed: session.boundClient !== null,
+        invoiceCount: this.deps.invoiceStaging.items(this.batch.id).length,
+      };
+    }
     if (saved) {
       this.lastSaved = null;
       return { state: "saved", savedProductId: saved.id, action: saved.action, expiresAt: null, claimed: false };
@@ -369,7 +543,7 @@ export class PhoneSessionBridge {
     return {
       state: session.boundClient === null ? "waiting" : "claimed",
       savedProductId: null,
-      action: session.action,
+      action: effectiveAction(session) ?? "COMPANION",
       expiresAt: new Date(session.expiresAtMs).toISOString(),
       claimed: session.boundClient !== null,
     };

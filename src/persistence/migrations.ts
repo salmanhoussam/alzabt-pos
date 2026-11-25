@@ -2873,4 +2873,18 @@ WHEN EXISTS (SELECT 1 FROM advance_corrections WHERE advance_id = NEW.advance_id
 BEGIN SELECT RAISE(ABORT, 'ledger: a corrected advance has no balance to refund'); END;
 `,
   },
+  {
+    version: 21,
+    name: "invoice_confirmed_request_identity",
+    // NULL means no confirmation identity was recorded; no historical invoice is backfilled.
+    // A protected identity is immutable with the rest of the final invoice (migration 6 trigger).
+    sql: `
+ALTER TABLE invoices ADD COLUMN confirmed_request_identity TEXT
+  CHECK (confirmed_request_identity IS NULL OR (
+    length(confirmed_request_identity) = 67
+    AND substr(confirmed_request_identity, 1, 3) = 'v1:'
+    AND substr(confirmed_request_identity, 4) NOT GLOB '*[^0-9a-f]*'
+  ));
+`,
+  },
 ];

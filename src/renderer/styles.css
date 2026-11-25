@@ -1253,3 +1253,17 @@ table.inv-diff td, table.inv-diff th { padding: 4px 8px; }
   .inv-tax { padding: 4px 10px; gap: 4px 12px; }
   .inv-tax .field { margin-top: 0; }
 }
+
+/* DEC-35z16 (PILOT): the phone-invoice review queue */
+.phone-invoice-queue { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 64px); overflow-y: auto; }
+.piq-list { list-style: none; padding: 0; margin: 8px 0; display: flex; flex-direction: column; gap: 8px; }
+.piq-item { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+.piq-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; background: var(--surface-sunken); flex: none; }
+.piq-text { flex: 1 1 200px; min-width: 0; }
+.piq-flag { color: var(--warning, #a15c00); }
+.piq-confirm { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* PHONE-INVOICE-ORIENTATION-01: rotate / re-read controls above the invoice review */
+.photo-rotate-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 12px; }
+.photo-reread-ask { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+

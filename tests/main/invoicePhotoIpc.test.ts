@@ -43,7 +43,8 @@ describe("readInvoicePhoto", () => {
     expect(r.data.status).toBe("read");
     if (r.data.status !== "read") return;
     expect(r.data.rows).toEqual([expect.objectContaining({ relation: "R1", quantityMilli: 12000, supplierPriceMinor: "75", lineTotalMinor: "900" })]);
-    expect(r.data.unexplained).toEqual([{ text: "سطر غامض 21.00 63.00", y: 150, crop: "data:image/jpeg;base64,AAAA" }]);
+    // TRANSITION (Stage A, 2026-11-16): an unexplained line also carries the NAME read at its place (was: text, y, crop).
+    expect(r.data.unexplained).toEqual([{ text: "سطر غامض 21.00 63.00", name: "سطر غامض", y: 150, crop: "data:image/jpeg;base64,AAAA" }]);
     expect(r.data.rows[0]).toMatchObject({ y: 100, crop: "data:image/jpeg;base64,AAAA", readings: 1 });
     expect(footprint()).toBe(before);
   });

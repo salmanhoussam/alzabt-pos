@@ -100,8 +100,8 @@ const upgrade = () => openDatabase(t.dbPath, V11, { fileMustExist: true });
 
 describe("migration 11 — v10 to v11, on a populated ledger", () => {
   it("is the eleventh migration, and 1-10 are byte-identical after it", () => {
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] /* TRANSITION: was 1..19 before migration 20 (advance_safety_attempts_voids); was 1..18 before migration 19 (payment_model_tenders_references_advances) */);
-    expect(MIGRATIONS).toHaveLength(20); // TRANSITION: was 19 before migration 20 (advance_safety_attempts_voids); was 18 before migration 19 (payment_model_tenders_references_advances); 17 before 18
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] /* TRANSITION: was 1..20 before migration 21 (invoice_confirmed_request_identity, M21: ALTER TABLE invoices ADD COLUMN confirmed_request_identity); was 1..19 before migration 20 (advance_safety_attempts_voids); was 1..18 before migration 19 (payment_model_tenders_references_advances) */);
+    expect(MIGRATIONS).toHaveLength(21); // TRANSITION: was 20 before migration 21 (invoice_confirmed_request_identity, M21); was 19 before migration 20 (advance_safety_attempts_voids); was 18 before migration 19 (payment_model_tenders_references_advances); 17 before 18
     expect(MIGRATIONS[10]!.name).toBe("operator_product_create_capability");
   });
 

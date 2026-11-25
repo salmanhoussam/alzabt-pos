@@ -69,22 +69,50 @@ interface Outcome {
   readonly notDone: Array<{ name: string; why: string }>;
 }
 
-export function PhotoInvoiceFlow({ products, onClose, onManual }: { products: readonly AdminProductDto[]; onClose: (created: number) => void; onManual?: () => void }) {
+/**
+ * DEC-35z16 (PILOT): `phoneInvoice` = one photo from the phone-invoice queue instead of the file picker.
+ * The review, the Decision Buttons and the confirmation are the SAME; only the photo's source differs.
+ * After a confirmed write with no refusal, the photo leaves the queue (`onPhoneReviewed`).
+ */
+export function PhotoInvoiceFlow({
+  products,
+  onClose,
+  onManual,
+  phoneInvoice,
+  onPhoneReviewed,
+}: {
+  products: readonly AdminProductDto[];
+  onClose: (created: number) => void;
+  onManual?: () => void;
+  phoneInvoice?: { readonly batchId: string; readonly id: string };
+  onPhoneReviewed?: () => void;
+}) {
   const [stage, setStage] = useState<"start" | "reading" | "review" | "confirm" | "writing" | "done">("start");
   const [read, setRead] = useState<Read | null>(null);
   const [plan, setPlan] = useState<ReviewPlan | null>(null);
   const [error, setError] = useState<Bilingual | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [lastMode, setLastMode] = useState<Mode>("read");
+  // PHONE-INVOICE-ORIENTATION-01: the photo's current clockwise quarter-turns, whether the operator has
+  // edited the rows (a re-read must not silently replace them), and a key that remounts the review on a re-read.
+  const [turns, setTurns] = useState(0);
+  const [edited, setEdited] = useState(false);
+  const [reviewKey, setReviewKey] = useState(0);
+  const [askReread, setAskReread] = useState(false);
+  const [rotating, setRotating] = useState(false);
+  /** The same photo again: the queued phone invoice, or the desktop file just read (no picker). */
+  const again = phoneInvoice ? { phoneInvoice } : { reuseLast: true };
 
   const start = async (mode: Mode) => {
     setStage("reading");
     setLastMode(mode);
     setError(null);
     try {
-      const r = await call(pos().readInvoicePhoto(mode === "read" ? undefined : { mode }));
+      const r = await call(pos().readInvoicePhoto(phoneInvoice ? { mode, phoneInvoice } : mode === "read" ? undefined : { mode }));
       if (r.status !== "read") return setStage("start");
       setRead(r);
+      setTurns(r.orientation?.quarterTurns ?? 0);
+      setEdited(false);
       setStage("review");
     } catch (e) {
       setError(readFailureText(e));
@@ -124,7 +152,60 @@ export function PhotoInvoiceFlow({ products, onClose, onManual }: { products: re
       }
     }
     setOutcome({ added, linked: plan.link.length, skipped: plan.skipped.length, notDone });
+    // DEC-35z16: a phone photo whose review was confirmed with nothing refused leaves the queue. If any
+    // create was refused it STAYS, so the operator can review it again; nothing is lost silently.
+    if (phoneInvoice && notDone.length === 0) {
+      try {
+        await call(pos().releasePhoneInvoice({ ...phoneInvoice, why: "reviewed" }));
+      } catch {
+        // The products are written; a photo left in the queue is visible and can be deleted there.
+      }
+      onPhoneReviewed?.();
+    }
     setStage("done");
+  };
+
+  /**
+   * «تدوير يمين/يسار»: the PHOTO turns (main re-orients the real image, and remembers it for a phone
+   * invoice); the rows the operator typed stay exactly as they are. Reading the text again is a
+   * separate, explicit step («إعادة القراءة»).
+   */
+  const rotate = async (delta: 1 | -1) => {
+    if (!read || rotating) return;
+    const next = (turns + delta + 4) % 4;
+    setRotating(true);
+    setError(null);
+    try {
+      const r = await call(pos().readInvoicePhoto({ mode: "photo-only", ...again, quarterTurns: next }));
+      if (r.status === "read") {
+        setRead({ ...read, preview: r.preview, orientation: r.orientation });
+        setTurns(next);
+      }
+    } catch (e) {
+      setError(readFailureText(e));
+    } finally {
+      setRotating(false);
+    }
+  };
+  /** «إعادة القراءة»: OCR again on the photo as it is turned now. Asks first when rows were edited. */
+  const reread = async (confirmed: boolean) => {
+    if (!read) return;
+    if (edited && !confirmed) return setAskReread(true);
+    setAskReread(false);
+    setRotating(true);
+    setError(null);
+    try {
+      const r = await call(pos().readInvoicePhoto({ mode: "read", ...again, quarterTurns: turns }));
+      if (r.status === "read") {
+        setRead(r);
+        setEdited(false);
+        setReviewKey((k) => k + 1);
+      }
+    } catch (e) {
+      setError(readFailureText(e));
+    } finally {
+      setRotating(false);
+    }
   };
 
   const money = (minor: bigint) => (read ? formatDecimal({ minor, currency: read.currency }) : "");
@@ -135,7 +216,7 @@ export function PhotoInvoiceFlow({ products, onClose, onManual }: { products: re
       <div className="panel photo-flow">
         {stage === "start" || stage === "reading" ? (
           <div className="photo-flow-step" dir="rtl">
-            <h2>إضافة أصناف من صورة فاتورة مورّد</h2>
+            <h2>{phoneInvoice ? "مراجعة فاتورة مورّد من الهاتف" : "إضافة أصناف من صورة فاتورة مورّد"}</h2>
             <p className="muted small">القراءة على هذا الجهاز فقط، بلا إنترنت. لا يُضاف أيّ صنف قبل مراجعتك وتأكيدك.</p>
             {error && <BilingualText text={error} testid="photo-flow-error" />}
             <div className="photo-flow-starts">
@@ -147,7 +228,7 @@ export function PhotoInvoiceFlow({ products, onClose, onManual }: { products: re
                 <b>{busy && lastMode === "photo-only" ? "جارٍ فتح الصورة…" : "فاتورة بخط اليد — أدخلها بنفسي بجانب الصورة"}</b>
                 <span className="small">لا قراءة آلية: الصورة أمامك وتكتب الأسطر بسرعة (Enter للسطر التالي).</span>
               </button>
-              {onManual && (
+              {onManual && !phoneInvoice && (
                 <button className="photo-flow-start" disabled={busy} onClick={onManual} data-testid="photo-flow-manual">
                   <b>إدخال يدوي</b>
                   <span className="small">صنف واحد بلا صورة.</span>
@@ -163,6 +244,33 @@ export function PhotoInvoiceFlow({ products, onClose, onManual }: { products: re
         ) : (stage === "review" || stage === "confirm") && read ? (
           <>
             {/* Kept MOUNTED while confirming, so going back keeps every decision the operator made. */}
+            {stage === "review" && (
+              <div className="photo-rotate-bar" dir="rtl" data-testid="photo-rotate-bar" data-turns={turns}>
+                <button className="btn small" disabled={rotating} onClick={() => void rotate(-1)} data-testid="photo-rotate-left" title="تدوير الصورة ربع دورة إلى اليسار">
+                  ↺ تدوير يسار
+                </button>
+                <button className="btn small" disabled={rotating} onClick={() => void rotate(1)} data-testid="photo-rotate-right" title="تدوير الصورة ربع دورة إلى اليمين">
+                  ↻ تدوير يمين
+                </button>
+                {read.mode !== "photo-only" && (
+                  <button className="btn small" disabled={rotating} onClick={() => void reread(false)} data-testid="photo-reread">
+                    {rotating ? "جارٍ…" : "إعادة القراءة"}
+                  </button>
+                )}
+                {askReread && (
+                  <span className="photo-reread-ask" data-testid="photo-reread-confirm">
+                    <span className="small">إعادة القراءة تستبدل الأسطر الحالية — ستضيع تعديلاتك عليها.</span>{" "}
+                    <button className="btn small danger" onClick={() => void reread(true)} data-testid="photo-reread-yes">
+                      استبدل الأسطر
+                    </button>{" "}
+                    <button className="btn small" onClick={() => setAskReread(false)} data-testid="photo-reread-no">
+                      أبقِ تعديلاتي
+                    </button>
+                  </span>
+                )}
+                {error && <BilingualText text={error} testid="photo-rotate-error" />}
+              </div>
+            )}
             <div className="photo-flow-body" style={{ display: stage === "review" ? "flex" : "none" }}>
               {rows.length === 0 && read.mode !== "photo-only" && (
                 <p dir="rtl" className="pir-none" data-testid="photo-flow-none">
@@ -170,6 +278,8 @@ export function PhotoInvoiceFlow({ products, onClose, onManual }: { products: re
                 </p>
               )}
               <PhotoInvoiceReview
+                key={reviewKey}
+                onEdit={() => setEdited(true)}
                 rows={rows}
                 meta={meta}
                 currency={read.currency}

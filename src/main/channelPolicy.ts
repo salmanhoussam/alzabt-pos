@@ -224,6 +224,9 @@ export const CHANNEL_POLICY: Readonly<Record<ChannelName, Access>> = Object.free
   // PHOTO-INVOICE-TO-ITEMS: the same people who may add products may read an invoice photo to
   // prepare them. It WRITES NOTHING; every product is still created through createProduct.
   readInvoicePhoto: "create-products",
+  // DEC-35z16 (PILOT): the phone-invoice queue feeds the SAME review, so it carries the same gate.
+  listPhoneInvoices: "create-products",
+  releasePhoneInvoice: "create-products",
   updateProduct: "owner",
   setProductActive: "owner",
   // Replaces or exports the whole price list.

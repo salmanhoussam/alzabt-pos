@@ -112,9 +112,14 @@ describe("the create-products set", () => {
    */
   // TRANSITION (PHOTO-INVOICE-TO-ITEMS): two -> three. `readInvoicePhoto` READS a photo to prepare products
   // and writes nothing; every product it leads to is still created through createProduct. Old value: two.
-  it("🔴 is EXACTLY these three channels", () => {
+  // TRANSITION (Phone Invoice queue, DEC-35z16, integrated in M1 2026-11-25): three -> five. `listPhoneInvoices`
+  // READS the staged phone photos (thumbnails) and `releasePhoneInvoice` deletes ONE staged photo FILE after review
+  // or discard (phoneInvoiceStaging.release: no ledger row, no money). Both serve the same «prepare products from an
+  // invoice photo» flow as readInvoicePhoto; every product still goes through createProduct. Old value: three.
+  // ⚠️ Classification made by the Phone Invoice author; flagged for Abu Abbas's confirmation in the M1 review.
+  it("🔴 is EXACTLY these five channels", () => {
     const create = names.filter((n) => CHANNEL_POLICY[n] === "create-products").sort();
-    expect(create).toEqual(["createProduct", "readInvoicePhoto", "startPhoneSession"]);
+    expect(create).toEqual(["createProduct", "listPhoneInvoices", "readInvoicePhoto", "releasePhoneInvoice", "startPhoneSession"]);
   });
 });
 

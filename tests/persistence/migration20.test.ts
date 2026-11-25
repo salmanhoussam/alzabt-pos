@@ -19,6 +19,7 @@ import { type TempDir, tempDir } from "../helpers/harness";
 import { AT, DAY, addParty } from "../helpers/receiptDb";
 
 const V19 = MIGRATIONS.slice(0, 19);
+const V20 = MIGRATIONS.slice(0, 20);
 let t: TempDir;
 beforeEach(() => (t = tempDir()));
 afterEach(() => t.cleanup());
@@ -48,7 +49,7 @@ describe("migration 20 — v19 → v20", () => {
     const sumsBefore = pre.prepare("SELECT version, checksum FROM schema_migrations ORDER BY version").all();
     pre.close();
 
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, V20);
     try {
       expect(Number(one(db, "SELECT max(version) AS v FROM schema_migrations").v)).toBe(20);
       // TRANSITION (M20 part 2): `SELECT *` used to return exactly the v19 columns. It now also returns
@@ -70,7 +71,7 @@ describe("migration 20 — v19 → v20", () => {
 
   it("2 · the advance recorded before migration 20 still works: an owner cash refund is accepted", () => {
     v19Ledger();
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, V20);
     try {
       db.transaction(() => {
         db.prepare("UPDATE document_numbers SET last_no = last_no + 1 WHERE kind = 'advance_refund'").run();
@@ -87,7 +88,7 @@ describe("migration 20 — v19 → v20", () => {
 
   it("3 · from v20 on, a new advance without its open, identical intent is refused, even by direct SQL", () => {
     v19Ledger();
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, V20);
     try {
       const insert = () =>
         db.transaction(() => {
@@ -106,7 +107,7 @@ describe("migration 20 — v19 → v20", () => {
 
   it("5 · G2 part: the v19 advance becomes origin 'receipt' with no link; corrections table new, empty, backed up", () => {
     v19Ledger();
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, V20);
     try {
       expect(one(db, "SELECT origin, corrects_advance_id FROM customer_advances WHERE id = 'a-v19'")).toEqual({ origin: "receipt", corrects_advance_id: null });
       expect(Number(one(db, "SELECT count(*) AS n FROM advance_corrections").n)).toBe(0);
@@ -120,7 +121,7 @@ describe("migration 20 — v19 → v20", () => {
 
   it("6 · the advance recorded BEFORE migration 20 can be corrected by the owner (not received), and then neither refunded nor corrected again", () => {
     v19Ledger();
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, V20);
     try {
       const correct = (id: string, key: string) =>
         db.prepare(
@@ -144,7 +145,7 @@ describe("migration 20 — v19 → v20", () => {
   });
 
   it("7 · a FRESH ledger at v20 has every M20 object and passes integrity checks", () => {
-    const db = openDatabase(t.dbPath, MIGRATIONS);
+    const db = openDatabase(t.dbPath, V20);
     try {
       expect(Number(one(db, "SELECT max(version) AS v FROM schema_migrations").v)).toBe(20);
       const names = (db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'trigger') ORDER BY name").all() as { name: string }[]).map((r) => r.name);
@@ -174,7 +175,7 @@ describe("migration 20 — v19 → v20", () => {
 
   it("4 · a v19 build refuses a v20 ledger and leaves the file byte-for-byte untouched", () => {
     v19Ledger();
-    openDatabase(t.dbPath, MIGRATIONS).close();
+    openDatabase(t.dbPath, V20).close();
     const sha = () => createHash("sha256").update(readFileSync(t.dbPath)).digest("hex");
     const before = sha();
     expect(() => openDatabase(t.dbPath, V19)).toThrow(/newer than this build/);

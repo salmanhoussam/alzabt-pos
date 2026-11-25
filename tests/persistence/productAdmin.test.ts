@@ -91,6 +91,8 @@ describe("schema is unchanged by this feature", () => {
       [19, "payment_model_tenders_references_advances"], // TRANSITION: the registry ended at 18 before migration 19
       // Migration 20 adds only the advance intent and the audited advance correction (G1 + G2); no product table.
       [20, "advance_safety_attempts_voids"], // TRANSITION: the registry ended at 19 before migration 20
+      // Migration 21 (M21) adds one column to invoices (confirmed_request_identity); no product table.
+      [21, "invoice_confirmed_request_identity"], // TRANSITION: the registry ended at 20 before migration 21
     ]);
   });
 

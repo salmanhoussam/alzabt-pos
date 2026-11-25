@@ -430,7 +430,7 @@ describe("the migration is fingerprinted and immutable", () => {
     // Their checksums are what an existing installation already has on disk; editing any of them
     // would make every real ledger refuse to open with MigrationMismatchError.
     expect(MIGRATIONS.filter((m) => m.version <= 7)).toHaveLength(7);
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] /* TRANSITION: was 1..19 before migration 20 (advance_safety_attempts_voids); was 1..18 before migration 19 (payment_model_tenders_references_advances) */); // 8 -> 9 product master -> 10 its audit -> 11 the create capability
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] /* TRANSITION: was 1..20 before migration 21 (invoice_confirmed_request_identity, M21: ALTER TABLE invoices ADD COLUMN confirmed_request_identity); was 1..19 before migration 20 (advance_safety_attempts_voids); was 1..18 before migration 19 (payment_model_tenders_references_advances) */); // 8 -> 9 product master -> 10 its audit -> 11 the create capability
     expect(MIGRATIONS[7]!.name).toBe("operator_accounts");
   });
 });

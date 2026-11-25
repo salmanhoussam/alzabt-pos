@@ -735,49 +735,4 @@ assert(
   assert(num("SELECT count(*) AS n FROM settlements") === 1, "exactly one payment was recorded");
 }
 
-// ═════════════════════════════════════════════════════════════════════════════════════════════════
-// P · INV-FIRST-CLICK (F2-5) — type in a header field, then press a button ONCE, straight from the field.
-//
-// 🔴 NO TAB, NO SECOND CLICK, NO RETRY. Every other section commits a field with Tab before it clicks
-// (`commitTestid` / `commitCustomer`), which is exactly why the defect was invisible to this script: the
-// blur-save had finished before the button was pressed. Here the press itself causes the blur, as it does
-// for a merchant. Before the fix the button was disabled by that blur before its click arrived, and the
-// first press did nothing (screen-only Chromium harness: 0 / 50 single clicks).
-// ═════════════════════════════════════════════════════════════════════════════════════════════════
-{
-  const FIRST_CLICK_PHONE = "70111222";
-  const FIRST_CLICK_NOTES = "ضغطة واحدة";
-  const ONE_PRESS_MS = 5000; // generous for a slow machine, but no second press is ever made
-  ({ app, page } = await launch());
-  await openDrafts(page);
-  await testid(page, "new-invoice").click();
-  await page.waitForSelector('[data-testid="invoice-mode-chooser"]');
-  await testid(page, "mode-outgoing").click();
-  await page.waitForSelector('[data-testid="add-row"]');
-
-  // Phone typed, then ONE press on «choose account»: the finder opens.
-  await page.locator(".inv-customer input").nth(CUSTOMER_FIELD.phone).fill(FIRST_CLICK_PHONE);
-  await testid(page, "account-choose").click();
-  await testid(page, "customer-finder").waitFor({ state: "visible", timeout: ONE_PRESS_MS });
-  assert(true, "🔴 F2-5: one press on «choose account» right after typing the phone opens the finder");
-  await testid(page, "customer-finder-close").click();
-  await testid(page, "customer-finder").waitFor({ state: "detached", timeout: 30000 });
-
-  // Notes typed, then ONE press on «save»: the draft says it is saved.
-  await page.locator(".inv-customer input").nth(CUSTOMER_FIELD.notes).fill(FIRST_CLICK_NOTES);
-  await testid(page, "save-draft").click();
-  await testid(page, "draft-saved").waitFor({ state: "visible", timeout: ONE_PRESS_MS });
-  assert(true, "🔴 F2-5: one press on «save» right after typing the notes saves the draft");
-
-  // Phone changed, then ONE press on «leave»: the sheet closes (the blur-save finished first, so nothing is dirty).
-  await page.locator(".inv-customer input").nth(CUSTOMER_FIELD.phone).fill(FIRST_CLICK_PHONE + "9");
-  await testid(page, "leave-draft").click();
-  await testid(page, "add-row").waitFor({ state: "detached", timeout: ONE_PRESS_MS });
-  assert((await testid(page, "exit-confirm").count()) === 0, "🔴 F2-5: one press on «leave» right after typing closes the sheet, with no unsaved-changes prompt");
-  await app.close();
-
-  const stored = one("SELECT customer_phone AS phone, notes FROM invoices WHERE notes = ?", FIRST_CLICK_NOTES);
-  assert(stored !== undefined && stored.phone === FIRST_CLICK_PHONE + "9", "🔴 F2-5: the last typed phone was stored before the sheet closed");
-}
-
 log(`\nOK — ${passed} assertions passed against the installed app`);

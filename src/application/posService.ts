@@ -1492,6 +1492,16 @@ export class PosService {
    * ══════════════════════════════════════════════════════════════════════════════════════════════
    */
   authorizePhoneSession(action: PhoneSessionAction, productId: string | null): PhoneSessionSpec {
+    // DEC-35z16 (PILOT): supplier-invoice photos from the phone. The SAME gate as the desktop Photo
+    // Invoice (create-products): the photos only feed that review, and its confirmation is what writes.
+    // DEC-35z17: the one «من الهاتف» button. Both purposes the phone may choose (a NEW product, or
+    // supplier-invoice photos) need the SAME create-products grant, checked here; the phone only narrows.
+    if (action === "COMPANION" || action === "INVOICE_BATCH") {
+      const creator = this.requireProductCreator();
+      if (productId !== null) throw new DomainError("INVALID_INPUT", "An invoice batch names no product");
+      this.requireStore();
+      return { action, productId: null, operatorId: creator.id };
+    }
     if (action !== "NEW_PRODUCT" && action !== "EDIT_PRODUCT") {
       // 🔴 VALIDATED BEFORE ANYONE IS AUTHORIZED, because the two actions are authorized
       // DIFFERENTLY now. An unknown action must never fall through to the weaker of the two gates.

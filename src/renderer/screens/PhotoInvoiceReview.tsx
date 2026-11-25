@@ -82,9 +82,10 @@ export function similarity(a: string, b: string): number {
 
 const MANUAL_TEXT = "(إدخال يدوي)";
 let manualSeq = 0;
-const manualRow = (text = ""): ExtractedRow => {
+// Stage A: a fragment added by hand starts with the NAME read at its place (when one was read) — never a number.
+const manualRow = (text = "", name = ""): ExtractedRow => {
   manualSeq += 1;
-  return { id: `manual-${manualSeq}`, rawText: text || MANUAL_TEXT, name: "", quantityMilli: null, supplierPriceMinor: null, lineTotalMinor: null, arithmeticOk: false };
+  return { id: `manual-${manualSeq}`, rawText: text || MANUAL_TEXT, name, quantityMilli: null, supplierPriceMinor: null, lineTotalMinor: null, arithmeticOk: false };
 };
 
 const ZOOMS = [
@@ -103,17 +104,20 @@ export function PhotoInvoiceReview({
   mode = "read",
   onPlan,
   onCancel,
+  onEdit,
 }: {
   rows: readonly ExtractedRow[];
   meta?: Readonly<Record<string, RowMeta>>;
   currency: string;
   products: ReadonlyArray<{ readonly id: string; readonly name: string }>;
   preview?: string | null;
-  unexplained?: ReadonlyArray<{ readonly text: string; readonly crop: string | null }>;
+  unexplained?: ReadonlyArray<{ readonly text: string; readonly crop: string | null; readonly name?: string }>;
   /** "photo-only": nothing was read (handwritten) — start with one empty row to type into. */
   mode?: "read" | "photo-only";
   onPlan: (plan: ReviewPlan) => void;
   onCancel: () => void;
+  /** PHONE-INVOICE-ORIENTATION-01: told on the operator's edits, so a re-read never silently replaces them. */
+  onEdit?: () => void;
 }) {
   const [rows, setRows] = useState<ReviewRow[]>(() => startReview(mode === "photo-only" && extracted.length === 0 ? [manualRow()] : extracted));
   const [saleText, setSaleText] = useState<Record<string, string>>({});
@@ -127,7 +131,10 @@ export function PhotoInvoiceReview({
   const [linkQuery, setLinkQuery] = useState<Record<string, string>>({});
   const [focusId, setFocusId] = useState<string | null>(() => (mode === "photo-only" ? rows[0]?.extracted.id ?? null : null));
   const listRef = useRef<HTMLDivElement>(null);
-  const set = (id: string, f: (r: ReviewRow) => ReviewRow) => setRows((rs) => rs.map((r) => (r.extracted.id === id ? f(r) : r)));
+  const set = (id: string, f: (r: ReviewRow) => ReviewRow) => {
+    onEdit?.();
+    setRows((rs) => rs.map((r) => (r.extracted.id === id ? f(r) : r)));
+  };
   const names = useMemo(() => products.map((p) => p.name), [products]);
   const nameOf = useMemo(() => new Map(products.map((p) => [p.id, p.name])), [products]);
   const issuesById = useMemo(() => reviewIssues(rows, names), [rows, names]);
@@ -150,15 +157,19 @@ export function PhotoInvoiceReview({
   // A new manual row takes the cursor (block body: an effect must never return a value React would call).
   useEffect(() => {
     if (!focusId) return;
-    const el = listRef.current?.querySelector<HTMLInputElement>(`[data-row="${focusId}"] [data-testid="photo-review-name"]`);
+    // Stage A: when the name came prefilled from the photo, the cursor goes to the QUANTITY (the first thing to type).
+    const row = listRef.current?.querySelector(`[data-row="${focusId}"]`);
+    const name = row?.querySelector<HTMLInputElement>("[data-testid=photo-review-name]");
+    const el = name && name.value.trim() !== "" ? row?.querySelector<HTMLInputElement>("[data-testid=photo-review-qty]") : name;
     if (el) {
       el.focus();
       el.scrollIntoView({ block: "nearest" });
     }
   }, [focusId]);
 
-  const addManual = (crop: string | null, text: string) => {
-    const x = manualRow(text);
+  const addManual = (crop: string | null, text: string, name = "") => {
+    onEdit?.();
+    const x = manualRow(text, name);
     setRows((rs) => [...rs, ...startReview([x])]);
     setManualCrops((m) => ({ ...m, [x.id]: crop }));
     setFocusId(x.id);
@@ -459,9 +470,15 @@ export function PhotoInvoiceReview({
                 <div key={`${i}-${u.text}`} className="pir-unexplained-line" data-testid="photo-unexplained-line">
                   {u.crop && <img className="pir-crop" src={u.crop} alt="" />}
                   <bdi dir="auto">{u.text}</bdi>{" "}
-                  <button type="button" className="btn ghost small" onClick={() => addManual(u.crop, u.text)} data-testid="photo-unexplained-add">
+                  <button type="button" className="btn ghost small" onClick={() => addManual(u.crop, u.text, u.name ?? "")} data-testid="photo-unexplained-add">
                     أضِف كسطر يدوي
                   </button>
+                  {u.name ? (
+                    <span className="muted" data-testid="photo-unexplained-name">
+                      {" "}
+                      الاسم المقروء: «<bdi dir="auto">{u.name}</bdi>» — تبقى الأرقام عليك من الصورة
+                    </span>
+                  ) : null}
                 </div>
               ))}
             </div>

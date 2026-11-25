@@ -1,0 +1,101 @@
+name: TEST ONLY installed trial validation
+
+on:
+  push:
+    branches: [codex/functional-trial-installer-20261124-r3]
+
+permissions:
+  contents: read
+
+jobs:
+  installed-trial:
+    if: github.repository == 'salmanhoussam/alzabt-pos' && github.ref == 'refs/heads/codex/functional-trial-installer-20261124-r3' && github.event.created == true && github.event.forced == false && github.event.deleted == false && github.run_attempt == 1
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare evidence directory
+        run: |
+          $directory = Join-Path $env:RUNNER_TEMP 'alzabt-trial-evidence'
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          "Source $env:GITHUB_SHA; image $env:ImageOS $env:ImageVersion" | Set-Content -LiteralPath (Join-Path $directory 'run.txt')
+      - name: Verify checkout and disposable runner
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_AFTER: ${{ github.event.after }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows' -or $env:GITHUB_EVENT_NAME -ne 'push') { throw 'Hosted Windows branch-creation push required' }
+          if ($env:EVENT_BEFORE -cne '0000000000000000000000000000000000000000' -or $env:GITHUB_SHA -cnotmatch '^[a-f0-9]{40}$' -or $env:EVENT_AFTER -cne $env:GITHUB_SHA -or (git rev-parse HEAD).Trim() -cne $env:GITHUB_SHA) { throw 'Fresh branch and event-bound source SHA required' }
+          if (git status --porcelain --untracked-files=all) { throw 'Checkout must be clean' }
+          Write-Host "Source $env:GITHUB_SHA; image $env:ImageOS $env:ImageVersion"
+          git rev-parse 'HEAD^{tree}'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm.cmd ci
+      - name: Typecheck and focused tests
+        run: |
+          npm.cmd run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx.cmd vitest run tests/main/trialBootstrap.test.ts tests/main/trialIsolation.test.ts tests/main/trialLocalGate.test.ts tests/main/trialAccountPolicy.test.ts tests/main/trialPhoneLoopback.test.ts tests/application/invoiceM21Identity.test.ts tests/application/invoiceConfirmationBoundary.test.ts tests/main/phoneInvoiceStaging.test.ts --maxWorkers=1 --no-file-parallelism
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/main/trialBuildCandidate.test.cjs tests/main/trialOwnedPayload.test.cjs tests/main/trialTemplateCandidate.test.cjs tests/main/trialVerifyInstalled.test.cjs tests/main/trialSmokeEnv.test.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/main/trialTemporaryUninstallPlan.test.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/main/trialUserProfile.test.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/main/trialUserProfile.test.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build source
+        run: |
+          $env:ALZABT_BUILD_SHA = $env:GITHUB_SHA
+          npm.cmd run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # npmRebuild is false in the trial build config, so the Electron ABI rebuild of better-sqlite3 is explicit
+          # here — through electron-builder's own install-app-deps (pinned by package-lock.json), never an unpinned
+          # npx download.
+          npx.cmd --no-install electron-builder install-app-deps
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the guarded TEST ONLY installer as the runner
+        id: trial-build
+        run: |
+          node scripts/trial-build-candidate.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installer = Join-Path $PWD 'release/Alzabt-POS-TRIAL-TEST-ONLY-Setup-0.1.1.exe'
+          $manifest = Join-Path $PWD 'release/trial-payload-manifest.json'
+          $installerHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifestHash = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
+          "installer_sha256=$installerHash" >> $env:GITHUB_OUTPUT
+          "manifest_sha256=$manifestHash" >> $env:GITHUB_OUTPUT
+          Write-Host "Built installer SHA-256 $installerHash; manifest SHA-256 $manifestHash"
+      # Runs as the runner account: plants second-account sentinels, creates the disposable STANDARD user
+      # alzabt-test, transfers only the bound installer + manifest (hash-checked), runs
+      # scripts/trial-installed-windows.ps1 AS alzabt-test and propagates its exact exit code.
+      - name: Installed lifecycle as a disposable standard user, with sentinels
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'alzabt-trial-evidence'
+          ./scripts/trial-hosted-supervisor.ps1 -Installer (Join-Path $PWD 'release/Alzabt-POS-TRIAL-TEST-ONLY-Setup-0.1.1.exe') -Manifest (Join-Path $PWD 'release/trial-payload-manifest.json') -EvidenceDir $evidence
+      - name: Upload synthetic run evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trial-installed-evidence
+          path: ${{ runner.temp }}/alzabt-trial-evidence/
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Quarantine installer after all checks pass
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trial-installer-test-only
+          path: release/Alzabt-POS-TRIAL-TEST-ONLY-Setup-0.1.1.exe
+          if-no-files-found: error
+          retention-days: 3

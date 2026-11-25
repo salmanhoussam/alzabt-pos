@@ -159,6 +159,18 @@ export async function readInvoiceImage(path: string, userData: string): Promise<
       const b = await guarded(worker.recognize(st.png, {}, { text: true, blocks: true }));
       lines.push(...positionedLines(b.data as unknown as TesseractLikeData, "deskewed", { skewDegrees: st.skew, width, height }));
     }
+    // Stage A (owner UAT 2026-11-16): a third reading of the photo as taken, ENGLISH MODEL ONLY, for the numbers.
+    // The Arabic+English model misread a whole TOTAL column of Latin digits on an upright, clean invoice (see
+    // OcrSource "digits"); the English model read it right. The SAME worker is re-initialised (no second worker
+    // on the 8 GB till). If this extra reading fails, the two readings above are kept as they are.
+    try {
+      await guarded(worker.reinitialize("eng"));
+      await guarded(worker.setParameters({ preserve_interword_spaces: "1", tessedit_pageseg_mode: "4" as never }));
+      const d = await guarded(worker.recognize(path, {}, { text: true, blocks: true }));
+      lines.push(...positionedLines(d.data as unknown as TesseractLikeData, "digits"));
+    } catch (e) {
+      if (workerError) throw e;
+    }
     const jpeg = (img: Electron.NativeImage) => `data:image/jpeg;base64,${img.toJPEG(72).toString("base64")}`;
     const preview = width > 0 ? jpeg(width > 1400 ? photo.resize({ width: 1400 }) : photo) : null;
     const crop = (y: number, h: number): string | null => {

@@ -118,7 +118,7 @@ export function rowsFromLines(lines: readonly string[], exponent = 2): OcrRowsRe
   // items can share every number (1 × 12.50 = 12.50 on a paint invoice), so numbers alone are not an
   // identity: a candidate is a duplicate only when its numbers match AND its name is mostly the same words.
   const kept: Array<{ k: string; words: Set<string> }> = [];
-  const wordsOf = (t: string) => new Set(t.toLowerCase().split(/s+/).filter((w) => w.length >= 2));
+  const wordsOf = (t: string) => new Set(t.toLowerCase().split(/\s+/).filter((w) => w.length >= 2));
   const sameWords = (a: Set<string>, b: Set<string>) => {
     if (a.size === 0 || b.size === 0) return a.size === b.size;
     let n = 0;
@@ -176,6 +176,11 @@ export interface PlacedRow extends OcrRow {
 
 export interface PlacedUnexplained {
   readonly text: string;
+  /**
+   * Stage A: the NAME read at this place (column numbers removed, spacing from the other readings), to prefill a
+   * manual row so the operator types only the numbers. Empty when nothing name-like was read. Never a number.
+   */
+  readonly name: string;
   readonly y: number;
   readonly h: number;
 }
@@ -186,6 +191,68 @@ export interface PlacedRowsResult {
 }
 
 const letters = (s: string) => (s.match(/[A-Za-z؀-ۿ]/g) ?? []).length;
+const LETTER = /[A-Za-z؀-ۿ]/;
+const DIGIT = /[0-9٠-٩۰-۹]/;
+
+/**
+ * Stage A (owner UAT 2026-11-16: «a name with missing spacing»). The engine's own line often JOINS two Arabic
+ * words («فيشكهرباء», «قفازاتعمل») while the word-geometry reading of the SAME photo keeps them apart («فيش
+ * كهرباء»). Measured on the owner's two invoices: geometry restored the space in 7 names and split one word
+ * wrongly («جد يد»). So a space from the other reading is taken ONLY when both words it separates have 3+
+ * letters, or when it separates digits from letters («5سم» → «5 سم»). The characters themselves never change:
+ * if the two readings are not the same characters apart from spaces, the base name is returned untouched.
+ */
+export function respaced(base: string, other: string): string {
+  const flat = (s: string) => s.replace(/\s+/g, "");
+  if (!base || !other || base === other || flat(base) !== flat(other)) return base;
+  const chars = [...flat(base)];
+  const spacesIn = (s: string): Set<number> => {
+    const set = new Set<number>();
+    let i = 0;
+    let gap = false;
+    for (const ch of s.trim()) {
+      if (/\s/.test(ch)) {
+        gap = true;
+        continue;
+      }
+      if (gap && i > 0) set.add(i);
+      gap = false;
+      i += 1;
+    }
+    return set;
+  };
+  const mine = spacesIn(base);
+  const theirs = spacesIn(other);
+  const all = [...new Set([...mine, ...theirs])].sort((a, b) => a - b);
+  const around = (at: number): [string, string] => {
+    const prev = all.filter((x) => x < at).pop() ?? 0;
+    const next = all.find((x) => x > at) ?? chars.length;
+    return [chars.slice(prev, at).join(""), chars.slice(at, next).join("")];
+  };
+  const keep = new Set(mine);
+  for (const at of theirs) {
+    if (mine.has(at)) continue;
+    const [l, r] = around(at);
+    const a = l.slice(-1);
+    const b = r.slice(0, 1);
+    const digitEdge = (DIGIT.test(a) && LETTER.test(b)) || (LETTER.test(a) && DIGIT.test(b));
+    if (digitEdge || (letters(l) >= 3 && letters(r) >= 3 && !DIGIT.test(l) && !DIGIT.test(r))) keep.add(at);
+  }
+  return chars.map((c, i) => (keep.has(i) ? " " + c : c)).join("");
+}
+
+/**
+ * The name part of a line whose numbers were NOT used for a row (another reading at the same place): numeric
+ * tokens at either END of the line are its columns and are dropped; numbers INSIDE the name (sizes: «مسامير 5 سم»)
+ * stay. Nothing is added or corrected.
+ */
+export function bareName(text: string): string {
+  const tokens = normDigits(text.replace(DIR_MARKS, "")).replace(/[|[\]]/g, " ").split(/\s+/).filter(Boolean);
+  const numeric = (s: string) => /^[-+]?\d+(?:[.,]\d+)?%?$/.test(s);
+  while (tokens.length && numeric(tokens[0]!)) tokens.shift();
+  while (tokens.length && numeric(tokens[tokens.length - 1]!)) tokens.pop();
+  return tokens.join(" ").trim();
+}
 
 export function rowsFromPositioned(lines: readonly PositionedLine[], exponent = 2): PlacedRowsResult {
   const sourcesPresent = new Set(lines.map((l) => l.source));
@@ -205,7 +272,10 @@ export function rowsFromPositioned(lines: readonly PositionedLine[], exponent = 
       // line — letters, two or more numbers, at least one printed with decimals — that no relation explains
       // is listed for manual entry with its strip of the photo. Its digits are never repaired or guessed.
       const nums = numbersOf(line.text);
-      if (nums.length >= 2 && nums.some((x) => x.dec) && letters(line.text) >= 2) unexplainedRaw.push(line);
+      if (line.source !== "digits" && nums.length >= 2 && nums.some((x) => x.dec) && letters(line.text) >= 2) unexplainedRaw.push(line);
+      // Stage A, NO SILENT LOSS: the digits reading saw money at a place («3.25 13.00») where the other readings saw
+      // none with decimals («10 325 4 مفكبراغي»). The place is listed, not repaired.
+      else if (line.source === "digits" && nums.filter((x) => x.dec).length >= 2) unexplainedRaw.push(line);
       continue;
     }
     cands.push({ k: `${e.qty}|${e.price}|${e.total}`, e, line, name: nameOf(line.text, e.used) });
@@ -215,7 +285,12 @@ export function rowsFromPositioned(lines: readonly PositionedLine[], exponent = 
   interface Group { k: string; y: number; h: number; members: Cand[] }
   const groups: Group[] = [];
   for (const c of [...cands].sort((a, b) => a.line.y - b.line.y)) {
-    const g = groups.find((x) => x.k === c.k && Math.abs(x.y - c.line.y) <= tol);
+    // Stage A: the English-only reading sometimes returns ONE tall engine box over a printed row (73 px where the
+    // page's lines are 20 px — measured on a real delivery note), so its line and its word line of the same row
+    // land 24 px apart. A digits line therefore also joins a same-numbers row whose box it OVERLAPS.
+    const g = groups.find(
+      (x) => x.k === c.k && (Math.abs(x.y - c.line.y) <= tol || (c.line.source === "digits" && Math.abs(x.y - c.line.y) < (c.line.h + x.h) / 2)),
+    );
     if (g) {
       g.members.push(c);
       g.y = g.members.reduce((s, m) => s + m.line.y, 0) / g.members.length;
@@ -224,24 +299,58 @@ export function rowsFromPositioned(lines: readonly PositionedLine[], exponent = 
   }
   const rows: PlacedRow[] = groups.map((g, i) => {
     // The name: the engine's own line of the ORIGINAL photo first, then the one with most letters.
+    // Stage A: the English-only "digits" reading never names a row while another reading of it exists.
     const ranked = [...g.members].sort(
       (a, b) =>
+        Number(b.line.source !== "digits") - Number(a.line.source !== "digits") ||
         Number(b.line.kind === "engine") - Number(a.line.kind === "engine") ||
         Number(b.line.source === "original") - Number(a.line.source === "original") ||
         letters(b.name) - letters(a.name),
     );
     const best = ranked[0]!;
-    const names = [...new Set(g.members.map((m) => m.name.trim()).filter((n) => n && n !== best.name.trim()))];
+    // NAME READINGS of this row, best first: its members' names (never the digits reading's) and — only when
+    // those carry no name (the numbers were printed on their own engine line, or only the digits reading
+    // balanced them) — the lines of the other readings at the same place, column numbers removed (bareName).
+    const flat = (s: string) => s.replace(/\s+/g, "");
+    const memberNames = ranked
+      .filter((m) => m.line.source !== "digits" && letters(m.name) >= 2)
+      .map((m) => m.name.trim());
+    const placeNames = lines
+      .filter((l) => l.source !== "digits" && Math.abs(l.y - g.y) <= tol && letters(l.text) >= 2 && !g.members.some((m) => m.line === l))
+      .sort((a, b) => Number(b.kind === "engine") - Number(a.kind === "engine") || Number(b.source === "original") - Number(a.source === "original") || letters(b.text) - letters(a.text))
+      .map((l) => bareName(l.text))
+      .filter((n) => letters(n) >= 2);
+    // The place's other lines NAME the row only when its own readings carry no name; otherwise they only lend
+    // their spacing (respaced) and are offered as choices.
+    const readingsOfName = memberNames.length > 0 ? [...memberNames, ...placeNames] : placeNames;
+    let name = readingsOfName[0] ?? (best.line.source === "digits" ? "" : best.name);
+    for (const o of readingsOfName.slice(1)) name = respaced(name, o);
+    const names = [...new Set(readingsOfName.filter((n) => n && flat(n) !== flat(name)))];
+    // The printed second-language line UNDER the row (bilingual invoices: «Wall Switch 1 Gang» under «مفتاح كهرباء
+    // مفرد»): offered as one more choice, never chosen. Only an engine line of the photo with no money of its own,
+    // below this row and nearer to it than to any other row.
+    const below = lines
+      .filter((l) => l.source === "original" && l.kind === "engine" && l.y > g.y + tol && l.y <= g.y + typical * 2.5)
+      .filter((l) => letters(l.text) >= 3 && numbersOf(l.text).every((x) => !x.dec) && !explain(l.text))
+      .find((l) => !groups.some((o) => o !== g && Math.abs(o.y - l.y) < Math.abs(g.y - l.y)));
+    if (below) {
+      const text = below.text.replace(DIR_MARKS, "").replace(/\s+/g, " ").trim();
+      if (text && flat(text) !== flat(name) && !names.includes(text)) names.push(text);
+    }
     const sources = [...new Set(g.members.map((m) => m.line.source))];
     const warnings: RowWarning[] = [];
     // CONFLICT: another group at the same place with DIFFERENT numbers.
     if (groups.some((o) => o !== g && o.k !== g.k && Math.abs(o.y - g.y) <= tol)) warnings.push("CONFLICT");
-    if (sourcesPresent.size > 1 && sources.length < sourcesPresent.size) warnings.push("SINGLE_READING");
+    // SINGLE_READING is about the PHOTO readings (original / straightened). A row only the digits reading found
+    // is a single reading too: its numbers were seen once, and its name came from another line.
+    const photoPresent = [...sourcesPresent].filter((s) => s !== "digits").length;
+    const photoHere = sources.filter((s) => s !== "digits").length;
+    if (photoHere === 0 || (photoPresent > 1 && photoHere < photoPresent)) warnings.push("SINGLE_READING");
     if (best.e.rel !== "R1") warnings.push("NOT_PLAIN_ARITHMETIC");
     return {
       id: `row-${i + 1}`,
       rawText: best.line.text.trim(),
-      name: best.name,
+      name,
       quantityMilli: Math.round(best.e.qty * 1000),
       supplierPriceMinor: toMinor(best.e.price, exponent),
       lineTotalMinor: toMinor(best.e.total, exponent),
@@ -261,7 +370,16 @@ export function rowsFromPositioned(lines: readonly PositionedLine[], exponent = 
   for (const l of [...unexplainedRaw].sort((a, b) => a.y - b.y)) {
     if (rows.some((r) => Math.abs(r.y - l.y) <= tol)) continue;
     if (unexplained.some((u) => Math.abs(u.y - l.y) <= tol)) continue;
-    unexplained.push({ text: l.text.trim(), y: Math.round(l.y), h: Math.round(l.h) });
+    // What the operator reads beside the photo strip: the Arabic+English reading of the place when there is one
+    // (the digits reading's letters are not words), and the name read there.
+    const here = lines
+      .filter((o) => o.source !== "digits" && Math.abs(o.y - l.y) <= tol && letters(o.text) >= 2)
+      .sort((a, b) => Number(b.kind === "engine") - Number(a.kind === "engine") || Number(b.source === "original") - Number(a.source === "original") || letters(b.text) - letters(a.text));
+    const shown = l.source === "digits" ? (here[0] ?? l) : l;
+    const nameReadings = [shown, ...here.filter((o) => o !== shown)].map((o) => bareName(o.text)).filter((n) => letters(n) >= 2);
+    let name = nameReadings[0] ?? "";
+    for (const o of nameReadings.slice(1)) name = respaced(name, o);
+    unexplained.push({ text: shown.text.trim(), name, y: Math.round(l.y), h: Math.round(l.h) });
   }
   return { rows, unexplained };
 }

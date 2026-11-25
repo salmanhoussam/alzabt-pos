@@ -64,7 +64,7 @@ import { type SaleRecord, paymentStatusFor } from "../domain/sale";
 import { cleanPaymentReference } from "../domain/ledger";
 import type { TerminalConfig } from "../fixtures/terminal";
 import { toInvoiceViewDto } from "../shared/dto";
-import { confirmationDigest } from "../shared/invoiceConfirmation";
+import { CONFIRMATION_DIGEST_MAX, confirmationDigest } from "../shared/invoiceConfirmation";
 
 /** Where a reconciliation edit says it came from, in audit metadata. */
 /** 100% in basis points. A rate above this is refused, not clamped. */
@@ -231,6 +231,17 @@ interface InvoicePayment {
 }
 
 const REFERENCE_TAKEN_ON_ISSUE = /payment reference is already recorded/;
+
+/** M21: identity of the trusted, byte-exact R5 confirmation and the normalized payment request. */
+function confirmedRequestIdentity(confirmedDraft: string, onAccount: boolean, payment: InvoicePayment | null): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    confirmedDraft,
+    onAccount,
+    payment: payment === null ? null : { method: payment.method, reference: payment.whish?.reference ?? null },
+  });
+  return `v1:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
+}
 
 /** The header fields an operator may edit while a draft is open. */
 export interface InvoiceHeaderDraft {
@@ -865,6 +876,10 @@ export class InvoiceService {
   ): InvoiceView {
     const cashier = this.requireCashier();
     const instant = this.now();
+    if (options?.confirmedDraft !== undefined &&
+      (typeof options.confirmedDraft !== "string" || options.confirmedDraft.length === 0 || options.confirmedDraft.length > CONFIRMATION_DIGEST_MAX)) {
+      throw new DomainError("INVALID_INPUT", "The confirmation is malformed");
+    }
     // 🔴 ON ACCOUNT IS AN EXPLICIT ACT, never inferred from a linked customer or an unpaid balance.
     const onAccount = options?.issueOnAccount === true;
     const credit = onAccount ? this.requireCreditPort() : null;
@@ -921,11 +936,33 @@ export class InvoiceService {
     confirmedDraft?: string,
   ): InvoiceView {
     return this.deps.transact((): InvoiceView => {
-      if (credit) {
-        credit.requireLiveOwner();
-        // A repeat of a request that already committed (its response was lost): verify, never redo.
-        const existing = this.deps.invoices.findById(invoiceId);
-        if (existing && existing.status === "final") return this.verifiedAccountReplay(existing, credit, payment);
+      if (this.requireCashier().id !== cashier.id) {
+        throw new DomainError("NOT_LOGGED_IN", "The operator session changed before invoice finalization");
+      }
+      if (credit) credit.requireLiveOwner();
+      const existing = this.deps.invoices.findById(invoiceId);
+      if (existing && existing.status === "final") {
+        const stored = existing.confirmed_request_identity;
+        if (stored === null) {
+          // Historical or legacy-tokenless issuance: never invent proof of an earlier confirmation.
+          if (confirmedDraft !== undefined) {
+            throw new DomainError("INVOICE_CONFIRMATION_UNVERIFIABLE", "The original confirmation identity is unavailable; review the issued invoice");
+          }
+          if (credit) return this.verifiedAccountReplay(existing, credit, payment);
+          throw new DomainError("INVOICE_NOT_DRAFT", `Invoice ${existing.invoice_number} has been issued and cannot be changed`);
+        }
+        if (!/^v1:[0-9a-f]{64}$/.test(stored)) {
+          throw new DomainError("INVOICE_CONFIRMATION_UNVERIFIABLE", "The recorded confirmation identity cannot be verified");
+        }
+        if (confirmedDraft === undefined) {
+          throw new DomainError("INVOICE_CONFIRMATION_REQUIRED", "This issued invoice requires its original confirmation for a replay");
+        }
+        if (confirmedRequestIdentity(confirmedDraft, credit !== null, payment) !== stored) {
+          throw new DomainError("IDEMPOTENCY_CONFLICT", "The confirmation or payment differs from the issued invoice");
+        }
+        return credit
+          ? this.verifiedAccountReplay(existing, credit, payment)
+          : this.verifiedOrdinaryReplay(existing, payment);
       }
       // 1 · reread from the database; whatever the UI believed is irrelevant
       const invoice = this.requireDraft(invoiceId);
@@ -1006,12 +1043,22 @@ export class InvoiceService {
       //     A draft that never set one falls back to the shop setting, which is how it behaved
       //     before per-invoice tax existed.
       const tax = this.invoiceTax(invoice);
+      // A legacy NULL snapshot does not identify the effective company tax in the confirmation.
+      // A protected issue must have an explicit snapshot before it can issue with enabled tax.
+      if (confirmedDraft !== undefined && invoice.tax_snapshot_json === null && tax.enabled) {
+        throw new DomainError("INVOICE_TAX_CONFIRMATION_REQUIRED", "Set the invoice tax explicitly and confirm it again");
+      }
       const totals = computeInvoiceTotals(
         lineTotals,
         invoice.currency,
         tax,
         money(invoice.paid_minor, invoice.currency),
       );
+      if (confirmedDraft !== undefined && (totals.subtotal.minor !== invoice.subtotal_minor ||
+        totals.tax.minor !== invoice.tax_minor || totals.total.minor !== invoice.total_minor ||
+        totals.paid.minor !== invoice.paid_minor || totals.balanceDue.minor !== invoice.balance_due_minor)) {
+        throw new DomainError("INVOICE_CONFIRMATION_STALE", "The invoice totals changed after confirmation; check and confirm again");
+      }
 
       // 5c · INV-PARTIAL-DEBT — OPTION B (owner, DEC-35h): a part-paid invoice's remainder is ALWAYS a
       //      debt on a named customer's account. An untracked remainder is no longer possible for a
@@ -1091,6 +1138,7 @@ export class InvoiceService {
           issuerSnapshotJson,
           taxSnapshotJson,
           finalizedAt,
+          confirmedRequestIdentity: confirmedDraft === undefined ? null : confirmedRequestIdentity(confirmedDraft, credit !== null, payment),
         },
         instant,
       );
@@ -1239,6 +1287,38 @@ export class InvoiceService {
       throw new DomainError("IDEMPOTENCY_CONFLICT", "This invoice was already issued with a different payment");
     }
     return this.withPayment({ invoice, lines: this.deps.invoices.listLines(invoice.id) });
+  }
+
+  /** A protected ordinary replay has no account debt; re-check its recorded invoice sale before returning it. */
+  private verifiedOrdinaryReplay(invoice: InvoiceRow, payment: InvoicePayment | null): InvoiceView {
+    const sale = this.deps.sales.findByInvoiceId(invoice.id);
+    const lines = this.deps.invoices.listLines(invoice.id);
+    const paymentAgrees = !!sale && (payment === null
+      ? sale.paymentMethod === null && sale.externalPayment === null
+      : payment.method === "cash"
+        ? sale.paymentMethod === "cash" && sale.externalPayment === null
+        : sale.paymentMethod === "external" && sale.externalPayment?.provider === "whish" &&
+          sale.externalPayment.reference === payment.whish?.reference);
+    const rowsAgree = !!sale && sale.lines.length === lines.length && lines.every((line, i) => {
+      const row = sale.lines[i];
+      return !!row && row.invoiceLineId === line.id && row.lineNo === Number(line.line_no) &&
+        row.productId === line.product_id && row.productName === (line.description ?? "") &&
+        row.saleUnit === line.canonical_unit && row.unitLabel === line.unit_label &&
+        BigInt(row.quantityMilli) === line.quantity_milli && row.unitPrice.minor === line.unit_price_minor &&
+        row.lineTotal.minor === line.line_total_minor;
+    });
+    if (!sale || sale.sourceType !== "invoice" || sale.invoiceId !== invoice.id || sale.customerId !== null ||
+      sale.currency !== invoice.currency || sale.subtotal.minor !== invoice.subtotal_minor ||
+      sale.tax.minor !== invoice.tax_minor || sale.total.minor !== invoice.total_minor ||
+      sale.paid.minor !== invoice.paid_minor || sale.balanceDue.minor !== invoice.balance_due_minor ||
+      invoice.subtotal_minor + invoice.tax_minor !== invoice.total_minor ||
+      invoice.paid_minor < 0n || invoice.balance_due_minor < 0n ||
+      invoice.paid_minor + invoice.balance_due_minor !== invoice.total_minor ||
+      sale.paymentStatus !== paymentStatusFor(invoice.paid_minor, invoice.balance_due_minor) ||
+      !paymentAgrees || !rowsAgree) {
+      throw new DomainError("LEDGER_INTEGRITY", "The issued invoice and its sale could not be verified together");
+    }
+    return this.withPayment({ invoice, lines });
   }
 
   private createSaleForInvoice(

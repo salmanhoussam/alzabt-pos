@@ -83,15 +83,16 @@ describe("Photo Invoice UX — text (findings 4, 6, 7)", () => {
     }
     expect(readFailureText(new ApiError("INVALID_INPUT", "x")).ar).toContain("ليس صورة");
     // DEC-35zzzz: the GENERIC fallback used to put errorText() under the Arabic line and leave English EMPTY.
-    const secret = "Error: boom at C:\\Users\\x\\main.js:12 — شركة النور مورّد 4471";
+    // Newly authored synthetic sentinel: no customer or supplier name or real user path.
+    const secret = "Error: boom at C:\\SYNTHETIC-ONLY\\example.js:12 — نص تجريبي حصرا 6382";
     for (const e of [new ApiError("INTERNAL", secret), new ApiError("SOMETHING_NEW", secret), new Error(secret), "not an error", new ApiError("bad code!", secret)]) {
       const g = readFailureText(e);
       expect(g.ar).toMatch(/[\u0600-\u06FF]/);
       expect(g.en.length).toBeGreaterThan(20);
       expect(g.en).toMatch(/^[\x20-\x7E]+$/);
       expect(g.ar + g.en).not.toContain("boom");
-      expect(g.ar + g.en).not.toContain("main.js");
-      expect(g.ar + g.en).not.toContain("النور");
+      expect(g.ar + g.en).not.toContain("example.js");
+      expect(g.ar + g.en).not.toContain("تجريبي حصرا");
       expect(g.ar).toMatch(/رمز الخطأ: [A-Z_]+\)/);
       expect(g.en).toMatch(/error code: [A-Z_]+\)/);
     }
@@ -149,7 +150,9 @@ describe("Photo Invoice UX — decisions and practical entry (findings 5, 8)", (
   });
   it("handwritten: a photo-only start, one empty row with the cursor in it, Enter opens the next row", () => {
     expect(FLOW).toMatch(/data-testid="photo-flow-handwritten"/);
-    expect(FLOW).toMatch(/readInvoicePhoto\(mode === "read" \? undefined : \{ mode \}\)/);
+    // TRANSITION (DEC-35z16 PILOT): the same call now also carries a queued phone photo when there is one;
+    // the picker path is unchanged. Old assertion: readInvoicePhoto(mode === "read" ? undefined : { mode }).
+    expect(FLOW).toMatch(/readInvoicePhoto\(phoneInvoice \? \{ mode, phoneInvoice \} : mode === "read" \? undefined : \{ mode \}\)/);
     expect(REVIEW).toMatch(/mode === "photo-only" && extracted\.length === 0 \? \[manualRow\(\)\]/);
     expect(REVIEW).toMatch(/if \(at === rows\.length - 1\) addManual\(null, ""\)/);
   });

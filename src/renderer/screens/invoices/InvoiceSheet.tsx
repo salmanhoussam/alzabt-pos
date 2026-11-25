@@ -34,7 +34,7 @@ import { isTypedTaxRateUnsaved } from "./taxRateDirty";
 import { classifyFlushFailure } from "./flushOutcome";
 import { accountPrefill } from "./accountPrefill";
 import { claimModal, focusedControl, openSheetModals, useModalFocus, type SheetModal } from "./sheetModal";
-import { claimAppModal, releaseAppModal } from "../../appModal";
+import { appModalOwner, claimAppModal, releaseAppModal, useAppModalOwner } from "../../appModal";
 import { confirmationDigest } from "../../../shared/invoiceConfirmation";
 import {
   createFailureLedger,
@@ -148,6 +148,10 @@ function percentText(basisPoints: number): string {
   return `${whole}.${String(frac).padStart(2, "0").replace(/0$/, "")}`;
 }
 
+// A renderer remount is not proof that an unanswered Main operation has settled.
+// Keep the per-invoice lock for this renderer session; a confirmed final read resolves it.
+const unknownIssueOutcomes = new Set<string>();
+
 export function InvoiceSheet({
   invoiceId,
   onReviewNow,
@@ -206,6 +210,14 @@ export function InvoiceSheet({
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [printNotice, setPrintNotice] = useState<string | null>(null);
+
+  // An issue refusal belongs to the issue attempt, not to a later unrelated field save.
+  // It is cleared only when a newly prepared confirmation is actually opened.
+  const [issueRefusal, setIssueRefusal] = useState<string | null>(() =>
+    unknownIssueOutcomes.has(invoiceId) ? t("inv.sheet.issueOutcomeUnknown") : null,
+  );
+  const [issueOutcomeUncertain, setIssueOutcomeUncertain] = useState(() => unknownIssueOutcomes.has(invoiceId));
+  const preparingIssue = useRef(false);
   /** This document printed without its own archived logo. A warning, never an error — see below. */
   const [logoWarning, setLogoWarning] = useState(false);
   /**
@@ -260,6 +272,8 @@ export function InvoiceSheet({
   const [operating, setOperating] = useState(false);
   /** The app-level owner id this sheet claims while any of its dialogs, or its issue, owns interaction. */
   const appOwnerId = `invoice:${invoiceId}`;
+  const activeAppOwner = useAppModalOwner();
+  const externalOwner = () => appModalOwner() !== null && appModalOwner() !== appOwnerId;
   /**
    * Opens `kind` only when nothing else owns interaction — no other dialog, no issue in flight, and no operator action
    * still waiting or running (`queue.acting`), unless the opener IS that action (`insideAction`: the confirmation from
@@ -272,7 +286,7 @@ export function InvoiceSheet({
     opener: HTMLElement | null = focusedControl(),
     insideAction = false,
   ): boolean => {
-    if (operatingRef.current || (!insideAction && queue.acting)) {
+    if (externalOwner() || operatingRef.current || (!insideAction && queue.acting)) {
       setError(t("inv.sheet.actionPending"));
       return false;
     }
@@ -323,7 +337,14 @@ export function InvoiceSheet({
 
   useEffect(() => {
     call(pos().getInvoice({ invoiceId }))
-      .then(setView)
+      .then((next) => {
+        if (next.invoice.status === "final") {
+          unknownIssueOutcomes.delete(invoiceId);
+          setIssueOutcomeUncertain(false);
+          setIssueRefusal(null);
+        }
+        setView(next);
+      })
       .catch((e) => setError(errorText(e)));
     call(pos().listProducts())
       .then(setProducts)
@@ -472,8 +493,8 @@ export function InvoiceSheet({
   ): Promise<boolean> => {
     // R5 (Abu Abbas F2): a write REQUESTED while a dialog owns the sheet is refused, not queued. The typed value stays
     // on screen and every action's own flush re-sends it. A save requested before the dialog opened runs as accepted.
-    if (!dialogAllows(by)) {
-      setError(t("inv.sheet.modalOpen"));
+    if (externalOwner() || operatingRef.current || preparingIssue.current || !dialogAllows(by)) {
+      setError(t(operatingRef.current || preparingIssue.current ? "inv.sheet.actionPending" : "inv.sheet.modalOpen"));
       return Promise.resolve(false);
     }
     return queue.save(async () => {
@@ -594,17 +615,20 @@ export function InvoiceSheet({
    * dispatched click on a control behind an open dialog (delete, add row, save, leave, unlink…) changes nothing.
    * `by` names the dialog an action comes from; the background passes nothing.
    */
-  const act = (op: () => Promise<void> | void, by: SheetModal | null = null) => {
-    if (!dialogAllows(by)) {
-      setError(t("inv.sheet.modalOpen"));
+  const act = (op: () => Promise<void> | void, by: SheetModal | null = null, preparing = false) => {
+    if (externalOwner() || operatingRef.current || preparingIssue.current || !dialogAllows(by)) {
+      setError(t(operatingRef.current || preparingIssue.current ? "inv.sheet.actionPending" : "inv.sheet.modalOpen"));
       return;
     }
+    if (preparing && queue.acting) return;
+    if (preparing) preparingIssue.current = true;
     void queue
       .action(async () => {
-        if (!dialogAllows(by)) throw new Error(t("inv.sheet.modalOpen"));
+        if (externalOwner() || !dialogAllows(by)) throw new Error(t("inv.sheet.modalOpen"));
         await op();
       })
-      .catch((e) => setError(errorText(e)));
+      .catch((e) => setError(errorText(e)))
+      .finally(() => { if (preparing) preparingIssue.current = false; });
   };
 
   const header = (patch: InvoiceHeaderPatch) =>
@@ -932,6 +956,10 @@ export function InvoiceSheet({
   const accountErrorText = (e: unknown): string => {
     // R5: the service found the persisted draft different from the confirmation — the same sentence as the sheet's own.
     if (e instanceof ApiError && e.code === "INVOICE_CONFIRMATION_STALE") return t("inv.sheet.confirmStale");
+    if (e instanceof ApiError && e.code === "INVOICE_CONFIRMATION_REQUIRED") return t("inv.sheet.confirmIdentityRequired");
+    if (e instanceof ApiError && e.code === "INVOICE_CONFIRMATION_UNVERIFIABLE") return t("inv.sheet.confirmIdentityUnavailable");
+    if (e instanceof ApiError && e.code === "INVOICE_TAX_CONFIRMATION_REQUIRED") return t("inv.sheet.confirmTaxExplicit");
+    if (e instanceof ApiError && e.code === "IDEMPOTENCY_CONFLICT") return t("inv.sheet.confirmIdentityConflict");
     // INV-PAY-METHOD: the method step's own sentences (text follows the operation).
     if (e instanceof ApiError && PAY_ERROR_KEY[e.code]) return t(PAY_ERROR_KEY[e.code]!);
     if (e instanceof ApiError && e.code.startsWith("CREDIT_")) {
@@ -1000,6 +1028,8 @@ export function InvoiceSheet({
   };
 
   const prepareFinalize = async () => {
+    // A lost/ambiguous answer needs a fresh read of the invoice, not a second issue from this sheet.
+    if (issueOutcomeUncertain) return;
     // R4: «إصدار» itself, taken NOW — it is disabled while the flushes below run, which takes its focus away.
     const issueButton = focusedControl();
     // R4: the issue confirmation never opens while another dialog is open (it would sit under or over it).
@@ -1066,6 +1096,7 @@ export function InvoiceSheet({
       confirmedFigures.current = storedView ? confirmationDigest(storedView, issueOnAccount) : null;
       // R4: re-checked at the moment of opening — a dialog opened while the flushes above ran wins, this refuses.
       if (!openModal("confirm", () => setConfirming(true), issueButton, true)) return;
+      setIssueRefusal(null);
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -1115,6 +1146,7 @@ export function InvoiceSheet({
     claimAppModal(appOwnerId);
     setBusy(true);
     setError(null);
+    let issueRequestStarted = false;
     try {
       // 🔴 FLUSH FIRST, AND AWAIT IT. A field the operator typed but never blurred — the commonest
       // case being the last field they touched before reaching for Finalize — would otherwise be
@@ -1153,7 +1185,7 @@ export function InvoiceSheet({
         confirmedFigures.current === null ||
         confirmationDigest(freshStored, issueOnAccount) !== confirmedFigures.current
       ) {
-        setError(t("inv.sheet.confirmStale"));
+        setIssueRefusal(t("inv.sheet.confirmStale"));
         return;
       }
       // Never silently downgrade a checked on-account instruction to an ordinary unpaid invoice.
@@ -1177,6 +1209,7 @@ export function InvoiceSheet({
       // R3: from here until the answer, the paid amount is fixed text — nothing on screen can differ from what is sent.
       setIssuing(true);
       try {
+        issueRequestStarted = true;
         next = await call(
           pos().finalizeInvoice({
             invoiceId,
@@ -1196,7 +1229,8 @@ export function InvoiceSheet({
         try {
           next = await call(pos().finalizeInvoice({ invoiceId, issueOnAccount: true, ...paymentPart, confirmedDraft }));
         } catch (again) {
-          if (again instanceof ApiError && again.code.startsWith("CREDIT_")) throw again;
+          if (again instanceof ApiError && (again.code.startsWith("CREDIT_") || again.code === "INVOICE_CONFIRMATION_REQUIRED" ||
+            again.code === "INVOICE_CONFIRMATION_UNVERIFIABLE" || again.code === "INVOICE_TAX_CONFIRMATION_REQUIRED" || again.code === "IDEMPOTENCY_CONFLICT")) throw again;
           throw new Error(t("inv.account.unknown"));
         }
       }
@@ -1208,7 +1242,13 @@ export function InvoiceSheet({
         onAccountOf: account ? (linkedName ?? undefined) : undefined,
       });
     } catch (e) {
-      setError(accountErrorText(e));
+      const uncertain = issueRequestStarted &&
+        (!(e instanceof ApiError) || e.code === "INVOICE_STATUS_UNKNOWN" || e.code === "INTERNAL" || e.code === "INVOICE_FINALIZED");
+      setIssueRefusal(uncertain ? t("inv.sheet.issueOutcomeUnknown") : accountErrorText(e));
+      if (uncertain) {
+        unknownIssueOutcomes.add(invoiceId);
+        setIssueOutcomeUncertain(true);
+      }
     } finally {
       operatingRef.current = false;
       setOperating(false);
@@ -1255,7 +1295,7 @@ export function InvoiceSheet({
 
   if (!view) return <div className="center muted">{error ?? "…"}</div>;
   /** F2-5-R2: the newest action error, else the newest header refusal that is still unresolved. */
-  const shownError = error ?? unresolvedFailure();
+  const shownError = [issueRefusal, error ?? unresolvedFailure()].filter(Boolean).join(" ") || null;
 
   /** L-R2: does this line show any value that is not stored? */
   const lineHasUnsaved = (line: InvoiceLineDto): boolean => saveFailures.keysWithPrefix(`line:${line.id}:`).length > 0;
@@ -1306,7 +1346,7 @@ export function InvoiceSheet({
   };
 
   return (
-    <div className="inv-sheet" ref={sheetRef}>
+    <div className="inv-sheet" ref={sheetRef} inert={activeAppOwner !== null && activeAppOwner !== appOwnerId}>
       <header className="inv-sheet-head" inert={modalOpen}>
         <div className="inv-issuer">
           <strong data-testid="sheet-issuer">{inv.issuer?.nameAr ?? t("inv.company.title")}</strong>
@@ -1333,7 +1373,7 @@ export function InvoiceSheet({
               type="date"
               dir="ltr"
               value={inv.invoiceDate ?? ""}
-              disabled={readOnly}
+              disabled={readOnly || busy}
               ref={bind("invoiceDate")}
               onChange={(e) => void header({ invoiceDate: e.target.value === "" ? null : e.target.value })}
               data-testid="sheet-date"
@@ -1443,6 +1483,7 @@ export function InvoiceSheet({
             <input
               type="checkbox"
               checked={taxOn}
+              disabled={busy}
               onChange={(e) => void applyTax(e.target.checked, taxRate)}
               data-testid="tax-enabled"
             />
@@ -1848,7 +1889,7 @@ export function InvoiceSheet({
           <>
             <button
               className="btn primary"
-              onClick={() => act(prepareFinalize)}
+              onClick={() => act(prepareFinalize, null, true)}
               // An invoice whose only rows are still unsaved is finalizable: finalize flushes them
               // first. What it refuses is an INCOMPLETE row, and it says so.
               disabled={busy || (view.lines.length === 0 && !draftRows.some((r) => !rowBlank(r.line)))}

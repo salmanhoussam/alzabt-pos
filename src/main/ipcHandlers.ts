@@ -183,6 +183,15 @@ export interface IpcHandlerOptions {
    * the owner check into main, where the listener could not re-use it.
    */
   readonly phoneSessions?: PhoneSessionBridge;
+  /**
+   * DEC-35z16 (PILOT): the queue of supplier-invoice photos staged by INVOICE_BATCH phone sessions.
+   * Absent means both queue channels answer NOT_AVAILABLE. It lists and releases files; it never
+   * writes a ledger row — the review that follows is the existing Photo Invoice flow.
+   */
+  readonly phoneInvoices?: {
+    readonly list: () => readonly import("../shared/ipcContract").PhoneInvoiceQueueItemDto[];
+    readonly release: (batchId: string, id: string, why: "reviewed" | "discarded") => boolean;
+  };
   /** Version/build identity of this installation. */
   readonly appInfo?: () => AppInfoDto;
   /** Read-only routing hint; absence must not grant setup authority. */
@@ -223,11 +232,16 @@ export interface IpcHandlerOptions {
    * Absent (tests, headless) answers "unavailable". It never writes anything.
    */
   /** `photo-only` (handwritten invoices): show the photo for manual entry, no OCR. */
-  readonly readInvoicePhoto?: (mode: "read" | "photo-only") => Promise<{
+  readonly readInvoicePhoto?: (
+    mode: "read" | "photo-only",
+    phoneInvoice?: { readonly batchId: string; readonly id: string },
+    orient?: { readonly quarterTurns?: number; readonly reuseLast?: boolean },
+  ) => Promise<{
     readonly lines: readonly PositionedLine[];
     readonly ms: number;
     readonly preview: string | null;
     readonly crop: (y: number, h: number) => string | null;
+    readonly orientation?: { readonly exif: number; readonly quarterTurns: number };
   } | null>;
   /**
    * Native photo picker for a product. Main shows the dialog, reads the file and NORMALIZES it
@@ -807,9 +821,9 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
    * token may create a product or touch an existing one, so a third value must be refused here
    * rather than reaching the session as something `switch` quietly ignores.
    */
-  function phoneAction(value: unknown): "NEW_PRODUCT" | "EDIT_PRODUCT" {
-    if (value !== "NEW_PRODUCT" && value !== "EDIT_PRODUCT") {
-      invalid("'action' must be NEW_PRODUCT or EDIT_PRODUCT");
+  function phoneAction(value: unknown): "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION" {
+    if (value !== "NEW_PRODUCT" && value !== "EDIT_PRODUCT" && value !== "INVOICE_BATCH" && value !== "COMPANION") {
+      invalid("'action' must be NEW_PRODUCT, EDIT_PRODUCT, INVOICE_BATCH or COMPANION");
     }
     return value;
   }
@@ -2081,15 +2095,28 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
     readInvoicePhoto: wrapAsync("readInvoicePhoto", async (p) => {
       // OCR-REVIEW-UX: an optional { mode } — absent = "read" (unchanged); "photo-only" = the photo beside manual rows.
       let mode: "read" | "photo-only" = "read";
+      let phoneInvoice: { batchId: string; id: string } | undefined;
+      const orient: { quarterTurns?: number; reuseLast?: boolean } = {};
       if (p !== undefined && p !== null) {
-        const o = objectWithOptional(p, [], ["mode"]);
+        const o = objectWithOptional(p, [], ["mode", "phoneInvoice", "quarterTurns", "reuseLast"]);
+        // PHONE-INVOICE-ORIENTATION-01: an operator rotation (0..3 clockwise quarter-turns) and "read the same file again".
+        if ("quarterTurns" in o && o.quarterTurns !== undefined) {
+          if (typeof o.quarterTurns !== "number" || !Number.isInteger(o.quarterTurns) || o.quarterTurns < 0 || o.quarterTurns > 3) invalid("'quarterTurns' must be 0, 1, 2 or 3");
+          orient.quarterTurns = o.quarterTurns;
+        }
+        if ("reuseLast" in o && o.reuseLast !== undefined) {
+          if (typeof o.reuseLast !== "boolean") invalid("'reuseLast' must be a boolean");
+          orient.reuseLast = o.reuseLast;
+        }
         if ("mode" in o && o.mode !== "read" && o.mode !== "photo-only") invalid("'mode' must be read or photo-only");
         if (o.mode === "photo-only") mode = "photo-only";
+        // DEC-35z16: a staged phone photo instead of the file picker. Ids only — main resolves the file.
+        if ("phoneInvoice" in o && o.phoneInvoice !== undefined) phoneInvoice = phoneInvoiceRef(o.phoneInvoice);
       }
       if (!options.readInvoicePhoto) return { status: "unavailable" as const };
       let reading: Awaited<ReturnType<NonNullable<IpcHandlerOptions["readInvoicePhoto"]>>>;
       try {
-        reading = await options.readInvoicePhoto(mode);
+        reading = await options.readInvoicePhoto(mode, phoneInvoice, orient);
       } catch (e) {
         // DEC-35zzzz: a REFUSED reading (not an image, OCR failed) is logged here with its code and the engine's
         // short reason — the screen shows only a bilingual sentence and the code. Unexpected faults are logged by
@@ -2104,7 +2131,7 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
       // too small against the domain, the review screen (`formatDecimal`) and the catalog prices it is compared with.
       const exponent = currencyExponent(currency);
       const r = rowsFromPositioned(reading.lines, exponent);
-      log.info("invoice-photo-read", { mode, rows: r.rows.length, unexplained: r.unexplained.length, ms: reading.ms });
+      log.info("invoice-photo-read", { mode, source: phoneInvoice ? "phone" : "picker", exif: reading.orientation?.exif ?? 1, quarterTurns: reading.orientation?.quarterTurns ?? 0, rows: r.rows.length, unexplained: r.unexplained.length, ms: reading.ms });
       return {
         status: "read" as const,
         mode,
@@ -2125,12 +2152,36 @@ export function createIpcHandlers(service: PosService, options: IpcHandlerOption
           alternativeNames: x.alternativeNames,
           warnings: x.warnings,
         })),
-        unexplained: r.unexplained.map((u) => ({ text: u.text, y: u.y, crop: reading.crop(u.y, u.h) })),
+        unexplained: r.unexplained.map((u) => ({ text: u.text, name: u.name, y: u.y, crop: reading.crop(u.y, u.h) })),
         ms: reading.ms,
         preview: reading.preview,
+        ...(reading.orientation ? { orientation: reading.orientation } : {}),
       };
     }),
+    // DEC-35z16 (PILOT): the phone-invoice queue. Lists and releases staged FILES; no ledger write.
+    listPhoneInvoices: wrap("listPhoneInvoices", (p) => {
+      noPayload(p);
+      if (!options.phoneInvoices) throw new DomainError("NOT_AVAILABLE", "Supplier invoices from a phone are not available on this terminal");
+      return options.phoneInvoices.list();
+    }),
+    releasePhoneInvoice: wrap("releasePhoneInvoice", (p) => {
+      const o = objectWithOptional(p, ["batchId", "id", "why"], []);
+      const ref = phoneInvoiceRef({ batchId: o.batchId, id: o.id });
+      if (o.why !== "reviewed" && o.why !== "discarded") invalid("'why' must be reviewed or discarded");
+      if (!options.phoneInvoices) throw new DomainError("NOT_AVAILABLE", "Supplier invoices from a phone are not available on this terminal");
+      const released = options.phoneInvoices.release(ref.batchId, ref.id, o.why);
+      log.info("phone-invoice-queue-release", { why: o.why, released });
+      return { released };
+    }),
   };
+
+  /** DEC-35z16: two server-made 32-hex ids, checked before they can ever name a file. */
+  function phoneInvoiceRef(v: unknown): { batchId: string; id: string } {
+    const o = objectWithOptional(v, ["batchId", "id"], []);
+    if (typeof o.batchId !== "string" || !/^[0-9a-f]{32}$/.test(o.batchId)) invalid("'batchId' must be 32 lower-case hex");
+    if (typeof o.id !== "string" || !/^[0-9a-f]{32}$/.test(o.id)) invalid("'id' must be 32 lower-case hex");
+    return { batchId: o.batchId, id: o.id };
+  }
 
   function saleReceipts(): SaleReceiptService {
     if (!options.saleReceipts) throw new DomainError("NOT_AVAILABLE", "Receipts are not available on this terminal");

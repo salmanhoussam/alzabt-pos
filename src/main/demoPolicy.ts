@@ -122,6 +122,11 @@ export const DEMO_CHANNEL_POLICY = Object.freeze({
   printSaleReceipt: "allow",
   saveSaleReceiptPdf: "deny",
   readInvoicePhoto: "deny",
+  // M1 integration (R5 × Phone Invoice, 2026-11-25): the phone-invoice queue arrived after the Demo table was written.
+  // Denied like every other phone channel above (startPhoneSession, phoneSessionState): the Demo never stages or
+  // releases a real supplier photo.
+  listPhoneInvoices: "deny",
+  releasePhoneInvoice: "deny",
 } satisfies Readonly<Record<ChannelName, DemoDecision>>);
 
 export function isDemoChannelAllowed(name: string): boolean {

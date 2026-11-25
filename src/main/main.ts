@@ -15,6 +15,8 @@ import { PosService, startupCatalog } from "../application/posService";
 import { PHOTO_EXTENSIONS, createProductPhotoPicker, electronCodec } from "./productPhoto";
 import { writeOnlineCatalogPackage, type PackageFs } from "./onlineCatalogPackage";
 import { PhoneSessionBridge } from "./phoneSessionBridge";
+import { PhoneInvoiceStaging } from "./phoneInvoiceStaging";
+import { uprightForReading, uprightThumbnail } from "./invoiceOrientation";
 import { decodeBarcodePhoto } from "./phoneBarcode";
 import { assertStorable, normalizeProductPhoto } from "./photoNormalize";
 import type { OnlineCatalogSnapshot } from "../application/posService";
@@ -112,9 +114,18 @@ let log: Logger = nullLogger;
 let posService: PosService | null = null;
 let syntheticEnvironment: ReturnType<typeof import("./demoDevEntry").openSyntheticDevEnvironment> | null = null;
 
+/**
+ * DEC-35z16 (PILOT): staged supplier-invoice photos from the phone, under `<userData>/phone-invoices`.
+ * Created by `startTill` (it needs the profile path) and read through a getter, like the service.
+ */
+let phoneInvoiceStaging: PhoneInvoiceStaging | null = null;
+
 const phoneSessions = new PhoneSessionBridge({
   get service() {
     return posService ?? undefined;
+  },
+  get invoiceStaging() {
+    return phoneInvoiceStaging ?? undefined;
   },
   /**
    * 🔴 SLICE F'S PIPELINE, VERBATIM — the same two calls `createProductPhotoPicker` makes for a
@@ -975,6 +986,25 @@ function startSyntheticTill(selected: import("./demoRuntime").SelectedDemoStart)
 function startTill(): void {
   const userData = app.getPath("userData");
   const backupDir = join(userData, BACKUP_DIR_NAME);
+  // DEC-35z16 (PILOT): the phone-invoice staging folder, and the crash/restart recovery of any batch
+  // a session left open (kept as `incomplete`, never dropped). Counts only are logged.
+  try {
+    phoneInvoiceStaging = new PhoneInvoiceStaging(join(userData, "phone-invoices"), {
+      decodes: (bytes) => {
+        const img = nativeImage.createFromBuffer(bytes);
+        if (img.isEmpty()) return false;
+        const { width, height } = img.getSize();
+        return width > 0 && height > 0 && width * height <= 80_000_000;
+      },
+      logger: log,
+    });
+    phoneInvoiceStaging.recover();
+    // A reading copy left by a crash mid-reading is removed (it is only ever a temporary upright copy).
+    rmSync(join(userData, "reading-tmp"), { recursive: true, force: true });
+  } catch (err) {
+    phoneInvoiceStaging = null;
+    log.error("phone-invoice-staging-unavailable", { error: err });
+  }
   // 🔴 FIRST, before planLedgerOpen and before any SQLite connection exists in this process: the
   // only moment a ledger file may be replaced. `halted` throws RestoreHaltedError → failStartup, so
   // the till, its services and the phone bridge's service never come up on an undecided profile.
@@ -1085,15 +1115,41 @@ function startTill(): void {
     saveCollectionReceiptPdf: saveCollectionPdfFile,
     pickInvoiceLogo,
     // PHOTO-INVOICE-TO-ITEMS: picker + OFFLINE OCR in main; returns lines only, writes nothing.
-    readInvoicePhoto: async (mode) => {
-      if (!mainWindow) return null;
-      const picked = dialog.showOpenDialogSync(mainWindow, {
-        title: "Choose a supplier invoice photo",
-        properties: ["openFile"],
-        filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png"] }],
-      });
-      if (!picked?.[0]) return null;
-      return mode === "photo-only" ? loadInvoicePhoto(picked[0]) : readInvoiceImage(picked[0], userData);
+    readInvoicePhoto: async (mode, phoneInvoice, orient) => {
+      // DEC-35z16: a photo from the phone-invoice queue goes through the SAME readers as a picked file.
+      // PHONE-INVOICE-ORIENTATION-01: every source is read UPRIGHT — its EXIF orientation applied, then
+      // the operator's quarter-turns — from a private copy deleted right after the reading.
+      let file: string;
+      let turns = orient?.quarterTurns;
+      if (phoneInvoice) {
+        if (!phoneInvoiceStaging) throw new DomainError("NOT_AVAILABLE", "Supplier invoices from a phone are not available on this terminal");
+        file = phoneInvoiceStaging.pathOf(phoneInvoice.batchId, phoneInvoice.id);
+        // A rotation is remembered for THIS invoice; without one, its saved rotation is used.
+        if (turns === undefined) turns = phoneInvoiceStaging.turnsOf(phoneInvoice.batchId, phoneInvoice.id);
+        else phoneInvoiceStaging.setTurns(phoneInvoice.batchId, phoneInvoice.id, turns);
+      } else {
+        if (!mainWindow) return null;
+        const picked = dialog.showOpenDialogSync(mainWindow, {
+          title: "Choose a supplier invoice photo",
+          properties: ["openFile"],
+          filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png"] }],
+        });
+        if (!picked?.[0]) return null;
+        file = picked[0];
+      }
+      const up = uprightForReading(readFileSync(file), turns ?? 0, electronCodec(nativeImage));
+      const read = (path: string) => (mode === "photo-only" ? loadInvoicePhoto(path) : readInvoiceImage(path, userData));
+      const orientation = { exif: up.exifOrientation, quarterTurns: up.turns };
+      if (!up.jpeg) return { ...(await read(file)), orientation };
+      const dir = join(userData, "reading-tmp");
+      mkdirSync(dir, { recursive: true });
+      const copy = join(dir, `${randomBytes(12).toString("hex")}.jpg`);
+      writeFileSync(copy, up.jpeg);
+      try {
+        return { ...(await read(copy)), orientation };
+      } finally {
+        rmSync(copy, { force: true });
+      }
     },
     pickProductPhoto,
     printInvoice: printInvoiceDocument,
@@ -1135,6 +1191,33 @@ function startTill(): void {
     // one. Created unconditionally because a till with a window can always serve a phone — the
     // refusal, when there is no network, comes from the address selection with a real sentence.
     phoneSessions: phoneSessions,
+    // DEC-35z16 (PILOT): the queue lists and releases staged FILES; thumbnails are made here, small.
+    phoneInvoices: phoneInvoiceStaging
+      ? {
+          list: () =>
+            phoneInvoiceStaging!.pending().map((p) => {
+              let thumbnail: string | null = null;
+              try {
+                // PHONE-INVOICE-ORIENTATION-01: upright (EXIF + this invoice's saved turns), shrunk before turning.
+                const jpeg = uprightThumbnail(readFileSync(phoneInvoiceStaging!.pathOf(p.batchId, p.id)), p.quarterTurns, electronCodec(nativeImage));
+                if (jpeg) thumbnail = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+              } catch {
+                thumbnail = null;
+              }
+              return {
+                batchId: p.batchId,
+                id: p.id,
+                bytes: p.bytes,
+                receivedAt: new Date(p.receivedAtMs).toISOString(),
+                batchStatus: p.batchStatus,
+                stale: p.stale,
+                thumbnail,
+                quarterTurns: p.quarterTurns,
+              };
+            }),
+          release: (batchId, id, why) => phoneInvoiceStaging!.release(batchId, id, why),
+        }
+      : undefined,
     appInfo: () => ({ version: BUILD_INFO.version, build: BUILD_INFO.build }),
     entryState: () => {
       const state = readRealEntryState(
@@ -1202,6 +1285,7 @@ function startTill(): void {
   });
   console.info("[pos] auto-start:", JSON.stringify(autoStart));
   log.info("auto-start", { ...autoStart });
+
 }
 
 function failStartup(err: unknown): void {

@@ -142,6 +142,9 @@ export const CHANNELS = {
   printSaleReceipt: "pos:printSaleReceipt",
   saveSaleReceiptPdf: "pos:saveSaleReceiptPdf",
   readInvoicePhoto: "pos:readInvoicePhoto",
+  // DEC-35z16 (PILOT): the queue of supplier-invoice photos sent from the phone, waiting for review.
+  listPhoneInvoices: "pos:listPhoneInvoices",
+  releasePhoneInvoice: "pos:releasePhoneInvoice",
 } as const;
 
 export type ChannelName = keyof typeof CHANNELS;
@@ -704,7 +707,8 @@ export interface CategoryDto {
  * cannot widen the surface or weaken the credential.
  */
 export interface StartPhoneSessionRequest {
-  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  /** DEC-35z17: "COMPANION" = the one «من الهاتف» button; the phone chooses product or invoices. */
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION";
   readonly productId?: string | null;
 }
 
@@ -729,7 +733,7 @@ export interface LanCandidateDto {
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
 export interface PhoneSessionDto {
-  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION";
   readonly host: string;
   readonly port: number;
   /** ISO-8601. The desktop counts down from this rather than inventing its own ten minutes. */
@@ -759,6 +763,25 @@ export interface PhoneSessionDto {
  * stays inside the QR symbol.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+/** DEC-35z16 (PILOT): one staged phone invoice, named by the ids the till assigned. */
+export interface PhoneInvoiceRef {
+  readonly batchId: string;
+  readonly id: string;
+}
+
+export interface PhoneInvoiceQueueItemDto extends PhoneInvoiceRef {
+  readonly bytes: number;
+  readonly receivedAt: string;
+  /** "incomplete": the phone never pressed «إنهاء» (timeout / cancel / app closed). Still reviewable. */
+  readonly batchStatus: "ready" | "incomplete";
+  /** Waiting longer than 14 days. Flagged, never deleted automatically. */
+  readonly stale: boolean;
+  /** A small JPEG data URL made by main for the list. Null if the photo could not be decoded. */
+  readonly thumbnail: string | null;
+  /** PHONE-INVOICE-ORIENTATION-01: this invoice's saved clockwise quarter-turns (0..3). */
+  readonly quarterTurns: number;
+}
+
 export interface PhoneSessionState {
   /**
    * `waiting` — open, no phone has scanned yet.
@@ -766,9 +789,12 @@ export interface PhoneSessionState {
    * `saved`   — a product was saved; `savedProductId` names it. Reported once.
    * `closed`  — nothing open (cancelled, expired, or never started).
    */
-  readonly state: "waiting" | "claimed" | "saved" | "closed";
+  readonly state: "waiting" | "claimed" | "saved" | "closed" | "batch_ready";
   readonly savedProductId: string | null;
-  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | null;
+  /** DEC-35z17: "COMPANION" while the phone has not chosen yet; then the purpose it locked. */
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION" | null;
+  /** DEC-35z16: INVOICE_BATCH only — photos received so far (live), or in the batch that just ended (once). */
+  readonly invoiceCount?: number;
   /** ISO-8601 while the session is live, so the dialog counts down from the real deadline. */
   readonly expiresAt: string | null;
   readonly claimed: boolean;
@@ -1575,8 +1601,10 @@ export interface FinalizeInvoiceRequest {
   /**
    * R5 (Abu Abbas F3): what the issue confirmation SHOWED — `confirmationDigest(view, issueOnAccount)` of the view on
    * screen. When present, the service recomputes it from the persisted draft inside the finalize transaction and
-   * refuses with INVOICE_CONFIRMATION_STALE on any difference, before a number, sale or payment is written. Optional,
-   * so every earlier caller keeps its exact behaviour.
+   * refuses with INVOICE_CONFIRMATION_STALE on any difference, before a number, sale or payment is written.
+   * M21 binds protected issuance to a durable identity of this confirmation and payment. A replay of a protected
+   * invoice requires the matching confirmation; a confirmed replay of a historical NULL identity is unverifiable.
+   * The field remains optional for legacy first issuance and the existing unverified legacy on-account replay.
    */
   readonly confirmedDraft?: string;
 }
@@ -1956,11 +1984,27 @@ export type ReadInvoicePhotoResponse =
       readonly currency: string;
       readonly rows: readonly InvoicePhotoRowDto[];
       /** Lines with amounts that no relation explained: for manual entry from the photo (with their crop). */
-      readonly unexplained: ReadonlyArray<{ readonly text: string; readonly y: number; readonly crop: string | null }>;
+      /** Stage A: `name` = the name read at that place (prefills a manual row; never a number). */
+      readonly unexplained: ReadonlyArray<{ readonly text: string; readonly name: string; readonly y: number; readonly crop: string | null }>;
       readonly ms: number;
       /** The photo itself (JPEG data URL) shown beside the rows. */
       readonly preview: string | null;
+      /**
+       * PHONE-INVOICE-ORIENTATION-01: what was applied to make the photo upright — the photo's own EXIF
+       * orientation (1 = none) and the operator's clockwise quarter-turns (0..3).
+       */
+      readonly orientation?: { readonly exif: number; readonly quarterTurns: number };
     };
+
+/** PHONE-INVOICE-ORIENTATION-01: how a photo should be read. */
+export interface ReadInvoicePhotoRequest {
+  readonly mode: "read" | "photo-only";
+  readonly phoneInvoice?: PhoneInvoiceRef;
+  /** Clockwise quarter-turns 0..3 chosen by the operator; for a phone invoice it is also SAVED for that invoice. */
+  readonly quarterTurns?: number;
+  /** Read the SAME desktop-picked file again (after a rotation) instead of opening the picker. */
+  readonly reuseLast?: boolean;
+}
 
 /** What the preload script exposes as `window.pos`. */
 export interface PosApi {
@@ -2138,7 +2182,11 @@ export interface PosApi {
   printCollectionReceipt(req: CollectionNoRequest): Promise<IpcResult<PrintAdvanceResponse>>;
   saveCollectionReceiptPdf(req: CollectionNoRequest): Promise<IpcResult<SaveAdvancePdfResponse>>;
   /** Main shows the picker, reads the photo OFFLINE and returns candidate rows. Writes nothing. */
-  readInvoicePhoto(req?: { readonly mode: "read" | "photo-only" }): Promise<IpcResult<ReadInvoicePhotoResponse>>;
+  readInvoicePhoto(req?: ReadInvoicePhotoRequest): Promise<IpcResult<ReadInvoicePhotoResponse>>;
+  /** DEC-35z16 (PILOT): supplier-invoice photos from the phone waiting for review, oldest first. Read-only. */
+  listPhoneInvoices(): Promise<IpcResult<readonly PhoneInvoiceQueueItemDto[]>>;
+  /** DEC-35z16: remove one from the queue — after its review was confirmed, or discarded by the operator. Writes no ledger row. */
+  releasePhoneInvoice(req: PhoneInvoiceRef & { readonly why: "reviewed" | "discarded" }): Promise<IpcResult<{ readonly released: boolean }>>;
   /** TILL-PRINT: one till receipt from the ledger (owner: any sale; others: what History shows them). Read-only. */
   getSaleReceipt(req: SaleIdRequest): Promise<IpcResult<SaleReceiptDto>>;
   printSaleReceipt(req: PrintSaleReceiptRequest): Promise<IpcResult<PrintSaleReceiptResponse>>;

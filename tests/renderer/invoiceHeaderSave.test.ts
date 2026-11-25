@@ -327,7 +327,7 @@ describe("InvoiceSheet wiring (source, comments stripped)", () => {
   });
 
   it("F2-5-R2: the sheet shows the action error, else the newest unresolved refusal — the container renders for either", () => {
-    expect(SHEET).toMatch(/const shownError = error \?\? unresolvedFailure\(\);/);
+    expect(SHEET).toMatch(/const shownError = \[issueRefusal, error \?\? unresolvedFailure\(\)\]\.filter\(Boolean\)\.join\(" "\) \|\| null;/);
     expect(SHEET).toMatch(/\{\(shownError \|\| logoWarning \|\| logoUnverified\) && \(/);
     expect(SHEET).toMatch(/\{shownError && <p className="error" data-testid="sheet-error">\{shownError\}<\/p>\}/);
   });

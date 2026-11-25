@@ -9,7 +9,8 @@ import { createSyntheticDemoRoot, openNewSyntheticDemoLedger, reserveSyntheticDe
 const parent = mkdtempSync(join(process.cwd(), "node_modules", "synthetic-ledger-test-"));
 
 describe("new synthetic ledger capability", () => {
-  it("opens two exclusively created schema-20 ledgers with separated data", () => {
+  // TRANSITION (M1 integration, 2026-11-25): schema-20 -> schema-21 with M21 (invoice_confirmed_request_identity).
+  it("opens two exclusively created current-schema (21) ledgers with separated data", () => {
     const root = createSyntheticDemoRoot(mkdtempSync(join(parent, "case-")));
     const a = reserveSyntheticDemoProfile(root);
     const b = reserveSyntheticDemoProfile(root);
@@ -17,8 +18,8 @@ describe("new synthetic ledger capability", () => {
     const dbB = openNewSyntheticDemoLedger(b);
     try {
       expect(existsSync(join(a.path, LEDGER_FILE_NAME))).toBe(true);
-      expect(schemaVersion(dbA)).toBe(20);
-      expect(schemaVersion(dbB)).toBe(20);
+      expect(schemaVersion(dbA)).toBe(21);
+      expect(schemaVersion(dbB)).toBe(21);
       const add = dbA.prepare("INSERT INTO catalog_products (id, source, source_key, name_ar, selling_price_minor, currency, base_unit, price_needs_review, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
       add.run("synthetic-a", "manual", "a", "Synthetic A", 100, "USD", "piece", 0, 1, "2026-01-01", "2026-01-01");
       const count = (db: typeof dbA) => Number((db.prepare("SELECT count(*) AS n FROM catalog_products").get() as { n: bigint }).n);

@@ -14,7 +14,14 @@
  *   different numbers + same place          → kept apart, both flagged CONFLICT — never merged.
  */
 
-export type OcrSource = "original" | "deskewed";
+/**
+ * "digits" (Stage A, owner UAT 2026-11-16): a third reading of the ORIGINAL photo with the English model only.
+ * Measured on the owner's upright synthetic invoice DEMO-003: the Arabic+English model read the TOTAL column
+ * 18.00 / 13.00 / 15.00 / 12.00 as «0» / «10» / «0» / «10» and 3.25 as «325», while the English model read every
+ * number right. Its LETTERS are worthless for Arabic names, so this reading only ever supplies NUMBERS (a row it
+ * finds still has to balance on its own), never a name and never an «unexplained» line.
+ */
+export type OcrSource = "original" | "deskewed" | "digits";
 
 export interface PositionedLine {
   readonly text: string;

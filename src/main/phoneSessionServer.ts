@@ -29,8 +29,11 @@ import type { Logger } from "./logger";
 import {
   checkAccess,
   claim,
+  effectiveAction,
   end,
+  lockPurpose,
   parseRoute,
+  type PhonePurpose,
   recordMalformed,
   type PhoneSession,
   type PhoneSessionEndReason,
@@ -68,6 +71,20 @@ export interface PhoneSessionServerDeps {
   readonly stagePhoto?: (body: Buffer) => PhoneMediaOutcome;
   /** Slice I1. Read a barcode out of a photograph. Stores nothing at all. */
   readonly scanBarcode?: (body: Buffer) => Promise<PhoneMediaOutcome>;
+  /**
+   * DEC-35z16 (PILOT). INVOICE_BATCH sessions only: stage one supplier-invoice photo. `captureKey` is
+   * the phone's per-photo retry key (header `X-Capture-Key`), so a retry is recognised, not stored twice.
+   */
+  readonly receiveInvoice?: (body: Buffer, captureKey: string) => PhoneMediaOutcome;
+  /** DEC-35z16. Remove one of this batch's own uploads before finishing. */
+  readonly deleteInvoice?: (invoiceId: string) => PhoneMediaOutcome;
+  /** DEC-35z16. «إنهاء والمتابعة على الكمبيوتر»: hand the batch to the till. On success the token is spent. */
+  readonly finishBatch?: () => PhoneMediaOutcome;
+  /**
+   * DEC-35z17. A COMPANION's choice: prepare the chosen purpose (the product form, or a new invoice
+   * batch). Called ONCE, before the session is locked; a refusal leaves the session unlocked.
+   */
+  readonly choosePurpose?: (purpose: PhonePurpose) => PhoneMediaOutcome;
   readonly now?: () => number;
   readonly logger?: Logger;
   /** Called once, when the session ends for any reason. The desktop refreshes on this. */
@@ -78,7 +95,8 @@ export interface PhoneSessionServerDeps {
 
 /** The only thing a page template is allowed to know. */
 export interface PhonePageView {
-  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT";
+  /** DEC-35z17: "COMPANION" while the phone has not chosen yet (the landing page). */
+  readonly action: "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION";
   readonly editing: boolean;
 }
 
@@ -167,6 +185,19 @@ const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   "X-Frame-Options": "DENY",
 });
 
+/**
+ * DEC-35z16: the invoice page's ONE difference — `blob:` images, so the phone can show thumbnails of
+ * the photos IT took (object URLs of its own local files; nothing is fetched). The product page keeps
+ * the policy above byte-for-byte.
+ */
+const INVOICE_PAGE_HEADERS: Readonly<Record<string, string>> = Object.freeze({
+  ...SECURITY_HEADERS,
+  "Content-Security-Policy":
+    "default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'",
+});
+const PURPOSE_LOCKED_AR = "هذه الجلسة مخصّصة لعمل آخر. اطلب رمزاً جديداً من الكمبيوتر.";
+const INVOICE_KEY_INVALID_AR = "تعذّر الإرسال من هذه الصفحة. أعد تحميلها وحاول مرة أخرى.";
+
 export async function startPhoneSessionServer(
   deps: PhoneSessionServerDeps,
 ): Promise<RunningPhoneSessionServer> {
@@ -253,6 +284,44 @@ export async function startPhoneSessionServer(
       log?.info("phone-session-claimed", { action: session.action, editing: session.productId !== null });
     }
 
+    // 🔴 DEC-35z16: THE SESSION'S ACTION DECIDES WHICH ROUTES EXIST FOR IT. An INVOICE_BATCH token
+    // reaches only the invoice routes (and its page); a product token never reaches them. Crossing
+    // over is something no page of ours does, so it is treated as a probe and spends budget.
+    // 🔴 DEC-35z17: THE CHOICE, AND THE SELECTION-ONLY STAGE. An unlocked COMPANION answers its landing
+    // page (GET) and one choice (POST /choose/...), nothing else. Once locked, the routes below follow the
+    // LOCKED purpose exactly as a single-purpose session of that kind.
+    if (route.kind === "choose") {
+      drain(req);
+      if (method !== "POST" || session.action !== "COMPANION") {
+        spendMalformed(res, "choose");
+        return;
+      }
+      handleChoose(res, route.purpose);
+      return;
+    }
+    const purpose = effectiveAction(session);
+    if (purpose === null && !(route.kind === "page" && method !== "POST")) {
+      drain(req);
+      spendMalformed(res, "unchosen");
+      return;
+    }
+    const invoiceRoute = route.kind === "invoice" || route.kind === "invoiceDelete" || route.kind === "finish";
+    const invoiceSession = purpose === "INVOICE_BATCH";
+    if (invoiceRoute !== invoiceSession && !(route.kind === "page" && method !== "POST")) {
+      drain(req);
+      spendMalformed(res, "action");
+      return;
+    }
+    if (invoiceRoute) {
+      if (method !== "POST") {
+        drain(req);
+        spendMalformed(res, "method");
+        return;
+      }
+      handleInvoice(req, res, route);
+      return;
+    }
+
     if (method === "POST") {
       if (route.kind === "photo") {
         handleMedia(req, res, deps.stagePhoto ? (b) => deps.stagePhoto!(b) : undefined, "photo");
@@ -275,10 +344,10 @@ export async function startPhoneSessionServer(
     }
 
     drain(req);
-    const html = deps.renderPage({ action: session.action, editing: session.productId !== null });
+    const html = deps.renderPage({ action: purpose ?? "COMPANION", editing: session.productId !== null });
     const body = Buffer.from(html, "utf8");
     res.writeHead(200, {
-      ...SECURITY_HEADERS,
+      ...(invoiceSession ? INVOICE_PAGE_HEADERS : SECURITY_HEADERS),
       "Content-Type": "text/html; charset=utf-8",
       "Content-Length": String(body.byteLength),
     });
@@ -453,6 +522,104 @@ export async function startPhoneSessionServer(
     });
   }
 
+  /**
+   * DEC-35z16 (PILOT): the three invoice routes. Upload, delete-own, finish.
+   *
+   * 🔴 NONE OF THEM ENDS THE SESSION EXCEPT A SUCCESSFUL FINISH. A refused photo (unreadable,
+   * duplicate, over a limit) costs that photo only — the batch so far stays, exactly as a refused
+   * product photo never costs the form. A successful finish spends the token and closes the listener.
+   */
+  function handleInvoice(
+    req: IncomingMessage,
+    res: ServerResponse,
+    route: { readonly kind: "invoice" } | { readonly kind: "invoiceDelete"; readonly invoiceId: string } | { readonly kind: "finish" },
+  ): void {
+    const answer = (outcome: PhoneMediaOutcome, what: string): boolean => {
+      if (!outcome.ok) {
+        log?.info("phone-invoice-refused", { what, code: outcome.code });
+        json(res, outcome.code === "SESSION_CLOSED" ? 404 : outcome.code === "DUPLICATE" || outcome.code === "LIMIT" ? 409 : 422, {
+          ok: false,
+          code: outcome.code,
+          message: outcome.message,
+        });
+        return false;
+      }
+      json(res, 200, { ok: true, ...outcome.data });
+      return true;
+    };
+    const run = (f: () => PhoneMediaOutcome, what: string): PhoneMediaOutcome => {
+      try {
+        return f();
+      } catch (err) {
+        log?.error("phone-invoice-fault", { what, error: err });
+        return { ok: false, code: "INTERNAL", message: MEDIA_FAILED_AR };
+      }
+    };
+
+    if (route.kind === "invoice") {
+      const receive = deps.receiveInvoice;
+      const key = typeof req.headers["x-capture-key"] === "string" ? req.headers["x-capture-key"] : "";
+      if (!receive) {
+        drain(req);
+        json(res, 503, { ok: false, code: "NOT_AVAILABLE", message: MEDIA_UNAVAILABLE_AR });
+        return;
+      }
+      if (!/^[0-9a-f]{32}$/.test(key)) {
+        drain(req);
+        json(res, 400, { ok: false, code: "INVALID_INPUT", message: INVOICE_KEY_INVALID_AR });
+        return;
+      }
+      readCappedBody(req, res, (body) => {
+        answer(run(() => receive(body, key), "upload"), "upload");
+      });
+      return;
+    }
+
+    drain(req);
+    if (route.kind === "invoiceDelete") {
+      const del = deps.deleteInvoice;
+      if (!del) return void json(res, 503, { ok: false, code: "NOT_AVAILABLE", message: MEDIA_UNAVAILABLE_AR });
+      answer(run(() => del(route.invoiceId), "delete"), "delete");
+      return;
+    }
+    const finish = deps.finishBatch;
+    if (!finish) return void json(res, 503, { ok: false, code: "NOT_AVAILABLE", message: MEDIA_UNAVAILABLE_AR });
+    if (answer(run(finish, "finish"), "finish")) {
+      session.savedCount += 1;
+      log?.info("phone-invoice-batch-finished", {});
+      void stop("completed");
+    }
+  }
+
+  /**
+   * DEC-35z17: lock a COMPANION to the phone's choice. The bridge prepares the purpose FIRST (form or batch);
+   * only then is the session locked, and an invoice lock re-arms the expiry for its 30-minute cap.
+   */
+  function handleChoose(res: ServerResponse, chosen: PhonePurpose): void {
+    const current = effectiveAction(session);
+    if (current !== null) {
+      if (current === chosen) return void json(res, 200, { ok: true, purpose: chosen, same: true });
+      log?.info("phone-companion-choice-refused", { locked: current, asked: chosen });
+      return void json(res, 409, { ok: false, code: "PURPOSE_LOCKED", message: PURPOSE_LOCKED_AR });
+    }
+    const prepare = deps.choosePurpose;
+    if (!prepare) return void json(res, 503, { ok: false, code: "NOT_AVAILABLE", message: MEDIA_UNAVAILABLE_AR });
+    let outcome: PhoneMediaOutcome;
+    try {
+      outcome = prepare(chosen);
+    } catch (err) {
+      log?.error("phone-companion-choice-fault", { error: err });
+      outcome = { ok: false, code: "INTERNAL", message: MEDIA_FAILED_AR };
+    }
+    if (!outcome.ok) return void json(res, 422, { ok: false, code: outcome.code, message: outcome.message });
+    if (lockPurpose(session, chosen) !== "locked") {
+      return void json(res, 409, { ok: false, code: "PURPOSE_LOCKED", message: PURPOSE_LOCKED_AR });
+    }
+    armExpiry();
+    log?.info("phone-companion-locked", { purpose: chosen });
+    json(res, 200, { ok: true, purpose: chosen });
+  }
+
   /** Consume a body we are not going to use, so the socket closes instead of stalling. */
   function drain(req: IncomingMessage): void {
     req.resume();
@@ -503,25 +670,30 @@ export async function startPhoneSessionServer(
 
   // Expiry closes the surface on its own, with no desktop interaction and no phone request needed.
   // 🔴 unref() so this timer can never be the reason the app stays alive on quit.
-  const msLeft = Math.max(0, session.expiresAtMs - now());
-  expiryTimer = setTimeout(() => {
-    // 🔴 THE GUARD ASKS `endedBy`, NOT `isLive`, AND THE DIFFERENCE IS A REAL DEFECT THIS CODE HAD.
-    //
-    // The first version read `if (!isLive(session, now())) return;`, meaning to skip the teardown
-    // when something else had already ended the session. But `isLive` is false for an EXPIRED
-    // session — which is precisely the state this timer exists to handle — so it returned early
-    // every single time and the socket was never closed. The session was correctly refused by
-    // `checkAccess`, so every request-level test still passed; the LISTENER stayed bound
-    // indefinitely with nothing to reveal it.
-    //
-    // Caught by "expiry closes the socket with no request and no desktop action", which is the one
-    // test that asserts the PORT rather than the answer. An open port is the whole risk here, so
-    // the condition has to be "has anything already ended it", not "is it still usable".
-    if (session.endedBy !== null) return;
-    log?.info("phone-session-expired", {});
-    void stop("expired");
-  }, msLeft);
-  expiryTimer.unref?.();
+  // DEC-35z17: armed at start, and again when a COMPANION locks to an invoice batch (its cap moves).
+  function armExpiry(): void {
+    if (expiryTimer) clearTimeout(expiryTimer);
+    const msLeft = Math.max(0, session.expiresAtMs - now());
+    expiryTimer = setTimeout(() => {
+      // 🔴 THE GUARD ASKS `endedBy`, NOT `isLive`, AND THE DIFFERENCE IS A REAL DEFECT THIS CODE HAD.
+      //
+      // The first version read `if (!isLive(session, now())) return;`, meaning to skip the teardown
+      // when something else had already ended the session. But `isLive` is false for an EXPIRED
+      // session — which is precisely the state this timer exists to handle — so it returned early
+      // every single time and the socket was never closed. The session was correctly refused by
+      // `checkAccess`, so every request-level test still passed; the LISTENER stayed bound
+      // indefinitely with nothing to reveal it.
+      //
+      // Caught by "expiry closes the socket with no request and no desktop action", which is the one
+      // test that asserts the PORT rather than the answer. An open port is the whole risk here, so
+      // the condition has to be "has anything already ended it", not "is it still usable".
+      if (session.endedBy !== null) return;
+      log?.info("phone-session-expired", {});
+      void stop("expired");
+    }, msLeft);
+    expiryTimer.unref?.();
+  }
+  armExpiry();
 
   log?.info("phone-session-listening", { host: deps.host, port });
 

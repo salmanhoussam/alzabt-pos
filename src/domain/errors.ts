@@ -55,6 +55,9 @@ export type DomainErrorCode =
   | "INVOICE_NOT_FINALIZABLE"
   /** R5: the persisted draft is not the one the issue confirmation showed (`shared/invoiceConfirmation.ts`). */
   | "INVOICE_CONFIRMATION_STALE"
+  | "INVOICE_CONFIRMATION_REQUIRED"
+  | "INVOICE_CONFIRMATION_UNVERIFIABLE"
+  | "INVOICE_TAX_CONFIRMATION_REQUIRED"
   | "COMPANY_PROFILE_REQUIRED"
   | "INVOICE_NUMBERING_LOCKED"
   | "RECONCILIATION_NOT_FOUND"

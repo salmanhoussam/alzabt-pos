@@ -115,7 +115,7 @@ describe("R3 issue-confirmation wiring (source, comments stripped)", () => {
     expect(late).toBeGreaterThan(0);
     expect(bind).toBeGreaterThan(late);
     expect(send).toBeGreaterThan(bind);
-    expect(fin).toMatch(/setError\(t\("inv\.sheet\.confirmStale"\)\);\s*return;/);
+    expect(fin).toMatch(/setIssueRefusal\(t\("inv\.sheet\.confirmStale"\)\);\s*return;/);
   });
 
   it("while the finalize request is in flight the paid amount is text, never an input", () => {
@@ -163,7 +163,7 @@ describe("R4 one-modal wiring (source, comments stripped)", () => {
     }
     expect((SHEET.match(/role="dialog" aria-modal="true"/g) ?? []).length).toBe(5);
     expect(SHEET).toMatch(/useModalFocus\(openModals\[0\] \?\? null, sheetRef, modalOpener\);/);
-    expect(SHEET).toMatch(/<div className="inv-sheet" ref=\{sheetRef\}>/);
+    expect(SHEET).toMatch(/<div className="inv-sheet" ref=\{sheetRef\} inert=\{activeAppOwner !== null && activeAppOwner !== appOwnerId\}>/);
   });
 });
 
@@ -188,7 +188,7 @@ describe("R5 ownership and confirmation wiring (source, comments stripped)", () 
     const act = SHEET.slice(SHEET.indexOf("const act = ("), SHEET.indexOf("const header = ("));
     expect((act.match(/dialogAllows\(by\)/g) ?? []).length).toBe(2);
     const bg = SHEET.slice(SHEET.indexOf("const background = ("), SHEET.indexOf("const act = ("));
-    expect(bg).toMatch(/if \(!dialogAllows\(by\)\) \{\s*setError\(t\("inv\.sheet\.modalOpen"\)\);\s*return Promise\.resolve\(false\);/);
+    expect(bg).toMatch(/if \(externalOwner\(\) \|\| operatingRef\.current \|\| preparingIssue\.current \|\| !dialogAllows\(by\)\) \{[\s\S]*?return Promise\.resolve\(false\);/);
     expect(SHEET).toMatch(/act\(finalize, "confirm"\)/);
     expect(SHEET).toMatch(/act\(discard, "discard"\)/);
     expect(SHEET).toMatch(/act\(saveAndLeave, "exit"\)/);

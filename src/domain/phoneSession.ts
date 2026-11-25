@@ -24,7 +24,29 @@ import { DomainError } from "./errors";
  * the session and is NEVER taken from a request: a token minted for EDIT_PRODUCT cannot create a
  * new product, and a token minted for NEW_PRODUCT cannot touch an existing one.
  */
-export type PhoneSessionAction = "NEW_PRODUCT" | "EDIT_PRODUCT";
+export type PhoneSessionAction = "NEW_PRODUCT" | "EDIT_PRODUCT" | "INVOICE_BATCH" | "COMPANION";
+
+/**
+ * DEC-35z17 (owner, ONE «من الهاتف» button): the Phone Companion session.
+ *
+ * 🔴 TWO-STAGE, SERVER-AUTHORIZED. A COMPANION token starts with SELECTION-ONLY power: it can show the
+ * landing page and accept ONE choice. The first valid choice from the bound phone LOCKS the session to
+ * a purpose — Product Entry (NEW_PRODUCT) or Invoice Capture (INVOICE_BATCH) — and from then on only
+ * that purpose's routes exist. Choosing again the SAME purpose is a no-op (a double tap); choosing the
+ * OTHER purpose is refused: a fresh session is needed. The desktop authorized both purposes when it
+ * opened the session (the same create-products grant); the phone never widens that, it only narrows it.
+ */
+export type PhonePurpose = "NEW_PRODUCT" | "INVOICE_BATCH";
+
+/**
+ * DEC-35z16 (owner, PILOT): supplier-invoice photos from the phone, several per session.
+ *
+ * 🔴 ITS OWN ACTION, FIXED AT CREATION LIKE THE OTHER TWO. An INVOICE_BATCH token can only upload,
+ * delete its own uploads and finish; it cannot reach the product form, a photo stage or a barcode
+ * read, and a product token cannot reach the invoice routes. Longer than a product session because a
+ * batch of invoices takes longer than one label — still a hard cap, never extended by activity.
+ */
+export const PHONE_INVOICE_SESSION_TTL_MS = 30 * 60 * 1000;
 
 /**
  * Ten minutes, per the approved study. Long enough to walk to the shelf, photograph a label and
@@ -72,11 +94,17 @@ export type PhoneSessionEndReason =
 export interface PhoneSession {
   readonly token: string;
   readonly action: PhoneSessionAction;
+  /**
+   * DEC-35z17: what this token may do NOW. Equal to `action` for a single-purpose session; null for a
+   * COMPANION until the phone's first choice locks it. Read through `effectiveAction`.
+   */
+  purpose: Exclude<PhoneSessionAction, "COMPANION"> | null;
   /** The exact product for EDIT_PRODUCT. Always null for NEW_PRODUCT — there is no product yet. */
   readonly productId: string | null;
   readonly operatorId: string;
   readonly createdAtMs: number;
-  readonly expiresAtMs: number;
+  /** Mutable only by `lockPurpose` (an invoice choice extends to its 30-minute cap from creation). */
+  expiresAtMs: number;
   /** Set by the first claimant. A second client is refused rather than taking over. */
   boundClient: PhoneClient | null;
   /** Counts only genuinely malformed requests, never an honest 404 on an unknown path. */
@@ -127,6 +155,12 @@ export function createSession(
   if (spec.action === "NEW_PRODUCT" && spec.productId) {
     throw new DomainError("INVALID_INPUT", "A new product cannot name an existing product");
   }
+  if (spec.action === "INVOICE_BATCH" && spec.productId) {
+    throw new DomainError("INVALID_INPUT", "An invoice batch names no product");
+  }
+  if (spec.action === "COMPANION" && spec.productId) {
+    throw new DomainError("INVALID_INPUT", "A phone companion session names no product");
+  }
   const token = randomToken();
   if (typeof token !== "string" || !/^[0-9a-f]+$/.test(token) || token.length < PHONE_SESSION_TOKEN_BYTES * 2) {
     throw new DomainError(
@@ -137,15 +171,38 @@ export function createSession(
   return {
     token,
     action: spec.action,
+    purpose: spec.action === "COMPANION" ? null : spec.action,
     productId: spec.productId,
     operatorId: spec.operatorId,
     createdAtMs: nowMs,
-    expiresAtMs: nowMs + PHONE_SESSION_TTL_MS,
+    expiresAtMs: nowMs + (spec.action === "INVOICE_BATCH" ? PHONE_INVOICE_SESSION_TTL_MS : PHONE_SESSION_TTL_MS),
     boundClient: null,
     malformedCount: 0,
     endedBy: null,
     savedCount: 0,
   };
+}
+
+/** DEC-35z17: what the token may do now — its locked purpose, or null while a COMPANION awaits the choice. */
+export function effectiveAction(session: PhoneSession): Exclude<PhoneSessionAction, "COMPANION"> | null {
+  return session.purpose;
+}
+
+export type LockOutcome = "locked" | "same" | "refused";
+
+/**
+ * DEC-35z17: the phone's choice on the landing page. Pure; the caller has already passed `checkAccess`
+ * (right token, live, the BOUND phone).
+ *   - a COMPANION with no purpose → locked; an invoice batch gets its 30-minute hard cap from CREATION;
+ *   - the same purpose again → "same" (idempotent, nothing changes);
+ *   - another purpose, or a single-purpose session → "refused".
+ */
+export function lockPurpose(session: PhoneSession, purpose: PhonePurpose): LockOutcome {
+  if (session.action !== "COMPANION") return session.purpose === purpose ? "same" : "refused";
+  if (session.purpose !== null) return session.purpose === purpose ? "same" : "refused";
+  session.purpose = purpose;
+  if (purpose === "INVOICE_BATCH") session.expiresAtMs = session.createdAtMs + PHONE_INVOICE_SESSION_TTL_MS;
+  return "locked";
 }
 
 /** Expiry is a comparison, stated once so no caller invents its own off-by-one. */
@@ -261,7 +318,7 @@ export function authorizes(
   action: PhoneSessionAction,
   productId: string | null,
 ): boolean {
-  if (session.action !== action) return false;
+  if (effectiveAction(session) !== action) return false;
   if (action === "EDIT_PRODUCT") return productId !== null && productId === session.productId;
   return productId === null;
 }
@@ -313,6 +370,14 @@ export type PhoneRoute =
   | { readonly kind: "photo"; readonly token: string }
   /** Slice I1. POST an image to be read for a barcode. Nothing is stored at all. */
   | { readonly kind: "barcode"; readonly token: string }
+  /** DEC-35z16. POST one supplier-invoice photo into the open batch (INVOICE_BATCH sessions only). */
+  | { readonly kind: "invoice"; readonly token: string }
+  /** DEC-35z16. POST: remove one of THIS batch's uploads before finishing. The id is 32 lower-case hex. */
+  | { readonly kind: "invoiceDelete"; readonly token: string; readonly invoiceId: string }
+  /** DEC-35z16. POST: «إنهاء والمتابعة على الكمبيوتر» — the batch is handed to the till and the token spent. */
+  | { readonly kind: "finish"; readonly token: string }
+  /** DEC-35z17. POST: the landing page's choice — locks a COMPANION session to one purpose. */
+  | { readonly kind: "choose"; readonly token: string; readonly purpose: PhonePurpose }
   | { readonly kind: "unknown" };
 
 /**
@@ -325,6 +390,14 @@ export type PhoneRoute =
 export function parseRoute(rawUrl: string): PhoneRoute {
   // Only the path matters; a query string is ignored rather than parsed, since no route takes one.
   const path = rawUrl.split("?")[0] ?? "";
+  const choose = /^\/m\/([0-9a-f]{64,})\/choose\/(product|invoice)$/.exec(path);
+  if (choose) return { kind: "choose", token: choose[1]!, purpose: choose[2] === "product" ? "NEW_PRODUCT" : "INVOICE_BATCH" };
+  const inv = /^\/m\/([0-9a-f]{64,})(?:\/(invoice|finish)|\/invoice\/([0-9a-f]{32})\/delete)$/.exec(path);
+  if (inv) {
+    const token = inv[1]!;
+    if (inv[3]) return { kind: "invoiceDelete", token, invoiceId: inv[3] };
+    return inv[2] === "finish" ? { kind: "finish", token } : { kind: "invoice", token };
+  }
   const m = /^\/m\/([0-9a-f]{64,})(\/photo|\/barcode)?$/.exec(path);
   if (!m) return { kind: "unknown" };
   const token = m[1]!;

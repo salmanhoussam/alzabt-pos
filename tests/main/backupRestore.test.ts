@@ -23,6 +23,8 @@ import { runPendingRestore } from "../../src/main/restoreStartup";
 import { verifyBackupPackage } from "../../src/persistence/backupPackage";
 import { openDatabase } from "../../src/persistence/db";
 import { MIGRATIONS } from "../../src/persistence/migrations";
+import { confirmationDigest } from "../../src/shared/invoiceConfirmation";
+import { toInvoiceViewDto } from "../../src/shared/dto";
 import { CatalogRepository } from "../../src/persistence/catalogRepository";
 import { InvoiceRepository } from "../../src/persistence/invoiceRepository";
 import { ReconciliationRepository } from "../../src/persistence/reconciliationRepository";
@@ -332,6 +334,36 @@ describe("🔴 a cashier is refused on all three channels — before any picker 
 });
 
 describe("🔴 restore — preview, consent, stage, restart, open", () => {
+  it("M21: a protected confirmation survives full package export, staged restore and restart", () => {
+    const a = open("synthetic-m21-source");
+    a.h.invoices.saveCompanyProfile({ nameAr: "Synthetic shop" });
+    const customer = a.h.parties.create({ kind: "customer", displayName: "Synthetic customer" }).party;
+    const id = a.h.invoices.createDraft().invoice.id;
+    a.h.invoices.addLines(id, [{ description: "Synthetic item", unitLabel: "piece", canonicalUnit: null, productId: null, quantity: "1", unitPrice: "10.00" }], "m21-restore-batch");
+    a.h.invoices.updateDraftHeader(id, { customerPartyId: customer.id });
+    const token = confirmationDigest(toInvoiceViewDto(a.h.invoices.getInvoice(id)), true);
+    a.h.invoices.finalizeInvoice(id, { issueOnAccount: true, confirmedDraft: token });
+    const identity = (a.h.db.prepare("SELECT confirmed_request_identity FROM invoices WHERE id = ?").get(id) as { confirmed_request_identity: string }).confirmed_request_identity;
+    expect(identity).toMatch(/^v1:[0-9a-f]{64}$/);
+    const pkg = exportPackage(a);
+
+    const b = open("synthetic-m21-target");
+    writeFileSync(join(b.userData, "ledger.json"), JSON.stringify({ ledgerFile: LIVE_LEDGER_FILE }));
+    b.picked["restore-backup"] = pkg;
+    const inspected = data<InspectRestoreResponse>(b.ipc.inspectRestoreBackup(undefined));
+    expect(inspected.status).toBe("ready");
+    if (inspected.status !== "ready") throw new Error("Synthetic package was not ready");
+    expect(data<ApplyRestoreResponse>(b.ipc.applyRestore({ manifestSha256: inspected.preview.manifestSha256, acceptMissingAssets: false })).status).toBe("staged");
+    b.h.db.close();
+    expect(runPendingRestore({ userDataDir: b.userData, now: NOW, log: nullLogger }).kind).toBe("restored");
+    const plan = planLedgerOpen(b.userData, realLedgerFs);
+    b.h = makeHarness(plan.ledgerPath);
+    expect((b.h.db.prepare("SELECT confirmed_request_identity FROM invoices WHERE id = ?").get(id) as { confirmed_request_identity: string }).confirmed_request_identity).toBe(identity);
+    const before = b.h.db.prepare("SELECT (SELECT count(*) FROM sales) AS sales, (SELECT count(*) FROM obligations) AS debts").get();
+    expect(b.h.invoices.finalizeInvoice(id, { issueOnAccount: true, confirmedDraft: token }).invoice.id).toBe(id);
+    expect(() => b.h.invoices.finalizeInvoice(id, { issueOnAccount: true, confirmedDraft: token + " " })).toThrow(/differs/);
+    expect(b.h.db.prepare("SELECT (SELECT count(*) FROM sales) AS sales, (SELECT count(*) FROM obligations) AS debts").get()).toEqual(before);
+  });
   it("previewing stages NOTHING; confirming stages and restarts once; the next start restores; the ledger opens with the backup's money", () => {
     const a = open("بيانات المحل أ");
     seed(a);

@@ -180,6 +180,9 @@ describe("IPC surface", () => {
         "saveInvoicePdf",
         // TRANSITION (PHOTO-INVOICE-TO-ITEMS): takes NO path — main runs the picker. Old list: without it.
         "readInvoicePhoto",
+        // TRANSITION (M1, Phone Invoice queue DEC-35z16): neither takes a path — main owns the staging folder. Old list: without them.
+        "listPhoneInvoices",
+        "releasePhoneInvoice",
         "startPhoneSession",
         "cancelPhoneSession",
         "phoneSessionState",
@@ -260,7 +263,8 @@ describe("IPC surface", () => {
     // 🔴 TRANSITION (DEC-35zz++ TILL-PRINT): 100 -> 103 — getSaleReceipt, printSaleReceipt, saveSaleReceiptPdf,
     // session-classified reads (the service limits a non-owner to History's window). The old value was 100.
     // X1 TRANSITION: 103 -> 104, the named read-only getEntryState channel.
-    expect(CHANNEL_NAMES).toHaveLength(104);
+    // TRANSITION (M1, Phone Invoice queue DEC-35z16): 104 -> 106 — listPhoneInvoices, releasePhoneInvoice. The old value was 104.
+    expect(CHANNEL_NAMES).toHaveLength(106);
     for (const ch of Object.values(CHANNELS)) expect(ch).toMatch(/^pos:[a-zA-Z]+$/);
 
     // Still nothing that would let the renderer speak SQL, name a path or invoke anything generic.
