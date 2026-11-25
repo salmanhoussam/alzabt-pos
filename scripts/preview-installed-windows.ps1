@@ -260,9 +260,11 @@ try {
   $previewData = Join-Path $local 'Alzabt-R5-Owner-Preview'
   $previewDataInfo = Get-Item -LiteralPath $previewData -Force -ErrorAction Stop
   if (-not $previewDataInfo.PSIsContainer -or ($previewDataInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Preview data folder missing or redirected' }
-  foreach ($forbidden in @((Join-Path $roaming 'Alzabt POS'), (Join-Path $roaming 'Alzabt POS TRIAL Test Data'), (Join-Path $roaming 'Alzabt POS R5 PREVIEW\alzabt-pos-ledger.sqlite'))) {
-    if (Test-Path -LiteralPath $forbidden) { throw "The preview created data outside its own folder: $forbidden" }
-  }
+  # The production and R3 folders exist here ON PURPOSE (synthetic sentinels created above) and are proven untouched by
+  # their hash checks. What must NEVER exist is a real ledger under the preview's own roaming profile: the Demo ledger
+  # is :memory: and the launcher's lives in its synthetic folder under LocalAppData.
+  $forbiddenLedger = Join-Path $roaming 'Alzabt POS R5 PREVIEW\alzabt-pos-ledger.sqlite'
+  if (Test-Path -LiteralPath $forbiddenLedger) { throw "The preview created a ledger outside its own folder: $forbiddenLedger" }
   $previewDataHash = Get-ChildItem -LiteralPath $previewData -Recurse -File | Sort-Object FullName | Get-FileHash -Algorithm SHA256 | ConvertTo-Json -Compress
   $before = Get-ChildItem -LiteralPath $installDir -Recurse -File | Sort-Object FullName | Get-FileHash -Algorithm SHA256 | ConvertTo-Json -Compress
   $trialRegistryBefore = Get-RegistryTreeHash $trialRegistryPath
