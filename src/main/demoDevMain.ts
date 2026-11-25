@@ -15,7 +15,7 @@ import {journeyFlag} from "./demoJourneyProbe";
 import {isOwnerPreviewBuild,syntheticBuildAllowed} from "./syntheticBuild";
 
 type Environment=ReturnType<typeof openSyntheticDevEnvironment>;
-export type SyntheticStartup = {kind:"ordinary"}|{kind:"refused"}|
+export type SyntheticStartup = {kind:"ordinary"}|{kind:"refused";reason:string}|
   {kind:"selected";env:Environment;selected?:SelectedDemoStart;ephemeral?:string};
 
 /**
@@ -73,7 +73,11 @@ export function prepareSyntheticStartup(args:readonly string[]):SyntheticStartup
       if(app.getPath("userData")!==env.entry || app.getPath("sessionData")!==env.entry)throw Error("Invalid entry");
     }
     return {kind:"selected",env,selected};
-  } catch {return {kind:"refused"}}
+  } catch(err) {
+    // A SHORT code only (gate:…); anything else is reported as the generic «gate:environment». Never a path or name.
+    const code=err instanceof Error && /^gate:[a-z-]+$/.test(err.message)?err.message:"gate:environment";
+    return {kind:"refused",reason:code};
+  }
 }
 export function registerSyntheticLifecycle(ports:{
   env:Environment; mode:"real"|"demo"; service:PosService|null;

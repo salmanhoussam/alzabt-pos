@@ -859,10 +859,14 @@ if (!gotSingleInstanceLock) {
   let selectedSynthetic: import("./demoRuntime").SelectedDemoStart | undefined;
   let ephemeralDemoSession: string | undefined;
   let handoverRefused = false;
+  let handoverReason = "";
   if (syntheticBuildAllowed()) {
     const dev = require("./demoDevMain") as typeof import("./demoDevMain");
     const prepared = dev.prepareSyntheticStartup(process.argv);
-    if (prepared.kind === "refused") handoverRefused = true;
+    if (prepared.kind === "refused") {
+      handoverRefused = true;
+      handoverReason = prepared.reason;
+    }
     if (prepared.kind === "selected") {
       syntheticEnvironment = prepared.env;
       selectedSynthetic = prepared.selected;
@@ -870,7 +874,7 @@ if (!gotSingleInstanceLock) {
     }
   }
   if (handoverRefused) {
-    console.error("[pos] synthetic handover unavailable; exiting");
+    console.error(`[pos] synthetic handover unavailable (${handoverReason || "gate:environment"}); exiting`);
     app.exit(1);
   } else {
   const userDataOverride = syntheticEnvironment ? undefined : process.env.ALZABT_POS_USER_DATA;

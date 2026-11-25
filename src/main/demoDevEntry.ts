@@ -6,8 +6,8 @@ import {join,parse,resolve} from "node:path";
 import Database from "better-sqlite3";
 import {MIGRATIONS} from "../persistence/migrations";
 import {schemaVersion,verifyAppliedMigrations} from "../persistence/db";
-import {verifiedSyntheticTestHome} from "./demoDevGate";
-import {syntheticDemoRetention} from "./demoProfile";
+import {syntheticGateRefusal,verifiedSyntheticTestHome} from "./demoDevGate";
+import {ensurePreviewSyntheticStorage,syntheticDemoRetention} from "./demoProfile";
 import {DemoLaunchRecords} from "./demoLaunchRecords";
 import {LEDGER_FILE_NAME} from "./ledgerGuard";
 import {isOwnerPreviewBuild,syntheticBuildAllowed,syntheticStorageName} from "./syntheticBuild";
@@ -24,17 +24,17 @@ function checkedDirectory(path:string):string {
 export function openSyntheticDevEnvironment(prepareEntry=true) {
   if(!syntheticBuildAllowed() || !app.hasSingleInstanceLock() || app.isReady())throw Error("Synthetic environment unavailable.");
   const home=verifiedSyntheticTestHome(false,true);
-  if(!home)throw Error("Synthetic environment unavailable.");
+  if(!home)throw Error(syntheticGateRefusal()??"gate:identity");
   // Development: these two directories were created by the owner-run disposable V8 probe; an absent or
   // unrecognised root is refused; no existing directory is reset.
   // OWNER PREVIEW: its OWN folder (never the development one, never a shop's), created on first start one level at
   // a time with a NON-recursive mkdir under the verified LocalAppData, then checked exactly like the development one.
   const local=join(home,"AppData","Local");
   const baseName=syntheticStorageName();
+  // The root MUST come from createSyntheticDemoRoot (marker); see ensurePreviewSyntheticStorage (run 45698905020).
   if(isOwnerPreviewBuild()) {
-    checkedDirectory(local);
-    for(const dir of [join(local,baseName),join(local,baseName,"synthetic-demo-root-v1"),join(local,baseName,"control")])
-      if(!existsSync(dir))mkdirSync(dir);
+    try {ensurePreviewSyntheticStorage(checkedDirectory(local),baseName)}
+    catch {throw Error("gate:storage")}
   }
   const base=checkedDirectory(join(local,baseName));
   const root=checkedDirectory(join(base,"synthetic-demo-root-v1"));

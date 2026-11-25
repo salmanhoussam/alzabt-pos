@@ -250,3 +250,31 @@ export function pendingSyntheticReservationPath(reservation:SyntheticDemoReserva
      readFileSync(marker,"utf8")!=="alzabt-synthetic-profile-v1")return unavailable();
   return profile;
 }
+
+/**
+ * OWNER PREVIEW first start: the preview's own synthetic storage under a verified parent (LocalAppData).
+ *
+ * ROOT CAUSE of hosted run 45698905020 (2026-11-25): the first version created `synthetic-demo-root-v1` with a bare
+ * mkdir, so it lacked the root marker that `inspectSyntheticRoot` requires — every fresh machine refused at startup
+ * («synthetic handover unavailable»). The root is now created ONLY through `createSyntheticDemoRoot`, which writes the
+ * marker exclusively. An EXISTING root is never repaired: without its marker it stays refused (fail closed).
+ * Each level is created non-recursively and every existing component is checked for links.
+ */
+export function ensurePreviewSyntheticStorage(parent: string, baseName: string): { readonly base: string; readonly root: string; readonly control: string } {
+  try {
+    const safeParent = checkPath(parent);
+    const base = join(safeParent, baseName);
+    try { mkdirSync(base); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
+    const safeBase = checkPath(base);
+    const root = join(safeBase, ROOT_NAME);
+    let rootExists = true;
+    try { lstatSync(root); } catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") rootExists = false; else throw err; }
+    if (!rootExists) createSyntheticDemoRoot(safeBase);
+    inspectSyntheticRoot(root); // marker + layout, whether just created or pre-existing
+    const control = join(safeBase, "control");
+    try { mkdirSync(control); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
+    return { base: safeBase, root: checkPath(root), control: checkPath(control) };
+  } catch {
+    throw new DemoProfileError("unavailable");
+  }
+}
