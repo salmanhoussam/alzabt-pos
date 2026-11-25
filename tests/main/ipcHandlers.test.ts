@@ -2,6 +2,7 @@
  * The IPC handlers are the renderer's entire reach into the main process. These tests drive them
  * with hostile and malformed payloads exactly as the renderer could send them.
  */
+import { TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CHANNEL_NAMES, createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import { CHANNELS, type IpcResult } from "../../src/shared/ipcContract";
@@ -306,7 +307,7 @@ describe("IPC surface", () => {
     // 🔴 THE OWNER, NOT CASHIER TWO. This flow ends in a VOID, and voiding is an owner-only
     // channel since migration 8 — reversing money is not a till operator's decision. Signing in as
     // a cashier here would now be refused with NOT_AUTHORIZED, which is the feature working.
-    expect(ipc.login({ cashierId: "cashier-01", pin: "1111" })).toEqual({
+    expect(ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN })).toEqual({
       ok: true,
       // 🔴 `mayCreateProducts` JOINED THE SESSION SHAPE WITH MIGRATION 11 — convenience for the
       // Products screen, never authority. True here because this session is the owner, who may
@@ -339,7 +340,7 @@ describe("IPC surface", () => {
 
   it("the renderer cannot choose the cashier, price, name or receipt number", () => {
     const { db, ipc } = setup();
-    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
     for (const extra of [
       { cashierId: "cashier-02" },
       { unitPrice: "1" },
@@ -356,7 +357,7 @@ describe("IPC surface", () => {
 
   it("rejects malformed money, quantities and methods", () => {
     const { db, ipc } = setup();
-    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
     const cases: Array<[Record<string, unknown>, string]> = [
       [{ expectedTotalMinor: 597 }, "INVALID_INPUT"], // a number, not a string
       [{ expectedTotalMinor: "5.97" }, "INVALID_INPUT"],
@@ -388,7 +389,7 @@ describe("IPC surface", () => {
 
   it("an unexpected failure on a non-sale channel is generic and says nothing about sales", () => {
     const { db, ipc } = setup();
-    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
     db.close(); // force a non-domain error inside the service
     const r = ipc.getTodaySales(undefined);
     // 🔴 TRANSITION. This asserted the English sentence verbatim:
@@ -407,7 +408,7 @@ describe("IPC surface", () => {
 
   it("createSale after an unexpected failure says NOT recorded only when the ledger has no such sale", () => {
     const { db, repository, ipc } = setup();
-    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
     // A failure BEFORE the commit: nothing is written.
     const commit = repository.commitSale.bind(repository);
     repository.commitSale = () => {
@@ -449,7 +450,7 @@ describe("IPC surface", () => {
 
   it("createSale reports 'unknown' when even the ledger lookup fails", () => {
     const { db, ipc } = setup();
-    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
     db.close();
     expect(ipc.createSale(goodSale())).toMatchObject({ ok: false, error: { code: "SALE_STATUS_UNKNOWN" } });
   });
@@ -466,7 +467,7 @@ describe("IPC surface", () => {
 
   it("🔴 an ENGLISH till still reads the exact English sentences that shipped", () => {
     const { db, repository, ipc } = setupIn("en");
-    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
 
     // A failure before the commit.
     const commit = repository.commitSale.bind(repository);
@@ -501,7 +502,7 @@ describe("IPC surface", () => {
 
   it("🔴 an ARABIC till reads Arabic, with the SAME codes and the SAME real receipt number", () => {
     const { db, repository, ipc } = setupIn("ar");
-    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
 
     const commit = repository.commitSale.bind(repository);
     repository.commitSale = () => {
@@ -546,7 +547,7 @@ describe("IPC surface", () => {
         },
       }),
     );
-    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
     h.db.close();
     const r = ipc.createSale(goodSale());
     // Still a truthful, readable answer — in the default language — rather than a thrown error.
@@ -557,7 +558,7 @@ describe("IPC surface", () => {
 
   it("a product id at the import limit (77 chars) can be sold — import and sale share one limit", () => {
     const { db, service, ipc } = setup();
-    ipc.login({ cashierId: "cashier-01", pin: "1111" });
+    ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
     const sourceId = "x".repeat(64);
     const bytes = new TextEncoder().encode(
       `source_id,name_ar,name_en,price,currency,base_unit,price_needs_review\n${sourceId},مياه,,0.50,USD,piece,0\n`,

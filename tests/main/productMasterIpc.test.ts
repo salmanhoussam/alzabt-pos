@@ -15,6 +15,7 @@
  * real row in a real table — never that a method was called on a fake that agreed with it.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -60,8 +61,8 @@ function withApp(
     const ipc = syncHandlers(
       createIpcHandlers(h.service, opts.pickPhoto ? { pickProductPhoto: opts.pickPhoto } : {}),
     );
-    if (as === "owner") expect((ipc.login({ cashierId: "cashier-01", pin: "1111" }) as Res).ok).toBe(true);
-    if (as === "cashier") expect((ipc.login({ cashierId: "cashier-02", pin: "2222" }) as Res).ok).toBe(true);
+    if (as === "owner") expect((ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN }) as Res).ok).toBe(true);
+    if (as === "cashier") expect((ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN }) as Res).ok).toBe(true);
     fn({ h, ipc });
   } finally {
     h.db.close();
@@ -307,7 +308,7 @@ describe("categories — the owner's list, through the real channels", () => {
     withApp("owner", ({ h, ipc }) => {
       const cat = newCategory(ipc, "عدد");
       ipc.logout(undefined);
-      expect((ipc.login({ cashierId: "cashier-02", pin: "2222" }) as Res).ok).toBe(true);
+      expect((ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN }) as Res).ok).toBe(true);
 
       const before = h.db.prepare("SELECT id, name_ar, is_active FROM catalog_categories").all();
       for (const [channel, payload] of [
@@ -436,7 +437,7 @@ describe("product enrichment — absent is not null, all the way across IPC", ()
     withApp("owner", ({ h, ipc }) => {
       const created = newProduct(ipc, { master: { brand: "Bosch", isOnlineVisible: true } });
       ipc.logout(undefined);
-      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
 
       expect(code(ipc.updateProduct({ id: created.id, draft: { ...DRAFT, master: { brand: "Hacked" } }, isActive: true }))).toBe(
         "NOT_AUTHORIZED",
@@ -719,7 +720,7 @@ describe("product photos — the boundary, with no producer yet", () => {
       const product = newProduct(ipc);
       const meta = store(h, product.id);
       ipc.logout(undefined);
-      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
 
       // 🔴 TRANSITION. Both reads were `owner`, justified as "the only V1 surface that reads a
       // photo is the owner's Add/Edit form". Requiring thumbnails on the products LIST — which a

@@ -70,3 +70,10 @@ export function isValidPin(pin: unknown): boolean {
     return false;
   }
 }
+
+/**
+ * 🔴 O-1 (owner D-O1/D-O2): the PINs published with the seeded «Cashier One»/«Cashier Two» accounts (migration 8 and
+ * src/fixtures/cashiers.ts). They are public, so they can never prove anything: `OperatorService.authenticate`
+ * refuses them as if wrong. They are also shorter than PIN_MIN_DIGITS, so no write path can choose them.
+ */
+export const PUBLISHED_DEFAULT_PINS: ReadonlySet<string> = new Set(["1111", "2222"]);

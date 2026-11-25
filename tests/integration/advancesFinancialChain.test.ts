@@ -11,6 +11,7 @@
  *
  * Synthetic data only. Harness clock: 2026-10-04, Beirut. Amounts in minor units (USD cents).
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -331,7 +332,7 @@ describe("advances × REF × COL — one connected story on one real ledger", ()
 
   it("12 · PERMISSIONS by ROLE: the cashier records an advance (D1) and nothing else; every money read/write of the owner is refused; NOTHING written", async () => {
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(h.service.currentRole()).toBe("cashier");
     const fp0 = footprint();
     const k = newKey();
@@ -355,13 +356,13 @@ describe("advances × REF × COL — one connected story on one real ledger", ()
     expect(footprint()).toBe(fp);
     // 🔴 The ROLE decides, never the name: rename the cashier to "Owner" — still refused.
     h.service.logout();
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     h.db.prepare("UPDATE operators SET name = 'Owner (by name only)' WHERE id = 'cashier-02'").run();
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect([h.service.currentCashier()!.name, h.service.currentRole(), code(ipc.getDailyMoney({}))]).toEqual(["Owner (by name only)", "cashier", "NOT_AUTHORIZED"]);
     h.service.logout();
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     expect([h.service.currentCashier()!.name, h.service.currentRole(), code(ipc.getDailyMoney({}))]).toEqual(["Cashier One", "owner", "OK"]);
     invariants("12");
   });

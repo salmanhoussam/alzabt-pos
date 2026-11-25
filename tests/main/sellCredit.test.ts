@@ -1,3 +1,4 @@
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import { type Harness, type TempDir, makeHarness, newKey, tempDir } from "../helpers/harness";
@@ -80,7 +81,7 @@ describe("the owner sells on a customer's account from the till", () => {
 describe("🔴 refused — and a refusal writes nothing", () => {
   it("a cashier: refused at the channel; the service refuses them too", () => {
     const c = customer();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(code(onAccount(c.id))).toBe("NOT_AUTHORIZED");
     expect(() => h.service.createCustomerCreditSale({ idempotencyKey: newKey(), customerId: c.id, lines: espresso.lines, expectedTotalMinor: 500n })).toThrow(/owner/i);
     expect(footprint()).toEqual({ sales: 0, lines: 0, tenders: 0, obligations: 0, settlements: 0 });

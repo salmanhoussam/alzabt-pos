@@ -1,3 +1,4 @@
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CatalogSource } from "../../src/domain/catalog";
 import { DomainError } from "../../src/domain/errors";
@@ -41,7 +42,7 @@ describe("cashier session", () => {
     // outcomes because a legacy bootstrap credential yields a setup ticket and NO session. This
     // harness clears the bootstrap flag, so a correct PIN is a real session with a real role.
     // Old value: `{ id: "cashier-02", name: "Cashier Two" }`.
-    expect(service.login("cashier-02", "2222")).toEqual({
+    expect(service.login("cashier-02", TEST_CASHIER_PIN)).toEqual({
       kind: "session",
       session: { id: "cashier-02", name: "Cashier Two", role: "cashier" },
     });

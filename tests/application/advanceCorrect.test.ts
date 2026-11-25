@@ -15,6 +15,7 @@
  *
  * Synthetic data only; real SQLite; amounts in MINOR units (USD cents).
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type AdvanceService, formatAdvanceNo } from "../../src/application/advanceService";
 import { AdvanceRepository } from "../../src/persistence/advanceRepository";
@@ -122,7 +123,7 @@ describe("G2 — case A: the money was NOT received", () => {
     const a = recordCash(c.id);
     expect(code(() => adv.correct({ advanceId: a.id, kind: "not_received", reason: "لم يدفع", idempotencyKey: key() }))).toBe("INVALID_INPUT");
     expect(code(() => adv.correct({ advanceId: a.id, kind: "not_received", reason: " ", confirmNotReceived: true, idempotencyKey: key() }))).toBe("INVALID_REASON");
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(code(() => adv.correct({ advanceId: a.id, kind: "not_received", reason: "لم يدفع", confirmNotReceived: true, idempotencyKey: key() }))).toBe("NOT_AUTHORIZED");
     expect(count("advance_corrections")).toBe(0);
   });
@@ -140,9 +141,9 @@ describe("G2 — case B: the money WAS received, its details were wrong", () => 
   it("🔴 Whish on the WRONG customer: re-linked, same reference not registered again, daily money nets to 0", () => {
     const wrong = customer("زبون خطأ");
     const right = customer("زبون صحيح");
-    h.service.login("cashier-02", "2222"); // the cashier really received it
+    h.service.login("cashier-02", TEST_CASHIER_PIN); // the cashier really received it
     const a = recordWhish(wrong.id, "WH-80001");
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     const regBefore = registryRows();
     laterDay();
     const r = adv.correct({ advanceId: a.id, kind: "replaced", customerId: right.id, reason: "سُجّل على الزبون الخطأ", idempotencyKey: key() });

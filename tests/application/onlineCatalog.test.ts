@@ -20,6 +20,7 @@
  * object would put in the file a merchant uploads to the public internet.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
@@ -666,7 +667,7 @@ describe("🔴 privacy — the canary test", () => {
 describe("authorization", () => {
   it("🔴 a CASHIER cannot take a snapshot, through the service itself", () => {
     const h = makeHarness(t.dbPath, { login: false });
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     let code: string | null = null;
     try {
       h.service.onlineCatalogSnapshot();

@@ -13,6 +13,7 @@
  *
  * Synthetic data only. Amounts in minor units (USD cents). Harness clock: 2026-10-04, Beirut.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -171,7 +172,7 @@ describe("🔴 retry, refusal and rollback never mint or reuse a number", () => 
     expect(errCode(pay(c, o, "9999"))).toBe("INVALID_AMOUNT");
     expect(errCode(payWhish(c, o, "100", "wh taken"))).toBe("DUPLICATE_PAYMENT_REFERENCE");
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(errCode(pay(c, o, "100"))).toBe("NOT_AUTHORIZED");
     expect(errCode(ipc.getCollectionReceipt({ collectionNo: 1 }))).toBe("NOT_AUTHORIZED");
     expect(footprint()).toEqual(fp);

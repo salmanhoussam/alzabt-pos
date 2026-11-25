@@ -9,6 +9,7 @@
  *
  * Synthetic data only: no real company, customer or product values appear anywhere.
  */
+import { TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
 import { InvoiceService, invoiceSaleIdempotencyKey } from "../../src/application/invoiceService";
@@ -85,7 +86,7 @@ const lineCount = () => Number((h.db.prepare("SELECT count(*) AS c FROM sale_lin
 beforeEach(() => {
   t = tempDir();
   h = makeHarness(t.dbPath);
-  h.service.login("cashier-01", "1111");
+  h.service.login("cashier-01", TEST_OWNER_PIN);
   saveProfile();
 });
 afterEach(() => {
@@ -417,7 +418,7 @@ describe("exactly one sale per finalized invoice", () => {
 
     const again = makeHarness(t.dbPath);
     try {
-      again.service.login("cashier-01", "1111");
+      again.service.login("cashier-01", TEST_OWNER_PIN);
       const sale = again.invoices.saleForInvoice(id);
       expect(sale).toBeDefined();
       expect(sale!.receiptNumber).toBe(receipt);

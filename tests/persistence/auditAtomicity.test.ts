@@ -9,6 +9,7 @@
  *   changed product with no audit row — which is what proves these tests can detect the failure
  *   they claim is prevented. Without it, B and C would pass against a no-op.
  */
+import { TEST_FIXTURE_CASHIERS, TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PosService } from "../../src/application/posService";
 import type { AuditDraft, AuditRow } from "../../src/domain/audit";
@@ -74,11 +75,11 @@ function makeService(opts: {
     auditStore:
       opts.auditStore ?? new AuditRepository(db, { appVersion: "test", schemaVersion: MIGRATIONS.length }),
     transact: opts.noTransaction ? (fn) => fn() : (fn) => db.transaction(fn).immediate(),
-    cashiers: FIXTURE_CASHIERS,
+    cashiers: TEST_FIXTURE_CASHIERS, // TRANSITION (O-1 P1): the published fixture PINs never sign in; same ids and names, test credentials
     terminal: FIXTURE_TERMINAL,
     now: clock.now,
   });
-  service.login("cashier-01", "1111");
+  service.login("cashier-01", TEST_OWNER_PIN);
   return service;
 }
 
@@ -195,11 +196,11 @@ describe("fail closed · product management refuses to run unaudited", () => {
       catalog: loadCatalog(FIXTURE_CATALOG),
       catalogStore: new CatalogRepository(db),
       // auditStore and transact deliberately absent
-      cashiers: FIXTURE_CASHIERS,
+      cashiers: TEST_FIXTURE_CASHIERS, // TRANSITION (O-1 P1): the published fixture PINs never sign in; same ids and names, test credentials
       terminal: FIXTURE_TERMINAL,
       now: clock.now,
     });
-    service.login("cashier-01", "1111");
+    service.login("cashier-01", TEST_OWNER_PIN);
     for (const act of [
       () => service.createProduct(draft),
       () => service.updateProduct("manual:000001", draft, true),

@@ -3,6 +3,7 @@
  * to a shop: an edit today never touches an invoice from yesterday, and a deactivated product
  * cannot be sold.
  */
+import { TEST_FIXTURE_CASHIERS, TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PosService } from "../../src/application/posService";
 import type { AuditRow } from "../../src/domain/audit";
@@ -38,12 +39,12 @@ function build(): void {
     catalogStore: new CatalogRepository(db),
     auditStore: trail,
     transact: (fn) => db.transaction(fn).immediate(),
-    cashiers: FIXTURE_CASHIERS,
+    cashiers: TEST_FIXTURE_CASHIERS, // TRANSITION (O-1 P1): the published fixture PINs never sign in; same ids and names, test credentials
     terminal: FIXTURE_TERMINAL,
     now: clock.now,
     audit: (row) => mirrored.push(row),
   });
-  service.login("cashier-01", "1111");
+  service.login("cashier-01", TEST_OWNER_PIN);
 }
 
 /** Every stored event, oldest first — `seq` order, which is the only ordering authority. */
@@ -135,7 +136,8 @@ describe("createProduct", () => {
     });
     expect(JSON.parse(event.metadata_json!)).toEqual({ origin: "manual_entry", source: "manual" });
     const serialised = JSON.stringify(event);
-    for (const secret of ["pin", "Pin", "PIN", "hash", "token", "1111"]) {
+    // TRANSITION (O-1 P1): the PIN actually used is now TEST_OWNER_PIN; the published 1111 stays in the list too.
+    for (const secret of ["pin", "Pin", "PIN", "hash", "token", "1111", TEST_OWNER_PIN]) {
       expect(serialised, `audit must not contain '${secret}'`).not.toContain(secret);
     }
     // The diagnostic mirror saw the same committed row; it is a copy, not the record.

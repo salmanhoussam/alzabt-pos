@@ -21,6 +21,7 @@
  *
  * Synthetic throughout.
  */
+import { TEST_FIXTURE_CASHIERS, TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { PosService } from "../../src/application/posService";
@@ -57,7 +58,8 @@ let ids = 0;
  */
 function build(auditStore: AuditRepository): PosService {
   const operatorStore = new OperatorRepository(db);
-  for (const fixture of FIXTURE_CASHIERS) {
+  // TRANSITION (O-1 P1): store the TEST credentials (same ids); the published 1111/2222 never sign in.
+  for (const fixture of TEST_FIXTURE_CASHIERS) {
     if (operatorStore.findById(fixture.id)) {
       operatorStore.setPin(fixture.id, fixture.pinSaltHex, fixture.pinHashHex, NOW.toISOString(), {
         mustResetPin: false,
@@ -74,7 +76,7 @@ function build(auditStore: AuditRepository): PosService {
     productImages: images,
     auditStore,
     transact: (fn) => db.transaction(fn).immediate(),
-    cashiers: FIXTURE_CASHIERS,
+    cashiers: TEST_FIXTURE_CASHIERS, // TRANSITION (O-1 P1): the published fixture PINs never sign in; same ids and names, test credentials
     operators: new OperatorService({
       operators: operatorStore,
       audit: trail,
@@ -86,7 +88,7 @@ function build(auditStore: AuditRepository): PosService {
     now: () => NOW,
     newId: () => `id-${(ids += 1).toString().padStart(4, "0")}`,
   });
-  service.login("cashier-01", "1111");
+  service.login("cashier-01", TEST_OWNER_PIN);
   return service;
 }
 
@@ -436,7 +438,8 @@ describe("🔴 atomicity — an audit failure ROLLS BACK the mutation", () => {
 
   it("🔴 a terminal with NO audit trail REFUSES these mutations rather than doing them unrecorded", () => {
     const operatorStore = new OperatorRepository(db);
-    for (const fixture of FIXTURE_CASHIERS) {
+    // TRANSITION (O-1 P1): store the TEST credentials (same ids); the published 1111/2222 never sign in.
+    for (const fixture of TEST_FIXTURE_CASHIERS) {
       if (operatorStore.findById(fixture.id)) {
         operatorStore.setPin(fixture.id, fixture.pinSaltHex, fixture.pinHashHex, NOW.toISOString(), { mustResetPin: false });
       }
@@ -451,7 +454,7 @@ describe("🔴 atomicity — an audit failure ROLLS BACK the mutation", () => {
       productImages: images,
       // No auditStore at all — the shape a terminal had before this wiring existed.
       transact: (fn) => db.transaction(fn).immediate(),
-      cashiers: FIXTURE_CASHIERS,
+      cashiers: TEST_FIXTURE_CASHIERS, // TRANSITION (O-1 P1): the published fixture PINs never sign in; same ids and names, test credentials
       operators: new OperatorService({
         operators: operatorStore,
         audit: trail,
@@ -463,7 +466,7 @@ describe("🔴 atomicity — an audit failure ROLLS BACK the mutation", () => {
       now: () => NOW,
       newId: () => `id-${(ids += 1).toString().padStart(4, "0")}`,
     });
-    unaudited.login("cashier-01", "1111");
+    unaudited.login("cashier-01", TEST_OWNER_PIN);
     expect(() => unaudited.createCategory("عدد", null)).toThrow(/audit trail is not wired/);
     expect(categoryCount()).toBe(0);
   });

@@ -11,6 +11,7 @@
  * the service asks at the right moment and records exactly what it is told. The real vault's own
  * behaviour — content-addressing, atomic copy — lives in the main process.
  */
+import { TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InvoiceService, type LogoVault } from "../../src/application/invoiceService";
 import { InvoiceRepository } from "../../src/persistence/invoiceRepository";
@@ -64,7 +65,7 @@ const issuerOf = (id: string) => JSON.parse(h.invoices.getInvoice(id).invoice.is
 beforeEach(() => {
   t = tempDir();
   h = makeHarness(t.dbPath);
-  h.service.login("cashier-01", "1111");
+  h.service.login("cashier-01", TEST_OWNER_PIN);
 });
 afterEach(() => {
   h.db.close();

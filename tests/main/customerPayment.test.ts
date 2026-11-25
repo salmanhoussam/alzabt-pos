@@ -18,6 +18,7 @@
  * Disposable database per test. Synthetic names and amounts only — no merchant data.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIpcHandlers, syncHandlers, paymentFailureTruth } from "../../src/main/ipcHandlers";
 import { LedgerService } from "../../src/application/ledgerService";
@@ -89,7 +90,7 @@ afterEach(() => {
  */
 const becomeCashier = () => {
   role = "cashier";
-  h.service.login("cashier-02", "2222");
+  h.service.login("cashier-02", TEST_CASHIER_PIN);
 };
 
 const customer = (name: string, phone?: string) => parties.create({ kind: "customer", displayName: name, phone }).party;

@@ -9,6 +9,7 @@
  * silently larger blast radius — so it is asserted by name here.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { describe, expect, it } from "vitest";
 import { CHANNELS } from "../../src/shared/ipcContract";
 import { CHANNEL_POLICY, PUBLIC_REASON, accessFor } from "../../src/main/channelPolicy";
@@ -228,7 +229,7 @@ describe("a CASHIER session is refused every owner-only channel", () => {
       const raw = createIpcHandlers(h.service);
       const ipc = syncHandlers(raw);
       // Cashier Two is a real cashier in this database.
-      const login = ipc.login({ cashierId: "cashier-02", pin: "2222" }) as { ok: boolean };
+      const login = ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN }) as { ok: boolean };
       expect(login.ok).toBe(true);
 
       const outcomes = await Promise.all(
@@ -273,7 +274,7 @@ describe("a CASHIER session is refused every owner-only channel", () => {
         },
       });
       const ipc = syncHandlers(raw);
-      const login = ipc.login({ cashierId: "cashier-02", pin: "2222" }) as { ok: boolean; data?: { mayCreateProducts?: boolean } };
+      const login = ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN }) as { ok: boolean; data?: { mayCreateProducts?: boolean } };
       expect(login.ok).toBe(true);
       const list = (await raw.listPhoneInvoices(undefined)) as { ok: boolean };
       expect(list.ok, "a create-products cashier reviews the queue").toBe(true);
@@ -296,7 +297,7 @@ describe("a CASHIER session is refused every owner-only channel", () => {
     const h = makeHarness(t.dbPath, { login: false });
     try {
       const ipc = syncHandlers(createIpcHandlers(h.service));
-      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
       const before = {
         products: h.db.prepare("SELECT count(*) AS n FROM catalog_products").get(),
         operators: h.db.prepare("SELECT count(*) AS n FROM operators").get(),
@@ -321,7 +322,7 @@ describe("a CASHIER session is refused every owner-only channel", () => {
     const h = makeHarness(t.dbPath, { login: false });
     try {
       const ipc = syncHandlers(createIpcHandlers(h.service));
-      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
       for (const channel of ["getCatalog", "getTodaySales", "listProducts"] as const) {
         expect((ipc[channel](undefined) as { ok: boolean }).ok, channel).toBe(true);
       }
@@ -405,7 +406,7 @@ describe("live role changes take effect on the next action", () => {
 
   it("🔴 CASHIER -> OWNER applies immediately, with the cashier still signed in", () => {
     withApp(({ h, ipc }) => {
-      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
       // As a cashier: refused.
       expect(code(ipc.listOperators(undefined))).toBe("NOT_AUTHORIZED");
 
@@ -420,11 +421,11 @@ describe("live role changes take effect on the next action", () => {
   it("🔴 OWNER -> CASHIER applies immediately when another active owner remains", () => {
     withApp(({ h, ipc }) => {
       // A second owner, so the last-owner rule is not what decides this test.
-      h.service.login("cashier-01", "1111");
+      h.service.login("cashier-01", TEST_OWNER_PIN);
       h.operators.setRole(OWNER, "cashier-02", "owner");
       h.service.logout();
 
-      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
       expect(ok(ipc.listOperators(undefined))).toBe(true);
 
       // Demoted by the OTHER owner — not by themselves, which is separately refused.
@@ -438,7 +439,7 @@ describe("live role changes take effect on the next action", () => {
 
   it("🔴 the LAST ACTIVE OWNER cannot be demoted or deactivated, through the real channels", () => {
     withApp(({ ipc }) => {
-      ipc.login({ cashierId: "cashier-01", pin: "1111" });
+      ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
       expect(code(ipc.setOperatorRole({ operatorId: "cashier-01", role: "cashier" }))).toBe("SELF_ROLE_CHANGE");
       expect(code(ipc.setOperatorActive({ operatorId: "cashier-01", isActive: false }))).toBe(
         "LAST_OWNER_PROTECTED",
@@ -450,7 +451,7 @@ describe("live role changes take effect on the next action", () => {
 
   it("🔴 a deactivated operator's OPEN SESSION stops working at once", () => {
     withApp(({ h, ipc }) => {
-      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
       expect(ok(ipc.getTodaySales(undefined))).toBe(true);
       h.operators.setActive(OWNER, "cashier-02", false);
       expect(code(ipc.getTodaySales(undefined))).toBe("OPERATOR_INACTIVE");
@@ -459,7 +460,7 @@ describe("live role changes take effect on the next action", () => {
 
   it("🔴 'admin' is UNREACHABLE from the application — two roles, not three", () => {
     withApp(({ ipc }) => {
-      ipc.login({ cashierId: "cashier-01", pin: "1111" });
+      ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
       // Not creatable...
       expect(code(ipc.createOperator({ name: "x", role: "admin", pin: "1234" }))).toBe("INVALID_INPUT");
       // ...and nobody can be changed into one.
@@ -477,7 +478,7 @@ describe("live role changes take effect on the next action", () => {
       // The only way to reach this value is editing the database directly. It must not be a
       // privilege escalation: the guard asks "is the role owner", not "is it cashier".
       h.db.prepare("UPDATE operators SET role = 'admin' WHERE id = 'cashier-02'").run();
-      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
       expect(code(ipc.listOperators(undefined))).toBe("NOT_AUTHORIZED");
       expect(code(ipc.exportBackup(undefined))).toBe("NOT_AUTHORIZED");
     });

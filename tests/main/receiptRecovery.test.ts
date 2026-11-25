@@ -4,6 +4,7 @@
  * response, a closed window and a restart; a failed lookup is never "not recorded"; a closed
  * not-recorded attempt can never post money. Synthetic data, real SQLite, minor units.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LedgerService } from "../../src/application/ledgerService";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
@@ -295,7 +296,7 @@ describe("🔴 the owner role is re-read inside EVERY financial transaction", ()
     breakSeal();
     send(body(c, "receipt-role-0003", [[a.id, "6000"], [b.id, "4000"]]));
     mendSeal();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(errCode(ipc.getCustomerStatement({ customerId: c.id }))).toBe("NOT_AUTHORIZED");
     expect(() => h.ledger.openReceipts(c.id)).toThrow(/owner/i);
     expect(errCode(send(body(c, "receipt-role-0003", [[a.id, "6000"], [b.id, "4000"]])))).toBe("NOT_AUTHORIZED");

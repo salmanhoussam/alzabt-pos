@@ -14,6 +14,7 @@
  *
  * Synthetic data only. Amounts in minor units (USD cents). Harness clock: 2026-10-04, Beirut.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -75,7 +76,7 @@ const owe = (partyId: string, ref: string, minor: bigint, currency = "USD") =>
   h.ledger.postObligation({ partyId, direction: "receivable", sourceKind: "manual", sourceRef: ref, currency, amountMinor: minor }).record;
 const asCashier = () => {
   h.service.logout();
-  h.service.login("cashier-02", "2222");
+  h.service.login("cashier-02", TEST_CASHIER_PIN);
 };
 const advance = (customerId: string, minor: bigint, channel: "cash" | "whish" = "cash", reference?: string) => {
   const k = newKey();

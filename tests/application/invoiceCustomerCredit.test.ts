@@ -11,6 +11,7 @@
  *
  * Real SQLite runtime. Every name, amount and id is synthetic.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
 import { type Harness, type TempDir, makeHarness, tempDir } from "../helpers/harness";
@@ -60,7 +61,7 @@ const link = (invoiceId: string, customerPartyId: string | null) =>
 const onAccount = (id: string) => h.invoices.finalizeInvoice(id, { issueOnAccount: true });
 const obligations = () => n("SELECT count(*) AS n FROM obligations");
 const sales = () => n("SELECT count(*) AS n FROM sales");
-const becomeCashier = () => h.service.login("cashier-02", "2222");
+const becomeCashier = () => h.service.login("cashier-02", TEST_CASHIER_PIN);
 
 describe("linking an invoice to a customer account", () => {
   it("🔴 two customers with the SAME name stay distinct — the link is the id, never the name", () => {

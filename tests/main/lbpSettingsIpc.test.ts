@@ -4,6 +4,7 @@
  *   setDisplayCurrency  any signed-in operator; only "USD" or "LBP"
  * Neither writes the ledger: the harness ledger's sales and catalog are compared before and after.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { describe, expect, it } from "vitest";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import type { TerminalSettings } from "../../src/shared/i18n";
@@ -83,7 +84,7 @@ describe("M5 LBP display channels", () => {
     try {
       const f = fakeStore();
       const ipc = syncHandlers(createIpcHandlers(h.service, { settings: f.store }));
-      expect((ipc.login({ cashierId: "cashier-02", pin: "2222" }) as { ok: boolean }).ok).toBe(true);
+      expect((ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN }) as { ok: boolean }).ok).toBe(true);
       expect(ipc.setDisplayCurrency({ currency: "LBP" })).toMatchObject({ ok: true });
       const r = ipc.setLbpRate({ rate: "90000" }) as { ok: boolean; error?: { code: string } };
       expect(r.ok).toBe(false);

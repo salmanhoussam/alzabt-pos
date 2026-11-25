@@ -16,6 +16,7 @@
  * any count.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { describe, expect, it } from "vitest";
 import { connect, type Socket } from "node:net";
 import { networkInterfaces as realInterfaces } from "node:os";
@@ -23,8 +24,8 @@ import { PhoneSessionBridge } from "../../src/main/phoneSessionBridge";
 import type { NetworkInterfaceMap } from "../../src/main/lanAddress";
 import { makeHarness, tempDir, type Harness } from "../helpers/harness";
 
-const OWNER = { cashierId: "cashier-01", pin: "1111" };
-const CASHIER = { cashierId: "cashier-02", pin: "2222" };
+const OWNER = { cashierId: "cashier-01", pin: TEST_OWNER_PIN };
+const CASHIER = { cashierId: "cashier-02", pin: TEST_CASHIER_PIN };
 const TOKEN = "f".repeat(64);
 
 /** This machine's real LAN IPv4 — loopback is excluded by `selectLanAddress` on purpose. */

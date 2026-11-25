@@ -1,3 +1,4 @@
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import type { Db } from "../../src/persistence/db";
@@ -41,8 +42,8 @@ const voidRows = (db: Db) => db.prepare("SELECT * FROM voids").all() as Record<s
 const tenderOf = (db: Db, saleId: string) => db.prepare("SELECT * FROM sale_tenders WHERE sale_id = ?").all(saleId);
 const registry = (db: Db) => db.prepare("SELECT * FROM external_references ORDER BY owner_id").all();
 const saleRow = (db: Db, saleId: string) => db.prepare("SELECT * FROM sales WHERE id = ?").get(saleId);
-const asCashier = () => h.service.login("cashier-02", "2222");
-const asOwner = () => h.service.login("cashier-01", "1111");
+const asCashier = () => h.service.login("cashier-02", TEST_CASHIER_PIN);
+const asOwner = () => h.service.login("cashier-01", TEST_OWNER_PIN);
 
 describe("🔴 a cashier cannot void a Whish sale — refused by the service, nothing written", () => {
   it("cashier → NOT_AUTHORIZED; no void row; sale, tender and reference untouched", () => {

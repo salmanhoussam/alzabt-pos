@@ -14,6 +14,7 @@
  *
  * Synthetic data only. Amounts in minor units (USD cents). Harness clock: 2026-10-04, Beirut.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -95,7 +96,7 @@ const footprint = () => [
 const customer = (name: string) => h.parties.create({ kind: "customer", displayName: name }).party;
 const asCashier = () => {
   h.service.logout();
-  h.service.login("cashier-02", "2222");
+  h.service.login("cashier-02", TEST_CASHIER_PIN);
 };
 const advance = (customerId: string, minor: bigint, channel: "cash" | "whish" = "cash", reference?: string) => {
   const k = newKey();

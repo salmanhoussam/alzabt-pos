@@ -1,3 +1,4 @@
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
 import type { NewSaleLine, SingleTender } from "../../src/persistence/saleRepository";
@@ -108,7 +109,7 @@ describe("one sale, paid in full by cash AND Whish Money", () => {
   });
 
   it("a cashier may split (the same permission as any paid sale — nothing here creates a debt)", () => {
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(split().sale.cashierId).toBe("cashier-02");
   });
 

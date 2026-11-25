@@ -9,6 +9,7 @@
  *   - a sale that posted no debt says so (null) — it is never shown as owing 0;
  *   - a CASHIER's response carries no current-debt key at all: main leaves it out, nothing is hidden.
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { priceCart } from "../../src/domain/cart";
 import { DomainError } from "../../src/domain/errors";
@@ -178,7 +179,7 @@ describe("🔴 a cashier receives no current-debt data at all", () => {
     pay(c.id, obligationOf(c.id, sale.id).id, "100");
     cash();
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const rows = history();
     expect(rows.length).toBeGreaterThanOrEqual(2);
     for (const r of rows) {
@@ -193,7 +194,7 @@ describe("🔴 a cashier receives no current-debt data at all", () => {
     const c = customer();
     const sale = credit(c.id);
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(h.service.currentDebtsForHistory([sale.id])).toBeNull();
     expect(code(() => h.ledger.currentSaleDebts([sale.id]))).toBe("NOT_AUTHORIZED");
     // and nothing new was opened to them: the statement stays owner-only
@@ -204,10 +205,10 @@ describe("🔴 a cashier receives no current-debt data at all", () => {
     const c = customer();
     const sale = credit(c.id);
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect("currentDebt" in entry(sale.id)).toBe(false);
     h.service.logout();
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     expect(entry(sale.id).currentDebt?.fullyPaid).toBe(false);
   });
 });

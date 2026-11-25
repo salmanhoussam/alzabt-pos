@@ -1,3 +1,4 @@
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
 import { type Harness, type TempDir, makeHarness, newKey, tempDir } from "../helpers/harness";
@@ -70,7 +71,7 @@ const receivables = (saleId: string) =>
 const CASH = { method: "cash" as const };
 const WHISH = (reference: string, fundsConfirmed: unknown = true) => ({ method: "external" as const, whish: { reference, fundsConfirmed } });
 const issue = (id: string, payment: unknown) => h.invoices.finalizeInvoice(id, { issueOnAccount: true, payment: payment as never });
-const becomeCashier = () => h.service.login("cashier-02", "2222");
+const becomeCashier = () => h.service.login("cashier-02", TEST_CASHIER_PIN);
 
 describe("a part-paid invoice puts its remainder on the customer's account", () => {
   it("🔴 cash 40 of 100: ONE cash tender of 40, ONE receivable of 60, sale partial — and the statement owes 60", () => {

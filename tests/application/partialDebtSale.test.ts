@@ -1,3 +1,4 @@
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
 import { LedgerRepository } from "../../src/persistence/ledgerRepository";
@@ -168,7 +169,7 @@ describe("🔴 refused — and a refusal writes nothing", () => {
 
   it("a cashier: refused by the service; an owner demoted in the durable row: refused at once", () => {
     const c = customer();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(codeOf(() => partialSale(c, cash(200n)))).toBe("NOT_AUTHORIZED");
     reset();
     const c2 = customer();

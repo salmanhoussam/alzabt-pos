@@ -1,3 +1,4 @@
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { loadCatalog, type Catalog } from "../../src/domain/catalog";
@@ -326,7 +327,7 @@ describe("atomic, owner-only POS customer credit sale", () => {
 
   it("uses the durable live role and refuses a cashier before any sale or obligation write", () => {
     const customerId = addParty();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(codeOf(() => createCredit(customerId))).toBe("NOT_AUTHORIZED");
     expect(countRows(h.db)).toMatchObject({ sales: 0, lines: 0 });
     expect(obligationCount()).toBe(0);

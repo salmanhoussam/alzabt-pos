@@ -10,6 +10,7 @@
  * directly and never passes through `ipcMain` at all.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CHANNELS } from "../../src/shared/ipcContract";
 import { CHANNEL_POLICY } from "../../src/main/channelPolicy";
@@ -65,8 +66,8 @@ function withApp(
             }),
       }),
     );
-    if (as === "owner") ipc.login({ cashierId: "cashier-01", pin: "1111" });
-    if (as === "cashier") ipc.login({ cashierId: "cashier-02", pin: "2222" });
+    if (as === "owner") ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
+    if (as === "cashier") ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
     fn({ h, ipc, seen });
   } finally {
     h.db.close();
@@ -112,9 +113,9 @@ describe("authorization", () => {
       // create grant cannot create one — and this test is about the EXPORT being refused, not
       // about who may add a product. Seeding it as the cashier would make the test pass for the
       // wrong reason: it would fail at the setup and never reach the exporter at all.
-      ipc.login({ cashierId: "cashier-01", pin: "1111" });
+      ipc.login({ cashierId: "cashier-01", pin: TEST_OWNER_PIN });
       publishOne(h);
-      ipc.login({ cashierId: "cashier-02", pin: "2222" });
+      ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
       expect(code(ipc.exportOnlineCatalog(undefined))).toBe("NOT_AUTHORIZED");
       // The refusal happens BEFORE anything could be written — not after a package appeared.
       expect(seen, "a refused export must not reach the writer at all").toEqual([]);

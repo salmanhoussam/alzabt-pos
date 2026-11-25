@@ -85,6 +85,7 @@ import type { AuditRepository } from "../persistence/auditRepository";
 import type { PinStateRepository } from "../persistence/pinStateRepository";
 import type { NewSaleHeader, NewSaleLine, SaleRepository } from "../persistence/saleRepository";
 import { type Cashier, pinMatches } from "./cashierAuth";
+import { PUBLISHED_DEFAULT_PINS } from "../domain/pinRule";
 import type { LoginOutcome as OperatorLoginOutcome, OperatorService } from "./operatorService";
 import type { OperatorRole } from "../persistence/operatorRepository";
 import type { ObligationRecord } from "../domain/ledger";
@@ -539,7 +540,12 @@ export class PosService {
     const outcome = this.deps.pinStates.update<LoginOutcome>(fixture.id, now, (state) => {
       const lock = checkLock(state, now);
       if (lock.locked) return { next: state, result: { kind: "locked", remainingMs: lock.remainingMs } };
-      if (pinMatches(account.credential, pin)) return { next: CLEAR_PIN_STATE, result: { kind: "ok" } };
+      // 🔴 O-1 P1: a published default PIN is a WRONG PIN here — it consumes an attempt, can lock the account, and
+      // gets the same «N attempts left» answer, so it never clears the lockout state nor reveals that a default is
+      // still stored. scrypt runs first either way (same cost). OperatorService.authenticate refuses it as well.
+      if (pinMatches(account.credential, pin) && !PUBLISHED_DEFAULT_PINS.has(pin)) {
+        return { next: CLEAR_PIN_STATE, result: { kind: "ok" } };
+      }
       const next = afterFailure(state, now);
       const nowLocked = checkLock(next, now);
       return nowLocked.locked

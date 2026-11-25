@@ -9,6 +9,7 @@
  *   - a key reused for a different customer (or for none) is a different request;
  *   - the statement lists a paid sale once, apart from the debts, and adds it to no total.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { priceCart } from "../../src/domain/cart";
@@ -104,7 +105,7 @@ describe("a PAID sale linked to an active customer", () => {
   it("a granted-nothing CASHIER may link a customer to a paid sale (the existing sale permission)", () => {
     const c = customer();
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const { sale } = sell(c.id);
     expect(sale.customerId).toBe(c.id);
     expect(sale.cashierId).toBe("cashier-02");
@@ -245,7 +246,7 @@ describe("🔴 the owner's statement: paid sales are activity, never debt", () =
     const c = customer();
     sell(c.id);
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const r = ipc.getCustomerStatement({ customerId: c.id }) as { ok: boolean; error?: { code: string } };
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe("NOT_AUTHORIZED");

@@ -19,6 +19,7 @@
  *
  * Synthetic data only; real SQLite; `amountMinor` is MINOR units.
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LedgerService } from "../../src/application/ledgerService";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
@@ -328,13 +329,13 @@ describe("the live owner role is re-read INSIDE the transaction", () => {
     breakSettlements();
     pay(req(c, o, "key-role-0000003", "300", "cash"));
     mendSettlements();
-    h.service.login("cashier-02", "2222"); // a genuine cashier on the same terminal
+    h.service.login("cashier-02", TEST_CASHIER_PIN); // a genuine cashier on the same terminal
     expect(errCode(ipc.getCustomerStatement({ customerId: c.id }))).toBe("NOT_AUTHORIZED");
     expect(errCode(pay(req(c, o, "key-role-0000003", "300", "cash")))).toBe("NOT_AUTHORIZED");
     expect(settlements()).toBe(0);
     expect(attempts()[0]!.resolved_at).toBeNull();
     // The owner, signing back in, recovers it.
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     expect(statement(c).pendingCollections.map((p) => p.status)).toEqual(["not_recorded"]);
     ok(pay(req(c, o, "key-role-0000003", "300", "cash")));
     expect(settlements()).toBe(1);

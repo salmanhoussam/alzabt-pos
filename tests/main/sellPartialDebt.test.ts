@@ -1,3 +1,4 @@
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import { type Harness, type TempDir, makeHarness, newKey, tempDir } from "../helpers/harness";
@@ -110,7 +111,7 @@ describe("🔴 what the renderer cannot send — and nothing is written", () => 
 
   it("a cashier is refused at the channel, with or without money received", () => {
     const c = customer();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(code(onAccount(c.id, { amountMinor: "200", method: "cash" }))).toBe("NOT_AUTHORIZED");
     expect(code(onAccount(c.id))).toBe("NOT_AUTHORIZED");
     expect(footprint()).toEqual({ sales: 0, tenders: 0, obligations: 0, settlements: 0 });

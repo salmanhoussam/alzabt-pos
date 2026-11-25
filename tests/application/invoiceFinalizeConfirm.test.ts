@@ -8,6 +8,7 @@
  *
  * Synthetic data only.
  */
+import { TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
 import { type Harness, type TempDir, makeHarness, tempDir } from "../helpers/harness";
@@ -21,7 +22,7 @@ const nextKey = () => `batch-test-${++keySeq}-key`;
 beforeEach(() => {
   t = tempDir();
   h = makeHarness(t.dbPath);
-  h.service.login("cashier-01", "1111");
+  h.service.login("cashier-01", TEST_OWNER_PIN);
   h.invoices.saveCompanyProfile({ nameAr: "متجر اختباري" });
 });
 afterEach(() => {

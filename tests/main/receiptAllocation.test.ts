@@ -5,6 +5,7 @@
  * Every refusal asserts that NOTHING was written, and the money-received arithmetic is checked in
  * receiptTotals.test.ts. `amountMinor` is MINOR units: "6000" is 60.00.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import { COUNTED_TABLES, snapshotDatabase } from "../../src/persistence/backup";
@@ -222,7 +223,7 @@ describe("🔴 refusals write nothing", () => {
     const c = customer();
     const a = owe(c.id, "A", 6000n);
     const b = owe(c.id, "B", 4000n);
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const before = snapshotCounts();
     expect(errCode(send(receiptReq(c, "receipt-key-0027", "10000", [[a.id, "6000"], [b.id, "4000"]])))).toBe("NOT_AUTHORIZED");
     expect(() => h.ledger.openReceipts(c.id)).toThrow(/owner/i);

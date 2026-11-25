@@ -1,3 +1,4 @@
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
 import { type Harness, type TempDir, makeHarness, newKey, tempDir } from "../helpers/harness";
@@ -97,7 +98,7 @@ describe("a paid invoice records how it was paid", () => {
   });
 
   it("a cashier issues a paid invoice exactly as before — the permission is unchanged", () => {
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const id = draft("100.00");
     h.invoices.finalizeInvoice(id, { payment: { method: "cash" } });
     expect(status(id).status).toBe("final");

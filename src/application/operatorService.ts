@@ -30,7 +30,7 @@ import {
 } from "../domain/audit";
 import { businessDateOf } from "../domain/businessDay";
 import { DomainError } from "../domain/errors";
-import { assertValidPin } from "../domain/pinRule";
+import { PUBLISHED_DEFAULT_PINS, assertValidPin } from "../domain/pinRule";
 import { SCRYPT, pinMatches } from "./cashierAuth";
 import { BOOTSTRAP_OWNER_ID } from "../persistence/operatorRepository";
 import type { OperatorRepository, OperatorRole } from "../persistence/operatorRepository";
@@ -191,7 +191,14 @@ export class OperatorService {
     if (!row || row.is_active !== 1) {
       throw new DomainError("INVALID_CREDENTIALS", "Operator or PIN is incorrect");
     }
-    if (!pinMatches({ pinSaltHex: row.pin_salt_hex, pinHashHex: row.pin_hash_hex }, pin)) {
+    // 🔴 O-1 P1 (owner D-O1/D-O2, contract v3.1 §1 + review R3): a PUBLISHED default PIN never authenticates — not
+    // the seeded owner, not the seeded cashier, not any row that a restore or a hand edit left holding one. The
+    // value check runs AFTER pinMatches, so scrypt has already run and a refusal costs the same time as a wrong PIN;
+    // it throws the SAME error, so PosService.login counts it toward lockout exactly like a wrong PIN and nothing
+    // reveals which accounts still hold a default. A stored published PAIR can only ever match one of these values,
+    // so the value check covers it. New PINs cannot be published values either: pinRule requires 6-8 digits.
+    const matches = pinMatches({ pinSaltHex: row.pin_salt_hex, pinHashHex: row.pin_hash_hex }, pin);
+    if (!matches || PUBLISHED_DEFAULT_PINS.has(pin)) {
       throw new DomainError("INVALID_CREDENTIALS", "Operator or PIN is incorrect");
     }
     // ══════════════════════════════════════════════════════════════════════════════════════════

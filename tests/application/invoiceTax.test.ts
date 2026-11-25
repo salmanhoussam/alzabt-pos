@@ -12,6 +12,7 @@
  *
  * Synthetic data only. No rate is hard-coded in the product — every one below is typed by the test.
  */
+import { TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
 import { type Harness, type TempDir, makeHarness, tempDir } from "../helpers/harness";
@@ -32,7 +33,7 @@ const inv = (id: string) => h.invoices.getInvoice(id).invoice;
 beforeEach(() => {
   t = tempDir();
   h = makeHarness(t.dbPath);
-  h.service.login("cashier-01", "1111");
+  h.service.login("cashier-01", TEST_OWNER_PIN);
   h.invoices.saveCompanyProfile({ nameAr: "متجر اختباري" });
 });
 afterEach(() => {

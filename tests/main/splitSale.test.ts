@@ -1,3 +1,4 @@
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import { CHANNEL_POLICY } from "../../src/main/channelPolicy";
@@ -53,7 +54,7 @@ describe("the bridge records a split sale", () => {
   it("the channel's permission is createSale's — a paid sale, never a debt — and a cashier may use it", () => {
     expect(CHANNEL_POLICY.createSplitSale).toBe(CHANNEL_POLICY.createSale);
     expect(CHANNEL_POLICY.createSplitSale).toBe("session");
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(code(send(base()))).toBe("OK");
   });
 

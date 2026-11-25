@@ -7,6 +7,7 @@
  * once, and only after staging" are assertions, not assumptions. The restart itself is simulated
  * by closing the ledger and running the startup half (restoreStartup.ts), exactly as main.ts does.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -309,7 +310,7 @@ describe("🔴 a cashier is refused on all three channels — before any picker 
     seed(a);
     a.picked["export-backup"] = join(t.dir, "usb");
     a.picked["restore-backup"] = join(t.dir, "usb");
-    a.ipc.login({ cashierId: "cashier-02", pin: "2222" });
+    a.ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
     expect(code(a.ipc.exportFullBackup(undefined))).toBe("NOT_AUTHORIZED");
     expect(code(a.ipc.inspectRestoreBackup(undefined))).toBe("NOT_AUTHORIZED");
     expect(code(a.ipc.applyRestore({ manifestSha256: "0".repeat(64), acceptMissingAssets: false }))).toBe("NOT_AUTHORIZED");
@@ -320,7 +321,7 @@ describe("🔴 a cashier is refused on all three channels — before any picker 
 
   it("the second lock: PosService.assertOwner refuses a cashier on its own", () => {
     const a = open("shop a");
-    a.ipc.login({ cashierId: "cashier-02", pin: "2222" });
+    a.ipc.login({ cashierId: "cashier-02", pin: TEST_CASHIER_PIN });
     expect(() => a.h.service.assertOwner()).toThrow(/Only the shop owner/);
   });
 

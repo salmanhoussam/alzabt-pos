@@ -16,6 +16,7 @@
  *
  * Synthetic data only. Amounts in minor units (USD cents). Harness clock: 2026-10-04, Beirut.
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type AdvanceService } from "../../src/application/advanceService";
 import { DailyMoneyService } from "../../src/application/dailyMoneyService";
@@ -79,11 +80,11 @@ const owe = (partyId: string, ref: string, minor: bigint) =>
   h.ledger.postObligation({ partyId, direction: "receivable", sourceKind: "manual", sourceRef: ref, currency: "USD", amountMinor: minor }).record;
 const asOwner = () => {
   h.service.logout();
-  h.service.login("cashier-01", "1111");
+  h.service.login("cashier-01", TEST_OWNER_PIN);
 };
 const asCashier = () => {
   h.service.logout();
-  h.service.login("cashier-02", "2222");
+  h.service.login("cashier-02", TEST_CASHIER_PIN);
 };
 const advance = (customerId: string, minor: bigint, channel: "cash" | "whish", reference?: string) => {
   const k = newKey();

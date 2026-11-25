@@ -12,6 +12,7 @@
  *
  * Synthetic data only. `amountMinor` is MINOR units ("1000" = 10.00).
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIpcHandlers, paymentFailureTruth, syncHandlers } from "../../src/main/ipcHandlers";
@@ -56,7 +57,7 @@ const customer = (name = "زبون") => h.parties.create({ kind: "customer", dis
 const supplier = () => h.parties.create({ kind: "supplier", displayName: "مورّد" }).party;
 const owe = (partyId: string, ref: string, minor: bigint, currency = "USD", direction: "receivable" | "payable" = "receivable") =>
   h.ledger.postObligation({ partyId, direction, sourceKind: "manual", sourceRef: ref, currency, amountMinor: minor }).record;
-const becomeCashier = () => h.service.login("cashier-02", "2222");
+const becomeCashier = () => h.service.login("cashier-02", TEST_CASHIER_PIN);
 
 type Req = {
   customerId: string;

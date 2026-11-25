@@ -9,6 +9,7 @@
  *
  * Synthetic data only. Minor units (USD cents). Harness clock: 2026-10-04, Beirut.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -136,7 +137,7 @@ describe("refusals — each its own code, NOTHING written (not even the sale)", 
     expect(codeOf(() => sell(c.id, corrected.id, 100n))).toBe("ADVANCE_CORRECTED_NOT_APPLICABLE");
     expect(codeOf(() => sell(c.id, a.id, 0n))).toBe("INVALID_AMOUNT");
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(codeOf(() => sell(c.id, a.id, 100n))).toBe("NOT_AUTHORIZED");
     const r = ipc.sellOnAdvance({ idempotencyKey: newKey(), lines: LINES, expectedTotalMinor: "500", customerId: c.id, advanceId: a.id, amountMinor: "100" });
     expect(r.ok ? "OK" : r.error.code).toBe("NOT_AUTHORIZED");

@@ -13,6 +13,7 @@
  *     test injects a real failure in the photo half to prove the product half rolls back with it.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { describe, expect, it } from "vitest";
 import { connect, type Socket } from "node:net";
 import { readFileSync } from "node:fs";
@@ -26,7 +27,7 @@ import type { NetworkInterfaceMap } from "../../src/main/lanAddress";
 import { makeHarness, tempDir, type Harness } from "../helpers/harness";
 import { DomainError } from "../../src/domain/errors";
 
-const OWNER = { cashierId: "cashier-01", pin: "1111" };
+const OWNER = { cashierId: "cashier-01", pin: TEST_OWNER_PIN };
 const TOKEN = "b".repeat(64);
 const PHOTOS = join(__dirname, "..", "fixtures", "photos");
 const BARCODES = join(__dirname, "..", "fixtures", "barcodes");
@@ -924,7 +925,7 @@ describe("the media routes inherit every H1/H2 protection", () => {
       await request(dto.host, dto.port, "POST", `/m/${TOKEN}/photo`, readFileSync(join(PHOTOS, "shelf.jpg")));
 
       f.h.service.logout();
-      f.h.service.login("cashier-02", "2222");
+      f.h.service.login("cashier-02", TEST_CASHIER_PIN);
 
       const res = await request(dto.host, dto.port, "POST", `/m/${TOKEN}`, submission());
       expect(res.status).toBe(422);

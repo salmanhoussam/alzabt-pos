@@ -2,6 +2,7 @@
  * Local catalog end to end below the UI: strict file → SQLite → live catalog → sale snapshot.
  * Synthetic Arabic data and fake prices only.
  */
+import { TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { startupCatalog } from "../../src/application/posService";
 import { loadCatalog } from "../../src/domain/catalog";
@@ -182,7 +183,7 @@ describe("importCatalog IPC handler", () => {
     }));
     expect(ipc.importCatalog(undefined)).toMatchObject({ ok: false, error: { code: "NOT_LOGGED_IN" } });
     expect(picks).toBe(0); // no dialog before login
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     expect(ipc.importCatalog({ path: "C:\\anything.csv" })).toMatchObject({ ok: false, error: { code: "INVALID_INPUT" } });
     expect(ipc.importCatalog(undefined)).toEqual({ ok: true, data: { status: "cancelled" } });
     expect(ipc.importCatalog(undefined)).toMatchObject({ ok: true, data: { status: "imported", inserted: 4 } });

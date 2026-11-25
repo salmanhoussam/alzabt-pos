@@ -16,6 +16,7 @@
  *
  * Synthetic data only; real SQLite; amounts are MINOR units (USD cents).
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AdvanceService, formatAdvanceNo } from "../../src/application/advanceService";
 import { AdvanceRepository, type AdvanceRecord } from "../../src/persistence/advanceRepository";
@@ -82,7 +83,7 @@ describe("record — who, what, and that an advance is only an advance", () => {
 
   it("a cashier records a Whish advance; the reference is registered once, against the advance", () => {
     const c = customer();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const r = adv.record(whish(c.id, "WH-88001"));
     expect(r.record).toMatchObject({ method: "external", provider: "whish", reference: "WH-88001", receivedBy: "cashier-02" });
     expect(count("external_references", `owner_kind = 'advance' AND owner_id = '${r.record.id}' AND legacy = 0`)).toBe(1);
@@ -230,9 +231,9 @@ describe("crash safety — open intents are answered, never guessed", () => {
     const c = customer();
     const k = key();
     expect(() => new DiesAfterIntent(advanceDeps(h)).record(cash(c.id, k))).toThrow(); // started by the owner
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(code(() => adv.close(k))).toBe("NOT_AUTHORIZED");
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     adv.close(k);
     expect(count("advance_attempts", "resolution = 'not_recorded'")).toBe(1);
   });

@@ -7,6 +7,7 @@
  *
  * Synthetic data only: no merchant name, price or invoice appears anywhere.
  */
+import { TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { loadCatalog } from "../../src/domain/catalog";
 import { MAX_QUANTITY_MILLI, MAX_UNIT_PRICE_MINOR } from "../../src/domain/quantity";
@@ -363,7 +364,7 @@ describe("a fractional sale, through the whole application", () => {
       ],
     };
     const h = makeHarness(t.dbPath, { catalog: loadCatalog(source) });
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     const { sale } = h.service.createSale({
       idempotencyKey: newKey(),
       paymentMethod: "cash",
@@ -396,7 +397,7 @@ describe("a fractional sale, through the whole application", () => {
   it("refuses a fraction of a whole-only product, and records nothing", () => {
     const source = { currency: "USD", products: [{ id: "syn-pc", sku: "SYN-PC", name: "Bolt", price: "0.75", baseUnit: "piece" }] };
     const h = makeHarness(t.dbPath, { catalog: loadCatalog(source) });
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     expect(() =>
       h.service.createSale({
         idempotencyKey: newKey(),
@@ -413,7 +414,7 @@ describe("a fractional sale, through the whole application", () => {
     // 0.001 kg at 0.04 = 0.00004 -> 0 minor units.
     const source = { currency: "USD", products: [{ id: "syn-kg", sku: "SYN-KG", name: "Sand", price: "0.04", baseUnit: "kg" }] };
     const h = makeHarness(t.dbPath, { catalog: loadCatalog(source) });
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     expect(() =>
       h.service.createSale({
         idempotencyKey: newKey(),
@@ -438,7 +439,7 @@ describe("a fractional sale, through the whole application", () => {
 
     const source = { currency: "USD", products: [{ id: "syn-kg", sku: "SYN-KG", name: "Rope", price: "4.00", baseUnit: "kg" }] };
     const h = makeHarness(t.dbPath, { catalog: loadCatalog(source) });
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     const { sale } = h.service.createSale({
       idempotencyKey: newKey(),
       paymentMethod: "cash",
@@ -470,7 +471,7 @@ describe("idempotency keys off the exact quantity", () => {
 
   it("the same request retried returns the same sale, not a second one", () => {
     const h = makeHarness(t.dbPath, { catalog: loadCatalog(source) });
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     const key = newKey();
     const first = h.service.createSale({
       idempotencyKey: key,
@@ -492,7 +493,7 @@ describe("idempotency keys off the exact quantity", () => {
 
   it("a DIFFERENT quantity under the same key is a conflict — 2.5 and 2.501 cannot collide", () => {
     const h = makeHarness(t.dbPath, { catalog: loadCatalog(source) });
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     const key = newKey();
     h.service.createSale({
       idempotencyKey: key,

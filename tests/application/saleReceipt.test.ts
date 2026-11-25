@@ -11,6 +11,7 @@
  *   · the document: Arabic + English, 80 mm and A5, «نسخة / COPY» on a reprint, every figure = the DTO's
  * Synthetic data only. Harness clock: 2026-10-04, Beirut.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type AdvanceService, formatAdvanceNo } from "../../src/application/advanceService";
 import { MAX_HISTORY } from "../../src/application/posService";
@@ -155,7 +156,7 @@ describe("🔴 D-TP2 — who may read / print a receipt (service AND channel)", 
     const narrow = service(2); // History shows the latest 2
     expect(narrow.receipt(sales[0]!.id).sale.receiptNumber).toBe(1); // owner: any
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(narrow.receipt(sales[2]!.id).sale.receiptNumber).toBe(3);
     expect(codeOf(() => narrow.receipt(sales[0]!.id))).toBe("NOT_AUTHORIZED");
     const nIpc = syncHandlers(handlers(narrow));

@@ -2,6 +2,7 @@
  * The renderer-facing edge of migration 16: what a payload may carry, and that the owner-only gate
  * holds when reached through the channel rather than the service. Synthetic data only.
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
 import { confirmationDigest } from "../../src/shared/invoiceConfirmation";
@@ -40,7 +41,7 @@ describe("the role the invoice sheet reads from currentCashier", () => {
     const owner = ok<{ id: string; role?: string }>(ipc.currentCashier(undefined));
     expect(owner).toMatchObject({ id: "cashier-01", role: "owner" });
 
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const cashier = ok<{ id: string; role?: string }>(ipc.currentCashier(undefined));
     expect(cashier).toMatchObject({ id: "cashier-02", role: "cashier" });
 
@@ -85,7 +86,7 @@ describe("issue-on-account through the channel", () => {
     ok(ipc.finalizeInvoice(req));
     expect(errCode(ipc.finalizeInvoice({ ...req, confirmedDraft: token + " " }))).toBe("IDEMPOTENCY_CONFLICT");
     expect(errCode(ipc.finalizeInvoice({ invoiceId: id, issueOnAccount: true }))).toBe("INVOICE_CONFIRMATION_REQUIRED");
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(errCode(ipc.finalizeInvoice(req))).toBe("CREDIT_OWNER_ONLY");
     expect(Number((h.db.prepare("SELECT count(*) AS n FROM sales").get() as { n: bigint }).n)).toBe(1);
     expect(Number((h.db.prepare("SELECT count(*) AS n FROM obligations").get() as { n: bigint }).n)).toBe(1);
@@ -104,10 +105,10 @@ describe("issue-on-account through the channel", () => {
   it("owner issues on account; the cashier is refused with its own code and nothing changes", () => {
     const { c, id } = prepared();
     ipc.updateInvoiceHeader({ invoiceId: id, patch: { customerPartyId: c.id } });
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(errCode(ipc.finalizeInvoice({ invoiceId: id, issueOnAccount: true }))).toBe("CREDIT_OWNER_ONLY");
     expect(ok<{ invoice: { status: string } }>(ipc.getInvoice({ invoiceId: id })).invoice.status).toBe("draft");
-    h.service.login("cashier-01", "1111");
+    h.service.login("cashier-01", TEST_OWNER_PIN);
     ok(ipc.finalizeInvoice({ invoiceId: id, issueOnAccount: true }));
     expect(Number((h.db.prepare("SELECT count(*) AS n FROM obligations").get() as { n: bigint }).n)).toBe(1);
     // The lost-response repeat answers from the ledger and writes nothing.

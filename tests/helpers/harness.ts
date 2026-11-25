@@ -1,3 +1,4 @@
+import { TEST_CREDENTIALS, TEST_OWNER_PIN } from "./testCredentials";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -129,11 +130,13 @@ export function makeHarness(
     const operatorStore = new OperatorRepository(db);
     for (const fixture of FIXTURE_CASHIERS) {
       if (operatorStore.findById(fixture.id)) {
-        // `mustResetPin: false`: re-storing each fixture+s OWN salt and hash clears the bootstrap
-        // flag and changes no credential, which is the whole point of this seam — 1111 still works
-        // for every existing test. It also puts the harness past OWNER SETUP REQUIRED, so harness
-        // tests exercise ordinary operation; the bootstrap ceremony is tested directly instead.
-        operatorStore.setPin(fixture.id, fixture.pinSaltHex, fixture.pinHashHex, clock.now().toISOString(), {
+        // TRANSITION (O-1 P1, owner R9, 2026-11-25): the published 1111/2222 never authenticate any more, so the
+        // harness gives the two seeded rows PRIVATE test PINs (tests/helpers/testCredentials.ts) through the same
+        // repository seam, with the production scrypt and no bypass. Old behaviour: it re-stored each fixture's OWN
+        // published salt+hash so that 1111 kept working. `mustResetPin: false` still puts harness tests past OWNER
+        // SETUP REQUIRED; the ownership ceremonies are tested directly, not here.
+        const test = TEST_CREDENTIALS[fixture.id]!;
+        operatorStore.setPin(fixture.id, test.pinSaltHex, test.pinHashHex, clock.now().toISOString(), {
           mustResetPin: false,
         });
       }
@@ -237,7 +240,7 @@ export function makeHarness(
       now: clock.now,
       newId: opts.ids ?? (() => `id-${(idSeq += 1).toString().padStart(4, "0")}`),
     });
-    if (opts.login !== false) service.login("cashier-01", "1111");
+    if (opts.login !== false) service.login("cashier-01", TEST_OWNER_PIN);
     return {
       db,
       repository,

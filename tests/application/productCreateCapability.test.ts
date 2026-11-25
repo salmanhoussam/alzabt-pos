@@ -19,13 +19,14 @@
  * the channel alone enforced would be no capability at all.
  * ════════════════════════════════════════════════════════════════════════════════════════════════
  */
+import { TEST_OWNER_PIN, TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors";
 import { makeHarness, tempDir } from "../helpers/harness";
 
 /** Migration 8 seeds these two. `cashier-01` is the OWNER despite its name; `cashier-02` is not. */
-const OWNER = { cashierId: "cashier-01", pin: "1111" };
-const CASHIER = { cashierId: "cashier-02", pin: "2222" };
+const OWNER = { cashierId: "cashier-01", pin: TEST_OWNER_PIN };
+const CASHIER = { cashierId: "cashier-02", pin: TEST_CASHIER_PIN };
 
 const draft = (sku: string) => ({
   nameAr: "صنف",

@@ -12,6 +12,7 @@
  *    the residual risk stays operational, closed by the owner's manual drawer count.
  * Synthetic data. Harness clock: 2026-10-04, Beirut.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -138,7 +139,7 @@ describe("«استردادات اليوم» — the day's REF- documents by name
     const a = advance("زبون", 1000n);
     adv.refund({ advanceId: a.id, amountMinor: 100n, reason: "سبب", idempotencyKey: newKey() });
     h.service.logout();
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(code(ipc.getDailyMoney({}))).toBe("NOT_AUTHORIZED");
   });
 

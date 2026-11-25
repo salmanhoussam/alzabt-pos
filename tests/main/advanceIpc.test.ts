@@ -9,6 +9,7 @@
  *   · without the service wired every advance channel says NOT_AVAILABLE.
  * Synthetic data only; real SQLite.
  */
+import { TEST_CASHIER_PIN } from "../helpers/testCredentials";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { accessFor } from "../../src/main/channelPolicy";
 import { createIpcHandlers, syncHandlers } from "../../src/main/ipcHandlers";
@@ -55,7 +56,7 @@ describe("ADV IPC — policy", () => {
 describe("ADV IPC — record", () => {
   it("a cashier records a cash advance: ADV-000001 with the receiver's name; the retry of the same key is the SAME receipt", () => {
     const c = customer("زبون الكاشير");
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     const { sync } = wired();
     const req = { customerId: c.id, amountMinor: "2500", channel: "cash", reference: null, fundsConfirmed: false, idempotencyKey: "ipc-adv-key-0001" };
     const first = ok<{ advance: AdvanceDto; duplicate: boolean }>(sync.recordAdvance(req));
@@ -106,7 +107,7 @@ describe("ADV IPC — record", () => {
     const sy = ok<{ lines: Array<{ unused: { minor: string } }> }>(sync.getAdvanceStatement({ customerId: y.id }));
     expect(sy.lines).toEqual([expect.objectContaining({ unused: { minor: "5000", currency: "USD" } })]);
     // the correction channel is owner only, by the service too
-    h.service.login("cashier-02", "2222");
+    h.service.login("cashier-02", TEST_CASHIER_PIN);
     expect(errCode(sync.correctAdvance({ advanceId: corr.successor.id, kind: "not_received", reason: "لا", confirmNotReceived: true, idempotencyKey: "ipc-corr-key-0002" }))).toBe("NOT_AUTHORIZED");
   });
 

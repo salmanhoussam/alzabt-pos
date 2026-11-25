@@ -14,6 +14,7 @@
  * These go through the REAL IPC handlers on a REAL ledger, because the boundary is where the bug
  * lived — the service's partial-update logic was correct all along and unreachable.
  */
+import { TEST_OWNER_PIN } from "../helpers/testCredentials";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -57,7 +58,7 @@ beforeEach(() => {
   t = tempDir();
   h = makeHarness(t.dbPath);
   ipc = syncHandlers(createIpcHandlers(h.service, { invoices: h.invoices }));
-  h.service.login("cashier-01", "1111");
+  h.service.login("cashier-01", TEST_OWNER_PIN);
   ok(ipc.saveCompanyProfile({
     nameAr: "متجر اختباري",
     nameEn: null,
